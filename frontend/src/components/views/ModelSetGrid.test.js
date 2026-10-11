@@ -1576,6 +1576,49 @@ describe("hand-made sets (#1520)", () => {
     expect(card.attributes("aria-label")).toContain("hidden");
   });
 
+  it("hides a hand-made card from its own eye, the set and not a file", async () => {
+    const { wrapper } = await mountGrid({
+      rows: [row(1, "realvisXL_v5", "checkpoint")],
+      handMade: [handSet(10, [SET_CKPT])],
+    });
+    await wrapper.find('[data-testid="set-hide"]').trigger("click");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(setWorkflowSetsHidden).toHaveBeenCalledWith(["hand:10"], true);
+    expect(wrapper.findAll('[data-testid="model-set-card"]')).toHaveLength(0);
+
+    await wrapper.find('[data-testid="toggle-hidden-sets"]').trigger("click");
+    const card = wrapper.find('[data-testid="model-set-card"]');
+    expect(card.classes()).toContain("msc--hidden");
+    await card.find('[data-testid="set-hide"]').trigger("click");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(setWorkflowSetsHidden).toHaveBeenLastCalledWith(["hand:10"], false);
+    wrapper.unmount();
+  });
+
+  it("offers no fill from a set hidden in this library, until Show them draws it", async () => {
+    hiddenOnServer.add("hand:12");
+    const { wrapper, store } = await mountGrid({
+      rows: [row(1, "realvisXL_v5", "checkpoint"), row(3, "filmgrain_xl")],
+      handMade: [
+        handSet(11, [SET_CKPT]),
+        handSet(12, [
+          slotMember(4, "juggernautXL_v9", "checkpoint"),
+          slotMember(3, "filmgrain_xl", "lora"),
+        ]),
+      ],
+    });
+    store.toggleSet("hand:11");
+    await wrapper.vm.$nextTick();
+    const fill = () =>
+      wrapper.findAll("button").find((b) => b.text().includes("Fill from a set"));
+    expect(fill().attributes("disabled")).toBeDefined();
+
+    store.showHiddenSets = true;
+    await wrapper.vm.$nextTick();
+    expect(fill().attributes("disabled")).toBeUndefined();
+    wrapper.unmount();
+  });
+
   it("draws a combination the set covers on the set and not again as evidence", async () => {
     const { wrapper } = await mountGrid({
       rows: [

@@ -448,9 +448,12 @@ const accessibleName = computed(() => {
   border-style: dashed;
 }
 
-/* Hidden, drawn only while the grid shows hidden sets: the pictures fade, the
-   text does not, so the card stays readable and the "Hidden" tag says why. */
-.msc--hidden .msc__pic {
+/* Hidden, drawn only while the grid shows hidden sets: the cover fades, whether
+   it holds pictures or is the empty stand-in (a hand-made set with none, or a
+   picture set with no cover), and the card's own text does not, so the card
+   stays readable and the "Hidden" tag says why. */
+.msc--hidden .msc__pic,
+.msc--hidden .msc__cover--empty {
   opacity: var(--opacity-disabled);
 }
 

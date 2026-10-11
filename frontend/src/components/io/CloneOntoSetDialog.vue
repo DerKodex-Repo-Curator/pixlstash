@@ -831,7 +831,10 @@ function candidates(payload) {
       namesById: namesById(models),
     };
   });
-  return [...handMade, ...evidence];
+  // A set hidden in this library is not offered (#1869), whichever kind it
+  // is. No "Show them" here, so the payload's own list decides.
+  const hidden = new Set(payload.hidden_sets ?? []);
+  return [...handMade, ...evidence].filter((set) => !hidden.has(set.key));
 }
 
 async function load() {

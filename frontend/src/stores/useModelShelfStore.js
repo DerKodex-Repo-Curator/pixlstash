@@ -760,6 +760,18 @@ function writeStored(key, value) {
   }
 }
 
+/**
+ * Drop a key this build no longer reads. Hides moved to the server (#1869), so
+ * a browser's old per-browser copy is dead weight; it is not carried over.
+ */
+function forgetStored(key) {
+  try {
+    window.localStorage?.removeItem(key);
+  } catch (err) {
+    console.warn(`[shelf] could not clear ${key}`, err);
+  }
+}
+
 /** Read the remembered selection, or null when there is none to trust. */
 function storedFilters() {
   const parsed = readStored(FILTERS_KEY);
@@ -1040,6 +1052,8 @@ function blockOf(row) {
 }
 
 export const useModelShelfStore = defineStore("modelShelf", () => {
+  // The per-browser hide list, retired with #1869; removed once it is seen.
+  forgetStored("pixlstash:modelShelfHiddenSets");
   const filters = reactive(storedFilters() || defaultFilters());
   /** Whether the Models rail is mounted; see `fetchedBlocks`. */
   const railMounted = ref(false);
@@ -1607,6 +1621,15 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
   const setsError = ref("");
   const setsLoaded = ref(false);
   let setsEpoch = 0;
+  // Hide writes, numbered as they are sent. An answer is applied only when no
+  // newer write has been applied, so answers that land out of order cannot put
+  // an older list on top. `ponytail:` issue order stands in for the server's
+  // order; a version on the answer would make it exact.
+  let hideSent = 0;
+  let hideApplied = 0;
+  // Moves on every send and every applied answer. A read that straddles one
+  // keeps the local list rather than its own snapshot, which may predate it.
+  let hideEvents = 0;
 
   /** The stack whose member panel is open, by its card key. */
   const openSetKey = ref("");
@@ -1653,6 +1676,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     // `force` overrides both: a scan has changed the answer.
     if (!force && (setsLoaded.value || setsLoading.value)) return;
     const startedAt = (setsEpoch += 1);
+    const hidesAtStart = hideEvents;
     setsLoading.value = true;
     setsError.value = "";
     try {
@@ -1662,7 +1686,12 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
         combinations: body.combinations,
         handMade: body.hand_made ?? [],
         setChecks: body.set_checks ?? [],
-        hiddenSets: body.hidden_sets ?? [],
+        // A hide sent or answered while this read was out is newer than the
+        // read's own list, which may have been served before it landed.
+        hiddenSets:
+          hideEvents === hidesAtStart
+            ? (body.hidden_sets ?? [])
+            : workflowSets.value.hiddenSets,
       };
       setsLoaded.value = true;
     } catch (err) {
@@ -1806,9 +1835,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
   // change. Hand-made sets hide the same way, under their own `hand:<id>` keys.
 
   /** The keys the active library hides, as the last read or write left them. */
-  const hiddenSetKeys = computed(
-    () => new Set(workflowSets.value.hiddenSets ?? []),
-  );
+  const hiddenSetKeys = computed(() => new Set(workflowSets.value.hiddenSets));
 
   /** Draw the hidden sets too, dimmed, so one can be shown again. */
   const showHiddenSets = ref(false);
@@ -1827,9 +1854,15 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
    */
   async function changeHidden(keys, hide) {
     const notices = useNoticeStore();
+    const sent = (hideSent += 1);
+    hideEvents += 1;
     try {
       const hiddenSets = await setWorkflowSetsHidden(keys, hide);
-      workflowSets.value = { ...workflowSets.value, hiddenSets };
+      if (sent > hideApplied) {
+        hideApplied = sent;
+        hideEvents += 1;
+        workflowSets.value = { ...workflowSets.value, hiddenSets };
+      }
     } catch (err) {
       notices.push({
         level: "error",
@@ -2020,6 +2053,15 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
       // A hand-made set hides the same way a derived one does (#1869): the
       // owner's own grouping, still theirs, just out of the way until shown.
       .filter((group) => showHiddenSets.value || !group.hidden),
+  );
+
+  /**
+   * The hand-made sets a surface other than the grid offers or names (the
+   * rail, the set chooser). Hidden is a filter on the library (#1869), so a
+   * set hidden here is left out of those too, until "Show them" draws it.
+   */
+  const shownHandMadeSets = computed(() =>
+    handMadeGroups.value.map((group) => group.set),
   );
 
   /**
@@ -2447,6 +2489,10 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
    * set from pictures (a checkpoint that only ever ran alone) that it is not
    * meant to stop at.
    *
+   * A hidden hand-made set is never swapped (`yieldOne`): hiding is the owner
+   * keeping it out of the way, and each route that closes its tray - the hide
+   * itself, "Show them" turning off, a read that brings the hide - lands here.
+   *
    * @param {number} setId
    * @returns {Promise<boolean>} true when the set gave way.
    */
@@ -2468,6 +2514,9 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
       await Promise.allSettled([...setWritesInFlight]);
       await loadWorkflowSets({ force: true });
     }
+    // Checked after the wait, since a hide may have landed while it was out.
+    // Not re-checked on unhide: the next close of the tray asks again.
+    if (hiddenSetKeys.value.has(`hand:${setId}`)) return false;
     const set = handMadeSets.value.find((candidate) => candidate.id === setId);
     const twin = automaticTwin(set);
     if (!twin) return false;
@@ -3370,9 +3419,10 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
    * while a card still lists it.
    *
    * Select-all means all of it, so both kinds are taken and both pills come up
-   * together - but only what is drawn: a hand-made set the `Show` narrowing
-   * (or its own hide) drops off the grid must not be selected, or Delete would
-   * take it off screen unasked.
+   * together - but only what is drawn: a hand-made set that its own hide takes
+   * off the grid (with "Show them" off) must not be selected, or Delete would
+   * take it off screen unasked. `Show` never narrows a hand-made set, so the
+   * set's own hide is the only thing that does.
    */
   function selectVisible() {
     const drawn = screenRows.value;
@@ -3834,6 +3884,8 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     // derived from this machine's models and this library's pictures, and the
     // credential that could read both has just changed.
     setsEpoch += 1;
+    // A hide still on the wire answers into the session it was sent in: drop it.
+    hideApplied = hideSent;
     workflowSets.value = {
       combinations: [],
       handMade: [],
@@ -3933,6 +3985,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     toggleSet,
     handMadeSets,
     handMadeGroups,
+    shownHandMadeSets,
     selectedSetIds,
     selectedMissingKeys,
     selectedMissingGroups,

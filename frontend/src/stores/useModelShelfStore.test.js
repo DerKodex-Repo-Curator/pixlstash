@@ -3156,7 +3156,9 @@ describe("sets from pictures are hidden, never deleted", () => {
       adapter({ id: 1, sha256: "a".repeat(64), filename: "base.st" }),
       adapter({ id: 2, sha256: "b".repeat(64), filename: "style.st" }),
     ]);
-    fetchWorkflowSets.mockResolvedValue({
+    // Answered when asked, as the hub is: a read after a hide or an undo sees
+    // what the server holds then, not what it held when the shelf was built.
+    fetchWorkflowSets.mockImplementation(async () => ({
       combinations: [
         {
           key: "1+2",
@@ -3171,7 +3173,7 @@ describe("sets from pictures are hidden, never deleted", () => {
       no_set: [],
       hand_made: handMade,
       hidden_sets: [...hiddenOnServer],
-    });
+    }));
     return useModelShelfStore();
   }
 
@@ -3321,6 +3323,163 @@ describe("sets from pictures are hidden, never deleted", () => {
     expect(store.openSetKey).toBe("");
     await useOperationStore().takeLocalReceiptAction();
     expect(store.openSetKey).toBe("model:1");
+  });
+
+  /** A promise its test answers by hand, when the answer's place matters. */
+  function deferred() {
+    let resolve;
+    const promise = new Promise((done) => (resolve = done));
+    return { promise, resolve };
+  }
+
+  it("undoes a hide on the server and on screen", async () => {
+    useOperationStore().setLocalReceiptHost(true);
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    store.hideSets([store.setGroups[0]]);
+    await flush();
+    expect([...hiddenOnServer]).toEqual(["model:1"]);
+
+    await useOperationStore().takeLocalReceiptAction();
+    expect([...hiddenOnServer]).toEqual([]);
+    expect(store.setGroups.map((g) => g.key)).toEqual(["model:1"]);
+    expect(store.hiddenSetCount).toBe(0);
+  });
+
+  it("takes a hidden hand-made set out of the set selection", async () => {
+    const store = shelfWithASet([handSet(7)]);
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    store.setView({ groupBy: "workflow_set" });
+    store.selectSet(7);
+    expect([...store.selectedSetIds]).toEqual([7]);
+
+    store.hideSets([store.handMadeGroups[0]]);
+    await flush();
+    expect([...store.selectedSetIds]).toEqual([]);
+  });
+
+  it("hiding an open hand-made tray never deletes that set", async () => {
+    useOperationStore().setLocalReceiptHost(true);
+    const store = await openOn([handSet(7)]);
+    store.hideSets([store.handMadeGroups[0]]);
+    await flush();
+    await flush();
+    expect(store.openSetKey).toBe("");
+    expect(deleteWorkflowSet).not.toHaveBeenCalled();
+    expect(store.handMadeSets.map((set) => set.id)).toEqual([7]);
+    expect([...hiddenOnServer]).toEqual(["hand:7"]);
+  });
+
+  it("turning Show them off over a hidden hand-made tray never deletes it", async () => {
+    const store = await openOn([handSet(7)]);
+    store.showHiddenSets = true;
+    store.hideSets([store.handMadeGroups[0]]);
+    await flush();
+    expect(store.openSetKey).toBe("hand:7");
+
+    // The grid drops the hidden card, which closes its tray on the way out.
+    store.showHiddenSets = false;
+    await flush();
+    await flush();
+    expect(store.openSetKey).toBe("");
+    expect(deleteWorkflowSet).not.toHaveBeenCalled();
+    expect([...hiddenOnServer]).toEqual(["hand:7"]);
+  });
+
+  it("applies the later hide's answer when the earlier one lands last", async () => {
+    // Uncovered, so the set from pictures stays on the grid beside the hand-made one.
+    const store = await openOn([handSet(7)], []);
+    const first = deferred();
+    const second = deferred();
+    setWorkflowSetsHidden
+      .mockReset()
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+
+    store.hideSets([store.setGroups[0]]);
+    store.hideSets([store.handMadeGroups[0]]);
+    second.resolve(["model:1", "hand:7"]);
+    await flush();
+    first.resolve(["model:1"]);
+    await flush();
+    expect(store.hiddenSetCount).toBe(2);
+  });
+
+  it("keeps a hide that lands while a set read is on the wire", async () => {
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    const answer = deferred();
+    // The read is served before the hide, and answers after it.
+    fetchWorkflowSets.mockImplementationOnce(() => answer.promise);
+    const reading = store.loadWorkflowSets({ force: true });
+
+    store.hideSets([store.setGroups[0]]);
+    await flush();
+    expect(store.hiddenSetCount).toBe(1);
+    // The same set, served before the hide: its own list says nothing hidden.
+    answer.resolve({
+      combinations: [
+        { key: "1+2", models: [checkpoint, lora], recipes: 2, covers: [] },
+      ],
+      no_set: [],
+      hidden_sets: [],
+    });
+    await reading;
+    expect(store.hiddenSetCount).toBe(1);
+    expect(store.setsLoading).toBe(false);
+  });
+
+  it("drops a hide answered after the session was reset", async () => {
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    const answer = deferred();
+    setWorkflowSetsHidden
+      .mockReset()
+      .mockImplementationOnce(() => answer.promise);
+
+    store.hideSets([store.setGroups[0]]);
+    store.resetForSession();
+    // The new session reads its own rows and sets, with nothing hidden.
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    answer.resolve(["model:1"]);
+    await flush();
+    expect(store.setGroups.map((g) => g.key)).toEqual(["model:1"]);
+    expect(store.hiddenSetCount).toBe(0);
+  });
+
+  it("removes the retired per-browser hide list when the store starts", async () => {
+    window.localStorage.setItem(
+      "pixlstash:modelShelfHiddenSets",
+      JSON.stringify(["model:1"]),
+    );
+    useModelShelfStore();
+    expect(window.localStorage.getItem("pixlstash:modelShelfHiddenSets")).toBe(
+      null,
+    );
+  });
+
+  it("starts the store when clearing the retired list throws", async () => {
+    const remove = vi
+      .spyOn(Storage.prototype, "removeItem")
+      .mockImplementation(() => {
+        throw new Error("test-storage-denied");
+      });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(() => useModelShelfStore()).not.toThrow();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("could not clear"),
+        expect.any(Error),
+      );
+    } finally {
+      remove.mockRestore();
+      warn.mockRestore();
+    }
   });
 
   it("reports a twin check that throws instead of rejecting unhandled", async () => {

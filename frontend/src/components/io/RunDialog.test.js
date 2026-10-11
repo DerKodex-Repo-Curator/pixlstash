@@ -2873,6 +2873,22 @@ describe("Create with LoRA", () => {
     expect(runWorkflowCard.mock.calls[0][0].destination.set_id).toBe(5);
   });
 
+  it("ranks the LoRA picker by no set hidden in this library", async () => {
+    fetchWorkflowSets.mockResolvedValue({
+      hand_made: [
+        { id: 10, members: [] },
+        { id: 11, members: [] },
+      ],
+      hidden_sets: ["hand:10"],
+    });
+    const wrapper = await mountRun({
+      ...fromPerson,
+      name: "Beach",
+      lora: { entityType: "set", entityId: 5, name: "Beach" },
+    });
+    expect(wrapper.vm.handMadeSets.map((set) => set.id)).toEqual([11]);
+  });
+
   it("never narrows by an attached LoRA other than the one on the run", async () => {
     const wrapper = await mountRun(fromPerson);
     wrapper.vm.addedLoras[0].sha256 = "z".repeat(64);

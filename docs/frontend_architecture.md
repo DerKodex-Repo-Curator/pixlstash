@@ -1898,14 +1898,19 @@ the shelf's workflow sets section) and served as `hand_made` on
   (`utils/workflowSets.js`) words one row, *Hide workflow set* / *Hide N
   workflow sets*, that leads the file pill's `⋯` and context menu
   (`ShelfSelectionBar`; only *Remove from set* goes before it, inside a
-  hand-made tray) and sits under *Replace* on a missing card's menu, with an
-  eye button on that card's pill (`MissingSetSelectionBar`). Both bars take
-  the same `sets` prop and emit `hide-sets`, and the view calls
-  `store.toggleHiddenSets`, so either menu hides every lit card from pictures
-  whichever pill counts it. It hides the selected cards still shown and turns
+  hand-made tray), sits under *Replace* on a missing card's menu, and sits
+  after *Duplicate set* on a hand-made set's menu (`WorkflowSetSelectionBar`),
+  each with an eye button on its pill. All three bars take the same `sets`
+  prop and emit `hide-sets`, and the view calls `store.toggleHiddenSets`, so
+  any menu hides every lit card, from pictures or hand-made, whichever pill
+  counts it. The keyboard path is the menu key on a card (it opens the
+  bar's menu), so a hand-made card is hidden and shown again without the
+  mouse. It hides the selected cards still shown and turns
   into *Show … again* only when every one is hidden. `sets` is
   `ModelShelf`'s `hideableSets`: the grid's exposed `selectedCardGroups`, the
-  model cards drawn selected, plus `store.selectedMissingGroups`. It is the
+  model cards drawn selected, plus `store.selectedMissingGroups` and the
+  selected hand-made groups (`store.handMadeGroups` whose set is in
+  `selectedSetIds`). It is the
   lit cards and not every selected head: a checkpoint picked in its open tray
   is a file, lights no card, and gets no set verb. The row is absent on the
   row list, which draws no sets, and it is not an icon on the file pill: that

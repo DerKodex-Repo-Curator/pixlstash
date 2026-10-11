@@ -1089,7 +1089,9 @@ const fillPictureItems = computed(() =>
 );
 
 const fillSetItems = computed(() =>
-  openHand.value ? fillFromSets(openHand.value.set, store.handMadeSets) : [],
+  openHand.value
+    ? fillFromSets(openHand.value.set, store.shownHandMadeSets)
+    : [],
 );
 
 const chooserSlot = computed(() =>
@@ -1142,7 +1144,7 @@ const chooserSections = computed(() => {
     set,
     slotId: chooser.value.slotId,
     rows: store.rows,
-    sets: store.handMadeSets,
+    sets: store.shownHandMadeSets,
     combinations: store.workflowSets.combinations,
     query: chooserQuery.value,
   }).map((section) => ({

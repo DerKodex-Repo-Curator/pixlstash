@@ -5823,6 +5823,48 @@ describe("the set grid is what the shelf opens on", () => {
     expect([...store.selectedMissingKeys]).toEqual([]);
   });
 
+  it("hides a selected hand-made set from the set pill, by its store group", async () => {
+    const { wrapper, store } = await gridWithThreeCards();
+    store.workflowSets = {
+      ...store.workflowSets,
+      handMade: [{ id: 10, name: "Kit", members: [] }],
+    };
+    await wrapper.vm.$nextTick();
+    const spy = vi.fn();
+    store.toggleHiddenSets = spy;
+    store.selectSet(10);
+    await wrapper.vm.$nextTick();
+
+    const setBar = wrapper.findComponent({ name: "WorkflowSetSelectionBar" });
+    await setBar.find('.selbar [data-verb="hide-sets"]').trigger("click");
+
+    // The store's group, by key: the set's card is what Hide reads.
+    expect(spy.mock.calls.map(([groups]) => groups.map((g) => g.key))).toEqual([
+      ["hand:10"],
+    ]);
+  });
+
+  it("passes the lit model cards and the selected hand-made set together", async () => {
+    const { wrapper, store, lightCards } = await gridWithThreeCards();
+    store.workflowSets = {
+      ...store.workflowSets,
+      handMade: [{ id: 10, name: "Kit", members: [] }],
+    };
+    await wrapper.vm.$nextTick();
+    const spy = vi.fn();
+    store.toggleHiddenSets = spy;
+    store.selectSet(10);
+    store.selectFromClick(1, { ctrl: true });
+    await lightCards("model:1");
+
+    // Either pill's row acts on the whole mixed selection, one list.
+    const setBar = wrapper.findComponent({ name: "WorkflowSetSelectionBar" });
+    await setBar.find('.selbar [data-verb="hide-sets"]').trigger("click");
+    expect(spy.mock.calls.map(([groups]) => groups.map((g) => g.key))).toEqual([
+      ["model:1", "hand:10"],
+    ]);
+  });
+
   it("takes Ctrl+A to mean the models the GRID draws", async () => {
     // The key was taken away entirely while nothing on the grid was selectable.
     // Back on, it has to answer the screen it is on: the row list holds two
