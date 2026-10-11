@@ -795,15 +795,19 @@ class AuthzGate:
             token_library,
             active_uuid,
         )
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                "This token belongs to a library that is not currently active. "
-                "Switch to that library, use a token created for the active "
+        detail = "This token belongs to a library that is not currently active."
+        # As in the middleware: a key that lives in ComfyUI's settings is not
+        # told how the owner could widen it.
+        if (
+            getattr(matched_token, "bound_address", None) is None
+            and getattr(matched_token, "scope", None) != COMFYUI_SCOPE
+        ):
+            detail += (
+                " Switch to that library, use a token created for the active "
                 "one, or let this one cover every library under API Tokens in "
                 "the settings."
-            ),
-        )
+            )
+        raise HTTPException(status_code=403, detail=detail)
 
     def _enforce_unscoped_owner(self, request: Request) -> None:
         """Require a fully-unscoped owner via the shared AuthService helper.

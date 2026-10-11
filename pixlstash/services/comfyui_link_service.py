@@ -12,8 +12,9 @@ Owner decisions (2026-10-06), which this module implements and nothing more:
   routes the ComfyUI-PixlStash nodes call and nothing else, so it cannot
   delete, change settings or make tokens.
 * It covers the library that is open when ComfyUI is linked. The owner can
-  set it to cover every library afterwards (``auth.set_token_libraries``),
-  and linking again keeps that.
+  set it to cover every library afterwards
+  (``AuthService.set_token_libraries``); the owner's own session linking the
+  same ComfyUI again keeps that.
 * The token works only from ComfyUI's own address (#1810). ComfyUI serves its
   settings, token included, to anyone who can reach it, so the token is bound
   to the source address PixlStash sees on the link's round-trip check, and
@@ -470,12 +471,29 @@ def _link(server, request: Request, saved_url: Optional[str]) -> dict:
         bound_address=TOKEN_BIND_PENDING,
     )
     public_id = minted["public_id"]
-    replaced = (server._server_config.get(LINK_CONFIG_KEY) or {}).get("token_public_id")
+    previous = server._server_config.get(LINK_CONFIG_KEY) or {}
+    replaced = previous.get("token_public_id")
     old_key = _token(server, replaced) if replaced else None
-    if old_key is not None and token_follows_active_library(old_key):
-        # Linking again must not quietly undo "Use in every library".
+    if (
+        old_key is not None
+        and token_follows_active_library(old_key)
+        and previous.get("comfyui_url") == comfyui_url
+    ):
+        # Linking the same ComfyUI again must not quietly undo "Use in every
+        # library". Through the owner's own operation, so a token that links
+        # again gets a key for the open library only, as on a first link.
         try:
-            _keep_every_library(server, public_id)
+            server.auth.set_token_libraries(request, minted["token_id"], True)
+        except HTTPException as refused:
+            if refused.status_code != 403:
+                _revoke(server, request, public_id)
+                raise
+            logger.info(
+                "ComfyUI link token %s replaces one that covered every "
+                "library, but covers only the open one: %s",
+                public_id,
+                refused.detail,
+            )
         except Exception:
             logger.exception(
                 "Could not carry every-library reach over to ComfyUI link "
@@ -683,27 +701,6 @@ def narrow_recorded_key(server) -> None:
             "the PixlStash nodes call.",
             public_id,
         )
-
-
-def _keep_every_library(server, public_id: str) -> None:
-    """Give a link's new key the every-library reach of the key it replaces.
-
-    Not ``auth.set_token_libraries``: that is the owner widening a token, and
-    refuses a token caller. This widens nothing, it keeps what the owner set
-    on the link when another key takes the old one's place.
-    """
-
-    def keep(session) -> None:
-        token = session.exec(
-            select(UserToken).where(UserToken.public_id == public_id)
-        ).first()
-        if token is not None:
-            token.all_libraries = True
-            session.add(token)
-            session.commit()
-
-    server.auth._db.run_task(keep, priority=DBPriority.IMMEDIATE)
-    server.auth._flush_token_cache()
 
 
 def reannounce(server) -> None:

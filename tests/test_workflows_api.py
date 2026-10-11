@@ -2330,27 +2330,84 @@ def test_start_up_narrows_a_link_made_before_the_scope(workflow_env, linked_comf
         workflow_env.owner.delete(f"{API}/users/me/token/{owners['token_id']}")
 
 
-def test_linking_again_keeps_use_in_every_library(workflow_env, linked_comfyui):
-    """The owner's choice belongs to the link, not to one key: the key that
-    replaces a widened one is widened, and a pinned one stays pinned."""
+def test_linking_again_keeps_use_in_every_library_for_the_owner_only(
+    workflow_env, linked_comfyui, comfy_at
+):
+    """The owner's choice belongs to the link, not to one key: when the
+    owner's own session links the same ComfyUI again, the key that replaces a
+    widened one is widened. A token that links again, or a link to another
+    address, gets a key for the open library only, or re-linking would be a
+    way for a token to send an every-library key wherever it likes."""
     server = workflow_env.server
+    owner = workflow_env.owner
     link = f"{API}/comfyui/link"
+
+    def widen() -> None:
+        r = owner.put(
+            f"{API}/users/me/token/{_link_key(server).id}/libraries",
+            json={"all_libraries": True},
+        )
+        assert r.status_code == 200, r.text
+        assert _link_key(server).all_libraries is True
+
+    # A pinned key is replaced by a pinned key.
     first = _link_key(server)
     assert first.all_libraries is False
-    assert workflow_env.owner.post(link).json()["linked"] is True
+    assert owner.post(link).json()["linked"] is True
     second = _link_key(server)
     assert (second.public_id != first.public_id, second.all_libraries) == (True, False)
 
-    r = workflow_env.owner.put(
-        f"{API}/users/me/token/{second.id}/libraries", json={"all_libraries": True}
-    )
-    assert r.status_code == 200, r.text
-    reply = workflow_env.owner.post(link).json()
+    # The owner's own session: kept.
+    widen()
+    reply = owner.post(link).json()
     assert reply["linked"] is True, reply
     third = _link_key(server)
     assert (third.public_id != second.public_id, third.all_libraries) == (True, True)
     assert third.scope == auth.COMFYUI_SCOPE
     assert reply["link"]["all_libraries"] is True
+
+    # A full-access token from this computer may link, but does not carry it.
+    r = owner.post(
+        f"{API}/users/me/token", json={"description": "agent", "scope": "ALL"}
+    )
+    assert r.status_code == 200, r.text
+    agent = r.json()
+    try:
+        reply = _bearer(server, agent["token"]).post(link).json()
+        assert reply["linked"] is True, reply
+        fourth = _link_key(server)
+        assert (fourth.public_id != third.public_id, fourth.all_libraries) == (
+            True,
+            False,
+        )
+    finally:
+        owner.delete(f"{API}/users/me/token/{agent['token_id']}")
+
+    # Nor does the owner's session to a ComfyUI at another address.
+    widen()
+    comfy_at("http://127.0.0.1:18189/")
+    reply = owner.post(link).json()
+    assert reply["linked"] is True, reply
+    assert _link_key(server).all_libraries is False
+
+
+def test_a_comfyui_row_naming_a_resource_is_refused_outright(
+    workflow_env, linked_comfyui
+):
+    """No flow mints one, and the gate would make it the owner on its routes
+    whatever it names, so the middleware refuses the row as it does a
+    full-access one that names a resource."""
+    server = workflow_env.server
+    assert linked_comfyui.get(f"{API}/pictures").status_code == 200
+    _set_link_key(
+        server, resource_type="character", resource_id=workflow_env.character_id
+    )
+    try:
+        r = linked_comfyui.get(f"{API}/pictures")
+        assert r.status_code == 403, r.text
+        assert "Misconfigured token" in r.json()["detail"]
+    finally:
+        _set_link_key(server, resource_type=None, resource_id=None)
 
 
 @pytest.fixture

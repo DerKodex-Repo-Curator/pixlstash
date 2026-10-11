@@ -2973,12 +2973,13 @@ class AuthService:
                         detail = "Token belongs to a different library"
                         # The way out is the owner's to take, so only a token
                         # that could be widened is told about it; a share link
-                        # or the ComfyUI link key (bound to an address, and
-                        # readable off ComfyUI) learns nothing about how this
-                        # server is set up.
+                        # or a ComfyUI key (bound to an address or of the
+                        # ComfyUI scope, and readable off ComfyUI) learns
+                        # nothing about how this server is set up.
                         if (
                             token_may_cover_every_library(matched_token)
                             and matched_token.bound_address is None
+                            and matched_token.scope != COMFYUI_SCOPE
                         ):
                             detail += (
                                 ". Switch to that library, or let the token "
@@ -3027,8 +3028,10 @@ class AuthService:
                         # and thus bypass every object-scope guard while looking
                         # like an owner. Reject it fail-closed - the shape is
                         # invalid and unreachable through any supported flow.
+                        # The same for a ComfyUI-scope row: the gate makes it
+                        # the owner on its routes, resource or no resource.
                         if (
-                            matched_token.scope == "ALL"
+                            matched_token.scope in ("ALL", COMFYUI_SCOPE)
                             and matched_token.resource_type is not None
                         ):
                             return JSONResponse(

@@ -94,8 +94,7 @@ class UserToken(SQLModel, table=True):
     # whichever library is active. Only ever honoured on a token with no
     # ``resource_type`` (a share link names ids that mean something else in the
     # next library) and, unless it is a ComfyUI-scope key, no
-    # ``bound_address``; only set through ``AuthService.set_token_libraries``
-    # (and carried to the key that replaces a ComfyUI link's).
+    # ``bound_address``; only set through ``AuthService.set_token_libraries``.
     # ``library_uuid`` keeps the library it was minted in; see
     # ``auth.token_covers_library``, the one place the two are read together.
     #

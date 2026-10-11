@@ -653,13 +653,17 @@ class TestATokenThatCoversEveryLibrary:
             session.get(UserToken, row.id).bound_address = "testclient"
             session.commit()
 
-        server.hub_engine.run_task(_bind)
         _restamp_tokens(server, other_library)
         client = TestClient(server.api)
-        pinned = client.get(f"{API}/pictures", headers=bearer)
-        assert pinned.status_code == 403
-        # Anyone can read this key off ComfyUI, so it is not told the way out.
-        assert pinned.json()["detail"] == "Token belongs to a different library"
+        # Anyone can read this key off ComfyUI, so it is not told the way out,
+        # bound to an address or (minted by hand) not.
+        for bind in (None, _bind):
+            if bind is not None:
+                server.hub_engine.run_task(bind)
+                server.auth._flush_token_cache()
+            pinned = client.get(f"{API}/pictures", headers=bearer)
+            assert pinned.status_code == 403
+            assert pinned.json()["detail"] == "Token belongs to a different library"
 
         widened = _cover(owner, row.id, True)
         assert widened.status_code == 200, widened.text
