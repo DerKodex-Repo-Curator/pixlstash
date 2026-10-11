@@ -1489,27 +1489,7 @@
       <ShelfSelectionBar
         ref="selBarRef"
         :sets="hideableSets"
-        @hide-sets="store.toggleHiddenSets(hideableSets)"
-        @hide-models="store.toggleHiddenModels(store.selectedModels)"
-        @rename="startRenameSelected"
-        @set-base-model="editVerb = 'base-model'"
-        @set-kind="editVerb = 'kind'"
-        @set-trigger-words="editVerb = 'trigger-words'"
-        @stack="confirmStack"
-        @unstack="confirmUnstack"
-        @make-cover="makeCover"
-        @remove-from-stack="confirmRemoveFromStack"
-        @move="openMove(store.selectedRows)"
-        @merge-copies="openMergeCopies"
-        @open-location="openLocation"
-        @set-icon="pickIcon"
-        @clear-icons="confirmClearIcons"
-        @forget="confirmForget"
-        @delete="confirmDelete"
-        @works-with="openWorksWith"
-        @new-set="newSetWithCheckpoint"
-        @clone-set="(group) => store.cloneSetFromPictures(group)"
-        @remove-from-set="removeSelectedFromSet"
+        v-on="verbListeners"
       />
       <WorkflowSetSelectionBar
         v-if="isSetGrid"
@@ -2470,9 +2450,9 @@ function shelfOwnsTheKey(event) {
   // confirmation for rows the reader cannot see and `Escape` would silently
   // clear a selection they did not know they still had.
   if (!isShelfTab.value) return false;
-  // The Models rail sits beside the shelf with a selection of its own, and
-  // none of the shelf's keys may reach through it: Delete there would delete
-  // the shelf's (unseen) selection, and Escape would clear it.
+  // The Models rail sits beside the shelf with a list and keys of its own:
+  // it asks for Delete and F2 itself (`store.requestVerb`), and its Escape
+  // and Ctrl+A are about its own rows.
   if (event?.target?.closest?.(".mrail")) return false;
   // The set grid is NOT excluded, and the reason it once was has gone with the
   // card standing for a whole set: every selectable thing on that screen is one
@@ -2605,7 +2585,7 @@ function onShelfKeydown(event) {
       store.clearSelection();
       return;
     }
-    if (event.key === "Delete" && !store.selectedRows.length) {
+    if (event.key === "Delete" && !ownSelection.value.length) {
       event.preventDefault();
       store.deleteHandMadeSets(store.selectedSets);
       return;
@@ -2619,7 +2599,7 @@ function onShelfKeydown(event) {
   if (renamesSet) return;
   // Escape and Delete are both about a selection, and the guard above no longer
   // asks for one.
-  if (!store.selectedRows.length) return;
+  if (!ownSelection.value.length) return;
   if (event.key === "Escape") {
     store.clearSelection();
     return;
@@ -2629,6 +2609,15 @@ function onShelfKeydown(event) {
   event.preventDefault();
   confirmDelete(event.shiftKey);
 }
+
+/**
+ * The rows the shelf's own keys act on. The Models rail's selection is not
+ * among them: the rail answers Delete and Escape on its own list, and a press
+ * made over here was aimed at something else.
+ */
+const ownSelection = computed(() =>
+  store.railSelection ? [] : store.selectedRows,
+);
 
 onMounted(() => window.addEventListener("keydown", onShelfKeydown));
 onUnmounted(() => window.removeEventListener("keydown", onShelfKeydown));
@@ -3789,10 +3778,12 @@ function startRenameSelected() {
   // and the dashed rule under a row is what makes an inline field honest. It
   // takes `ShelfEditDialog`'s `rename`, which already owns that one string, so
   // the verb is live there rather than being a menu item that does nothing.
+  // The Models rail's selection takes the dialog too: its row may not be drawn
+  // on the list at all.
   // The row list is left exactly as it was, including its silent no-op when the
   // selection is held but the row is not drawn - that is a separate question
   // and not this change's to answer.
-  if (isSetGrid.value) {
+  if (isSetGrid.value || store.railSelection) {
     editVerb.value = "rename";
     return;
   }
@@ -4403,6 +4394,46 @@ const firstRead = computed(
 function openWorksWith() {
   showWorksWith(store.selectedRows[0] ?? null);
 }
+
+/**
+ * Every verb the selection bar emits, and what runs it.
+ *
+ * One map for two askers: the shelf's own bar, bound with `v-on`, and the
+ * Models rail, which is not this view's child and asks through
+ * `store.requestVerb`. Both act on `store.selectedRows`, which is the rail's
+ * selection while the rail has one, so each confirmation exists once.
+ */
+const verbListeners = {
+  "hide-sets": () => store.toggleHiddenSets(hideableSets.value),
+  "hide-models": () => store.toggleHiddenModels(store.selectedModels),
+  rename: startRenameSelected,
+  "set-base-model": () => (editVerb.value = "base-model"),
+  "set-kind": () => (editVerb.value = "kind"),
+  "set-trigger-words": () => (editVerb.value = "trigger-words"),
+  stack: confirmStack,
+  unstack: confirmUnstack,
+  "make-cover": makeCover,
+  "remove-from-stack": confirmRemoveFromStack,
+  move: () => openMove(store.selectedRows),
+  "merge-copies": openMergeCopies,
+  "open-location": openLocation,
+  "set-icon": pickIcon,
+  "clear-icons": confirmClearIcons,
+  forget: confirmForget,
+  delete: confirmDelete,
+  "works-with": openWorksWith,
+  "new-set": newSetWithCheckpoint,
+  "clone-set": (group) => store.cloneSetFromPictures(group),
+  "remove-from-set": removeSelectedFromSet,
+};
+
+watch(
+  () => store.verbRequest,
+  (request) => {
+    // The runs tab draws none of this, so nothing may open over it.
+    if (request && isShelfTab.value) verbListeners[request.verb]?.(...request.args);
+  },
+);
 
 /** Open the dialog, remembering what to hand focus back to. */
 function showWorksWith(model) {

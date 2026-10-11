@@ -5387,7 +5387,10 @@ pill, the pill's `⋯` menu and the ROW CONTEXT MENU, because every `title` on i
 is a refusal sentence (`stackRefusal`, `forgetTitle`, `moveTitle`,
 `assignTitle`) and three copies of them would drift. The verb list itself is one
 array in a render function drawn twice — under `⋯` without the single-item verbs
-and at the pointer with them.
+and at the pointer with them. The Models rail is a fourth surface over the same
+array and gates: it mounts this component with `rail`, which draws none of the
+three and hands the rows (`RailVerbs`) to the rail's own menu, and there a pick
+goes through `store.requestVerb` instead of an emit (see *The Models rail*).
 
 - **The pill floats bottom-centre over the list**, the same object the photo
   grid docks over its tiles, rather than the docked strip it was: a bar between
@@ -6309,14 +6312,36 @@ the first time a hand-made set opens while the rail is closed.
   count as the reason) and *In no set yet*. The Fits set is
   `store.railFitsSetId`; the set panel's *Models · N fit* button is the only
   thing that sets it for you. A deleted filtered set clears it and says so.
-- **Its own selection.** A listbox, one tab stop: arrows, Shift/Ctrl, Home/End,
-  type-ahead, Space, Ctrl+A and Escape act on the rail's selection only, and
-  the shelf's window key handler declines any key whose target is inside
-  `.mrail` (`shelfOwnsTheKey`). Nothing in it reaches the shelf's selection, so
-  the shelf pill never appears and Delete, Move and Forget are unreachable. Its verbs are
-  *Add to <open set>* (Enter, and the row's mouse-only Add), *Add to set…* and
-  *New workflow set with these*, in the footer's ⋯ and the row menu
-  (right-click, Shift+F10, the Menu key).
+- **Its own list, and one selection on screen.** A listbox, one tab stop:
+  arrows, Shift/Ctrl, Home/End, type-ahead, Space, Ctrl+A and Escape act on the
+  rail's selection only, and the shelf's window key handler declines any key
+  whose target is inside `.mrail` (`shelfOwnsTheKey`). The rail mirrors its
+  selection into `store.railSelection` (`setRailSelection`), and while that is
+  set `selectedRows` is the rail's rows, each file standing for itself, never
+  for its run. Taking it drops the shelf's `selectedIds`, and a model picked
+  on the shelf drops it, which the rail watches for. `clearSelection` leaves
+  it alone, because a click on a set card clears the shelf's models and the
+  reader who selected here to add to that set still means them. The shelf's
+  window keys never act on it (`ownSelection` in `ModelShelf.vue`): Delete and
+  Escape pressed over the shelf are about the shelf. Leaving the list (the
+  Tasks tab, a closed rail) lets go of it.
+- **Its verbs.** The rail's own lead the menu and are set in semibold: *Add to
+  <open set>* (Enter, and the row's mouse-only Add), *Add to set…* and *New
+  workflow set with these*. Under them the footer's ⋯ and the row menu
+  (right-click, Shift+F10, the Menu key) hold every verb of the shelf's row
+  menu, and Delete and F2 answer on the list. The rows are not a second
+  copy: the rail mounts `ShelfSelectionBar` with `rail`, which draws no pill
+  and no menu and exposes `RailVerbs`, the same rows under the same gates,
+  minus the two the rail's menu already has of its own: *New workflow set
+  with this checkpoint* and *Hide model*, which sits between the set verbs
+  and these. The rail is not the shelf's
+  child, so a pick goes through `store.requestVerb`; `ModelShelf.vue` watches
+  `store.verbRequest` and runs it from `verbListeners`, the one map its own
+  bar is bound to with `v-on`, so each confirmation exists once. Rename takes
+  `ShelfEditDialog` under a rail selection, since the row may not be drawn on
+  the list. The shelf's pill stays down for a rail selection: it would come up
+  on every click of a list whose commonest gesture is Add. Nothing is asked
+  for on the runs tab, which draws no shelf to run it.
 - **Adds in a run.** Adds into the open set go out with `addToHandMadeSet(…,
   {quiet: true})`; once they pause for 1.5 s, `announceAdded` raises one
   receipt for the whole run (what the set still holds of it), whose Undo takes

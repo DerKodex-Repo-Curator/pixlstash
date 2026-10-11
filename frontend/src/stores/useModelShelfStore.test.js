@@ -1279,6 +1279,45 @@ describe("stacks are atomic", () => {
     expect(store.selectedRows.map((r) => r.id)).toEqual([1, 3]);
     expect(store.selectedModelIds).toEqual([1, 3]);
   });
+
+  it("hands the verbs the Models rail's selection while the rail has one", () => {
+    // The rail lists each file by itself, so a step of a run is that file and
+    // not the run: Delete there must not take the two steps nobody picked.
+    const store = shelfWithARun();
+    store.setRailSelection([2]);
+    expect(store.selectedRows.map((r) => r.id)).toEqual([2]);
+    expect(store.selectedModelIds).toEqual([2]);
+    // With the display fields the gates read, as every other screen's rows.
+    expect(store.selectedRows[0].locState).toBe("present");
+  });
+
+  it("holds one model selection at a time, the shelf's or the rail's", () => {
+    const store = shelfWithARun();
+    store.selectFromClick(4, {}, [1, 4]);
+    store.setRailSelection([2]);
+    expect(store.selectedIds.size).toBe(0);
+    expect(store.selectedRows.map((r) => r.id)).toEqual([2]);
+
+    // A shelf click takes it back, in the same breath: a row drag reads the
+    // selection straight after making it.
+    store.selectFromClick(4, {}, [1, 4]);
+    expect(store.railSelection).toBeNull();
+    expect(store.selectedRows.map((r) => r.id)).toEqual([4]);
+
+    // Clearing the shelf's selection is not a pick: clicking a set card does
+    // it, and the models selected in the rail to add to that set are still
+    // meant.
+    store.setRailSelection([2]);
+    store.clearSelection();
+    expect(store.selectedRows.map((r) => r.id)).toEqual([2]);
+  });
+
+  it("leaves the shelf's selection alone when the rail reports none", () => {
+    const store = shelfWithARun();
+    store.selectFromClick(4, {}, [1, 4]);
+    store.setRailSelection([]);
+    expect(store.selectedRows.map((r) => r.id)).toEqual([4]);
+  });
 });
 
 describe("the verbs", () => {
