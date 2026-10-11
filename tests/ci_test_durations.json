@@ -12,9 +12,10 @@
     "local run (2026-10-07): tests/test_task_runner_submit_and_wait.py, which #1788 newly gates, --force-cpu --fast-captions to match CI",
     "local run (2026-10-07): tests/test_prompt_match.py, which this branch newly gates, --force-cpu --fast-captions to match CI",
     "local run (2026-10-10): tests/test_workflow_versions.py, which #1854 newly gates (the surviving tests of the removed tests/test_comfyui_workflow_pull.py), --force-cpu --fast-captions to match CI",
-    "local run (2026-10-11): tests/test_library_move.py, which this branch newly gates, --force-cpu --fast-captions to match CI"
+    "local run (2026-10-11): tests/test_library_move.py, which this branch newly gates, --force-cpu --fast-captions to match CI",
+    "local run (2026-10-11): tests/test_library_move_cleanup.py, which this branch newly gates, --force-cpu --fast-captions to match CI"
   ],
-  "test_count": 4228,
+  "test_count": 4229,
   "total_seconds": 8047.63,
   "durations": {
     "tests/multi_project_authz/test_generic_field_reader_allowlist.py::test_bbox_is_serialised_exactly_as_the_relationship_path_did": 19.33,
@@ -2066,6 +2067,7 @@
     "tests/test_library_move.py::TestWhatIsLeftBehind::test_a_picture_whose_file_is_gone_stays_and_the_rest_still_move": 0.48,
     "tests/test_library_move.py::TestWhatTheOtherLibraryAlreadyHolds::test_a_file_in_its_scrapheap_stays_put_in_both": 1.01,
     "tests/test_library_move.py::TestWhatTheOtherLibraryAlreadyHolds::test_a_file_it_already_has_is_not_copied_twice": 0.84,
+    "tests/test_library_move_cleanup.py::test_thumbnail_cleanup_preserves_original_persistence_error": 0.0,
     "tests/test_library_restore_cli.py::test_archive_member_cannot_escape_the_restore_directory[../escaped.txt]": 0.0,
     "tests/test_library_restore_cli.py::test_archive_member_cannot_escape_the_restore_directory[/etc/escaped.txt]": 0.0,
     "tests/test_library_restore_cli.py::test_archive_member_cannot_escape_the_restore_directory[images/../../escaped.txt]": 0.0,
