@@ -2993,8 +2993,9 @@ every kind, and the popup's request is not symmetric, so kind by kind:
 A waiting change the popup has no control for is sent as it waits, so it is
 in `ran` and is saved; a run made through the API or MCP names only what its
 caller chose, and what waited beside it was not in that run. `_set_to_save` is the one
-place the set is put together, so `ran_save` in the state, a `dry_run` and
-the save itself judge the set that is written: a checkpoint pick that waits
+place the set is put together, so a `dry_run` and the save itself judge the
+set that is written, and `ran_save` in the state judges `ran` as it stands,
+which is that set for a save from a run: a checkpoint pick that waits
 closes Save for what waits and not for a run that did not use it, and what
 waits being stale does not close a run's save, which was made on the version
 the workflow has (`ran` is null otherwise).

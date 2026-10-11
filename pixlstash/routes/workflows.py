@@ -1356,6 +1356,140 @@ class RunDestination(BaseModel):
     character_id: int | None = None
 
 
+class WorkflowChanges(BaseModel):
+    """A set of changes to a workflow (#1849), in the words a run already uses.
+
+    What the Workflow tab holds unsaved, what a run changed, and what Save and
+    Save as new take in their request are all this one shape, so there is one
+    way a change is applied: the run planner's. ``models`` picks a file per
+    loader address, ``loras`` sets a loader's LoRA and its default strengths,
+    ``skip_loras`` removes a loader, ``stages`` switches an optional stage on
+    or off, and ``values`` are parameters.
+
+    **Nothing here is who a picture is of.** A LoRA attached to a person is
+    never part of a workflow: an entry of ``loras`` naming one is not counted
+    and no save writes it. Prompt, seed, count and the pictures put in belong
+    to a run or a recipe and have no field here.
+    """
+
+    models: list[RunModel] = Field(default_factory=list, max_length=MAX_DEFAULTS)
+    loras: list[RunLora] = Field(default_factory=list, max_length=MAX_RUN_LORAS)
+    skip_loras: list[RunLoraSlot] = Field(
+        default_factory=list, max_length=MAX_RUN_LORAS
+    )
+    stages: dict[Stage, bool] = Field(default_factory=dict)
+    values: list[RunValue] = Field(default_factory=list, max_length=MAX_DEFAULTS)
+
+    @model_validator(mode="after")
+    def _one_answer_per_thing(self) -> "WorkflowChanges":
+        """One pick per loader, one value per parameter, a slot set or removed."""
+        addresses = [model.address for model in self.models]
+        if len(set(addresses)) != len(addresses):
+            raise ValueError("One model per loader address.")
+        _one_row_per_address(self.values)
+        for value in self.values:
+            # Stored, and read back on every grid: bounded like a default.
+            if len(str(value.value)) > MAX_VALUE_LENGTH:
+                raise ValueError(
+                    f"A parameter value is longer than {MAX_VALUE_LENGTH} characters."
+                )
+            if isinstance(value.value, float) and not math.isfinite(value.value):
+                raise ValueError("A parameter value must be a finite number.")
+        slots = [(item.node_id, item.field) for item in self.loras]
+        if len(set(slots)) != len(slots):
+            raise ValueError("One entry per LoRA slot.")
+        both = set(slots) & {(item.node_id, item.field) for item in self.skip_loras}
+        if both:
+            raise ValueError(
+                "LoRA slot "
+                + ", ".join(f"{field} on node {node}" for node, field in sorted(both))
+                + " is both set and removed."
+            )
+        return self
+
+    def over(self, other: "WorkflowChanges") -> "WorkflowChanges":
+        """These changes with *other*'s on top: *other* wins thing by thing.
+
+        A slot *other* removes is no longer set, and one it sets is no longer
+        removed, whichever of the two this set said. Never fails: two sets
+        that each fit the limits can be more than one together, which is for
+        the caller to refuse (:meth:`too_many`) and no reason to fail a read.
+        """
+        models = {m.address: m for m in [*self.models, *other.models]}
+        values = {
+            (v.slot_label, v.input_name): v for v in [*self.values, *other.values]
+        }
+        set_here = {(i.node_id, i.field): i for i in self.loras}
+        gone_here = {(i.node_id, i.field): i for i in self.skip_loras}
+        for item in other.loras:
+            gone_here.pop((item.node_id, item.field), None)
+            set_here[(item.node_id, item.field)] = item
+        for item in other.skip_loras:
+            set_here.pop((item.node_id, item.field), None)
+            gone_here[(item.node_id, item.field)] = item
+        # Built from validated entries, one per key: only the lengths could
+        # fail validation here.
+        return WorkflowChanges.model_construct(
+            models=list(models.values()),
+            loras=list(set_here.values()),
+            skip_loras=list(gone_here.values()),
+            stages={**self.stages, **other.stages},
+            values=list(values.values()),
+        )
+
+    def less(self, other: "WorkflowChanges") -> "WorkflowChanges":
+        """These changes without each one *other* holds exactly.
+
+        Thing by thing: a model address, a LoRA slot (set or removed), a
+        stage, a parameter. One that *other* answers differently stays.
+        """
+        models = {m.address: m for m in other.models}
+        values = {(v.slot_label, v.input_name): v for v in other.values}
+        # A slot *other* removes is held as None, one it sets as the entry.
+        slots = {
+            **{(i.node_id, i.field): i for i in other.loras},
+            **{(i.node_id, i.field): None for i in other.skip_loras},
+        }
+        return WorkflowChanges.model_construct(
+            models=[m for m in self.models if models.get(m.address) != m],
+            loras=[i for i in self.loras if slots.get((i.node_id, i.field)) != i],
+            skip_loras=[
+                i
+                for i in self.skip_loras
+                if slots.get((i.node_id, i.field), i) is not None
+            ],
+            stages={
+                s: on for s, on in self.stages.items() if other.stages.get(s) != on
+            },
+            values=[
+                v for v in self.values if values.get((v.slot_label, v.input_name)) != v
+            ],
+        )
+
+    def too_many(self) -> bool:
+        """Whether this is more than one save takes: the limits of each list,
+        which two sets laid over each other can pass together."""
+        return (
+            max(len(self.models), len(self.values)) > MAX_DEFAULTS
+            or max(len(self.loras), len(self.skip_loras)) > MAX_RUN_LORAS
+        )
+
+    def changes_the_graph(self) -> bool:
+        """Whether a save of these makes a new version: a model or a LoRA
+        loader changed. Stages and parameters are defaults, stored beside the
+        graph, and change no graph."""
+        return bool(self.models or self.loras or self.skip_loras)
+
+    def count(self) -> int:
+        return (
+            len(self.models)
+            + len(self.loras)
+            + len(self.skip_loras)
+            + len(self.stages)
+            + len(self.values)
+        )
+
+
 class RunRequest(BaseModel):
     """``POST /workflows/run`` and its dry run, which take the same body.
 
@@ -1523,145 +1657,6 @@ class RunRequest(BaseModel):
     # seed of the picture its graph was read from is "Clone picture", and any
     # other is named after its workflow.
     label: str | None = Field(None, max_length=MAX_LABEL_LENGTH)
-
-
-class WorkflowChanges(BaseModel):
-    """A set of changes to a workflow (#1849), in the words a run already uses.
-
-    What the Workflow tab holds unsaved, what a run changed, and what Save and
-    Save as new take in their request are all this one shape, so there is one
-    way a change is applied: the run planner's. ``models`` picks a file per
-    loader address, ``loras`` sets a loader's LoRA and its default strengths,
-    ``skip_loras`` removes a loader, ``stages`` switches an optional stage on
-    or off, and ``values`` are parameters.
-
-    **Nothing here is who a picture is of.** A LoRA attached to a person is
-    never part of a workflow: an entry of ``loras`` naming one is not counted
-    and no save writes it. Prompt, seed, count and the pictures put in belong
-    to a run or a recipe and have no field here.
-    """
-
-    models: list[RunModel] = Field(default_factory=list, max_length=MAX_DEFAULTS)
-    loras: list[RunLora] = Field(default_factory=list, max_length=MAX_RUN_LORAS)
-    skip_loras: list[RunLoraSlot] = Field(
-        default_factory=list, max_length=MAX_RUN_LORAS
-    )
-    stages: dict[Stage, bool] = Field(default_factory=dict)
-    values: list[RunValue] = Field(default_factory=list, max_length=MAX_DEFAULTS)
-
-    @model_validator(mode="after")
-    def _one_answer_per_thing(self) -> "WorkflowChanges":
-        """One pick per loader, one value per parameter, a slot set or removed."""
-        addresses = [model.address for model in self.models]
-        if len(set(addresses)) != len(addresses):
-            raise ValueError("One model per loader address.")
-        _one_row_per_address(self.values)
-        for value in self.values:
-            # Stored, and read back on every grid: bounded like a default.
-            if len(str(value.value)) > MAX_VALUE_LENGTH:
-                raise ValueError(
-                    f"A parameter value is longer than {MAX_VALUE_LENGTH} characters."
-                )
-            if isinstance(value.value, float) and not math.isfinite(value.value):
-                raise ValueError("A parameter value must be a finite number.")
-        slots = [(item.node_id, item.field) for item in self.loras]
-        if len(set(slots)) != len(slots):
-            raise ValueError("One entry per LoRA slot.")
-        both = set(slots) & {(item.node_id, item.field) for item in self.skip_loras}
-        if both:
-            raise ValueError(
-                "LoRA slot "
-                + ", ".join(f"{field} on node {node}" for node, field in sorted(both))
-                + " is both set and removed."
-            )
-        return self
-
-    def over(self, other: "WorkflowChanges") -> "WorkflowChanges":
-        """These changes with *other*'s on top: *other* wins thing by thing.
-
-        A slot *other* removes is no longer set, and one it sets is no longer
-        removed, whichever of the two this set said. Never fails: two sets
-        that each fit the limits can be more than one together, which is for
-        the caller to refuse (:meth:`too_many`) and no reason to fail a read.
-        """
-        models = {m.address: m for m in [*self.models, *other.models]}
-        values = {
-            (v.slot_label, v.input_name): v for v in [*self.values, *other.values]
-        }
-        set_here = {(i.node_id, i.field): i for i in self.loras}
-        gone_here = {(i.node_id, i.field): i for i in self.skip_loras}
-        for item in other.loras:
-            gone_here.pop((item.node_id, item.field), None)
-            set_here[(item.node_id, item.field)] = item
-        for item in other.skip_loras:
-            set_here.pop((item.node_id, item.field), None)
-            gone_here[(item.node_id, item.field)] = item
-        # Built from validated entries, one per key: only the lengths could
-        # fail validation here.
-        return WorkflowChanges.model_construct(
-            models=list(models.values()),
-            loras=list(set_here.values()),
-            skip_loras=list(gone_here.values()),
-            stages={**self.stages, **other.stages},
-            values=list(values.values()),
-        )
-
-    def less(self, other: "WorkflowChanges") -> "WorkflowChanges":
-        """These changes without each one *other* holds exactly.
-
-        Thing by thing: a model address, a LoRA slot (set or removed), a
-        stage, a parameter. One that *other* answers differently stays.
-        """
-        models = {m.address: m for m in other.models}
-        values = {(v.slot_label, v.input_name): v for v in other.values}
-        # A slot *other* removes is held as None, one it sets as the entry.
-        slots = {
-            **{(i.node_id, i.field): i for i in other.loras},
-            **{(i.node_id, i.field): None for i in other.skip_loras},
-        }
-        return WorkflowChanges.model_construct(
-            models=[m for m in self.models if models.get(m.address) != m],
-            loras=[i for i in self.loras if slots.get((i.node_id, i.field)) != i],
-            skip_loras=[
-                i
-                for i in self.skip_loras
-                if slots.get((i.node_id, i.field), i) is not None
-            ],
-            stages={
-                s: on for s, on in self.stages.items() if other.stages.get(s) != on
-            },
-            values=[
-                v for v in self.values if values.get((v.slot_label, v.input_name)) != v
-            ],
-        )
-
-    def too_many(self) -> bool:
-        """Whether this is more than one save takes: the limits of each list,
-        which two sets laid over each other can pass together."""
-        return (
-            max(len(self.models), len(self.values)) > MAX_DEFAULTS
-            or max(len(self.loras), len(self.skip_loras)) > MAX_RUN_LORAS
-        )
-
-    def changes_the_graph(self) -> bool:
-        """Whether a save of these makes a new version: a model or a LoRA
-        loader changed. Stages and parameters are defaults, stored beside the
-        graph, and change no graph."""
-        return bool(self.models or self.loras or self.skip_loras)
-
-    def count(self) -> int:
-        return (
-            len(self.models)
-            + len(self.loras)
-            + len(self.skip_loras)
-            + len(self.stages)
-            + len(self.values)
-        )
-
-
-# `RunRequest.waited` names the class above, which is written in a run's own
-# types and so comes after it.
-RunRequest.model_rebuild()
 
 
 class SaveVerb(BaseModel):
@@ -9900,9 +9895,10 @@ def create_router(server) -> APIRouter:
 
         Laid under it, a waiting change the owner put back for the run
         would be saved as if the run had used it. What waits is not stale
-        for a set that leaves it out. One function, so the verb the state
-        offers (``ran_save``), a dry run and the save judge the set that is
-        written. What such a save then does to what waits is ``_save``'s.
+        for a set that leaves it out. One function, so a dry run and the
+        save judge the set that is written; the verb the state offers
+        (``ran_save``) is judged on the run's set as it stands, which is the
+        same set. What such a save then does to what waits is ``_save``'s.
         """
         if from_run:
             return asked, False
@@ -9921,9 +9917,8 @@ def create_router(server) -> APIRouter:
             ran=ran,
             save=save,
             save_as_new=save_as_new,
-            ran_save=_verbs(
-                hub, workflow_id, *_set_to_save(waiting, stale, ran, from_run=True)
-            )[0]
+            # A run's set stands alone, never stale (`_set_to_save`).
+            ran_save=_verbs(hub, workflow_id, ran, False)[0]
             if ran is not None
             else None,
         )
@@ -10292,14 +10287,6 @@ def create_router(server) -> APIRouter:
 
         def saved(kept: WorkflowChanges, **answer) -> WorkflowSaved:
             still = waiting.count() if untouched else kept.count()
-            if still:
-                logger.info(
-                    "[workflows] Workflow %s: %d change(s) %s still wait after "
-                    "the save of what its run changed.",
-                    workflow_id,
-                    still,
-                    "made on an older version" if untouched else "made after the run",
-                )
             return WorkflowSaved(still_waiting=still, **answer)
 
         if changes.too_many():
