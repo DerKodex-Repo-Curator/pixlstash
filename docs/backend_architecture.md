@@ -3064,7 +3064,12 @@ matches a fix to a row by `was` too, so the row stops showing it). Naming
 `was` or `now` at that loader is the workflow's own model and loads `now`;
 `_keep_run_changes` reads both sides of its comparison through the fixes, or
 the replacement the Run popup sends on every run would read as a change to
-save after each one. And `POST …/set-clone-plans` plans against the graph
+save after each one. A fix is its slot kind's there as it is in a run: a
+`clip_name` on a CLIP vision loader is not a text encoder's, so the class of
+the loader at that address is read off the graph, and only where a text
+encoder's fix names the file
+(`test_a_text_encoders_replacement_is_not_a_vision_loaders`). And
+`POST …/set-clone-plans` plans against the graph
 with the fixes applied (`_apply_model_fixes` with no `object_info`, as
 `_fix_replacements` reads it: the fix's own spelling, never a swapped-in
 loader), so `swaps` and `takes` are keyed by the file a row shows, and a set

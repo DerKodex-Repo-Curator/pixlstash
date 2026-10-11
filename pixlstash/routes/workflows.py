@@ -9640,19 +9640,33 @@ def create_router(server) -> APIRouter:
                 )
             }
 
+            # The graph is read only where the answer needs it: for an
+            # address the recipe does not spell that way, where the same
+            # loader answers to either spelling, and for the class of a
+            # loader a text encoder's replacement might not be for.
+            graph_files_at = None
+
+            def files_at(address: str, classes: bool = False) -> list[str]:
+                nonlocal graph_files_at
+                if graph_files_at is None:
+                    graph_files_at = _graph_files_at(
+                        hub, asked.workflow_id, _owner_object_info()
+                    )
+                return graph_files_at(address, classes)
+
             def loaded(address: str, filename: str) -> str:
                 """The file a loader at *address* naming *filename* loads."""
                 name = normalized_filename(filename)
                 widget = address.rpartition(OVERRIDE_ADDRESS_SEPARATOR)[2]
-                return replaced.get((model_fix_kind("", widget), name), name)
-
-            # An address the recipe does not spell that way is read off the
-            # graph, where the same loader answers to either spelling; the
-            # graph is read only then.
-            files_at = None
+                kind = model_fix_kind("", widget)
+                # A `clip_name` on a vision loader is an image encoder, which
+                # a text encoder's replacement leaves alone.
+                if kind == FILE_TEXT_ENCODER and (kind, name) in replaced:
+                    cls = next(iter(files_at(address, classes=True)), "")
+                    kind = model_fix_kind(cls, widget)
+                return replaced.get((kind, name), name)
 
             def loads_another(model: RunModel) -> bool:
-                nonlocal files_at
                 filename = model.filename or by_digest.get(
                     str(model.sha256).strip().lower()
                 )
@@ -9662,10 +9676,6 @@ def create_router(server) -> APIRouter:
                 now = loaded(model.address, filename)
                 if models.get(model.address):
                     return now != loaded(model.address, models[model.address])
-                if files_at is None:
-                    files_at = _graph_files_at(
-                        hub, asked.workflow_id, _owner_object_info()
-                    )
                 own = {loaded(model.address, f) for f in files_at(model.address)}
                 # A loader the graph has not got loaded nothing.
                 return bool(own) and now not in own
@@ -9779,7 +9789,7 @@ def create_router(server) -> APIRouter:
                 workflow_id,
                 exc.detail,
             )
-            return lambda _address: []
+            return lambda _address, _classes=False: []
 
     def _files_at(graph: dict):
         """A read of the files *graph* loads at a model address.
@@ -9787,14 +9797,14 @@ def create_router(server) -> APIRouter:
         By either spelling of the address: a loader is named by its slot
         label or by its `core:` label, a run loads a model at both
         (``_apply_models``), and the default recipe knows it by one of them
-        only.
+        only. With *classes*, the class types of those loaders instead.
         """
         labels, core = _graph_labels(graph, "models")
 
-        def files_at(address: str) -> list[str]:
+        def files_at(address: str, classes: bool = False) -> list[str]:
             slot_label, _, widget = address.rpartition(OVERRIDE_ADDRESS_SEPARATOR)
             return [
-                node["inputs"][widget]
+                str(node.get("class_type") or "") if classes else node["inputs"][widget]
                 for node_id, node in graph.items()
                 if isinstance(node, dict)
                 and isinstance(node.get("inputs"), dict)
