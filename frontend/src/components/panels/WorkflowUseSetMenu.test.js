@@ -323,6 +323,90 @@ describe("choosing a set", () => {
     expect(menu(wrapper).exists()).toBe(false);
   });
 
+  describe("over a row that already has an unsaved pick", () => {
+    const PICKED = [
+      {
+        address: "4.ckpt_name",
+        filename: "sdxl/realvisxl_v50.safetensors",
+        kind: "checkpoint",
+        pick: "sdxl/dreamshaperXL.safetensors",
+      },
+      {
+        address: "9.vae_name",
+        filename: "sdxl_vae.safetensors",
+        kind: "vae",
+        pick: "vae/other-vae.safetensors",
+      },
+      { address: "11.clip_name", filename: "clip_l.safetensors", kind: "text_encoder" },
+    ];
+
+    it("takes the pick back off where the set holds the saved file, and says so in its count", async () => {
+      // `swaps` lists only what changes: a set that agrees with the saved
+      // graph has none, and says which files it holds in the rest of its plan.
+      planSetClones.mockResolvedValue({
+        plans: [
+          plan("hand:7", {
+            unpaired_bases: [],
+            takes: { "vae/SDXL_VAE.safetensors": 21, "clip_l.safetensors": 22 },
+          }),
+          plan("hand:8", { fit: "wont_load", reason: "Needs a UNETLoader" }),
+          plan("hand:9"),
+          plan("model:31"),
+        ],
+      });
+      const wrapper = mountMenu({ models: PICKED });
+      await openMenu(wrapper);
+      expect(meta(wrapper, "hand:7")).toContain("fills 2 rows");
+      await row(wrapper, "hand:7").trigger("click");
+      // Each under its saved file: the tab reads that as the pick gone. The
+      // text encoder, untouched and unchanged, is not named.
+      expect(wrapper.emitted("use")[0][0].models).toEqual([
+        { address: "4.ckpt_name", filename: "sdxl/realvisxl_v50.safetensors" },
+        { address: "9.vae_name", filename: "sdxl_vae.safetensors" },
+      ]);
+    });
+
+    it("leaves a pick alone on a row the set has nothing for", async () => {
+      planSetClones.mockResolvedValue({
+        plans: [
+          plan("hand:7", {
+            // The base model was not paired, and the set holds no VAE.
+            unpaired_bases: ["sdxl/realvisxl_v50.safetensors"],
+            takes: {},
+          }),
+          plan("hand:8"),
+          plan("hand:9"),
+          plan("model:31"),
+        ],
+      });
+      const wrapper = mountMenu({ models: PICKED });
+      await openMenu(wrapper);
+      expect(meta(wrapper, "hand:7")).toBe("changes nothing here");
+      await row(wrapper, "hand:7").trigger("click");
+      expect(wrapper.emitted("use")).toBeUndefined();
+    });
+
+    it("does not count a row that already shows the file the set gives it", async () => {
+      planSetClones.mockResolvedValue({
+        plans: [
+          plan("hand:7", {
+            swaps: {
+              "sdxl/realvisxl_v50.safetensors": "sdxl/dreamshaperXL.safetensors",
+            },
+            unpaired_bases: [],
+            takes: {},
+          }),
+          plan("hand:8"),
+          plan("hand:9"),
+          plan("model:31"),
+        ],
+      });
+      const wrapper = mountMenu({ models: PICKED });
+      await openMenu(wrapper);
+      expect(meta(wrapper, "hand:7")).toBe("changes nothing here");
+    });
+  });
+
   it("puts focus back on the button", async () => {
     const wrapper = mountMenu();
     await openMenu(wrapper);

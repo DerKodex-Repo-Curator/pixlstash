@@ -175,7 +175,9 @@ describe("ReplaceMissingDialog", () => {
     });
     await flushPromises();
     expect(wrapper.text()).not.toContain("Loaded by");
-    expect(wrapper.text()).toContain("1 manual workflow loads it; clone it");
+    expect(wrapper.text()).toContain(
+      "1 manual workflow loads it; pick another model on its Workflow tab and save.",
+    );
   });
 
   it("lists a refusal by workflow, keeps going, and stays open", async () => {

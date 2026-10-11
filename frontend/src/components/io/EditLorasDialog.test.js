@@ -249,7 +249,7 @@ describe("delete and restore", () => {
     ]);
   });
 
-  it("strikes the row through with Restore, and leaves it out of the PUT", async () => {
+  it("strikes the row through with Put back, and leaves it out of the PUT", async () => {
     const wrapper = await mountDialog();
     await deleteButton(wrapper, 3).trigger("click");
     await flushPromises();
@@ -257,10 +257,21 @@ describe("delete and restore", () => {
     const row = wrapper.findAll(".eld-row")[3];
     expect(row.classes()).toContain("eld-row--deleted");
     expect(row.find(".eld-pos").text()).toBe("—");
-    expect(row.text()).toContain("Restore");
-    // Focus lands on the Restore of the row it happened on.
-    expect(document.activeElement?.textContent?.trim()).toBe("Restore");
-    expect(textOf(wrapper)).toContain("1 change");
+    expect(row.text()).toContain("Put back");
+    // The Workflow tab's words, since the two edit one set of changes.
+    expect(row.find("[data-focus='restore']").attributes("aria-label")).toBe(
+      "Put Hairstyle-V3 back",
+    );
+    expect(row.text()).toContain(", removed");
+    expect(deleteButton(wrapper, 2).attributes("aria-label")).toBe(
+      "Remove film-grain-35mm",
+    );
+    expect(wrapper.find("[role=status][aria-live=polite]").text()).toBe(
+      "Hairstyle-V3 removed. Put back is on the same row.",
+    );
+    // Focus lands on the Put back of the row it happened on.
+    expect(document.activeElement?.textContent?.trim()).toBe("Put back");
+    expect(textOf(wrapper)).toContain("1 loader removed");
 
     const body = saveLoraChain.mock.calls[0][1];
     expect(body.dry_run).toBe(true);
@@ -272,7 +283,7 @@ describe("delete and restore", () => {
     const wrapper = await mountDialog();
     await deleteButton(wrapper, 1).trigger("click");
     await flushPromises();
-    await button(wrapper, "Restore").trigger("click");
+    await button(wrapper, "Put back").trigger("click");
     await flushPromises();
 
     const row = wrapper.findAll(".eld-row")[1];
@@ -302,7 +313,7 @@ describe("reordering by keyboard", () => {
       document.activeElement?.closest("[data-row]")?.getAttribute("data-row"),
     ).toBe("n:22");
     // A swap of neighbours is one change, as the owner made it.
-    expect(textOf(wrapper)).toContain("1 change");
+    expect(textOf(wrapper)).toContain("1 loader moved");
 
     expect(sent(true).at(-1).entries.map((entry) => entry.node_id)).toEqual([
       "14",
@@ -395,7 +406,7 @@ describe("Add a LoRA", () => {
     await select.setValue("sha-skin");
     await flushPromises();
     expect(rowNames(wrapper)[4]).toBe("skin-detail-xl new");
-    expect(textOf(wrapper)).toContain("1 change");
+    expect(textOf(wrapper)).toContain("1 loader added");
 
     expect(sent(true).at(-1).entries.at(-1)).toEqual({
       node_id: null,
@@ -617,6 +628,90 @@ describe("one button: Apply or Save", () => {
     expect(sent(false)).toEqual([]);
   });
 
+  describe("the button's word changing under the reader", () => {
+    const said = (wrapper) =>
+      wrapper.find("[data-testid='eld-button-said']").text();
+
+    it("says nothing while it still reads Apply, however many removals", async () => {
+      const wrapper = await mountDialog();
+      await deleteButton(wrapper, 3).trigger("click");
+      await flushPromises();
+      await deleteButton(wrapper, 2).trigger("click");
+      await flushPromises();
+      expect(labelOf(primary(wrapper))).toBe("Apply");
+      expect(said(wrapper)).toBe("");
+    });
+
+    it("says the new word and why when an edit turns Apply into Save, and back", async () => {
+      const wrapper = await mountDialog();
+      await deleteButton(wrapper, 3).trigger("click");
+      await flushPromises();
+      expect(said(wrapper)).toBe("");
+
+      // A move on top of the removal: the same button now writes at once.
+      dry = [...DELETED_33, ...MOVED_22];
+      await swapSecondAndThird(wrapper);
+      expect(labelOf(primary(wrapper))).toBe("Save");
+      expect(said(wrapper)).toBe(
+        `The button now reads Save. ${note(wrapper).text()}`,
+      );
+      expect(said(wrapper)).toContain("Moving or adding a loader cannot wait");
+      // The gesture's own words are not overwritten by it.
+      expect(wrapper.find("[role=status][aria-live=polite]").text()).toContain(
+        "moved to",
+      );
+
+      // The move taken back: Apply again, and that is said too.
+      dry = DELETED_33;
+      await swapSecondAndThird(wrapper);
+      expect(labelOf(primary(wrapper))).toBe("Apply");
+      expect(said(wrapper)).toBe(
+        "The button now reads Apply. Apply puts this in the Workflow tab as an unsaved change. Nothing is written until you save there.",
+      );
+    });
+  });
+
+  describe("the same edit made twice", () => {
+    it("is said the second time too", async () => {
+      dry = MOVED_22;
+      const wrapper = await mountDialog();
+      const said = () =>
+        wrapper.find("[data-testid='eld-button-said']").text();
+      await swapSecondAndThird(wrapper);
+      expect(said()).toContain("The button now reads Save.");
+      // Taken back: no edit, the button reads Apply and does nothing.
+      await swapSecondAndThird(wrapper);
+      expect(labelOf(primary(wrapper))).toBe("Apply");
+      expect(said()).toBe("");
+      await swapSecondAndThird(wrapper);
+      expect(said()).toContain("The button now reads Save.");
+    });
+  });
+
+  describe("the footer's summary", () => {
+    const summary = (wrapper) =>
+      wrapper.find("[data-testid='eld-count']").text();
+
+    it("says what was done in its own words, each kind counted", async () => {
+      const wrapper = await mountDialog();
+      expect(summary(wrapper)).toBe("No changes");
+      await deleteButton(wrapper, 3).trigger("click");
+      await flushPromises();
+      expect(summary(wrapper)).toBe("1 loader removed");
+      await deleteButton(wrapper, 2).trigger("click");
+      await flushPromises();
+      expect(summary(wrapper)).toBe("2 loaders removed");
+      await setStrength(wrapper, 0, "0.5");
+      expect(summary(wrapper)).toBe("2 loaders removed, 1 strength changed");
+    });
+
+    it("counts a move as a move, whatever the dry run has yet to say", async () => {
+      const wrapper = await mountDialog();
+      await swapSecondAndThird(wrapper);
+      expect(summary(wrapper)).toBe("1 loader moved");
+    });
+  });
+
   it.each(press)(
     "saves a moved loader straight away with %s, as the next version",
     async (_how, accept) => {
@@ -773,7 +868,7 @@ describe("one button: Apply or Save", () => {
 
     // A third edit: the lines listed are the edit before it, so the button
     // and Enter wait for the route again.
-    await button(wrapper, "Restore").trigger("click");
+    await button(wrapper, "Put back").trigger("click");
     await flushPromises();
     expect(asked).toHaveLength(3);
     expect(wrapper.find("[data-testid='eld-changes']").exists()).toBe(true);
@@ -867,8 +962,8 @@ describe("opened from Save as recipe", () => {
     const wrapper = await mountDialog({ dropLora: "hairstyle-v3.safetensors" });
     const row = wrapper.findAll(".eld-row")[3];
     expect(row.classes()).toContain("eld-row--deleted");
-    expect(row.text()).toContain("Restore");
-    expect(textOf(wrapper)).toContain("1 change");
+    expect(row.text()).toContain("Put back");
+    expect(textOf(wrapper)).toContain("1 loader removed");
     // Asked about as it opens, so the delete is one press from the tab.
     expect(labelOf(primary(wrapper))).toBe("Apply");
     expect(primary(wrapper).attributes("disabled")).toBeUndefined();
@@ -957,7 +1052,7 @@ describe("a forked chain, drawn side by side", () => {
     expect(wrapper.find("[role=status][aria-live=polite]").text()).toBe(
       "detail-tweaker-xl moved to Base pass, at 4.",
     );
-    expect(textOf(wrapper)).toContain("1 change");
+    expect(textOf(wrapper)).toContain("1 loader moved");
 
     const body = sent(true).at(-1);
     expect(body.entries.map((entry) => entry.node_id)).toEqual(["10", "11"]);

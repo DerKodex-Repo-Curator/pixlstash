@@ -3739,7 +3739,12 @@ describe("the tab as the editor (#1850)", () => {
       const menu = wrapper.findComponent({ name: "WorkflowUseSetMenu" });
       expect(menu.props("workflowId")).toBe(KEY);
       expect(menu.props("models")).toEqual([
-        { address: ADDRESS, filename: "realvisXL_v5.safetensors" },
+        {
+          address: ADDRESS,
+          filename: "realvisXL_v5.safetensors",
+          kind: "checkpoint",
+          pick: null,
+        },
       ]);
 
       menu.vm.$emit("use", {
@@ -3762,6 +3767,26 @@ describe("the tab as the editor (#1850)", () => {
         picker(wrapper).findAll("option").map((o) => o.text()),
       ).toContain("ponyV6");
       expect(count(wrapper)).toBe("1 unsaved change");
+    });
+
+    it("takes an earlier pick back off a row the set puts on its saved file", async () => {
+      const { wrapper } = await mountEditor();
+      await settle(wrapper);
+      await picker(wrapper).setValue(JUGGERNAUT.filename);
+      await flush(wrapper);
+      const menu = wrapper.findComponent({ name: "WorkflowUseSetMenu" });
+      // The menu is told what the row shows now, so it can tell.
+      expect(menu.props("models")[0].pick).toBe(JUGGERNAUT.filename);
+
+      menu.vm.$emit("use", {
+        name: "The set it was made with",
+        models: [{ address: ADDRESS, filename: "SDXL/realvisXL_v5.safetensors" }],
+      });
+      await flush(wrapper);
+      // Gone from the set, not kept as a pick of the saved file.
+      expect(lastSet().models).toEqual([]);
+      expect(bar(wrapper).exists()).toBe(false);
+      expect(wrapper.find('[data-testid="wftab-edited"]').exists()).toBe(false);
     });
 
     it("opens on the workflow the selection bar asked for", async () => {
@@ -4386,6 +4411,39 @@ describe("the tab as the editor (#1850)", () => {
       await wrapper.find("[data-testid='wftab-edit-loras']").trigger("click");
       return wrapper.findComponent({ name: "EditLorasDialog" });
     }
+
+    it.each([
+      ["Cancel", (dialog) => dialog.vm.$emit("close")],
+      [
+        "Apply",
+        (dialog) => {
+          dialog.vm.$emit("apply", {
+            skip_loras: [{ node_id: "31", field: "lora_name" }],
+            loras: [],
+          });
+          dialog.vm.$emit("close");
+        },
+      ],
+      [
+        "Save",
+        (dialog) => {
+          dialog.vm.$emit("overwritten", KEY);
+          dialog.vm.$emit("close");
+        },
+      ],
+    ])("puts focus back on Edit LoRAs… when the dialog ends in %s", async (_how, end) => {
+      const { wrapper } = await mountEditor();
+      const opener = wrapper.find("[data-testid='wftab-edit-loras']");
+      const dialog = await openDialog(wrapper);
+      document.activeElement?.blur?.();
+      expect(document.activeElement).toBe(document.body);
+      end(dialog);
+      await flush(wrapper);
+      expect(wrapper.findComponent({ name: "EditLorasDialog" }).exists()).toBe(
+        false,
+      );
+      expect(document.activeElement).toBe(opener.element);
+    });
 
     it("takes Apply's removals and strengths into the unsaved changes, over what waits", async () => {
       waitingOnServer = {

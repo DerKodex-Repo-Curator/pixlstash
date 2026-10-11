@@ -358,11 +358,14 @@ describe("the cards", () => {
     await wrapper.vm.$nextTick();
     const replace = () => wrapper.find('[data-testid="model-set-replace-missing"]');
     expect(replace().text()).toBe("Replace…");
-    // The manual one is named apart, as cloned rather than replaced.
+    // The manual one is named apart: its model is changed on its own
+    // Workflow tab, not replaced from here.
     const note = wrapper.find('[data-testid="model-set-missing"]').text();
     expect(note).toMatch(/It is loaded by\s+\S/);
     expect(note).toContain("A manual workflow loads it too:");
-    expect(note).toContain("clone it with other models");
+    expect(note.replace(/\s+/g, " ")).toContain(
+      "pick another model on its Workflow tab and save to change that.",
+    );
     store.toggleSet("missing:solo.sft");
     await wrapper.vm.$nextTick();
     expect(replace().exists()).toBe(false);

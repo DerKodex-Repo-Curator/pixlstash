@@ -97,10 +97,12 @@ const props = defineProps({
   /** The workflow whose rows are filled. */
   workflowId: { type: String, required: true },
   /**
-   * The tab's model rows, each `{address, filename}`: the loader address the
-   * default recipe names the model by, and the file the SAVED graph loads
-   * there, as the graph spells it. The plans are read against the saved
-   * graph, so a row's waiting change is not what goes here.
+   * The tab's model rows, each `{address, filename, kind, pick}`: the loader
+   * address the default recipe names the model by, the file the SAVED graph
+   * loads there, as the graph spells it (the plans are read against the saved
+   * graph), the row's kind (`checkpoint`, `vae`, `text_encoder`), and the file
+   * waiting on it unsaved, if any. `pick` is only what the row shows now, so
+   * a set that holds the saved file can take an earlier pick back off it.
    */
   models: { type: Array, required: true },
   disabled: { type: Boolean, default: false },
@@ -108,7 +110,11 @@ const props = defineProps({
   disabledReason: { type: String, default: "" },
 });
 
-/** `use`: `{name, models: [{address, filename}]}`, the rows the set fills. */
+/**
+ * `use`: `{name, models: [{address, filename}]}`, the rows the set fills. A
+ * row put back to its saved file is in it under that file, which the tab reads
+ * as "no change here any more".
+ */
 const emit = defineEmits(["use"]);
 
 const open = ref(false);
@@ -175,22 +181,51 @@ function setsOf(payload) {
   return [...handMade, ...evidence];
 }
 
+/** Whether `files` names `file`, under whatever folder and case. */
+function names(files, file) {
+  const base = loraBase(file);
+  return (files ?? []).some((other) => loraBase(other) === base);
+}
+
 /**
- * The model rows a plan's `swaps` (the graph's file -> the set's) change: each
- * row's address with the file it takes. Two spellings of one file are the same
- * file (`loraBase`, as the tab compares them), the graph's own spelling first.
- * A row the set would leave on the file it already loads is not a change.
+ * Whether the set holds the very file a row's loader loads, so taking the set
+ * leaves that loader as saved. `swaps` lists only the files that change, so
+ * this is read off the rest of the plan: a base model the plan paired with a
+ * set checkpoint (not among `unpaired_bases`), or a VAE or text encoder the
+ * set has a model for (`takes`, which lists them changed or not).
  */
-function fillOf(swaps) {
-  const files = Object.keys(swaps ?? {});
+function keepsSaved(plan, model) {
+  return model.kind === "checkpoint"
+    ? !names(plan.unpaired_bases, model.filename)
+    : names(Object.keys(plan.takes ?? {}), model.filename);
+}
+
+/**
+ * The model rows a set changes: each row's address with the file it takes.
+ * Two spellings of one file are the same file (`loraBase`, as the tab compares
+ * them), the graph's own spelling first.
+ *
+ * A row takes what the plan's `swaps` (the graph's file -> the set's) give
+ * it, or its own saved file where the set holds exactly that. Either is a
+ * change only when it is not what the row shows now: so a set that agrees
+ * with the saved graph does nothing to an untouched row, and takes an earlier
+ * unsaved pick back off one that has it.
+ */
+function fillOf(plan) {
+  const swaps = plan.swaps ?? {};
+  const files = Object.keys(swaps);
   return props.models.flatMap((model) => {
     const base = loraBase(model.filename);
     const from =
-      model.filename in (swaps ?? {})
+      model.filename in swaps
         ? model.filename
         : files.find((file) => loraBase(file) === base);
-    if (from === undefined || loraBase(swaps[from]) === base) return [];
-    return [{ address: model.address, filename: swaps[from] }];
+    let takes;
+    if (from !== undefined) takes = swaps[from];
+    else if (model.pick && keepsSaved(plan, model)) takes = model.filename;
+    else return [];
+    if (loraBase(takes) === loraBase(model.pick || model.filename)) return [];
+    return [{ address: model.address, filename: takes }];
   });
 }
 
@@ -198,7 +233,7 @@ function fillOf(swaps) {
 const rows = computed(
   () =>
     sets.value?.map((set) => {
-      const fill = fillOf(set.plan.swaps);
+      const fill = fillOf(set.plan);
       const wontLoad = set.plan.fit === "wont_load";
       const meta = wontLoad
         ? // The server's own words, as sent.

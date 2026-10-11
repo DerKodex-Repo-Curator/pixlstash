@@ -480,6 +480,7 @@
             >LoRAs</span
           >
           <AppButton
+            ref="editLorasButton"
             size="sm"
             variant="ghost"
             data-testid="wftab-edit-loras"
@@ -1731,11 +1732,20 @@ const modelRows = computed(() => {
   });
 });
 
-/** The rows a model set may fill: the loader's address and the file it loads. */
+/**
+ * The rows a model set may fill: the loader's address, the file it loads as
+ * saved, its kind, and the file waiting on it. The last two let a set that
+ * holds the saved file take an earlier pick back off the row.
+ */
 const settableModels = computed(() =>
   modelRows.value
     .filter((row) => row.settable && row.file)
-    .map((row) => ({ address: row.address, filename: row.file })),
+    .map((row) => ({
+      address: row.address,
+      filename: row.file,
+      kind: row.kind,
+      pick: row.pick,
+    })),
 );
 
 /** Pick a file for a model row; the saved one ("") takes the change back. */
@@ -1743,7 +1753,11 @@ function pickModel(row, file) {
   return edit((set) => withModel(set, row.address, file, row.file));
 }
 
-/** *Use a set…*: every row the set answers for, as unsaved changes. */
+/**
+ * *Use a set…*: every row the set answers for, as unsaved changes. A row the
+ * set puts back to its saved file arrives under that file, and `withModel`
+ * takes its earlier pick out of the set.
+ */
 function useSet({ models } = {}) {
   return edit((set) =>
     (models ?? []).reduce((next, model) => {
@@ -2312,9 +2326,19 @@ function openEditLoras(key, drop = "") {
   editKey.value = key;
 }
 
-function closeEditLoras() {
+const editLorasButton = ref(null);
+
+/**
+ * The dialog is gone, however it ended (Cancel, Apply, Save), and took focus
+ * with it: nothing restores focus after an overlay opened from code. It goes
+ * back to *Edit LoRAs…*, unless it has already landed somewhere of its own.
+ */
+async function closeEditLoras() {
   editKey.value = "";
   editDrop.value = "";
+  await nextTick();
+  const active = document.activeElement;
+  if (!active || active === document.body) editLorasButton.value?.focus?.();
 }
 
 // The name and count arrive with the card when the dialog was opened from a

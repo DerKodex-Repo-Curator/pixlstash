@@ -144,7 +144,7 @@ frontend/src/
     │   └── tagHealthBoardLogic.js     # Pure board estimate/threshold helpers (+ *.test.js)
     ├── editors/     # Entity create / edit / delete dialogs
     ├── settings/    # UserSettingsDialog, its section sub-components (Appearance, Behaviour, SmartScore, Workflows, Account, Snapshots, Compute, Libraries, Layout), and the Settings* layout primitives (SettingsRow, SettingsSection, SettingsChip/ChipGrid, SettingsFieldBlock, SettingsSliderRow, SettingsTwoCol, SettingsInfoCard, SettingsAddTagRow)
-    ├── io/          # Import / export / external-service connection, ComfyUiRunner, RunDialog, SaveRecipeDialog, ExportRecipeDialog, CloneOntoSetDialog, CloneWithModelsDialog
+    ├── io/          # Import / export / external-service connection, ComfyUiRunner, RunDialog, SaveRecipeDialog, ExportRecipeDialog
     └── widgets/     # Reusable primitives, including the App* design-system layer (AppButton/AppDialog/AppInput/AppSelect/AppStepper/AppTextarea + FieldLabel, and the two pick-one shapes `Segmented` and `OptionRows`), the two undo receipts (ActionReceipt over the grid, OverlayActionReceipt inside the lightbox), the Dedup* family (the duplicate queue's row, the picture strip both queue rows are built on, compare dialog, auto-stack dialog, tier menu, the shared threshold control, scan banner, scope pill, why-pills and confidence pill), `MixedQueueRow` (one row of the Duplicates destination's third page, which is a queue of its own), `KeepCoverOnlyDialog` (the one consent for collapsing stacks to their covers; see §5 "Confirming a destructive action"), the Stack* family (badge, edge ticks, expansion strip), `AdapterTray` (the adapters one person or set uses, read-only, inside the two editors), `BaseModelInput` (the completing base-model field, shared by the shelf's bulk dialog and its inline row editor), `PicturePicker` (one faceted, single-select library picker: the shelf's thumbnail verb today, the workflow Fixed and run-time modes next), and `AiToolkitIcon` (the one non-mdi glyph in the app: ai-toolkit's mark, traced as a `currentColor` path because they publish it only as raster)
 ```
 
@@ -233,7 +233,7 @@ All state consumed by more than one component lives in a Pinia store. The stores
 | `useReviewSessionsStore` | `useReviewSessionsStore.js` | Tag-review state: the tag-health board, the rail of open review sessions (each = one tag + frozen scope + one scan's results), and the per-session binary/pair card queues. Per-item decisions write through `/tag_suggestions`; session bookkeeping talks to `/reviews`, the board to `/tag_health`. Also owns the opt-in gamification — variable-ratio sticker awards with monotonic XP / level / streak counters; the sticker vocabulary is imported from `setAppearance.js` so sets and stickers never drift. |
 | `useLockedSetsStore` | `useLockedSetsStore.js` | Which pictures are frozen by a locked picture set. Fed by `GET /picture_sets/locked-members`; refreshed on app start and on the same sidebar-refresh / `pictures_changed` ws triggers the sidebar uses. Single source of the lock-tooltip copy reused by the grid badge, overlay chip, and context-menu gating. |
 | `useModelShelfStore` | `useModelShelfStore.js` | The model shelf's rows and its `Show` selection. `rows` are the raw `/adapters` + `/checkpoints` payload, **every block fetched so far rather than the shown set**: a fetch replaces the blocks it asked for and leaves the rest standing, because the option vocabularies (`adapterKindOptions`, `capabilityOptions`, `baseModelOptions`) are derived from `rows`, so an overwriting narrowed fetch deleted the kind checkboxes that unticking Adapters is documented to *grey*, and dropped base models that stayed selected and persisted with no box left to untick them. `visibleRows` layers the resolved name, the reduced location state and `copies` (how many of the row's registered copies are `present`) on top and applies the kind, capability and base-model narrowing **client-side**, so a multi-select base-model filter is not one request per option. The capability filter matches **has this capability**, not *is this kind*: a model serving two features survives a tick of either, and like the kind boxes it narrows only the block it hangs under (engines), never the whole shelf. `groups` sorts `visibleRows` client-side on the five ruled `SortKey` values and cuts them into one level of groups (`none` / `base_model` / `folder` / `feature`), always returning at least one group so the flat and grouped lists are one piece of markup; the fifth axis, `workflow_set`, is deliberately NOT in that list and is the shelf's DEFAULT (#1438) — its groups overlap, so it swaps the row list for `ModelSetGrid.vue` and is served instead by `workflowSets` / `visibleCombinations` / `setStacks` / `setFoldCounts` / `noSetRows`, read once from `GET /models/workflow-sets` by `loadWorkflowSets()` and refetched only after a scan (`fetchRows({markNew: true})`), never on a filter tick, because it is a window over every kept picture in the vault and every stored ComfyUI run; `worksWithModel(id)` answers off the WHOLE payload rather than the narrowed one, since hiding a companion because its kind is unticked would turn a view setting into a claim about the evidence; sorting never refetches, because every field the keys read is already on the payload and three server-sorted blocks would be destroyed by the merge above. **Two axes fan a row out across several groups** — `folder` (a file copied into two folders occupies both) and `feature` (a multi-capability model is listed under each feature it serves, which is the design rule) — so `rowKey` carries the group on every grouped axis, not just the ones that need it: one key across several draws put `tabindex="0"` on all of them at once. **Under `folder` the key carries the COPY, not the folder**, because the hub is content-addressed and the same bytes can be registered twice *inside one folder* under two names — the exact collision the previous sentence describes, reached on the axis it was written for. `relpath` is half the `model_file` key and so unique within a folder by construction. A row that cannot answer the key sorts last in BOTH directions, and the unset group sorts last whatever the direction; an adapter declares no capability and groups under **its algorithm** (`LoRA`, `LoKr`, …) rather than under one "No feature recorded" bucket that held most of the shelf. One vocabulary spells it and one fold keys it, both in `utils/modelShelf.js`: `adapterKindKey` trims and lower-cases the free-text column, `adapterKindLabel` names the folded value, and the group key, the group header, the row's Kind cell, the nested `Show` checkboxes AND the `adapterKinds` filter behind them all read those two rather than `row.kind`. **The fold has to reach the filter, not just the label.** `LoRA` is reachable from the edit dialog, which trims but does not case-fold, so faceting on the raw column offered two checkboxes drawn with the same label that each ticked half the rows — while the axis folded them into one visible group. **And the fold has to reach the remembered selection too**, which `storedFilters` does on read: a shipped build persisted the raw column, so a blob holding `LoRA` would match nothing and appear in no checkbox — an empty shelf with the Adapters box reading fully on and nothing on screen naming the filter doing it. Folded rather than discarded by a `FILTERS_SCHEMA_VERSION` bump, which throws the whole blob away when the selection is still exactly what the user chose. The key is the folded value and never the label, because the key is what `modelShelfView.collapsed.feature` remembers a collapse by; it is prefixed `kind:` to keep an algorithm out of the capability keyspace. Group headers are uppercased by `.shelf-group-label` like every other header on the axis, so the header reads `LORA` where the cell reads `LoRA`: one vocabulary stops a *second spelling* existing, it does not exempt the axis from the shelf-wide case rule. Everything that is not an adapter with an algorithm still falls through to "No feature recorded", which is the whole of the rest: a checkpoint, an unclassified file, an engine declaring no capability and any `file_kind` this build does not know have no algorithm at all; an adapter whose `kind` folds to the empty string has none either (the hub CHECK makes it NOT NULL, not non-empty, so a whitespace-only one is reachable over the raw API); and an adapter whose `kind` is the literal `unknown` has the classifier's refusal rather than an algorithm (`KIND_UNKNOWN`, `utils/adapter_header.py`) — heading that `UNKNOWN` would stand a second shrug beside the real one and call it a feature. The `Show` facet still offers `Unknown` as a box, because "which of these could we not identify" is a real selection even where it is not a real feature. `view` (`groupBy`, `sortKey`, `sortDirection`) and the per-axis collapsed sets persist under `pixlstash:modelShelfView`, a SECOND key so `resetFilters` cannot take the sort order with it. `filters` (`adapters`, `adapterKinds`, `checkpoints`, `unclassified`, `engines`, `capabilities`, `baseModels`, `duplicatesOnly`) persists to `localStorage` under `pixlstash:modelShelfFilters` — not to `/users/me/config`, which is a fixed `User` model and would need a backend column. **`duplicatesOnly` is the one field `storedFilters` deliberately does not read back**: "only the files written twice" is a question somebody asks once while reclaiming disk, and remembered across a restart it is a shelf that opens showing four rows of an eighteen-hundred-row library with nothing on screen saying why. An empty `adapterKinds` / `capabilities` / `baseModels` array means **unconstrained**, the standard multi-select convention and the only reading under which a fresh install shows anything. `activeCount` counts filter SECTIONS that deviate from their default, not ticked boxes, or a mild narrowing would read as `9`. Only the four top-level type toggles refetch, and they narrow client-side too; the rest only narrow what is already loaded. Each fetch takes the next `epoch` and only the newest may write `rows` or clear `loading`, so a slower earlier flight cannot land last and show adapters only while Checkpoints is ticked; `resetForSession` bumps the same counter, so a read on the wire when the credential changed is discarded. `ModelShelf.vue` watches `loaded` and refetches when a session reset clears it, which the store cannot do itself because session-reset handlers run *before* the new credential is installed. **Session reset drops `rows` but keeps `filters`:** the models are hub-side facts about this machine, but every row carries the characters and sets in the ACTIVE LIBRARY that use it, while the selection and the view axes are the user's own preferences and hold no ids. `offlineMounts` and the `New` badge's `newIds` are both derived here and both documented under §13.1, "The three kinds of absence": `offlineMounts` reads `rows` rather than `visibleRows` on purpose, and `newIds` is a per-fetch id diff that only `fetchRows({ markNew: true })` fills and every other fetch clears. |
-| `useWorkflowsStore` | `useWorkflowsStore.js` | The Workflows grid's cards (v1.12 F1a) — `GET /workflows`, one card per workflow keyed by `id` (#1623); B9 (#1410) moved the grid onto that route when it deleted the shelf's topology list. `sortKey` is one of `rating` / `used` / `pictures` / `name` (the one ascending key, A to Z); *Your ratings* orders by **`rank`**, the Bayesian cover rank, not by the `rating` the card displays, or a 5.0 from one picture would lead a 4.8 from ninety. `selectedKeys` holds workflow ids: `select(id, {additive})` replaces the selection or toggles one id, `selectRange(ids)` takes a drawn run, and `runnableCard` is the one selected card or null. `refetch()` bumps the epoch, clears `loading` and re-reads the grid, so a write's re-read is never refused behind an older read still on the wire, and that older read cannot land over it. `invalidate()` is the one door in from outside the view — a ghost purge in Settings › Privacy — and re-reads the grid **only if it had been read**, so a purge made by somebody who never opened Workflows fires no request. The copy verbs `duplicateCard` and `cloneCardWithModels` (both clone dialogs) both re-read the grid after writing rather than patching it, and return the server's answer (whose `workflow_id` is the new manual workflow, which the caller selects) or `null` with the reason in `error`. `deleteSelected` deletes manual workflows only (the bar's gate), clears the selection when none was refused and bumps `recipesEpoch`, since their saved recipes become unfiled. `cloneOntoSetKey` / `requestCloneOntoSet(id)` is how the Workflow tab's button and the menu's row ask `WorkflowsView` to open Clone onto a workflow set, the `pictureToOpen` shape. Session reset drops all of it: every count on a card is read across the active library's pictures. **`filters` (F7) is split across the wire on purpose**: the One-offs and Hidden flags are sent as `include_one_offs` / `include_hidden` and re-read the grid, because they widen the set the server answers with; Ghosts, Type, Checkpoint, Source and Rating only ever remove a card, so `filteredCards` applies them here. `filterChips` is the one answer to "which filters are on" — the panel's *Clear all*, the strip and the toolbar badge all count it — and its WORDS come from `workflowFilterChips` in `utils/filterChips.js`, the module that exists so one filter cannot be spelled two ways; the store owns the state and the refetch decision and nothing else. A filter that removes a card also **prunes `selectedKeys`**, because the selection bar and the rail's bulk verbs act on the selection and would otherwise offer Hide or Delete on cards nobody can see, and `filterOptions` counts each pick-one option over `cards` rather than `filteredCards`, so a count cannot go to zero on the row being read. |
+| `useWorkflowsStore` | `useWorkflowsStore.js` | The Workflows grid's cards (v1.12 F1a) — `GET /workflows`, one card per workflow keyed by `id` (#1623); B9 (#1410) moved the grid onto that route when it deleted the shelf's topology list. `sortKey` is one of `rating` / `used` / `pictures` / `name` (the one ascending key, A to Z); *Your ratings* orders by **`rank`**, the Bayesian cover rank, not by the `rating` the card displays, or a 5.0 from one picture would lead a 4.8 from ninety. `selectedKeys` holds workflow ids: `select(id, {additive})` replaces the selection or toggles one id, `selectRange(ids)` takes a drawn run, and `runnableCard` is the one selected card or null. `refetch()` bumps the epoch, clears `loading` and re-reads the grid, so a write's re-read is never refused behind an older read still on the wire, and that older read cannot land over it. `invalidate()` is the one door in from outside the view — a ghost purge in Settings › Privacy — and re-reads the grid **only if it had been read**, so a purge made by somebody who never opened Workflows fires no request. `duplicateCard` re-reads the grid after writing rather than patching it, and returns the server's answer (whose `workflow_id` is the new manual workflow, which the caller selects) or `null` with the reason in `error`. `deleteSelected` deletes manual workflows only (the bar's gate), clears the selection when none was refused and bumps `recipesEpoch`, since their saved recipes become unfiled. `useSetKey` / `requestUseSet(id)` is how the selection menu's *Use a set…* row asks `WorkflowTab` to open its own set menu on that workflow (#1850): the `pictureToOpen` shape, a one-shot the tab clears when it takes it. **Every write the Workflow tab makes to a workflow's waiting changes ends in `refetch()`**, because the updates socket does not echo a write to the window that made it and the card's *Unsaved* badge is drawn off the grid. Session reset drops all of it: every count on a card is read across the active library's pictures. **`filters` (F7) is split across the wire on purpose**: the One-offs and Hidden flags are sent as `include_one_offs` / `include_hidden` and re-read the grid, because they widen the set the server answers with; Ghosts, Type, Checkpoint, Source and Rating only ever remove a card, so `filteredCards` applies them here. `filterChips` is the one answer to "which filters are on" — the panel's *Clear all*, the strip and the toolbar badge all count it — and its WORDS come from `workflowFilterChips` in `utils/filterChips.js`, the module that exists so one filter cannot be spelled two ways; the store owns the state and the refetch decision and nothing else. A filter that removes a card also **prunes `selectedKeys`**, because the selection bar and the rail's bulk verbs act on the selection and would otherwise offer Hide or Delete on cards nobody can see, and `filterOptions` counts each pick-one option over `cards` rather than `filteredCards`, so a count cannot go to zero on the row being read. |
 | `useModelFoldersStore` | `useModelFoldersStore.js` | The registered model folders and the scans running against them. Fetched by the shelf (folder headers, drive bands) and re-read when `ModelFoldersDialog` opens. It is a **store rather than dialog state** because a scan outlives the panel that started it, and because `POST .../rescan` answers 202 as soon as the thread starts, so completion has to be waited for: the store polls `GET /model-folders` every 3s and treats `last_checked` advancing as done, then refreshes `useModelShelfStore` and says what landed. It **gives up after 10 minutes**, because the scanner logs an exception without stamping `last_checked` and a crashed scan is otherwise indistinguishable from a slow one. `forget` captures the row's fields BEFORE the request, which is what makes the notice's `Add it back` possible and therefore what lets removal skip a confirmation prompt. **Session reset drops it whole:** absolute host paths are owner-only, and a session that lost its credential has no standing to keep polling. |
 | `useGenStackPrefsStore` | `useGenStackPrefsStore.js` | Remembered client pref for whether newly filtered images stack with their source: `stackFilterOutputs` (plugin "Filters" runs), default ON and persisted to `localStorage`. Its `stackI2IOutputs` half went in v1.12 F5 with the two surfaces that read it, since `POST /workflows/run` does not stack. |
 | `useEntityListsStore` | `useEntityListsStore.js` | The character / picture-set / project **lists** themselves (`characters`, `pictureSets`, `projects`) plus `fetchedAt` and `pending` per kind. One cache for the three surfaces that need them — the `SideBar` tree, the image context menu's Person/Set/Project flyouts, and the tag-review scope pickers. **Stale-while-revalidate:** a caller renders the cached list immediately and calls `refresh(kind)` *without awaiting it*, so opening a flyout never waits on the network; concurrent callers share one in-flight request (`inFlight`, modelled on `useDedupStore.scopeCounts`). `invalidate(kinds)` is **refetch-only** — a `characters_changed` ws event or a local assignment says "ask again", it never writes the store from a payload (`origin_client_id` is echo-matching, not authority; see §9 and integration_architecture.md §8.1). **These are `SCOPED_LIST` routes, so their content is an authorization decision:** the cache is in-memory only (never `localStorage`/`sessionStorage`), `reset()` drops it on every auth-context transition via the single `onSessionReset` chokepoint in `apiClient` (logout / login / share-token entry / vault switch), and an epoch guard discards any response that was in flight across that transition. Revalidate-on-open is mandatory rather than an optimisation: a share/scoped session receives no ws events (the stream is owner-only), so it is that session's only invalidation path. **The sidebar's row counts ride along on these lists (`include_counts=true`, issue #651):** every character row carries `image_count` and `project_image_count` (scoped to the character's OWN `project_id`, or to "in no project" when it has none) and every project row carries `image_count`, which is what replaced `SideBar.fetchSidebarData`'s one-`/{id}/summary`-per-row fan-out. They live on the shared list rather than in a second counts-bearing cache on purpose (two shapes for one entity would mean two caches, two invalidation paths and two epochs), and the flyout / scope-picker consumers simply ignore the extra fields. Because both scopes are on every row and neither depends on the sidebar's current project selection, one cached response serves both sidebar view modes. Distinct from `useEntityNamesStore`, which holds id→name maps only. |
@@ -1468,172 +1468,10 @@ Load-bearing behaviours:
 - **Pictures in (#1457).** A row per `RunGroup.picture_inputs` entry of the first pre-flight group, between the Workflow select and the Prompt. **The popup never decides how an input is filled**: `fill` is the server's answer (`selection`, `request`, `fixed`, `original`, `graph` or `null`), so a card whose one open input the selection fills shows the selection there with nothing asked. **A picture opened on its own recipe sends `replay: true`** (Run recipe, and Make more like these… on one picture: `runsOwnWorkflow`, not an edit and not `pickWorkflow`; never *Use as input for…*, *Run a workflow on these…* or another workflow), and the server answers `original` with the picture that one was made from: an ordinary picture tile, "The picture this one was made from". *Use my selection here* on such a row writes nothing to the card, which could not move it: it sends this run `picture_id: null` for that input, and the clear button (shown for any row with a pick) takes it back. Either path of that button first drops any other `null` pick, since a body may send the selection to one input only. A filled row is a 72px tile that opens `PicturePicker` (mounted only while a slot is being filled), a pin (`AppBarButton`, `aria-pressed`) and, for a picture chosen for this run, a clear; a selection row is a 2×2 contact sheet of the selection; any non-selection row offers *Use my selection here* when there is one. `runBody` sends `inputs` with **only the pictures picked for this run** — pins, the stored selection and the lone-open-input rule are the server's. Pinning and moving the selection write `PUT /workflows/{id}/inputs` through `setupWith`, which sends **every row as it was read** with one changed (and a second `selection` demoted to `picker`), because the PUT replaces the whole set. Unpinning keeps the picture for this run. `picture_input_unfilled` is filtered out of the notices (`shownRefusals`) and the Run button's blocker names the slot instead ("Choose a picture for Reference first."): a pin whose picture has gone is "no picture yet", not an error. Titles are the loaders' own; two alike are numbered. Every setup write waits for the pre-flight after the last one (`settle`), is refused unless the rows on screen were read for the card it would go to (`inputsKey`), and the rows are cleared on a workflow switch or a failed pre-flight, so a pin is never written from a stale set; the controls use `aria-disabled` and focus returns to the row. **The stack checkbox** (`stack`) shows only where its label is true — one picture, or a selection fed in — defaults to ticked exactly when a selection is fed in, and is not remembered — deliberately not the retired `stackI2IOutputs` store key, which is still on disks defaulted on.
 - **A bypassed LoRA is drawn beside the refusals and is not one** (#1463). The server takes a LoRA loader out of the graph when this ComfyUI does not have its file, and the run goes ahead; `runReasons.bypassNotice` turns `RunGroup.bypassed_loras` into the reason shape so `RunReasonNotice` can draw it, in the warning hue (`--surface-warning`), with `mdi-alert-outline` and without the "can't run" lead. **It is concatenated for display only and never put into `group.reasons`**: `reasonsBlock` reads that list and `MakeMoreDialog.runnable` counts groups with none, so a notice placed there would block the very run the server is willing to make. Said *before* the run, because a picture made without the character LoRA the owner expected, with nothing said, is worse than a refusal. The live region around the list follows it: `role="alert"` while a refusal is on screen, `role="status"` when only notices are, because an assertive interruption is for something that went wrong. `RunReasonNotice.test.js` pins the wording and the glyph; the hue is a token in a scoped stylesheet, which jsdom does not apply, so the class is as far as a unit test reaches. A **replaced seed node** (`RunGroup.replaced_nodes`) is the second notice of the same kind, `nodes_replaced`, naming the node class once each and no model folder; `runReasons.repairNotices` is the one reading of every repair report, and both popups spread it rather than each notice.
 - **A graph LoRA is removed with its ×** (#1478, #1850). Every loader row has one; the row stays, struck through, reads *Removed*, and **Put back** takes it back (focus moves from one to the other, and a live region says which). Removed rows go out as `skip_loras: [{node_id, field}]` and are never also in `loras`: the run goes without the loader, and on a workflow run a save writes the workflow without it. A loader set to another LoRA or strength shows what it had on a line under the row (a `RunResetChip`, `mira_v2 · 0.6`), which puts it back; a loader the shelf cannot name has no digest to be sent by, so it gets no chip and is never a change. A row the dry run reports missing, or one the shelf cannot identify, is flagged on the row. `runReasons.bypassNotice` splits `bypassed_loras` on `requested`: removed by the owner (`loras_skipped`, "Removed from this run: …") or left out because this ComfyUI lacks the file. `unplacedNotice` draws `unplaced_loras`, a saved recipe's LoRA the run does not apply, and `lora_not_skippable` is a refusal with the server's sentence. **Where the rows come from depends on the run.** A picture's run reads that picture's `lora_slots`. A run of a workflow by itself has no picture, so it reads the workflow's own chain (`GET …/lora-chain`, the read the Workflow tab lists loaders from, so the two editors address one loader the same way), and `ownSlots` makes a row for each loader holding a LoRA of the default recipe (matched by shelf digest, else by file), **at the recipe's strength**, since that is what such a run loads. A loader the recipe leaves out gets none: a run bypasses it, and one holding a person's LoRA is never the workflow's (rule 4 of #1846). A workflow with no sample to take a default from runs its graph as it is, so every loader is a row, less the ones whose LoRA the shelf has attached to a person. Default LoRAs the graph has no loader for are named in a line ("This workflow also loads …, as it stores it"). A changed chain row sends `strength_clip` by the Workflow tab's rule (`utils/workflowEdits.withLoraStrength`): it follows the model strength where the graph had the two as one number, and is left alone where they were set apart. An × that takes a row away with it (a LoRA added by hand) hands focus to the next row's ×, else to Add LoRA.
-- **Editing the chain for good lives in the workflow inspector** (#1478). `WorkflowTab` lists the LoRAs in apply order from `GET /workflows/{id}/lora-chain`, with **Edit LoRAs…** in the head of the LoRAs panel even when there is none. That opens `EditLorasDialog.vue`: the chain drawn as a graph, one node each for the model source, every loader and the reader of the result, with an arrow from each node to the next. A loader node carries a drag handle (Alt+↑/↓ from the keyboard, announced in a live region), a delete that leaves it struck through with Restore, and a strength field. **Add a LoRA** sits on the last wire, into the reader, since it appends there; with no loader at all it reads **Insert LoRA between these nodes**, naming both nodes to a screen reader. **Save…** is a second step that lists the dry run's changes and asks where the edit lands (a `Segmented`: *Over the original*, the default by owner decision 2026-10-10, or *A new workflow*) before the real `PUT`. Over the original sends `overwrite`, keeps the card and its pictures as its next version (the inspector's *Version N* line, now on an automatic workflow too once it is saved over), and emits `overwritten` so `WorkflowTab` reads the chain and the detail again (the selection did not move). A new workflow is named there and files a new card, the original unchanged. Plain Enter accepts whichever is chosen, since neither loses anything, and the live region says which when the choice changes. `editable: false` opens it read-only with the server's sentence. **Where the model forks** (`lanes` in the read) the dialog goes `xl` (fullscreen from three lanes) and draws the graph as it is: the source and the loaders every pass reads once at the top under **Both passes**, a drawn fork, then one lane per sampler side by side with a teal/violet identity rail, its own **Add** and its sampler at the foot, the shorter lane's sampler level with the other's. Rows there drop their title bar to a tooltip (`EditLorasRow.vue` draws a row in both layouts). A drag moves a loader within a lane, into the trunk or across into another pass, and the row's menu offers the same moves from the keyboard; Alt+↑/↓ stays inside the row's own segment. `utils/loraChain.js` holds the pure parts (the PUT body, the change count, `editLorasRoute`). **Pending mode** (`pending`): `CloneOntoSetDialog` opens the same dialog, stacked, on a clone that is not written yet. It reads the card's chain and then shows the clone's (the source under its new loader class, no loader when the clone clears them), offers in the picker only the LoRAs for the clone's base model (*In this set*, *Ran with <checkpoint>*, *Trained on <base model>*, and a count of the rest), and its footer says **Done**, which emits the rows and the `{entries, lanes}` body and writes nothing.
-- **Save as recipe lists one row per LoRA**, each removable with Restore, and a LoRA the shelf cannot identify is flagged with what a run will do with it. Taking a flagged one off asks **"Take X out of what?"** every time: this recipe (the row goes) or the workflow, which opens `/workflows?workflow=<id>&edit=loras&drop_lora=<filename>` (`loraChain.editLorasRoute(id)`) with that loader already deleted. The saved body holds exactly the rows shown.
-- **A missing model blocks the WHOLE batch**, mirroring `workflow_run_service.blocks_batch`: installing a file is a trip away from the keyboard, so queueing the rest would leave the owner repeating the gesture to catch what was skipped. A group that cannot run stays on screen, faded, with its reason and its count — filtering it out would make the total add up and say nothing about why. `MakeMoreDialog.test.js` pins that.
-- **An empty prompt box is `null`, not `""`.** `apply_prompts` leaves the graph alone on `None` and writes on `""`, so the two are opposite instructions: "leave the graph's own text alone" and "blank every positive-prompt node". Only a box that *had* text in it and was cleared sends `""`. A card and a multi-picture selection read no recipe, so their box is empty because nothing filled it, and sending that would generate from no prompt at all. Such a box is then filled with the workflow's own prompt once the pre-flight has read it (`RunGroup.prompt.positive_text`), and where `positive_settable` is false there is no box at all, only a line saying so, and `prompt` goes as `null`.
-- **`count` is per RECIPE, unless the recipe takes its pictures.** `_submit_every` runs each card `count` times; the pictures only choose which cards run — except where a card's picture input is fed from them (`fill: "selection"`, #1457), when the run repeats once per picture. `MakeMoreDialog` therefore counts each runnable group once, or once per picture where it feeds them, times `count`, reads that from the pre-flight rather than deciding it, and labels the field plain **"Count"** since it is per recipe for one card and per picture for another. A card it cannot run because it needs a picture chosen is named with `picture_input_unfilled`'s sentence; that dialog has no picture UI of its own.
-- **The ceiling is on the TOTAL, and it is 200.** `MAX_RUNS_PER_REQUEST` (`routes/comfyui.py`) is checked by `_plan` against the sum over every group, so two recipes at 150 each is a 400 although each count is legal. Both popups guard the product and name the number rather than letting the owner find it by pressing Run.
-- **A pre-flight 4xx is a refusal and is shown at once.** The route answers 400/404/422 on the dry run exactly as on the run, "so the two never disagree". Anything else - the network, a 5xx - is the question not being asked, which is not a refusal: the button stays live and the run itself answers. Over-blocking is its own regression.
-- **`allow_unchecked` is never sent.** An uninspectable ComfyUI blocks, the backend refuses independently, and there is no consent checkbox on this surface. (The same decision `RemixDialog` reached on 2026-07-29 and kept until it was deleted.)
-- **A submit failure is a form error**: the popup stays open with every input intact and the message in a `role="alert"`. A success emits `run` with the prompts, which `App.vue` hands to the grid's `ComfyUiRunner` and reports as a toast whose **Show** action deep-links to the Tasks tab (`sidebarStore.showTasksTab()`).
-- **Add LoRA always works.** With a free loader in the graph it fills that slot, as it always did; with none (no loader at all, or every one taken) it adds a row the run puts in **a loader of its own**, sent as `add_loras: [{sha256, strength_model}]`. The server splices that loader in after the model source on the run's own copy, so nothing the graph loads is replaced and the workflow's own recipe LoRAs still run (a person's LoRA is not one of them: see the Person field below). On a workflow run every loader that has a row counts as taken and the ones the default recipe leaves empty are not offered, so Add LoRA there always adds a loader of its own. An added row is the run's: the band never counts it and no save writes it. A LoRA the graph already loads is not added twice. A splice the server cannot make is `lora_not_insertable`, drawn with its sentence and **Run without the LoRA**, which clears added rows too. An added row with no LoRA picked blocks Run with a reason.
-- **Save what you ran: one reading of the form** (#1850). On a run of a workflow by itself (`runsWorkflowItself`: `kind: "card"`, no pictures, no saved recipe; Create with LoRA… included) what the form changes can be kept. A run from pictures or from a saved recipe is a recipe laid over the workflow, not a set of changes to it (rule 8 of #1846), and gets none of this. `formChanges` is the form read as a `WorkflowChanges` (`{models, loras, skip_loras, stages, values}`: the server's shape, in the words a run body already uses) against what the workflow has saved, and it is the ONE such reading. The band counts and names it, `runBody` builds its `loras`, `skip_loras`, `skip_stages`, `keep_stages` and non-checkpoint `models` from it, and a save sends it, so a save cannot keep something the run did not use (`RunDialog.test.js` asserts every entry of it is in the run body). It holds exactly what carries a ↺ chip. The run still sends MORE than it: every parameter shown, and the checkpoint row always, since the form is what runs. That is why the save set is built from the edits and never from the run body, which would write forty parameters as changed.
-
-  | On the form | Counted in the band | In the run body | Written by a save |
-  |---|---|---|---|
-  | Checkpoint | when changed | `models`, always | when changed |
-  | VAE, text encoder | when changed | `models`, when changed | when changed |
-  | A loader's LoRA or strength | yes, `N LoRAs changed` | `loras` | yes |
-  | A loader removed with its × | yes, `N LoRAs removed` | `skip_loras` | yes |
-  | Stages | yes, `Upscale off` | `skip_stages` / `keep_stages` | yes |
-  | Size | yes, once | `values`, both numbers | both numbers |
-  | Any other parameter, fixed ones included | when changed | `values`, always | only when changed |
-  | A change waiting in the Workflow tab the form has no control for | yes | as it waits | by the server, from what waits |
-  | Prompt, negative prompt, seed, count, stack | no | as before | no |
-  | Pictures put in, where results go | no | `inputs`, `destination` | no |
-  | People picked, and a LoRA added by hand | no | `add_loras` | no |
-  | A sampler or scheduler replacement (`missing_choices`) | no | `choices` | no |
-  | A node replaced or a LoRA loader swapped by this ComfyUI | no | applied by the server | no |
-
-  `utils/workflowChanges.js` holds the pure parts this popup and the Tasks tab share, so the two cannot drift: `over` (the client's reading of `WorkflowChanges.over`: a slot the top removes is no longer set, one it sets no longer removed), `describeChanges` (a set as `{count, text}`), `answering` (below), `changesWord`, `suggestedName`, `modelWord` (a loader named from its address by `model_fix_kind`'s rule) and `saveFailure`.
-- **The band** (`data-testid="rund-band"`) is a panel under the form and above the footer, drawn only while something differs, so a plain run looks as it did and asks the server nothing about saving. `band` is `describeChanges(runChanges)`: the count, and the list in one fixed order (models, LoRAs, stages, parameters: the order #1850 lists what a save writes, and the only one the Tasks tab can reproduce from a set alone), with what is naturally plural counted rather than listed. Two loaders of one file are one model, width and height of one node are one Size, three removals are `3 LoRAs removed`. Three lines: `3 changes from the workflow`; the list, on one line and cut with an ellipsis (whole in its `title`), so the band is one height however much has changed and its arrival moves the footer once, not again as the owner types; and what a save never keeps (`Prompt, seed, count and the people picked stay with the run.`, naming a LoRA added by hand when there is one), which is never cut. Its arrival is said once, in a polite live region whose words do not move with the count. **Save as new…** and **Save** are neutral at the small size; Run stays the one amber button. **Which verbs are open is the server's answer, asked as a dry run of the very save**: `saveWorkflow(id, {changes: saveChanges, version, dry_run: true})`, 300 ms after the set last changed and never per keystroke, the newest question's answer the only one kept. The checkpoint rule and "the workflow changed since" are never re-derived here. A closed Save stays in the tab order (`aria-disabled`, dimmed) and points at the server's `reason`, printed under the row as it was sent; while no answer is in, the button is live and the save itself answers. A refused save (409) prints its `detail`, and a 503 says ComfyUI did not answer (`saveFailure`). Not offered where `GET …/changes` could not be read: without the version and what waits, a save from here could not be made honestly.
-- **Save and Save as new….** *Save* sends `saveWorkflow(id, {changes: saveChanges, version})`, `version` being what `GET …/changes` answered. The workflow's values are then what the form shows, so the baseline is read again rather than the band merely hidden: `clearChanges`, `loadCard`, `loadOwn`, `layOwn`, pre-flight. The chips go and `dirty` goes false; the prompt, seed, count, people and pictures are untouched; "Saved to this workflow." stands where the band was and takes focus, since the band's buttons left with it. *Save as new…* turns the band into its one question ("Name of the new workflow", *Back*, *Save as new workflow*; focus goes to the field, and *Back* or Escape returns it to *Save as new…*). The name offered is `suggestedName`: the workflow's with the picked checkpoint in brackets, else numbered, and never a word saying where it came from. It sends `saveWorkflowAsNew(id, {name, changes})` and moves the popup onto the new workflow through `switchCard`, with no edit carried, since the new graph holds them all. Both then call `useRunDialogStore.changesSaved` and `useWorkflowsStore.invalidate()`.
-- **The popup opens on what waits in the Workflow tab** (rule 7 of #1846). With the card, a workflow run reads `getWorkflowChanges(id)` and the chain (`loadOwn`), and `layOwn` lays `waiting` over the form as if the owner had made those edits here: model picks, loaders set or removed, stages, parameters. The chips therefore show the SAVED value, the band counts them, and Run sends them, which is all *Run with changes…* in the inspector is. The popup never writes the waiting set, so closing leaves it exactly as it was, and what was laid at open does not make the form `dirty` (`changesAtOpen`). **What waits is split in two.** `laid` is what the form took. `carried` is what it has no control for (a loader with no row, a parameter with no field, a pick named by digest where the form holds files): a run sends those as they wait (`runChanges = over(carried, formChanges)`), the band counts them, and a save says nothing about them, leaving them to the server, which saves what waits with the request on top. **That layering is also the trap `answering` closes.** A waiting change the owner undid here is absent from `formChanges`, so left unsaid the server would save the waiting one. For everything in `laid` that `formChanges` does not name, `saveChanges` states the form's present answer outright: the file at that loader address, the loader set with its own LoRA and strength instead of removed, the stage's boolean, the parameter's value. It is `laid` and not all of `waiting` that is answered for: answering for a pick the form never took would put the row's own file back over it.
-- **Repairs.** A missing checkpoint replaced by a pick is a `models` change like any other, counted and saved, and is the case the server lets Save through. What a change set cannot say keeps applying to every run and is not offered for saving: a node replaced by a built-in (`replaced_nodes`), a LoRA loader swapped for the ComfyUI-PixlStash one (`swapped_loaders`), and a sampler or scheduler replacement (`choices`, addressed by node). The *Save fixed workflow* button, which kept the first two as a workflow of their own, is gone with `runReasons.changesNodes`; `POST …/fixed-copy` has no caller in the frontend.
-- **Two limits of saving from here.** (1) On an automatic workflow nobody has saved over, a run that names `loras` leaves every other loader as the graph has it, while a save places the default recipe's LoRAs as well (`recipe_too`; `docs/backend_architecture.md`, "Saving over a workflow"). A loader the owner did not touch can therefore run at the graph's strength and be saved at the default's; the band is right about what is saved. (2) `RunLora` names a LoRA by its shelf digest, so a loader the shelf cannot name cannot be restated: if it waited as removed and the owner put it back here, the save still removes it.
+- **Editing the chain for good lives in the workflow inspector** (#1478). `WorkflowTab` lists the LoRAs in apply order from `GET /workflows/{id}/lora-chain`, with **Edit LoRAs…** in the head of the LoRAs panel even when there is none. That opens `EditLorasDialog.vue`: the chain drawn as a graph, one node each for the model source, every loader and the reader of the result, with an arrow from each node to the next. A loader node carries a drag handle (Alt+↑/↓ from the keyboard, announced in a live region), a *Remove* that leaves it struck through with *Put back* (the Workflow tab's words, since the two edit one set of changes), and a strength field. **Add a LoRA** sits on the last wire, into the reader, since it appends there; with no loader at all it reads **Insert LoRA between these nodes**, naming both nodes to a screen reader. **It ends in one button, whose word is what it does with the edit** (#1850). Every gesture asks `PUT …/lora-chain` with `dry_run`, one request at a time, and lists the answer's lines under *What changes*; their `kind`s, and nothing the dialog derives, decide the button. Where every line is a `deleted` or a `strength` on a loader the chain read gives a `sha256` for (a `rewired` beside a delete is the planner's consequence of it and is carried), the button reads **Apply**: the dialog emits `apply` with `{skip_loras: [{node_id, field}], loras: [{node_id, field, sha256, strength_model, strength_clip}]}` and closes, and nothing is written, because the server's waiting changes can hold exactly that (`WorkflowTab` lays it over them). An `added` or `moved` loader, or a strength for a LoRA the shelf has no digest for, has no waiting form on the server, so the button reads **Save**: the real `PUT` with `overwrite`, which keeps the card and its pictures and makes the chain its next version, then `overwritten`, on which the tab re-bases what was waiting. The note above the footer says which and why, and is the button's `aria-describedby`; **when an edit changes the word, a live region of its own says so with that note** (its own, so the dry run's answer does not replace "… moved to 3 of 4" before it is read), and it is cleared when the edit goes away so the same edit made again is said again. The footer's summary is in the words of what was done, counted off the rows on screen (`1 loader removed`, `2 loaders moved, 1 strength changed`). There is no "new workflow" step and no third button: *Save as new…* is the Workflow tab's bar. Plain Enter runs the primary. `editable: false` opens it read-only with the server's sentence. **Where the model forks** (`lanes` in the read) the dialog goes `xl` (fullscreen from three lanes) and draws the graph as it is: the source and the loaders every pass reads once at the top under **Both passes**, a drawn fork, then one lane per sampler side by side with a teal/violet identity rail, its own **Add** and its sampler at the foot, the shorter lane's sampler level with the other's. Rows there drop their title bar to a tooltip (`EditLorasRow.vue` draws a row in both layouts). A drag moves a loader within a lane, into the trunk or across into another pass, and the row's menu offers the same moves from the keyboard; Alt+↑/↓ stays inside the row's own segment. `utils/loraChain.js` holds the pure parts (the PUT body, the change count, `editLorasRoute`).
 - **Create with LoRA…** (a person's or a picture set's context menu, `SideBar.openLoraRunFromCtx`; hidden when read-only, when ComfyUI is not configured, and on a locked set; **disabled until a LoRA is known to be attached**: `primeLoraCheck` makes the same `GET /adapters` read as the popup when the menu opens, and again if the ComfyUI setting lands under an open menu, the row stays disabled while that is out and when it fails, with the reason as its tooltip, and reads "No LoRA attached" when there is none. The popup's own no-LoRA line is therefore only reachable when the LoRA is detached between the menu and the popup) is this popup, opened with `source.lora = {entityType, entityId, name}` on `kind: "card"` with `pickWorkflow`. `loadLoraSource` reads the attached LoRAs (`GET /adapters?character_id=|set_id=`, both attachable file kinds, as `AdapterTray` does) and the hand-made workflow sets; the first LoRA starts as an added row. The **Workflow picker is narrowed** by `utils/loraWorkflows.fitWorkflows` against the first added row's LoRA: workflows whose checkpoint `base_model_family` matches the LoRA's first, then the ones whose base model is not known (labelled so), each ranked by a hand-made set pairing the LoRA with the checkpoint's `sha256`, then by the LoRA among the card's `recipe_values.loras`. Workflows on another base model, and ones that start from a picture (a `type` other than `txt2img` or `video`), are left out and counted in a line under the picker. `base_model_family` includes the shelf's filename guesses on purpose: a LoRA the shelf shows as Krea 2 must narrow to Krea 2 workflows even when its file never said so. Video workflows are offered on the same base-model filter; a start-frame one cannot be told apart by its `type`, so its picture input runs on the frame the graph names ("As the workflow has it" in Pictures, changeable) or is refused as `picture_input_unfilled` when that file is gone. A LoRA with no known base model narrows nothing and says so. **Results go to** the set for a set (preselected in the set picker) and, for a person, to their reference pictures (`destination.character_id`, fixed; not face-assigned), never to the view behind the popup.
 - **The person a workflow run is of** (`io/PersonPicker.vue`, the **Person** field above LoRAs). A workflow run by itself carries no person's LoRA: the server leaves a LoRA attached to a person out of a `workflow_id` run and keeps it in a recipe's (`docs/backend_architecture.md`, "A person's LoRA is a recipe's"). So on that run only (`offersPerson`: `kind: "card"`, no pictures, no saved recipe, and not Create with LoRA… on a picture set) the popup offers the people whose LoRA works with the workflow's checkpoint, by face: `utils/loraWorkflows.fitPeople` joins the shelf rows' `attachments` (`GET /adapters`, plus the `unknown` file kind, read by `loadPeople` without holding the popup up) to `useEntityListsStore.characters` on the same `base_model_family` rule as the workflow narrowing. **Only a match is offered**: a person is listed because their LoRA is for this checkpoint's base model, so one whose LoRA has no base model recorded, or whose every LoRA is for another one, is counted in the note and not shown, and a workflow whose own base model is not known offers nobody and says why. The field is absent where nobody has a LoRA. **Several people can be picked** (#1850). The picker is a `role="group"` whose tiles are each a checkbox (`aria-checked`: a choice and not a press, which is why not `aria-pressed`, `docs/design/buttons.md`; every tile is its own tab stop, with no roving focus) and it follows `OptionRows`' no-fill rule: a picked tile is an olive ring (`--active-bar`) round the face and a medium-weight name, hover is `--hover-wash`; the faces are `characterThumbnailUrl`, never a bare path. **No one** is the first tile, on while nobody is picked, and pressing it takes every pick off. `personIds` holds the picks in the order picked; an added row carries `person`, the id of the person whose LoRA it holds, or null. **`settlePeople` is the one function that makes the rows say what the picks say**, run on a press and from a watcher on `personFits` and on the rows' digests: one row per picked person, first among the added rows and in the order picked (ahead of a LoRA added by hand), so `add_loras` stacks their loaders in that order; a pick the workflow no longer offers comes off rather than being sent, and a row whose LoRA is no longer that person's takes their first. Each row has its own strength and its select offers only that person's fitting LoRAs. **One file is never on two people's rows**: a second person whose every fitting LoRA is already on another's row stays picked with no row of their own (that loader is theirs too), a row never offers a file another person's row holds, and unpicking the row's person hands the row on. A LoRA the graph already loads is not added a second time either: the server sets the strengths on the loader that has it. Pressing a picked tile unpicks them; the row's × does the same and puts focus on that tile. The fix that takes every LoRA off the run (`dropLoras`) unpicks everyone. Where the run is filed is not changed by a pick. **Save as recipe keeps the person**: `recipeLoras` holds the added rows beside the graph's, since a workflow run has no graph row for them and a recipe saved without would run as somebody else. On the Workflow tab the person's LoRA is no default row; **Also used** lists it, drawing on the summary's `shared` list as well as `varying` (a LoRA in every picture that the default leaves out), and drops the "No LoRA" count whenever the pile is not exactly `varying`. **Opened from Create with LoRA… on a person, the person is drawn chosen and fixed, and others can be added beside them**: their tile comes first and is a statement, not a control (a span said as a checked, disabled checkbox), and there is no **No one** tile, since that run is never of no one; their row comes first, has no ×, and its select is limited to the LoRAs attached to them. The other tiles are the people who fit the workflow picked. A picture set's Create with LoRA… shows no Person field and keeps its ×. **The trigger-word line** (`utils/triggerWords.js`) is one line, always: `Trigger word missing` in `surface-error` under the Prompt box, then one small button for each picked person's row whose LoRA has a trigger word (the first of the shelf row's `trigger_words`, which is the person's name until one is recorded, and nothing when the list is empty) that the prompt does not name, in the order picked, each labelled with the word it adds (*Add ohwx*). A word two rows share is asked for once. **The button's tooltip and its accessible name say whose it is**, `Add ‹word›, ‹person›'s trigger word`: the label may be cut short, so the name carries the word whole, and the tip is `Tooltip`'s activator-slot form with `describe` off, because `AppButton`'s own `tooltip` would describe the button with the words it is already named by. With more than three words missing, one *Add all N* stands in for them, N being the words still missing and not the people picked. **The line never wraps**: the words keep their size and the buttons give way, each to an ellipsis (a `nowrap` flex row whose buttons take `min-width: 0`; one row at the form's 494px with three long words). A button puts its word first in the prompt (*Add all N*, all of them, in the order picked) and returns focus to the box. It is a suggestion and never a Run blocker. Once typed (whole word, any case, any spacing inside a phrase) a word's button goes, the line goes with the last, and every picked person's word is marked in the box: `AppTextarea`'s `highlight` prop draws the marks on an `aria-hidden` copy of the text under a clear textarea (same box, font, wrapping and scroll offset, re-levelled after every draw; the copy and its held scrollbar gutter exist from the moment there is a word to look for, so the text does not rewrap as the word is typed), in `--active-wash`, the olive of the chosen person's ring.
 - **Save as recipe** opens `io/SaveRecipeDialog.vue` from the footer (F6, #1408; F5 shipped it as an inline name field, which that step replaced). It `POST /recipes` with the prompt, the LoRAs and the edits as `overrides`, addressed `"<slot_label>/<input_name>"` — the form `POST /workflows/run` unpacks back into `values` when that recipe is run. Since #1480 the button reads an inert **Saved** once one of the card's saved recipes would be *duplicated* by this form (`wouldDuplicate`, not `keepsTheSameLook` — an edited parameter is a variation, not a duplicate), and a typed name already on the workflow offers **Replace** instead of a second row with the same name.
-
-#### `CloneOntoSetDialog.vue` (`io/`)
-
-Clone onto a workflow set: this workflow with that set's models. Opened from
-the Workflows selection bar's menu (single card) and from *Clone onto a set…*
-in the Workflow tab's Models panel head, both through
-`useWorkflowsStore.requestCloneOntoSet(id)`, which `WorkflowsView` watches.
-`AppDialog size="xl"`, two panes.
-
-- **Left: the shelf's sets, built as the shelf builds them**
-  (`fetchWorkflowSets`: the hand-made ones, then `setGroups` over the
-  combinations), each planned once per open by `POST …/set-clone-plans`.
-  *Fits this graph* shows the same-base-model and same-family groups, and any
-  set of another base model whose plan `maps_cleanly` (its checkpoints, VAEs
-  and text encoders fill the graph's loaders one for one); *All*
-  adds the other base models, the sets that will not load (disabled, the
-  reason in place of the files line) and *Pick files myself*, which closes this
-  dialog and opens `CloneWithModelsDialog` on the same card. With nothing that
-  fits, it opens on *All*. Each card says in advance "Keeps its N LoRAs" or
-  "Clears N LoRAs".
-- **Right: the clone as a node diff**, the plan's `loaders` read as they come.
-  A row that changes is two lines, each said: **Original** (class, files and a
-  CLIP loader's type, struck) and **To →** (the files after, the class again
-  only when it changes, and the node pack chip). A row that does not is one
-  line ending "Unchanged". The row is one grid (kind, the line's word, the
-  line), a two-line row's lines being its grid rows, so the words and the
-  lines start level and sit on each line's baseline. A
-  pack ComfyUI does not have is a warning, never a refusal.
-- **Names are read as the shelf reads them.** Every set member goes through
-  `headName` on the way in (`shelfNamed`): its display name, else one derived
-  from its file, so no set card, files line or offered clone name carries
-  `….safetensors`.
-- **Which file goes to which loader is the server's guess and the owner's
-  call** (#1831). Where the set holds two or more VAEs (or text encoders),
-  each loader file taking one is a compact `AppSelect` of the set's files of
-  that kind (the plan's `takes` and `choices`), on the row's **To →** line. A
-  row with a select is two lines even when nothing changes, its **Original**
-  line unstruck and "Unchanged" under the kind (beside a long file name it
-  wrapped), because the file a loader has is how the owner knows which loader
-  it is. Such a row names files exactly, in its
-  text and in the select alike (`loraStem`: no folder, no extension): the
-  shelf's tidied name drops a precision or a version, which may be all that
-  tells two files of one kind apart. Picking the file another loader has
-  swaps the two, and a status line
-  says so, since the other row changed untouched. The dialog never
-  builds the swap itself: it re-asks `set-clone-plans` for that one set with
-  the whole pairing as `picks` and replaces the set's plan with the answer, so
-  the diff, the fit and the `swaps` Clone sends stay the server's. The selects
-  are not disabled while that is asked (disabling the focused one drops focus
-  to the page); Clone is, and the rows are `aria-busy`. A pick made meanwhile
-  waits and is asked next, against the plan the answer left, the latest one
-  winning: the select already shows it, so dropping it would turn the select
-  back unexplained. A pick ComfyUI will not load shows the plan's
-  `reason` beside the diff and Clone waits for another pick.
-- **LoRAs go only when the base model changes** (`keeps_loras`, the server's
-  rule). Then "Removed <checkpoint> LoRAs" with a struck chip per loader and a
-  reason naming the new base model (or saying which one is unknown), and Clone
-  sends `loras: {entries: [], lanes}`; otherwise `loras: null`. *Edit LoRAs…*
-  opens `EditLorasDialog` in pending mode and its Done is what Clone sends. A
-  set change re-applies the rule from the original and drops the edit, saying
-  which added LoRAs went. Clone is off while a removal is needed and the chain
-  is not editable (ComfyUI down): it would be refused; and off onto another
-  base model when the chain could not be read at all, since it may hold LoRAs
-  of the old one. The dialog sends every checkpoint of a set, and the server
-  pairs them with the graph's base loaders by filename (#1690); a base loader
-  left without one (a set holding fewer checkpoints than the graph loads) is
-  named in a warning and keeps its file.
-- The name defaults, until typed in, to the card's generated name with the
-  base models the plan loads in the model's place, by shelf name in loader
-  order ("<model> + <model>: <type> + …", detected by the card's
-  `type_label`), else "<card> · <set>" for a name the owner chose.
-  The view's notice names a missing pack after the write.
-- A set with no cover picture shows an icon; a hand-made set says "Grouped by
-  you" in a tooltip, leaving the cover for its picture count.
-
-#### `CloneWithModelsDialog.vue` (`io/`)
-
-Clone with new models, the per-file picker: opened from Clone onto a workflow
-set's *Pick files myself* card (single card only). `AppDialog size="md"`: a Name, the Checkpoint,
-one row per VAE and text-encoder file the graph loads, and a line for the LoRAs.
-Reads `GET /workflows/{id}/model-swap` on open and again on each checkpoint
-choice, never per keystroke (the server reads the whole shelf and every recipe).
-
-- **Every row a proposal filled says which step answered** (`via`: this
-  checkpoint, other checkpoints of its base model, other checkpoints of its
-  family, or `declared`: nothing has run with it and its file layout is one
-  the family declares, which the line calls untested and draws in the warning
-  tone). A row nothing answered keeps the workflow's own file and says so;
-  the only row filled without evidence is a `declared` one, and its line says
-  so. A row the owner changes loses its line,
-  and with the workflow's own checkpoint chosen no row carries one.
-- **Rows are rebuilt from the workflow's own files on every checkpoint
-  choice**: a row filled for the previous checkpoint is not evidence about this
-  one. A row whose own file is proposed keeps it; the others take the next
-  proposal nobody has taken **of the same encoder layout** (`family`, so a
-  CLIP-L never lands in a T5 slot). A row that kept its file says why, decided
-  after every row is filled: another row took the proposal that fitted it, or
-  nothing of its encoder type was proposed, or nothing ran at all. A proposal
-  counts as a row's own file only by exact filename, never by basename. The row selects are
-  disabled while the read is in flight, and a failed read resets the rows and
-  keeps Clone off until another choice.
-- **The base swap is by shelf row, not by name**: an unchanged checkpoint the
-  graph loads under another copy's filename is never a swap. A row shows the
-  shelf's spelling of the graph's own file where there is one (the row the
-  server resolved, else the one shelf file of that basename), and a row's
-  swap is judged against that spelling exactly, so another shelf file of the
-  same basename is a real swap. The checkpoint select keeps the workflow's own
-  checkpoint even when the server's ComfyUI narrowing left it out, so neither
-  select ever renders blank.
-- **The graph's own file is always among a select's options** (RunDialog's
-  `optionsFor` rule), so an unmatched slot never renders empty.
-- **Clone stays off until something would change.** `swaps` compares basenames
-  case-folded; a clone that swaps nothing would land on the original card.
-- **LoRAs are flagged, never dropped**: `flags` names each one trained on
-  another family than the chosen checkpoint.
-- The checkpoint id is compared as a string: the native `<select>` inside
-  `AppSelect` hands its value back as text.
-- **Every checkpoint choice bumps the read sequence**, the way back to the
-  original included, so a late proposal cannot fill rows for a checkpoint no
-  longer chosen; Clone is off while a proposal read is in flight. The open read
-  keeps a sequence of its own, so a card change mid-read cannot strand it.
-- Only the first base loader is swapped; any others (a refiner, Wan 2.2's
-  second expert) are named in a line saying they stay. CLIP-vision loaders get
-  no row.
-
-The store's `cloneCardWithModels` mirrors `duplicateCard` (re-read the grid,
-`null` plus `error` on failure); the view names the file written in a notice,
-says when ComfyUI did not answer and the names went in unchecked, and selects
-the new card.
 
 #### `WorkflowCard.vue`, `ChipRow.vue`, `InfoPopover.vue` (`widgets/`, v1.12 Workflows & Recipes)
 The uniform workflow card and its two parts. Mounted by `WorkflowsView.vue` (F1a, below). In this code a `workflow_recipe` / structural hash is a **variant**; a user's Recipe is a **saved recipe**.
@@ -1645,6 +1483,7 @@ The uniform workflow card and its two parts. Mounted by `WorkflowsView.vue` (F1a
 - **`WorkflowCard`** takes one `card` and `selected`, and emits only `run` (*Run it…* on a card with no pictures). **The CONTENT cannot grow the card, but its column can**: a cover at `aspect-ratio: 6 / 5`, then four rows that clip rather than grow: the name, always two lines tall (`--wf-name-h`, 36px, even for a one-line name, so every card's rows line up), the model marks, the base-model name and LoRA count, and the special facts, summing to a fixed `--wf-meta-h` (134px). The cover is a ratio and not a pixel height because it used to be a flat 132px against a fluid card width, so its cells drifted from 1.2:1 at the 240px column floor to 1.8:1 by 360px — nobody had chosen landscape; it fell out. Cards still line up because every card in a row is the same width, which is what the old fixed total was really protecting.
 - **The cover's TRACKS come from the strip, one cell per picture** (#1456). It used to be `v-for="i in 3"` with only the `<img>` conditional, so a workflow with one or two pictures showed its picture beside painted `input-background` rectangles and read as a card that had failed to load — and a card under three pictures is not the rare case it looks like, since `one_off` also requires unrated, not imported and no saved recipe, so the partial card on the grid is one somebody cared about. The box stays 6:5 at every count and only the tracks inside it change: `--1` is one cell at **6:5**, `--2` a pair of **3:5** columns, `--3` today's 2fr/1fr mosaic with every cell at **4:5** (the big one spans two columns and two rows, so it keeps the cover's own proportion). The strip is capped at three by a `slice(0, 3)` in the component, matching the server's own `COVER_DEPTH = 3`, so four and up are the mosaic. A card whose covers have not arrived keeps `min(picture_count, 3)` empty cells rather than a collapsed cover, so the placeholder is the arrangement the pictures are about to land in and not one box the size of the whole cover, which is what `--empty` looks like. An entry with no `url` is dropped before the count, because there is no picture behind it to draw. The shape decides how much of the picture a cell keeps: of an 832×1216 generation, 6:5 keeps 57% of the height, 4:5 keeps 86%, and 3:5 keeps all of it (a cell narrower than the picture trims the sides) — so the widest cut lands on the card with one picture to show, which is what giving it the whole box costs. **WHERE that slice is taken from is the stored rectangle's business, not the anchor's** (#1465): each `covers` entry carries the face-weighted square `render_thumbnail` computed for that picture, `coverCellStyle` (`utils/workflowCard.js`) fits the cell's own ratio around its centre and clamps it to the bitmap — `cropRectForRatio` / `cropImgStyle` in `utils/squareCrop.js`, the square helper's generalisation — and the result is inline `width`/`height`/`left`/`top` on an absolutely-positioned `<img>`. The cell ratio comes from the COUNT alone, since the mosaic's three cells are all 4:5. `object-fit: cover` + `object-position: top center` survives as the fallback for a picture whose rectangle has not been computed yet (the fields are nullable), which is the half that would be a regression if it moved; the anchor itself stays the app's shipped convention (`ImageGrid.css`). The cover's box and tracks, the scrim badge and the meta rows are shared with `ModelSetCard` through `widgets/cardCover.css`, which each card loads scoped ahead of its own rules. jsdom has no layout, so `WorkflowCard.test.js` resolves both stylesheets against the token sheet and asserts the meta sum, the cell ratios of all three arrangements, the mosaic's `grid-row: 1 / 3` and that no other rule grants that span, and that row 4's right padding keeps it clear of ⓘ; the content cases (0 and 5 LoRAs, long names) were measured once in Chromium, not in CI, and the long-name case before the name row became two lines; jsdom cannot render the clamp, so the two-line name is pinned as CSS only. **The cells stay inert `<span>`s**, and that is a decision rather than an omission: opening a picture is a CONTEXT-MENU verb here, never a click. Making a tile a button took the card's ordinary click away from it — a press on the top half of a card stopped selecting it — and put hover chrome over the picture, for a gesture nobody had asked for. What the tiles do carry is `data-picture-id` / index / total, because a right-click anywhere on a card opens the card menu and that menu offers to open a picture, so it has to know which tile the pointer was over. Both hosts read it off the event target (`pictureUnder`) rather than the card tracking a "last right-clicked" that could go stale, and the menu row names what it will open (*Open picture 2 of 3*), falling back to *Open cover picture* when the press missed a tile or came from `⋯`, which has no pointer. **That is why the two verb menus are held equal by `data-verb` and not by their labels**: the same verb correctly saying which picture it is about to open is not the divergence #403 was about. **A workflow that saves video counts in videos** (`outputNoun` / `outputCount` in `utils/workflowCard.js`, off the card's `type: "video"`; the one copy of the rule): the card's accessible name and empty cover (*No videos yet*), the ⓘ and inspector *Show all N videos* links, the delete confirmation, and the verb menu's rows and tooltips (*Open cover video*, *Show all videos using this workflow*). The menu's noun is the selection's, so a selection that is not all video keeps *picture*, except the open row for a right-clicked tile, which the host names by that tile's own card. The Run popup and the grid it lands on (*All Pictures*) still say picture.
 - **`selected` is the card's own mark, and it is an overlay.** The shell's wash plus `--selection-ring` (`style.css` rule 3) on a `::after` at `--z-raised`, `pointer-events: none`. It was twice put somewhere it could not be seen: on the grid cell, which `.wf-card`'s opaque `surface` covers entirely, and then on the card itself, where an inset shadow paints under the element's children and the cover's `<img>`s are children — so the ring ran along the text rows and stopped dead at the thumbnails. `.selection-overlay` in `ImageGrid.css` is the shipped answer for marking something with pictures in it.
+- **A card with changes waiting wears *Unsaved*** (#1850): the shipped `.wf-card__badge`, drawn when `unsaved_changes > 0` (one badge whatever the count, plain text, and "unsaved changes" straight after the name in `cardAccessibleName`). It sits in `.wf-card__start`, a row at the card's top-start corner that holds the ComfyUI mark first and *Unsaved* second, so a badge that comes and goes moves nothing; the row is the card's, not the cover's, so a card with no pictures wears it too. It needs no read of its own: the grid's card carries the count, `keepUnchanged` compares cards whole so a moved count redraws that card, and the window that made the change re-reads the grid itself (the socket skips it). **The "made with the model this workflow has since replaced" flag on a cover is gone** with the tab's *Replaced* alert; the server still sends `superseded` on a cover and still sorts such covers last, and the card draws nothing for it.
 - **A hidden card leads its facts row with `hidden`** (F7). It is drawn at all only because somebody chose *Hidden: Show* in Filters, and the row clips to "+N" — a mark that can be clipped away leaves a card reading as an ordinary one in the grid it was deliberately kept out of.
 - **"+N" is not a control.** The card's `aria-label` (`cardAccessibleName(card)`, which takes no options) carries every chip, each LoRA as a "workflow LoRA", and ratings as "4.8 of 5".
 - **`ChipRow`** measures its chips from a hidden natural-width copy, shows as many as fit (`fitChipCount`, which always keeps one and ellipsizes it rather than showing a bare "+N"), and emits `overflow` with the hidden count. **Nothing consumes `overflow` yet**: every host's accessible name already carries every chip the line clipped — the event is there for a caller that wants to say so visibly, and until one exists it is unused surface.
@@ -1781,7 +1620,8 @@ proves ran together, with a model free to appear in more than one.
   (`GET …/model-swap?replacing=` on the first workflow loading it) and writes
   the choice to each of them through `PUT …/model-fix`, in turn, listing every
   refusal by workflow. Manual workflows are never written (a fix re-keys
-  topologies they are not on); the row says to clone them instead.
+  topologies they are not on); the row says to pick another model on each
+  one's Workflow tab and save.
 - **Rename has no inline field on the grid**, because a name lives on a card and
   the dashed rule under a row is what makes an inline field honest. The verb
   falls through to `ShelfEditDialog`'s `rename`, which already exists for the
@@ -2052,7 +1892,7 @@ the shelf's workflow sets section) and served as `hand_made` on
   never shows "Undone". A write that changed nothing ("Nothing added") has no Undo and
   goes to a plain notice. Errors stay notices. A `quiet` write raises no pill
   at all, for a caller that narrates it itself (the slot picker).
-- **Clone with new models** labels proposals with `via: "grouped"` "Grouped by
+
   you" and lists them first in its selects; one with `prepick: false` (the set
   offers several of that kind) is shown but not pre-picked.
 - **The merge offer is ghosts in the tray (#1523).** A set the server gives an
@@ -2240,11 +2080,12 @@ filtered by.
   and when the list shrinks past it, no card at all — which takes the grid's
   only tab stop with it and strands a keyboard user outside a screen they
   cannot re-enter.
+- **The card menu has no clone verb** (#1850; `panels/WorkflowSelectionBar.vue`, one list for the bar's ⋯ and the context menu). Its rows are Rename, Hide, *Use a set…*, Export, Duplicate and Delete. *Use a set…* is offered for exactly one workflow and changes that workflow, so it sits with the rows that do; the bar emits `use-set` and the view opens the rail and calls `store.requestUseSet(id)`, which `WorkflowTab` answers by opening its own set menu. Duplicate says *Duplicated as <name>.*
 - **Nothing rearranges workflows.** They are automatic (`auto:<core and families digest>`);
   there is no Merge or Split verb, and a wrong grouping is fixed in the core
   rule (`services/workflow_identity.py`). Run is single-selection only. Every
   route in `api/workflows.js` is addressed by workflow id, and the duplicate,
-  clone-with-models and save-LoRA-chain answers name `workflow_id`. Writes
+  save-as-new and save-LoRA-chain answers name `workflow_id`. Writes
   re-read the grid through `refetch()`, whose **epoch stamp** (also bumped by
   `reset()`) stops an older read, or a fetch still in flight when the
   credential changes, writing its cards over the newer answer.
@@ -2280,7 +2121,7 @@ empty list. The footer is the Workflow tab's alone: Recipes runs a recipe from
 its own row, and Tasks replaces the body, so Run… would act on a card the reader
 can no longer see.
 
-- **Open a copy in ComfyUI is an icon-only button beside Run…**, wearing the ComfyUI
+- **Open in ComfyUI is an icon-only button beside Run…**, wearing the ComfyUI
   logomark (`widgets/ComfyuiIcon.vue`, `currentColor` on the AiToolkitIcon
   pattern), shown while `comfyuiUrl` is set. It opens what Run… runs
   (`runTarget`: the one selected workflow) and is refused with a reason, not
@@ -2354,15 +2195,15 @@ can no longer see.
 - **Models, LoRAs, Parameters: three bordered panels** (#1653, design
   `docs/design/workflow-inspector-two-layers.md` §1.1, §1.5, §2.1-2.3; layout
   since "grouped panels with side labels"). Each `.wftab-panel` carries its
-  verb in its head (*Clone onto a set…* on Models, *Edit LoRAs…* on LoRAs),
+  verb in its head (*Use a set…* on Models, *Edit LoRAs…* on LoRAs),
   rows sit on a `--space-9` label column, and the tab's body pads
   `--space-4` (only on the Workflow tab; the inspector's own body stays
   `--space-3`). **Models** is built from `detail.card.default_recipe`
-  alone: its models (Checkpoint, VAE, CLIP, the missing-model and model-fix
-  states unchanged) and a read-only **Stages** row from `stages` (omitted when
-  the base graph has none; "Off: most of its pictures ran without it." under
-  it when one is off). A stage that `stage_details` names a kind for (an
-  upscale) carries it in a `Tooltip` on its name; the Run popup prints the
+  alone: its models (one row per loader, each a picker, below) and a
+  **Stages** row of checkboxes from `stages` (omitted when the base graph has
+  none; "Off: most of its pictures ran without it." under it while one is off
+  as saved and untouched). A stage that `stage_details` names a kind for (an
+  upscale) carries it in a `Tooltip` on its label; the Run popup prints the
   same sentence beside the stage's checkbox, so the tip is never its only
   copy. Until the detail lands it reads "Reading its default
   recipe…" rather than drawing the grid card's slots as if they were the
@@ -2372,9 +2213,11 @@ can no longer see.
   histogram of the card's `rating_counts` (`WorkflowStarChart.vue`), the 4★
   and 5★ bars at full ink, every bar when none is rated 4★+, no chart when
   nothing is rated; its accessible name and tooltip give every count and the
-  source. A row is marked only when it is the exception, "Yours"
-  (`provenance: edited`) under its label, and only a parameter row has a
-  reset, because `PUT …/defaults` writes parameters only.
+  source. A row is marked only when it is the exception: "Yours"
+  (`provenance: edited`) under its label, or *Edited* / *Removed* while a
+  change waits on it (below). A parameter row's reset writes, because
+  `PUT …/defaults` takes parameters only; a model or strength row's reset
+  only takes its change back out of the waiting set.
   **Parameters** groups rows as *Set each run* and *Fixed · N* (folded behind
   a disclosure past three), by the pins as they were when the workflow was
   opened (`openedPins`), so a toggled row stays under the pointer. Each row
@@ -2446,16 +2289,187 @@ can no longer see.
     `filterChips` puts the Workflow chip first, then the value chip (the
     pile's LoRA gets a chip of its own); × on the value chip leaves the
     workflow, × on the Workflow chip takes the value it was opened with too.
+- **The head says which version the workflow is on, and is the way back**
+  (#1850, rule 3 of #1846; `panels/WorkflowVersionMenu.vue`). Under the
+  picture count, on a line of its own (the count shares its line with the
+  star chart, and the three do not fit the 288px rail), a quiet chip reads
+  `Version 3 · 2 Oct` (`versionDay`: `today`, day and month, the year once it
+  is not this one). Only where there is a history, `versions > 1`: an
+  automatic workflow nobody has saved over has no versions and no chip, and
+  nothing is invented for it.
+  - **Where the number and the day come from.** The grid's card already
+    carries `version`, `versions` and `version_at`, so the head draws at once;
+    once `GET …/versions` lands, its `current` row wins, which is what moves
+    the head with a go-back's own answer. **One read for the selected
+    workflow, never one per card**, and none where the card says there is no
+    history. It is asked again whenever the card's `version` moves. A read
+    for another workflow is neither kept (`versionsAsk`, `stillOn`) nor drawn
+    (`shownVersions` filters on the key).
+  - **The menu** is the shared `.ctx-menu`: a *Versions* heading and one
+    `menuitemradio` row per version in the server's order (newest first),
+    with its number, day and `reason` **exactly as sent** (a null reason
+    leaves the number and the day). The current row is checked (medium label,
+    the olive check in the leading slot, no fill) and only closes the menu.
+    Each row has an explicit `aria-label`, since its two spans would
+    otherwise be read run together. Unread or failed, the menu holds one
+    disabled row saying so, and opening it asks again.
+  - **Going back** (`goBack`) is `POST …/versions/{n}/restore` with no
+    confirmation: nothing is removed, so it is undone by going back again.
+    Its answer is taken as the list, the rows off the graph and the waiting
+    changes are read again (below), the grid is re-read, and a `success`
+    notice says *Back on version 2, kept as version 4. Nothing was removed.*
+    with **Undo**, which goes back to the version left. A refusal (404, 409)
+    is a `role="alert"` panel under the head in the server's words with
+    Dismiss, not a notice, and the list is read again because it was stale.
+    Focus returns to the chip when the menu closes.
+- **A change to the graph waits, and one bar saves the set** (#1850, rules 1,
+  2 and 7 of #1846). A model picked, a stage switched, a loader removed or
+  its strength changed is not written when it is made: it joins the ONE set
+  of changes the server keeps for the workflow (`GET`, `PUT` and
+  `DELETE /workflows/{id}/changes`, a `WorkflowChanges`), so it survives
+  another card being selected, the inspector closing and a restart, and the
+  rail never asks "discard changes?". The rail is a view of that set.
+  `utils/workflowEdits.js` holds the pure half: each function takes a set
+  and answers the next one (`withModel`, `withStage`, `withLoraStrength`,
+  `withLoraRemoved`, `withFragment`, `withoutGoneLoaders`), and **a row put
+  back to its saved value leaves the set**, because the bar counts entries.
+  Parameters, pins, name and notes are not in it: they still save as they
+  are typed.
+  - **The write rule** (`edit`): build the next set from what waits, draw it
+    at once (`intent`), `PUT` it, draw the answer. **One write on the wire,
+    the last intent wins**: each edit queues a link that sends the newest set
+    there is when its turn comes, and an answer is drawn only when no newer
+    set waits behind it, so the first of two quick edits cannot draw over the
+    second. **No edit before the set has been read**: the next set is built
+    from what waits, and one built from nothing would replace changes that
+    are there, so an edit made while that read is out or has failed is
+    refused with a notice and the read is asked again. A changes read for
+    another workflow is neither kept nor drawn.
+  - **Model rows are one per loader, each a picker.** `modelRows` is one row
+    per entry of `default_recipe.models`. A Wan 2.2 pair is two rows under
+    one *Checkpoints* label, since a pick is one loader's, and `row.name`
+    tells them apart to a screen reader. The options come from
+    `GET …/model-swap?replacing=<file>&slot_kind=`, which answers for a file
+    that is not missing too, so `checkInstalled` asks it **once per row's
+    file per selection** (after its 250 ms settle), not only for a missing
+    one, and also when ComfyUI cannot be asked what is missing. The saved
+    file is the first option, so choosing it takes the change out; a pick the
+    read does not list (one a set filled in) is listed too. A pick is
+    `models: [{address, filename}]` at the loader's address. A changed row
+    reads *Edited* (the *Yours* mark's class) and keeps `Saved: <name>` under
+    the field, with a reset named `Put <label> back to <saved>`. The picker's
+    menu spans the label column as well (`:deep(.app-select__menu)`): the
+    field alone is too narrow for a model's name. **A missing file is a row
+    that needs a pick**: its warning and the file's name stay above the field
+    until one is made. The pre-flight names a file as the graph spells it and
+    the recipe may spell it another way, so `missingByAddress` gives a
+    missing file to the row naming it, else to the first row of its kind
+    without one, and it is the graph's spelling the server is asked about. A
+    shelf loader's row (`…/checkpoint_id`, whose value is a shelf row id) and
+    a base model no loader of the default recipe names stay text: there is no
+    address a pick could be written to.
+  - **The "Replaced" alert is gone, and so is its write.** The tab no longer
+    calls `PUT …/model-fix` (`ReplaceMissingDialog`, on the Models shelf,
+    still does). The server still applies a replacement made before
+    (`model_fixes` on the detail), so such a row simply shows the file the
+    workflow now loads (`loadedFile`), with no mark and no way back of its
+    own.
+  - **Stages are checkboxes**, one per entry of `default_recipe.stages`. A
+    toggle is `stages: {name: bool}`, and the group reads *Edited* while any
+    differs from saved.
+  - **LoRA rows.** A row the graph has a loader for (the chain's own, or a
+    default-recipe LoRA joined to one by digest) carries its slot (`node_id`,
+    `field`). Its strength is a number field, written on change as a `loras`
+    entry naming the same LoRA; that needs the shelf's digest, so a loader
+    holding a file the shelf does not know keeps its strength as text. Its ×
+    is `skip_loras`: the row stays until the save, struck through, marked
+    *Removed*, with *Put back*, and focus moves with the control (×, then
+    *Put back*, then × again). A default LoRA no loader matches is text.
+    *Add to default* on the pile is still a write of its own
+    (`PUT …/default-lora`): the set has no way to add a loader.
+  - **The bar** sits in the footer above Run…, only while something waits:
+    `N unsaved changes` (the server's `count`; never a list, the rows show
+    which) and *Discard*, then *Save as new…* and *Save*, both neutral at the
+    small size so Run… stays the one amber button. **Which verbs are offered,
+    and the sentence saying why one is not, are the server's** (`save` and
+    `save_as_new`, each `{open, reason}`, on every changes read and write). A
+    closed verb is not drawn greyed out: its `reason` is printed as sent,
+    once where both give the same one. The checkpoint rule and the "changed
+    since" rule are decided nowhere in the client, so this bar, the Run popup
+    and the Tasks tab say the same sentence. *Save* is `POST …/save` with the
+    `version` the changes were read against; a 409's `detail` is printed in
+    the bar (`role="alert"`) and the verbs are read again. *Save as new…*
+    turns the bar into its one question, the name, with *Back* (Enter saves,
+    Escape goes back), and selects the workflow it makes. *Discard* asks
+    nothing. After Save or Discard the bar is gone, so focus goes to Run…. A
+    save says how many loaders it left out for holding a person's LoRA
+    (`left_out`).
+  - **Run… reads *Run with changes…*** while something waits. It opens the
+    Run popup exactly as before; the popup itself reads what waits on the
+    workflow it opens on (`RunDialog.vue`, above, "Save what you ran").
+  - **Use a set…** in the Models head (`panels/WorkflowUseSetMenu.vue`) took
+    the place of the clone dialogs. Opened, it reads the owner's sets
+    (`fetchWorkflowSets`) and one `POST …/set-clone-plans` for all of them,
+    and each row says `fills N rows`, the server's `reason` for a set that
+    will not load, or `changes nothing here`. It writes nothing: it emits
+    `{address, filename}` rows built from the plan's `swaps`, and the tab
+    lays them over the set as model picks. The tab hands it each row's saved
+    file, kind and waiting pick, so a set that holds the saved file takes an
+    earlier pick back off the row (read off `takes` and `unpaired_bases`,
+    since `swaps` lists only what changes). A set's LoRAs are not added, and
+    the row says so. The selection menu's *Use a set…* row reaches it through
+    `useWorkflowsStore.requestUseSet(id)`: the tab selects the workflow,
+    opens the rail on this tab, and opens the menu once the model rows are
+    in.
+  - **Edit LoRAs… ends in *Apply* or *Save*.** The server's set can hold a
+    loader removed and a strength changed, but not one moved or added: that
+    is `PUT …/lora-chain`, which rewires the graph and has no waiting form.
+    *Apply* emits a fragment (`skip_loras`, `loras`) that `applyLoraEdit`
+    lays over the set, and nothing is written. *Save* writes the chain at
+    once as the next version and emits `overwritten`. What was waiting was
+    made against the version before, which the server refuses to save, so
+    `onOverwritten` **re-bases** it: read the chain again, drop the LoRA
+    entries whose loader the edit took out, `DELETE` the set and `PUT` it
+    again, which stamps it with the new version, and post the server's
+    reason if Save was open before and is closed after. **If that second
+    write fails after the discard, the waiting changes are lost**, and the
+    notice says so. Only for the selected workflow. Focus goes back to
+    *Edit LoRAs…* when the dialog closes, whichever way it ended.
+  - **Open in ComfyUI opens the SAVED graph.** The ComfyUI-PixlStash node
+    fetches `GET /workflows/{id}/graph` and does not ask for the unsaved one
+    yet (#1852, in the node pack's repository), so while changes wait a line
+    under the footer says they are not in what opens until they are saved,
+    and the button is described by it.
+  - **A workflow changed from somewhere else is followed in place.** A save
+    from another window, ComfyUI or an assistant is announced
+    (`workflows_changed`), the grid is re-read, and the selected card's
+    `version` or `unsaved_changes` moves. On `version` the rows off the graph
+    are read again **quietly** (`refreshGraph`: detail, chain and form
+    inputs, then the pre-flight), with nothing blanked, the parameter groups
+    kept, and a notes draft that is no longer the text last read left alone.
+    On either, the changes are read again unless the rail already holds that
+    state. **The socket skips the window that wrote**, so this window's own
+    writes have to say so themselves: every edit, save, discard and go-back
+    calls `store.refetch()`, which is what puts *Unsaved* on the card, and a
+    save from the Run popup or the Tasks tab is followed through
+    `useRunDialogStore.saved`, on which the tab drops its waiting state and
+    reads the changes, the versions and the rows again.
+  - **Known gaps.** On a workflow with no pictures the LoRA rows are the
+    graph's loaders, and nothing in the chain read says a loader holds a
+    person's LoRA, so its row can be edited; the server neither counts nor
+    saves such an entry (rule 4 of #1846). A save of stages alone made in
+    **another window** moves neither `version` nor `unsaved_changes`, so it
+    is not followed until the workflow is selected again.
 - **Models and Parameters read the default recipe** (#1623). The Models rows
   (Checkpoint, VAE, CLIP) read `detail.card.default_recipe.models` once the
   detail read lands, since the grid serves `default_recipe` null; Parameters
   read `default_recipe.values`, and
-  `PUT /workflows/{id}/defaults` sends parameter rows only. Replace-model and
-  Hide re-read the grid through `store.refetch()`, which bumps the store's
+  `PUT /workflows/{id}/defaults` sends parameter rows only. Hide, and every
+  write of the waiting changes, re-read the grid through `store.refetch()`, which bumps the store's
   epoch and clears `loading` so the re-read is not refused behind an older
   one still on the wire. `?workflow=<id>&edit=loras&drop_lora=<filename>`
   (`utils/loraChain.editLorasRoute(id)`) opens Edit LoRAs;
-  `EditLorasDialog` and `CloneWithModelsDialog` take `workflowId`.
+  `EditLorasDialog` takes `workflowId`.
 - **An editor file not converted yet says so in Defaults** (#1530). An
   imported card with `variant_count: 0` and no default values is a ComfyUI
   editor document with no API graph (every manual workflow has
@@ -6203,7 +6217,7 @@ from the UI today and are not oversights**:
   only the gesture. Every import is a new manual workflow (no overwrite or
   keep-both choice); the view re-reads the grid and lands on the last one's
   `workflow_id` (`landOn`: select it, cursor on its card), as Duplicate and
-  both clone dialogs do with theirs. `useWindowFileImport` no longer has to stand aside for this
+  the Workflow tab's *Save as new…* do with theirs. `useWindowFileImport` no longer has to stand aside for this
   screen.
 - ~~**The way out to a workflow's pictures.**~~ **Back.** The shelf
   inspector's second tab was Pictures, and its tiles opened one through
@@ -6295,12 +6309,16 @@ show; what somebody saves in ComfyUI stays there until it is imported.
 A card that came from ComfyUI's saved workflows while PixlStash still read them
 (`origin_category === "comfyui"`) keeps the ComfyUI logomark
 (`widgets/ComfyuiIcon.vue`, 12 px) as a scrim badge in its top-start corner
+(the `.wf-card__start` row, ahead of *Unsaved*)
 (`role="img"`, *From ComfyUI*, also appended to the card's accessible name).
 Filters › Origin narrows the grid to *ComfyUI*, *From pictures* (automatic
 cards) or *Our own* (clones, copies, imports, recipe extracts, built-ins), with
 counts and a chip, not persisted; *ComfyUI* is how those leftover cards are
-listed to select and delete. The inspector shows *Version N · date* (`version`,
-`version_at`) for a card with more than one version, whatever its origin.
+listed to select and delete. The inspector's head shows *Version N · day* as
+a chip that opens the version menu (`WorkflowVersionMenu.vue`, under
+`WorkflowTab.vue` above) for a card with more than one version, whatever its
+origin; it draws from the card's `version` and `version_at` until the versions
+read lands.
 
 **Running a workflow is the Run popup** (#1407, `io/RunDialog.vue`), described
 in full under "The io/ dialogs" above. From this screen the Workflow tab's

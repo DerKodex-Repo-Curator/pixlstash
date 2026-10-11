@@ -251,9 +251,20 @@
     </template>
 
     <!-- One live region for the gestures a reader who is not watching the
-         list cannot see: a move, a delete, a restore. -->
+         list cannot see: a move, a removal, a row put back. -->
     <p class="visually-hidden" role="status" aria-live="polite">
       {{ liveMessage }}
+    </p>
+    <!-- And one for the primary button changing its word. Its own region:
+         the dry run answers a moment after the gesture, and one region would
+         have it replace "… moved to 3 of 4" before that was read. -->
+    <p
+      class="visually-hidden"
+      role="status"
+      aria-live="polite"
+      data-testid="eld-button-said"
+    >
+      {{ buttonMessage }}
     </p>
 
     <template #footer>
@@ -350,7 +361,7 @@ const props = defineProps({
    * A LoRA filename to open with its loader already struck through.
    *
    * Save-as-recipe's "The workflow" answer: the owner already said which
-   * entry they meant, so the dialog opens with it deleted and Restore beside
+   * entry they meant, so the dialog opens with it removed and Put back beside
    * it rather than asking them to find it again.
    */
   dropLora: { type: String, default: "" },
@@ -388,11 +399,14 @@ const dropMissed = ref("");
 const draggingId = ref(null);
 const overId = ref(null);
 const liveMessage = ref("");
+const buttonMessage = ref("");
 const listEl = ref(null);
 /** The note under the list is the primary button's description. */
 const noteId = useId();
 
 let newRows = 0;
+/** The primary button's word as last said aloud; it opens reading Apply. */
+let saidWord = "Apply";
 /** Bumped per open, so a slow read for a closed dialog writes nothing. */
 let loadToken = 0;
 
@@ -465,10 +479,37 @@ const changeCount = computed(() =>
   countChanges(readLoaders.value, effectiveRows.value),
 );
 
+/**
+ * The footer's summary, in the words of what was done: "1 loader removed",
+ * "2 loaders moved, 1 strength changed". Counted off the rows the owner sees,
+ * never off the dry run: it has to read right while that is still out, and a
+ * rewire is a consequence the list under *What changes* already spells out.
+ * What is neither removed, added nor re-weighted was moved.
+ */
 const changeLabel = computed(() => {
   const count = changeCount.value;
   if (!count) return "No changes";
-  return `${count} ${count === 1 ? "change" : "changes"}`;
+  const rowsNow = effectiveRows.value;
+  const removed = rowsNow.filter((row) => !row.isNew && row.deleted).length;
+  const added = rowsNow.filter((row) => row.isNew && row.sha256).length;
+  const strengths = rowsNow.filter(
+    (row) =>
+      !row.isNew &&
+      !row.deleted &&
+      row.hasStrength &&
+      row.strength !== row.readStrength,
+  ).length;
+  const moved = Math.max(0, count - removed - added - strengths);
+  const loaders = (n, did) => `${n} ${n === 1 ? "loader" : "loaders"} ${did}`;
+  return [
+    removed && loaders(removed, "removed"),
+    added && loaders(added, "added"),
+    moved && loaders(moved, "moved"),
+    strengths &&
+      `${strengths} ${strengths === 1 ? "strength" : "strengths"} changed`,
+  ]
+    .filter(Boolean)
+    .join(", ");
 });
 
 function adapterLabel(adapter) {
@@ -486,7 +527,7 @@ const pickerOptions = computed(() => [
 /**
  * No row at all, both ends read, and the chain editable: the button sits on
  * the wire between the two nodes and says so. A deleted row still stands on
- * screen with Restore, so it keeps the list between the nodes and the button
+ * screen with Put back, so it keeps the list between the nodes and the button
  * an Add; a read-only chain offers no insert to name.
  */
 const spliceIn = computed(
@@ -593,6 +634,31 @@ const fragment = computed(() => {
 
 /** Whether the edit can wait as an unsaved change: Apply, else Save. */
 const waits = computed(() => fragment.value !== null);
+
+// The button's word is what it does with the edit, and an edit can change
+// it under a reader who is not looking at it: a removal reads Apply, and
+// moving a loader on top of it turns the same button into Save, which writes
+// at once. So the change is said when it happens, with the note that
+// explains it. Only a change of word: the first Apply is the button as it
+// opened, and a second removal changes nothing about what the button does.
+watch(
+  () => (changes.value.length ? (waits.value ? "Apply" : "Save") : ""),
+  (word) => {
+    if (!word) {
+      // No edit: the button reads Apply again, and does nothing. The line
+      // is cleared with it, or the same edit made again would put the same
+      // words in the region and a screen reader would say nothing.
+      if (!previewing.value) {
+        saidWord = "Apply";
+        buttonMessage.value = "";
+      }
+      return;
+    }
+    if (word === saidWord) return;
+    saidWord = word;
+    buttonMessage.value = `The button now reads ${word}. ${note.value}`;
+  },
+);
 
 /** The primary acts only on an edit the dry run has answered for. */
 const ready = computed(
@@ -786,6 +852,8 @@ async function load() {
   dropMissed.value = "";
   changes.value = [];
   previewError.value = "";
+  saidWord = "Apply";
+  buttonMessage.value = "";
   say("");
   if (!props.workflowId) return;
   loading.value = true;
@@ -835,7 +903,7 @@ function applyDrop() {
     return;
   }
   row.deleted = true;
-  say(`${row.name} is deleted. Restore is on its row.`);
+  say(`${row.name} is removed. Put back is on its row.`);
 }
 
 async function loadShelf() {
@@ -867,7 +935,7 @@ async function remove(row) {
     return;
   }
   row.deleted = true;
-  say(`${row.name} deleted. Restore is on the same row.`);
+  say(`${row.name} removed. Put back is on the same row.`);
   await focusRow(row.id, "restore");
 }
 
