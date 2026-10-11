@@ -15,7 +15,7 @@
   "scripts": {
     "sync-version": "node ../scripts/sync-node-versions.mjs electron",
     "copy-assets": "node scripts/copy-assets.mjs",
-    "check-electron": "node scripts/check-electron-binary.mjs",
+    "check-electron": "install-electron",
     "build": "npm run sync-version && tsc && npm run copy-assets",
     "start": "npm run check-electron && npm run build && node scripts/dev-run.mjs",
     "setup-dev-icon": "node scripts/dev-desktop-integration.mjs",
