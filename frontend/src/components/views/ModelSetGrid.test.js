@@ -821,7 +821,7 @@ describe("the cards", () => {
 });
 
 describe("the models no recipe names", () => {
-  it("draws them as a card of their own, worded so it is not a verdict", async () => {
+  it("draws no card for them: the Models rail lists them", async () => {
     const { wrapper } = await mountGrid({
       rows: [row(1, "realvisXL_v5")],
       support: [row(2, "never_run", "vae")],
@@ -829,52 +829,37 @@ describe("the models no recipe names", () => {
       noSet: [2],
     });
 
-    const ghost = wrapper.find(".msg__ghost");
-    expect(ghost.exists()).toBe(true);
-    expect(ghost.text()).toContain("In no set");
-    expect(ghost.text()).toContain("1 model");
-    // The NARROW claim, and no more: `no_set` means no kept picture here was
-    // made with them, which is not "no recipe names them" and is not a verdict.
-    expect(ghost.text()).toContain(
-      "No kept picture in this library and no recorded ComfyUI run used",
-    );
-    expect(ghost.text()).toContain(
-      "nothing here rules out what they work with",
-    );
-    expect(ghost.text()).not.toContain("No recipe in this library binds");
-  });
-
-  it("is narrowed by Show, like every other card", async () => {
-    const { wrapper, store } = await mountGrid({
-      rows: [row(1, "realvisXL_v5")],
-      support: [row(2, "never_run", "vae")],
-      combinations: [],
-      noSet: [1, 2],
-    });
-    expect(wrapper.find(".msg__ghost").text()).toContain("2 models");
-
-    await store.setFilters({ support: false });
-    await wrapper.vm.$nextTick();
-
-    expect(wrapper.find(".msg__ghost").text()).toContain("1 model");
-  });
-
-  it("is not a row in the grid, so the arrows never walk into it", async () => {
-    const { wrapper } = await mountGrid({
-      rows: [row(1, "realvisXL_v5")],
-      support: [row(2, "never_run", "vae")],
-      combinations: [combination("1", [CKPT])],
-      noSet: [2],
-    });
-
-    // The treegrid holds the cards and nothing else: a ghost inside it would be
-    // the last thing Down reaches, and it is not a set.
-    // One card, plus the New workflow set tile (#1520) - which is a row, and
-    // is the only other thing the arrows may walk to.
+    expect(wrapper.text()).not.toContain("In no set");
+    expect(wrapper.text()).not.toContain("never_run");
+    // One card, plus the New workflow set tile (#1520).
     const grid = wrapper.find('[role="treegrid"]');
     expect(grid.findAll('[role="row"]')).toHaveLength(2);
     expect(grid.findAll(".msg__row")).toHaveLength(1);
-    expect(grid.find(".msg__ghost").exists()).toBe(false);
+  });
+
+  it("says there is nothing to group when they are all the shelf holds, filtered or not", async () => {
+    // A VAE and a LoRA that ran together beside no base model: a combination,
+    // served for Works with, and no card.
+    const { wrapper, store } = await mountGrid({
+      rows: [row(3, "filmgrain_xl")],
+      support: [row(2, "sdxl_vae", "vae")],
+      combinations: [combination("2,3", [VAE, LORA])],
+      noSet: [2, 3],
+    });
+    expect(wrapper.text()).toContain("No picture in this library records");
+    expect(wrapper.findAll(".msg__row")).toHaveLength(0);
+
+    // No set exists for Show to be hiding, so a filter must not turn this into
+    // "1 set is being left out by Show".
+    await store.setFilters({ support: false });
+    await wrapper.vm.$nextTick();
+
+    expect(store.activeCount).toBeGreaterThan(0);
+    expect(wrapper.text()).toContain("No picture in this library records");
+    expect(wrapper.text()).not.toContain("No workflow set matches");
+    expect(wrapper.find('[data-testid="new-workflow-set"]').exists()).toBe(
+      true,
+    );
   });
 });
 

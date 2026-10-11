@@ -932,7 +932,6 @@ describe("Clone set to edit", () => {
           covers: [],
         },
       ],
-      noSet: [],
       handMade: [],
       setChecks: [],
     };
