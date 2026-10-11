@@ -130,6 +130,20 @@ describe.each(MENUS)("$name", ({ mountMenu, scrapheap, readOnly }) => {
     expect(trigger(mountMenu())).toBeUndefined();
   });
 
+  it("opens and closes through button activation without hover", async () => {
+    useLibrariesStore().libraries = [ACTIVE, ARCHIVE];
+    const wrapper = mountMenu();
+    expect(trigger(wrapper).attributes("aria-expanded")).toBe("false");
+    // Native buttons dispatch click for Enter and Space as well as a pointer.
+    await trigger(wrapper).trigger("click");
+    expect(trigger(wrapper).attributes("aria-expanded")).toBe("true");
+    expect(trigger(wrapper).element.parentElement.querySelector(".ctx-submenu")).not.toBeNull();
+    await trigger(wrapper).trigger("click");
+    expect(trigger(wrapper).attributes("aria-expanded")).toBe("false");
+    expect(trigger(wrapper).element.parentElement.querySelector(".ctx-submenu")).toBeNull();
+    wrapper.unmount();
+  });
+
   it("is absent for an owner the library routes would refuse", () => {
     useLibrariesStore().libraries = [ACTIVE, ARCHIVE];
     useLibrariesStore().canManage = false;

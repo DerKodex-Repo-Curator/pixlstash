@@ -56,4 +56,16 @@ describe("buildLibraryMoveMessage", () => {
   it("has nothing to say when nothing moved and nothing was kept", () => {
     expect(buildLibraryMoveMessage({ libraryName: "Archive" })).toBeNull();
   });
+
+  it("warns that a picture locked during the move now exists in both libraries", () => {
+    expect(
+      buildLibraryMoveMessage({ libraryName: "Archive", copiedButLockedCount: 1 }),
+    ).toEqual({
+      level: "warning",
+      body:
+        "Nothing was moved to Archive. 1 picture was copied to Archive " +
+        "but stayed here because a set became locked during the move. " +
+        "Undo will not remove it from Archive.",
+    });
+  });
 });

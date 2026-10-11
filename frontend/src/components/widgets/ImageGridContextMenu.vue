@@ -719,7 +719,13 @@
           @mouseenter="selectedImageIds.length && (moveSubmenuOpen = true)"
           @mouseleave="moveSubmenuOpen = false"
         >
-          <button class="ctx-item" :disabled="!selectedImageIds.length">
+          <button
+            class="ctx-item"
+            :disabled="!selectedImageIds.length"
+            aria-haspopup="true"
+            :aria-expanded="moveSubmenuOpen"
+            @click="moveSubmenuOpen = !moveSubmenuOpen"
+          >
             <Tooltip
               text="Copies the selection into another library and moves it to this library's Scrapheap. Tags, score and description go with it; people, sets, projects and stacks do not."
               activator="parent"

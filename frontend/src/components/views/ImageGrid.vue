@@ -4029,6 +4029,7 @@ async function deleteSelected(idsOverride = null, moveTo = null) {
     const alreadyThere = new Set();
     const inOtherScrapheap = new Set();
     const notCopied = new Set();
+    const copiedButLocked = new Set();
     // Named by the server, never derived here: an id in none of its lists (a
     // picture another tab already deleted) is not one this move took, so it is
     // neither announced as moved nor has its tile dropped by this.
@@ -4050,6 +4051,9 @@ async function deleteSelected(idsOverride = null, moveTo = null) {
         inOtherScrapheap.add(String(id));
       }
       for (const id of resp?.failed ?? []) notCopied.add(String(id));
+      for (const id of resp?.copied_but_locked ?? []) {
+        copiedButLocked.add(String(id));
+      }
     }
 
     // Only drop the tiles the server actually deleted. Removing the skipped ones
@@ -4095,6 +4099,7 @@ async function deleteSelected(idsOverride = null, moveTo = null) {
         alreadyThereCount: alreadyThere.size,
         inOtherScrapheapCount: inOtherScrapheap.size,
         notCopiedCount: notCopied.size,
+        copiedButLockedCount: copiedButLocked.size,
       });
     } else {
       showLockedDeleteNotice(

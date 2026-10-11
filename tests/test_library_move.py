@@ -314,6 +314,41 @@ class TestWhatTheOtherLibraryAlreadyHolds:
 
 
 class TestWhatIsLeftBehind:
+    def test_a_lock_added_after_copy_is_reported_as_present_in_both_libraries(
+        self, server, owner, other, monkeypatch
+    ):
+        from pixlstash.routes.pictures import _library_move
+
+        picture_id = _add(server, _png())
+        sha = _here(server, picture_id).pixel_sha
+        copy_into = _library_move._copy_into
+
+        def copy_then_lock(target, source_root, row):
+            outcome = copy_into(target, source_root, row)
+
+            def lock(session: Session):
+                locked_set = PictureSet(name="locked-during-copy", locked=True)
+                session.add(locked_set)
+                session.flush()
+                session.add(PictureSetMember(set_id=locked_set.id, picture_id=row.id))
+                session.commit()
+
+            server.vault.db.run_task(lock)
+            return outcome
+
+        monkeypatch.setattr(_library_move, "_copy_into", copy_then_lock)
+
+        body = _move(owner, other, [picture_id]).json()
+
+        assert body["moved"] == []
+        assert body["moved_count"] == 0
+        assert body["skipped_locked"] == []
+        assert body["copied_but_locked"] == [picture_id]
+        assert _here(server, picture_id).deleted is False
+        (arrived,) = _there(server, other, sha)
+        assert arrived["deleted"] is False
+        assert arrived["on_disk"] is True
+
     def test_a_picture_in_a_locked_set_is_not_copied_at_all(self, server, owner, other):
         frozen = _add(server, _png())
         free = _add(server, _png())

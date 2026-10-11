@@ -4,7 +4,7 @@ A library is a folder with its own database, and the server has one open. So a
 move is a copy into the other library followed by the ordinary soft delete
 here, in that order: the picture is committed there before it is touched here,
 and what happens here is the same undoable move to the Scrapheap that Delete
-does. Nothing in this module removes a file.
+does. Source files remain on disk; a failed target import is cleaned up.
 
 The other library is opened beside the active one, as a switch opens its
 candidate, but with no workers and without being published
@@ -62,6 +62,9 @@ class MoveToLibraryResponse(BaseModel):
     moved: list[int] = []
     # Left here because a locked set freezes them.
     skipped_locked: list[int] = []
+    # Copied there, but kept here because a set became locked during copying.
+    # Undo cannot remove the destination copy.
+    copied_but_locked: list[int] = []
     # Left here because the other library already holds the same file, byte
     # for byte, with whatever tags and score it has there.
     skipped_already_there: list[int] = []
@@ -134,6 +137,8 @@ def _copy_into(target, source_root: str, row) -> str:
     with open(source_path, "rb") as handle:
         data = handle.read()
     ext = os.path.splitext(row.file_path)[1].lower()
+    # The helper checks known matches before creating any file or thumbnail;
+    # only fingerprints in `created` have written artifacts to clean up.
     fingerprints, existing, scrapheaped, created = _create_picture_imports(
         SimpleNamespace(vault=target),
         [(data, ext, row.original_file_name)],
@@ -232,7 +237,7 @@ def register_routes(router, server):
                         )
                         outcomes[row.id] = "failed"
                 arrived = [pid for pid, how in outcomes.items() if how == "new"]
-                moved, newly_locked = (
+                moved, copied_but_locked = (
                     scrapheap_pictures(server, request, arrived)
                     if arrived
                     else ([], [])
@@ -255,7 +260,8 @@ def register_routes(router, server):
             library_name=library.name,
             moved_count=len(moved),
             moved=moved,
-            skipped_locked=sorted(set(locked) | set(newly_locked)),
+            skipped_locked=sorted(locked),
+            copied_but_locked=copied_but_locked,
             skipped_already_there=[
                 pid for pid, how in outcomes.items() if how == "duplicate"
             ],

@@ -392,7 +392,13 @@
         @mouseenter="selectedCount > 0 && (moveSubmenuOpen = true)"
         @mouseleave="moveSubmenuOpen = false"
       >
-        <button class="ctx-item" :disabled="selectedCount === 0">
+        <button
+          class="ctx-item"
+          :disabled="selectedCount === 0"
+          aria-haspopup="true"
+          :aria-expanded="moveSubmenuOpen"
+          @click="moveSubmenuOpen = !moveSubmenuOpen"
+        >
           <Tooltip
             text="Copies the selection into another library and moves it to this library's Scrapheap. Tags, score and description go with it; people, sets, projects and stacks do not."
             activator="parent"
