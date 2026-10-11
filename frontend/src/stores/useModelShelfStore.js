@@ -1821,6 +1821,9 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
    *
    * @param {Array<string>} keys - the sets' own keys.
    * @param {boolean} hide - true hides, false shows again.
+   * @returns {Promise<boolean>} false when the write did not land, so a caller
+   *   whose own work depends on it (the twin swap) can fail rather than report
+   *   a state the server never took.
    */
   async function changeHidden(keys, hide) {
     const notices = useNoticeStore();
@@ -1832,12 +1835,12 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
         level: "error",
         text: errorDetail(err) || "Could not change what this library hides.",
       });
-      return;
+      return false;
     }
     // Only when the card actually leaves the screen: with "Show them" on it is
     // drawn dimmed, and dropping the selection under a visible card would be a
     // change the reader did not ask for.
-    if (!hide || showHiddenSets.value) return;
+    if (!hide || showHiddenSets.value) return true;
     // A hidden card leaves the screen, so it leaves the selection and the open
     // panel with it: otherwise Undo or "Show them" would bring it back lit, with
     // the file pill armed by no gesture.
@@ -1862,44 +1865,49 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
         [...selectedSetIds.value].filter((id) => !goneSets.has(id)),
       );
     }
+    return true;
   }
 
   /**
-   * Hide sets from pictures, with a receipt whose Undo shows them again.
+   * Hide sets, with a receipt whose Undo shows them again.
    *
-   * @param {Array<Object>} groups - entries of `setGroups`.
+   * @param {Array<Object>} groups - entries of `setGroups` or `handMadeGroups`.
    */
-  function hideSets(groups) {
+  async function hideSets(groups) {
     const fresh = groups.filter((group) => !hiddenSetKeys.value.has(group.key));
     if (!fresh.length) return;
     const keys = fresh.map((group) => group.key);
     const wasOpen = keys.includes(openSetKey.value) ? openSetKey.value : "";
-    changeHidden(keys, true);
+    // The receipt claims the hide happened, so it waits for the write to land:
+    // a failed PUT is already noticed, and raising Undo over it would offer to
+    // undo a change the server never took.
+    if (!(await changeHidden(keys, true))) return;
     raiseSetReceipt(
       fresh.length === 1
         ? `Hid the set "${fresh[0].card.name}". No file was touched.`
         : `Hid ${fresh.length} sets. No file was touched.`,
       "hide",
       async () => {
-        await changeHidden(keys, false);
+        if (!(await changeHidden(keys, false))) return false;
         // Undo puts back the tray the hide closed, unless another has opened.
         if (wasOpen && !openSetKey.value) openSetKey.value = wasOpen;
+        return true;
       },
       async () => changeHidden(keys, true),
     );
   }
 
   /**
-   * Show hidden sets from pictures again, with a receipt whose Undo hides them.
+   * Show hidden sets again, with a receipt whose Undo hides them.
    *
-   * @param {Array<Object>} groups - entries of `setGroups`.
+   * @param {Array<Object>} groups - entries of `setGroups` or `handMadeGroups`.
    */
-  function unhideSets(groups) {
+  async function unhideSets(groups) {
     const keys = groups
       .map((group) => group.key)
       .filter((key) => hiddenSetKeys.value.has(key));
     if (!keys.length) return;
-    changeHidden(keys, false);
+    if (!(await changeHidden(keys, false))) return;
     raiseSetReceipt(
       keys.length === 1
         ? `"${groups.find((g) => g.key === keys[0]).card.name}" is shown again.`
@@ -1911,10 +1919,10 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
   }
 
   /**
-   * Hide over a selection of sets from pictures: the one rule the menus' row
-   * is worded by (`hideSetsVerb`), so what it says is what runs.
+   * Hide over a selection of sets: the one rule the menus' row is worded by
+   * (`hideSetsVerb`), so what it says is what runs.
    *
-   * @param {Array<Object>} groups - entries of `setGroups`.
+   * @param {Array<Object>} groups - entries of `setGroups` or `handMadeGroups`.
    */
   function toggleHiddenSets(groups) {
     if (hideSetsVerb(groups)?.hide) hideSets(groups);
@@ -2476,7 +2484,9 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
         if (set.declined?.length) {
           await setWorkflowSetDeclines(restored.id, set.declined);
         }
-        if (wasHidden) await changeHidden([twin.key], true);
+        // `false` (the hide did not land, already reported) fails the undo:
+        // the twin would otherwise stay shown over the set this undid.
+        if (wasHidden && !(await changeHidden([twin.key], true))) return false;
         return restored;
       },
       // The swap again, checked again: the restored set may have changed since.
@@ -2492,7 +2502,9 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
       failure: "The set could not be swapped for the set from pictures.",
     });
     if (!done) return false;
-    if (wasHidden) await changeHidden([twin.key], false);
+    // A twin that would not come back on screen means the swap left nothing
+    // shown where the hand-made set was: fail it rather than report the swap.
+    if (wasHidden && !(await changeHidden([twin.key], false))) return false;
     // Opened only over a closed tray: an owner who has opened another set
     // since keeps it, and this never moves the view off a hand-made tray -
     // which the watch below would read as that set being closed too.
@@ -3358,14 +3370,17 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
    * while a card still lists it.
    *
    * Select-all means all of it, so both kinds are taken and both pills come up
-   * together. Hand-made sets are never narrowed by `Show`, so all of them are
-   * drawn.
+   * together - but only what is drawn: a hand-made set the `Show` narrowing
+   * (or its own hide) drops off the grid must not be selected, or Delete would
+   * take it off screen unasked.
    */
   function selectVisible() {
     const drawn = screenRows.value;
-    if (view.groupBy === GRID_GROUP_BY && handMadeSets.value.length) {
-      selectedSetIds.value = new Set(handMadeSets.value.map((set) => set.id));
-      setAnchor = handMadeSets.value[0].id;
+    if (view.groupBy === GRID_GROUP_BY && handMadeGroups.value.length) {
+      selectedSetIds.value = new Set(
+        handMadeGroups.value.map((group) => group.set.id),
+      );
+      setAnchor = handMadeGroups.value[0].set.id;
     }
     if (view.groupBy === GRID_GROUP_BY && missingSetKeys.value.length) {
       selectedMissingKeys.value = new Set(missingSetKeys.value);
@@ -3823,6 +3838,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
       combinations: [],
       handMade: [],
       setChecks: [],
+      hiddenSets: [],
     };
     setsLoaded.value = false;
     setsLoading.value = false;

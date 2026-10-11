@@ -345,6 +345,7 @@ const accessibleName = computed(() => {
     return [
       name,
       "grouped by you",
+      props.card.hidden ? "hidden" : null,
       kindLabel,
       incomplete
         ? "incomplete: no checkpoint"

@@ -74,6 +74,9 @@ def set_group_attributes(
     ``workflow_group_attr``; *hidden* is the owner's answer for ONE library
     when *library_uuid* is given, else the machine-wide fallback - see
     :func:`set_group_hidden`.
+
+    Every caller acting for an active library passes *library_uuid*; the
+    fallback is only for hub-level (library-less) writes.
     """
     given = {
         column: value

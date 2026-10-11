@@ -9994,8 +9994,10 @@ like every shelf table), read and written by
   *hide* used to live in the browser, which is per-machine, not per-library.
   `GET /models/workflow-sets` now carries `hidden_sets` and
   `PUT /models/workflow-sets/hidden` sets it: hub `workflow_set_hidden` rows,
-  keyed by `(library_uuid, set_key)` where the key is the set's own - a
-  combination's sorted `model.id`s, or `hand:<id>`. A row means hidden; showing
+  keyed by `(library_uuid, set_key)` where the key is the set's own -
+  `model:<head id>` for a set from pictures (or `missing:<filename>` when its
+  head is off the shelf), `hand:<id>` for a hand-made set. A row means hidden;
+  showing
   a set deletes it. Verified and hand-made sets hide the same way, so a set
   from pictures that is noise in one library stays hidden there and nowhere
   else. The endpoints are `owner_only`; the key is opaque, so no set has to

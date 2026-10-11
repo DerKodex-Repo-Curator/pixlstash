@@ -3179,6 +3179,33 @@ describe("sets from pictures are hidden, never deleted", () => {
     return { ...model, sha256: sha, slot: "checkpoint", on_shelf: true };
   }
 
+  it("takes only the hand-made sets the grid draws on Select all", async () => {
+    // A hidden hand-made set leaves the grid (#1869), so Select all must not
+    // take it: Delete would otherwise delete a set the reader cannot see.
+    hiddenOnServer.add("hand:7");
+    const store = shelfWithASet([
+      {
+        id: 7,
+        name: "seven",
+        declined: [],
+        members: [member(checkpoint, "a".repeat(64))],
+      },
+      {
+        id: 8,
+        name: "eight",
+        declined: [],
+        members: [member(lora, "b".repeat(64))],
+      },
+    ]);
+    store.setView({ groupBy: "workflow_set" });
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    expect(store.handMadeGroups.map((group) => group.set.id)).toEqual([8]);
+
+    store.selectVisible();
+    expect([...store.selectedSetIds]).toEqual([8]);
+  });
+
   it("hides a set, remembers it, and draws it again on request", async () => {
     const store = shelfWithASet();
     await store.fetchRows();
@@ -3238,6 +3265,23 @@ describe("sets from pictures are hidden, never deleted", () => {
     store.toggleHiddenSets(store.setGroups);
     await flush();
     expect(store.setGroups.map((g) => g.hidden)).toEqual([false]);
+  });
+
+  it("raises no hide receipt when the write did not land", async () => {
+    // The receipt claims the hide happened and arms an Undo, so it must wait
+    // for the PUT: over a refused write it would offer to undo nothing.
+    useOperationStore().setLocalReceiptHost(true);
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    setWorkflowSetsHidden.mockRejectedValueOnce(new Error("put refused"));
+
+    store.toggleHiddenSets(store.setGroups);
+    await flush();
+    expect(store.setGroups.map((g) => g.key)).toEqual(["model:1"]);
+    expect(store.hiddenSetCount).toBe(0);
+    expect(useNoticeStore().notices.at(-1)).toMatchObject({ level: "error" });
+    expect(useOperationStore().receipt).toBe(null);
   });
 
   it("drops a hidden card's head from the selection, so Undo re-arms nothing", async () => {

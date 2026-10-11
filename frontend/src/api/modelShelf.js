@@ -216,7 +216,8 @@ export async function fetchWorkflowSets() {
  * Hide or show workflow sets in the ACTIVE library (#1869).
  *
  * Per library, on the server: a set hidden here is still drawn in another. The
- * key is the set's own - a combination's sorted member ids, or `hand:<id>`.
+ * key is the set's own - `model:<head id>` (or `missing:<filename>`), or
+ * `hand:<id>` for a hand-made set.
  * Answers with every set the library now hides, so the caller can draw from one
  * answer rather than re-reading the whole set payload.
  *

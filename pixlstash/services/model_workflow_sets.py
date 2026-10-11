@@ -650,9 +650,10 @@ def set_sets_hidden(
 ) -> list[str]:
     """Hide or show sets in one library; answer with that library's hidden keys.
 
-    A key is the shelf's own for a set - a combination's sorted member ids, or
-    ``hand:<id>`` for a hand-made set - so no key has to correspond to a row. A
-    hub with no active library hides nothing (there is no library to hide it in).
+    A key is the shelf's own for a set - `model:<head id>` (or
+    `missing:<filename>`), or ``hand:<id>`` for a hand-made set - so no key has
+    to correspond to a row. A hub with no active library hides nothing (there
+    is no library to hide it in).
     """
     if not library_uuid or not keys:
         return hidden_set_keys(hub, library_uuid)

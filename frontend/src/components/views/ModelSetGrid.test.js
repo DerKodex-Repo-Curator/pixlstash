@@ -1562,6 +1562,20 @@ describe("hand-made sets (#1520)", () => {
     expect(cards[0].text()).not.toMatch(/recipe/);
   });
 
+  it("announces a hidden hand-made card as hidden", async () => {
+    // The visible "Hidden" tag is aria-hidden, so the name is the only place a
+    // screen reader hears it - the derived branch says it, and so must this.
+    hiddenOnServer.add("hand:10");
+    const { wrapper, store } = await mountGrid({
+      rows: [row(1, "realvisXL_v5", "checkpoint")],
+      handMade: [handSet(10, [SET_CKPT])],
+    });
+    store.showHiddenSets = true;
+    await wrapper.vm.$nextTick();
+    const card = wrapper.find('[data-testid="model-set-card"]');
+    expect(card.attributes("aria-label")).toContain("hidden");
+  });
+
   it("draws a combination the set covers on the set and not again as evidence", async () => {
     const { wrapper } = await mountGrid({
       rows: [

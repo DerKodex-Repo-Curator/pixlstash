@@ -218,6 +218,13 @@ _SEED_MODELS = (
 def _seed_hub(server) -> dict[str, int]:
     """Write the shelf tables from scratch. Returns filename -> model.id."""
     with server.hub.transaction() as conn:
+        # Sets first: their members reference `model`, so a set left by one
+        # test would block the model wipe (or hide a row from the next test,
+        # the hide keyed by a key that is stable across tests).
+        conn.execute("DELETE FROM model_workflow_set_member")
+        conn.execute("DELETE FROM model_workflow_set_decline")
+        conn.execute("DELETE FROM model_workflow_set")
+        conn.execute("DELETE FROM workflow_set_hidden")
         # Both children of `model` before the parent: foreign keys are on for
         # the hub, so a leftover row aborts the wipe rather than lingering.
         conn.execute("DELETE FROM model_file")
@@ -1258,6 +1265,12 @@ def test_hand_made_set_routes_answer_the_owner_and_refuse_tokens(shelf_env):
         routes = (
             ("POST", "/api/v1/models/workflow-sets", None, {"json": {}}),
             (
+                "PUT",
+                "/api/v1/models/workflow-sets/hidden",
+                None,
+                {"json": {"keys": ["hand:1"], "hidden": True}},
+            ),
+            (
                 "PATCH",
                 f"/api/v1/models/workflow-sets/{set_id}",
                 "/api/v1/models/workflow-sets/{set_id}",
@@ -1359,8 +1372,14 @@ def test_deleting_a_hand_made_set_forgets_its_hide(shelf_env):
     server = shelf_env.server
     made = _new_set(shelf_env, name="Soon gone")
     key = f"hand:{made['id']}"
-    shelf_env.owner.put(
+    r = shelf_env.owner.put(
         f"{API}/models/workflow-sets/hidden", json={"keys": [key], "hidden": True}
+    )
+    assert r.status_code == 200, r.text
+    # The row the delete is meant to forget is really there first, or the
+    # `is None` below would pass on a hide that never landed.
+    assert server.hub.fetchone(
+        "SELECT 1 FROM workflow_set_hidden WHERE set_key = ?", (key,)
     )
 
     assert (

@@ -572,8 +572,9 @@ CREATE TABLE IF NOT EXISTS model_set_member_verdict (
 """
 
 # The owner hides a set IN A LIBRARY (issue #1869). Keyed by the set's own key
-# as the shelf computes it - a combination's sorted member ids, or ``hand:<id>``
-# for a hand-made set - because a set from pictures is computed, not stored, and
+# as the shelf computes it - `model:<head id>` for a set from pictures (or
+# `missing:<filename>` when its head is off the shelf), `hand:<id>` for a
+# hand-made set - because a set from pictures is computed, not stored, and
 # has no row to hang a column on. A row means hidden in that library; no row
 # means shown, which is why there is no ``hidden`` column to flip. Per library
 # for the same reason ``workflow_group_hidden`` is: what a library cares about

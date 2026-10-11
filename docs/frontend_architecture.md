@@ -1886,9 +1886,11 @@ the shelf's workflow sets section) and served as `hand_made` on
   so a delete would only come back on the next read. The card's eye button, or
   Delete/Backspace on the card under the cursor (stopped before the shelf's
   file delete; it hides that one card, never a selection), calls
-  `store.hideSets`, which records
-  the group key (`model:<id>` / `missing:<name>`) under
-  `pixlstash:modelShelfHiddenSets` in `localStorage`. A line under the grid
+  `store.hideSets`, which sets
+  the group key (`model:<id>` / `missing:<name>` / `hand:<id>`) through
+  `PUT /models/workflow-sets/hidden` for the ACTIVE library (**#1869**: the
+  hide is server-side and per library, not the per-browser
+  `localStorage` flag it used to be). A line under the grid
   counts the hidden sets and toggles `store.showHiddenSets`, which draws them
   with `card.hidden` (faded covers, a "Hidden" tag, the eye button to show one
   again). The file verbs stay on the card's context menu and the bar.

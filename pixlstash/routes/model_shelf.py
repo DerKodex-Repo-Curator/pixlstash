@@ -2288,9 +2288,10 @@ def create_router(server) -> APIRouter:
         summary="Hide or show workflow sets in this library",
         description=(
             "Which sets the ACTIVE library leaves out of the grid. The key is "
-            "the set's own - a combination's sorted member ids comma-joined, "
-            "or `hand:<id>` for a hand-made set - so a derived set and a "
-            "hand-made one are hidden the same way. Per library: a set hidden "
+            "the set's own - `model:<head id>` for a set from pictures (or "
+            "`missing:<filename>` when its head is off the shelf), `hand:<id>` "
+            "for a hand-made set - so a derived set and a hand-made one are "
+            "hidden the same way. Per library: a set hidden "
             "here is still shown in another library, and hiding one thing "
             "never touches a member or a file. Returns every set the library "
             "now hides, so the client can draw the grid from one answer."

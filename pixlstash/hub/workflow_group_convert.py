@@ -1718,6 +1718,9 @@ def _carry_group_state(
         ("workflow_group_default", "address"),
         ("workflow_group_pins", None),
         ("workflow_group_picture_input", "address"),
+        # Each library's own hide rides with the id, so re-identifying a
+        # workflow does not drop it back to the machine-wide fallback (#1869).
+        ("workflow_group_hidden", "library_uuid"),
     ):
         if table == "workflow_group_pins" and both_pinned:
             if not keep:
