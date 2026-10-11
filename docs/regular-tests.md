@@ -82,6 +82,15 @@ shrinks as automated coverage grows.
 > state, which a selection-scoped dropdown has no single target for. They drop
 > out of the context menu above one picture, and the spec asserts that they do.
 
+## Move to library — `move-to-library.spec.js`
+
+| Test | Covers | Status |
+|------|--------|--------|
+| a right-clicked picture moves to the library picked, and Undo brings it back | Destination menu, move response and notice, source Scrapheap, and one Undo; temporary archive is detached after the spec | ✅ |
+
+The spec asserts the thumbnail URL shape before extracting its picture ID, so
+missing or placeholder sources fail with the actual `src` in the diagnostic.
+
 ## Picture Detail (ImageOverlay) — `overlay.spec.js` (plan §4)
 | Test | Covers | Status |
 |------|--------|--------|

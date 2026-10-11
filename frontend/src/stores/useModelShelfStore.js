@@ -1607,7 +1607,6 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
   // and again after a scan, never per filter tick.
   const workflowSets = ref({
     combinations: [],
-    noSet: [],
     handMade: [],
     setChecks: [],
   });
@@ -1668,7 +1667,6 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
       if (startedAt !== setsEpoch) return;
       workflowSets.value = {
         combinations: body.combinations,
-        noSet: body.no_set,
         handMade: body.hand_made ?? [],
         setChecks: body.set_checks ?? [],
       };
@@ -1688,9 +1686,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
    * its COVER, so a stacked row's `id` is the cover's and the rest of the run
    * lives in `memberIds`. Matching a combination's members against `row.id`
    * therefore dropped every set that reached the shelf through a non-cover step
-   * of a run - and dropped its `no_set` entry with it, so the model appeared on
-   * no card at all and the grid's empty state claimed no picture recorded it.
-   * That is the one outcome `fetch_workflow_sets` is written to prevent.
+   * of a run, so the grid's empty state claimed no picture recorded it.
    *
    * The `memberIds ?? [id]` fan-out is the same one `selectVisible` and
    * `modelsBehind` already use for the same reason.
@@ -1989,23 +1985,6 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
   );
 
   /**
-   * The shown rows no recipe in this library binds to anything.
-   *
-   * Drawn as a card of its own rather than omitted: absence of co-occurrence is
-   * not evidence, and a grid that quietly dropped them would be asserting the
-   * opposite. Intersected with `visibleRows` so `Show` applies to this card too.
-   */
-  const noSetRows = computed(() => {
-    const loose = new Set(workflowSets.value.noSet);
-    // The MEMBERS of a shown run, not the runs: a stack row is drawn as its
-    // cover, so filtering on `row.id` alone dropped every other step of every
-    // run from this card - and the card counts models rather than rows.
-    return rows.value.filter(
-      (row) => loose.has(row.id) && shownModelIds.value.has(row.id),
-    );
-  });
-
-  /**
    * Every model the set grid can show in an OPEN tray, as well as its card heads.
    *
    * **Not the same set as `shownModelIds`, which is why it exists.** A
@@ -2019,9 +1998,6 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
    * Intersected with `rows` because a verb writes a SHELF ROW: a combination can
    * name a model from a block this session has never fetched, and there is
    * nothing to rename, move or delete for one of those.
-   *
-   * The `In no set` models are deliberately NOT here: that card states a count
-   * and offers `List the N`, so there is no row on this screen to point at.
    */
   const setGridModelIds = computed(() => {
     const known = new Set(rows.value.map((row) => row.id));
@@ -3137,7 +3113,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
    * **`screenRows` and not `visibleRows`, because the shelf has two screens.**
    * On the set grid the row list is not drawn at all, so reading it there would
    * arm the bar over models that screen shows nowhere - a selection carried in
-   * from the list, or one of the `In no set` models, with Delete live over a
+   * from the list, or a model in no set, with Delete live over a
    * grid that cannot show the reader what it would take. It cuts the other way
    * too: a combination is drawn WHOLE, so a tray lists files the row list is
    * hiding, and those are on screen and must be actionable. Switching axis moves
@@ -3815,7 +3791,6 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     setsEpoch += 1;
     workflowSets.value = {
       combinations: [],
-      noSet: [],
       handMade: [],
       setChecks: [],
     };
@@ -3908,7 +3883,6 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     setGridModelIds,
     setGridRows,
     screenRows,
-    noSetRows,
     openSetKey,
     toggleSet,
     handMadeSets,

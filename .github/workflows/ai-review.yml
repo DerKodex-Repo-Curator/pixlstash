@@ -114,8 +114,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OPENROUTER.KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          # /review never chunks: the whole diff must fit in one call.
+          # One call holds MAX_MODEL_TOKENS minus the output cap: ~120k of diff.
           CONFIG.MAX_MODEL_TOKENS: "160000"
+          # A diff past that used to lose whole files (35 of 48 on a ~337k-token
+          # PR). Now it is split into calls of that same size, run side by side
+          # and merged into one review; 8 calls cover ~900k tokens of diff. A
+          # diff that fits one call is still reviewed in one.
+          PR_REVIEWER.ENABLE_LARGE_PR_CHUNKING: "true"
+          PR_REVIEWER.MAX_NUMBER_OF_CALLS: "8"
           GITHUB_ACTION_CONFIG.AUTO_REVIEW: "true"
           GITHUB_ACTION_CONFIG.AUTO_IMPROVE: "false"
           GITHUB_ACTION_CONFIG.PUSH_COMMANDS: '["/review"]'

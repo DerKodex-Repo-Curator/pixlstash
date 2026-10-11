@@ -13,8 +13,7 @@
   file's name inside an opened set, or pick **Works with** from any single
   model's right-click menu.
 - Nothing is ruled out by any of this. A pairing you have never tried simply is
-  not drawn, and the models nothing here was made with get a card of their own
-  saying so — not a verdict that they do not work. The old `None`, `Base model`,
+  not drawn — not a verdict that it does not work. The old `None`, `Base model`,
   `Folder` and `Feature` groupings are all still there under `Group`.
 - **The shelf's verbs work on the sets screen too.** Click a card to select the
   checkpoint it is named after, or a model inside an opened set to select that

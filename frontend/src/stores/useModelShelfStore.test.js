@@ -2691,10 +2691,8 @@ describe("the workflow sets", () => {
     // **`visibleRows` is not a list of models.** A run is drawn as its cover, so
     // a stacked row's `id` is the cover's and the rest live in `memberIds`.
     // Matching a combination's members on `row.id` alone dropped every set that
-    // reached the shelf through any other step - and dropped the model from
-    // `no_set` too, so it appeared on no card at all and the grid's empty state
-    // claimed no picture recorded it. That is the one outcome the payload is
-    // built to prevent.
+    // reached the shelf through any other step, so the grid's empty state
+    // claimed no picture recorded it.
     listAdapters.mockResolvedValue([
       adapter({
         id: 1,
@@ -2737,10 +2735,9 @@ describe("the workflow sets", () => {
 
     expect(store.visibleCombinations).toHaveLength(1);
     expect(store.setGroups[0].card.pictures).toBe(500);
-    expect(store.noSetRows.map((row) => row.id)).toEqual([3]);
   });
 
-  it("draws a card per base model and one for the models with no set", async () => {
+  it("draws a card per base model and none for the models with no set", async () => {
     const store = shelfWithASet();
     await store.fetchRows();
     await store.loadWorkflowSets();
@@ -2749,7 +2746,6 @@ describe("the workflow sets", () => {
       "used.st",
     ]);
     expect(store.setGroups[0].card.pictures).toBe(12);
-    expect(store.noSetRows.map((row) => row.id)).toEqual([2]);
   });
 
   it("does not refetch the sets when a filter refetches the rows", async () => {
@@ -2780,7 +2776,6 @@ describe("the workflow sets", () => {
     await store.setFilters({ adapters: false });
 
     expect(store.visibleCombinations).toEqual([]);
-    expect(store.noSetRows).toEqual([]);
   });
 
   it("answers Works with from the whole payload, not from what Show draws", async () => {
@@ -3027,12 +3022,11 @@ describe("the workflow sets", () => {
     store.selectVisible();
     expect(store.selectedRows.map((r) => r.id).sort()).toEqual([1, 2]);
 
-    // A model on no card at all: `no_set` is drawn as a count, not as a row.
+    // A model on no card at all: `no_set` is not drawn on the grid.
     fetchWorkflowSets.mockResolvedValue({ combinations: [], no_set: [1, 2] });
     await store.loadWorkflowSets({ force: true });
     store.setView({ groupBy: "workflow_set" });
 
-    expect(store.noSetRows.map((r) => r.id).sort()).toEqual([1, 2]);
     expect(store.selectedRows).toEqual([]);
     // And the ids are still held, so going back offers them again.
     expect([...store.selectedIds].sort()).toEqual([1, 2]);

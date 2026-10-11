@@ -1111,13 +1111,20 @@ class Server(
             registered_vault_path(self.hub, library, self._hub_bootstrap)
         )
 
-    def build_vault(self, image_root: str) -> Vault:
+    def build_vault(self, image_root: str, *, workers: bool = True) -> Vault:
         """Construct (but do not start) a Vault over *image_root*.
 
         Shared by startup and by switching library, so a vault opened by a
         switch is configured exactly like one opened at boot. Anything that
         diverges here is a bug that only shows up after the first switch, which
         is the hardest kind to find.
+
+        Args:
+            workers: ``False`` builds a vault that can never run background
+                work, whatever the server config says. It is how a library
+                other than the active one is opened to receive pictures:
+                closing a worker-capable vault releases the shared detection
+                and embedding models out from under the active library's tasks.
         """
         startup_forced_cpu = self._startup_check_report.get("forced_cpu", False)
         force_cpu = (
@@ -1130,9 +1137,8 @@ class Server(
             description=User().description,
             server_config_path=self._server_config_path,
             path_mapper=self.path_mapper,
-            disable_background_workers=self._server_config.get(
-                "disable_background_workers", False
-            ),
+            disable_background_workers=not workers
+            or self._server_config.get("disable_background_workers", False),
             force_cpu=bool(force_cpu),
             fast_captions=Server.DEFAULT_FAST_CAPTIONS,
             daily_snapshots_enabled=self._server_config.get("daily_snapshots", True),
