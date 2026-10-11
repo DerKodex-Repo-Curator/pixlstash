@@ -68,7 +68,9 @@ test.describe('move to library', () => {
     scrapheapBefore = await scrapheapIds(apiContext)
     await grid.goto()
     const src = await grid.thumbnails.first().locator('img').getAttribute('src')
-    const pictureId = Number(src.match(/\/thumbnails\/(\d+)\./)[1])
+    const matched = src?.match(/\/thumbnails\/(\d+)\./)
+    expect(matched, `thumbnail src was not a thumbnail URL: ${src}`).toBeTruthy()
+    const pictureId = Number(matched[1])
     const card = grid.card(pictureId)
 
     await grid.openContextMenu(card)
