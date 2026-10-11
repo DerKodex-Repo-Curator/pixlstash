@@ -1819,6 +1819,35 @@ the shelf's workflow sets section) and served as `hand_made` on
   `selectedIds`** (`changeHidden`), as the missing-key watch does for a
   missing card, so Undo or *Show them* never brings a card back lit with the
   file pill armed. With *Show them* on, the card stays, dimmed and selected.
+- **A model is hidden per library too, and it is a different verb from the
+  set's.** *Hide model* / *Hide N models* sits beside the set row on the file
+  pill's context menu (`ShelfSelectionBar`, emitting `hide-models`) and on
+  the rail's menu (`ModelsRail`), both worded by `hideModelsVerb`
+  (`utils/modelShelf.js`) and both running `store.toggleHiddenModels`: it
+  hides the selected models still shown and reads *Show … again* only when
+  every one is hidden. The store holds ONE list, `hiddenModelIds`, fed by the
+  `hidden` flag on every row a fetch brings, by `hidden_models` on the set
+  payload (so a tray can leave out a model whose block was never read) and by
+  the answer of `PUT /models/hidden`; the two reads skip the list when a hide
+  was sent or answered while they were out. `offeredRows` is `rows` less the
+  hidden ones, and everything that lists or offers starts there:
+  `visibleRows`, the rail, the slot chooser, *Fill from pictures* and *Fits*.
+  On the set grid a card named after a hidden model goes with it
+  (`visibleCombinations`), a hidden member leaves a card's tray
+  (`evidenceGroups`; the set's check is still read off the whole
+  combination), and a hand-made set's merge offer drops it
+  (`withShelfNames`). **A hand-made set keeps its own members**: the owner put
+  them there, and hiding a model edits no set. A copy of a set from pictures
+  is therefore made of the group's `allModels`, hidden members included
+  (`cloneSetFromPictures`), or the copy would not cover the card's pictures
+  and the card would stay beside it. A model that leaves the screen leaves
+  `selectedIds` with it. *Show › Hidden models*
+  (`filters.showHidden`, not restored on startup, counted by `activeCount`)
+  draws them all again, marked *Hidden*, which is where the menu's row turns
+  into the way back. Outside the shelf the same flag keeps a hidden model out
+  of the Run popup's LoRA lists and its people, *Edit LoRAs*' picker, the
+  sidebar's *Create with LoRA…* gate and the *Use a set* menu; a row that
+  already loads a hidden file still names it.
 - **A hand-made set that re-creates a set from pictures gives way to it.**
   When the owner closes the set's tray (or opens another card), a watch on
   `openSetKey` runs `yieldToTwin`, never each add: a set is built one model at
