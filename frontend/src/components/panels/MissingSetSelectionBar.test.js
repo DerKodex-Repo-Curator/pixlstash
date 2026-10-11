@@ -40,7 +40,6 @@ function selectMissing(names) {
       picture_count: 1,
       covers: [],
     })),
-    noSet: [],
     handMade: [],
   };
   store.selectAllMissing();

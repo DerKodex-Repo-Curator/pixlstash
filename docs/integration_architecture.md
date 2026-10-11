@@ -528,8 +528,8 @@ Rules neither side may drift from:
    the evidence could only reach through a basename several shelf rows answer to
    carries `ambiguous: true` and is still listed. A ComfyUI run never sets
    `ambiguous`: only unambiguous matches were stored. A client may not render a
-   missing companion as incompatible, which is why the grid and the *Works with*
-   dialog both close with that sentence in as many words.
+   missing companion as incompatible, which is why the *Works with* dialog
+   closes with that sentence in as many words.
 2. **Membership is not stored and overlaps.** A model appears in every
    combination it has run in; nothing is written, no column on `model` names a
    set, and the answer is derived per request. A client must not cache it as a
