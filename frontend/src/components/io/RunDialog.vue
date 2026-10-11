@@ -957,10 +957,13 @@
       <p v-else-if="runBlocker" :id="blockerId" class="rund-note rund-note--bad">
         {{ runBlocker }}
       </p>
-      <!-- `aria-disabled`, not `disabled`, for this dialog's own stated
-           reason: a natively-disabled button is out of the tab order, so a
-           keyboard reader could never reach the sentence saying why it is
-           inert. `onSave` does the refusing. -->
+      <!-- A look already kept is `aria-disabled`, not `disabled`, for this
+           dialog's own stated reason: a natively-disabled button is out of
+           the tab order, so a keyboard reader could never reach the sentence
+           saying why it is inert. `onSave` refuses that one. With no
+           workflow, a form still being read, or a run or a save out, it is
+           natively disabled: the recipe is made from the form, so not from
+           one that is still being put right. -->
       <AppButton
         :icon-left="keptAs ? 'check' : 'bookmark-plus-outline'"
         :disabled="!activeKey || !formRead || submitting || Boolean(saving)"
@@ -1174,13 +1177,15 @@ const loadFailedId = useId();
 const picsLabelId = useId();
 const stackId = useId();
 const stageId = useId();
-/** Bumped per open, so a slower earlier read cannot write over a later one. */
-let loadToken = 0;
 /**
  * Bumped per read of a workflow into the form: the open, a move of the
  * picker, the read after a band save. Only the newest may write any of the
  * form. Two reads of ONE workflow can be out at once (picked, left, picked
  * again), and the key cannot tell those apart.
+ *
+ * Nothing guards one open against the next: `App.vue` mounts a new popup per
+ * open, so `load()` runs once per instance. Calling it again on one instance
+ * (a retry) would need a per-open guard back.
  */
 let readAsk = 0;
 const runDialog = useRunDialogStore();
@@ -1455,18 +1460,12 @@ async function switchCard(key, keepEdits) {
   clearPicks();
   pictureInputs.value = [];
   inputsKey.value = "";
-  // The same generation the load uses. A card read still in flight when the
-  // popup is closed and reopened on another source would otherwise resolve
-  // into the new dialog and replace its card, and the pre-flight behind it
-  // would replace the new dialog's refusals with the old gesture's.
-  const token = loadToken;
   try {
-    if (await readWorkflow(key, token, keepEdits)) await runPreflight(token);
+    if (await readWorkflow(key, keepEdits)) await runPreflight();
   } catch (err) {
-    // A workflow the picker has since left is nobody's failure to be told.
-    if (token === loadToken && key === activeKey.value) {
-      loadFailed.value = errorMessage(err, "Could not read that workflow.");
-    }
+    // Only a read that is still current rethrows: a workflow the picker has
+    // since left is nobody's failure to be told.
+    loadFailed.value = errorMessage(err, "Could not read that workflow.");
   }
 }
 
@@ -1484,21 +1483,22 @@ const formRead = computed(() => formKey.value === activeKey.value);
 /**
  * Read the workflow in the picker into the form: its card, and on a run of
  * the workflow by itself its loaders and what waits on it, laid over the
- * form. False when the picker moved on, the popup was reopened or a newer
- * read began meanwhile, and then it has written nothing since: not its card,
- * not its failure.
+ * form. False when a newer read began meanwhile (the picker moved on, a save
+ * read its workflow again), and then it has written nothing since: not its
+ * card, not its failure.
  */
-async function readWorkflow(key, token, keepEdits = false) {
+async function readWorkflow(key, keepEdits = false) {
   const ask = ++readAsk;
-  const stale = () =>
-    token !== loadToken || key !== activeKey.value || ask !== readAsk;
+  // The picker's key is only written by a read (the open's own) or with a
+  // read begun at once, so the newest read is of the workflow in the picker.
+  const stale = () => ask !== readAsk;
   formKey.value = "";
   try {
     await loadCard(key, ask, { keepEdits });
     if (stale()) return false;
     if (runsWorkflowItself.value) {
       // The loaders, and what waits, are the workflow's: read for this one.
-      await loadOwn(key, token, ask);
+      await loadOwn(key, ask);
       if (stale()) return false;
       layOwn();
     }
@@ -1900,7 +1900,7 @@ function pickCheckpoint(filename) {
  * checkpoint that is not the graph's is asked about as the graph's file, and
  * that file, which fits the graph by construction, leads the offer.
  */
-async function offerCheckpoints(found, key, token) {
+async function offerCheckpoints(found, key) {
   const file = checkpointBase.value;
   if (!checkpointModel.value || checkpointFiles.value || !file) return;
   if (checkpointFix.value?.file === file) return;
@@ -1927,8 +1927,7 @@ async function offerCheckpoints(found, key, token) {
   // As the graph names it once the owner's fixes are applied, which is what
   // the server reads.
   const graphFile = inPlaceOf(checkpointModel.value.filename || file);
-  const current = () =>
-    token === loadToken && key === activeKey.value && ask === checkpointAsk;
+  const current = () => key === activeKey.value && ask === checkpointAsk;
   let answer;
   try {
     answer = await readSwap(key, graphFile, "checkpoint");
@@ -2384,9 +2383,6 @@ watch(
 /** The gesture, refused here rather than by a `disabled` nobody can reach. */
 function onSave() {
   if (keptAs.value || !activeKey.value || submitting.value) return;
-  // The recipe is made from the form, so not from one a save or a read is
-  // still putting right.
-  if (saving.value || !formRead.value) return;
   saveOpen.value = true;
 }
 
@@ -2944,7 +2940,7 @@ function readSwap(key, file, kind) {
  * (what goes with the checkpoint and the loader can load). A row nothing
  * answers for stays as it was: text, or the checkpoint's typed box.
  */
-function loadModelChoices(key, token, read) {
+function loadModelChoices(key, read) {
   for (const row of Object.keys(modelChoices)) delete modelChoices[row];
   if (!runsWorkflowItself.value || !key) return;
   const asks = modelRows.value
@@ -2962,7 +2958,7 @@ function loadModelChoices(key, token, read) {
   for (const ask of asks) {
     readSwap(key, ask.file, ask.kind)
       .then((answer) => {
-        if (token !== loadToken || key !== activeKey.value || read !== readAsk) return;
+        if (read !== readAsk) return;
         // Typed over while the read was out: the owner's name stays in its
         // box, which a list arriving under the caret would take away.
         if (ask.row === CHECKPOINT_ROW && checkpointTyped.value) return;
@@ -3194,7 +3190,6 @@ function leaveBand() {
   verbs.value = null;
   bandError.value = "";
   bandNote.value = "";
-  bandLive.value = "";
   naming.value = false;
 }
 
@@ -3262,9 +3257,8 @@ async function keep(verb, write) {
   // Once drawn: the sentence comes with `saving`.
   const waitInFooter = () => void nextTick(() => runWaitLine.value?.focus());
   if (waited) waitInFooter();
-  const token = loadToken;
   const from = activeKey.value;
-  const here = (key) => token === loadToken && key === activeKey.value;
+  const here = (key) => key === activeKey.value;
   try {
     let saved = null;
     try {
@@ -3298,7 +3292,7 @@ async function keep(verb, write) {
         if (!here(from)) return;
       }
       activeKey.value = at = saved.key;
-      if (!(await readWorkflow(at, token))) return;
+      if (!(await readWorkflow(at))) return;
     } catch (err) {
       console.warn(`[run] saved, but could not read ${saved.key} again`, err);
       if (!here(at)) return;
@@ -3313,7 +3307,7 @@ async function keep(verb, write) {
     // line it lands on is read then, so nothing else announces it.
     await nextTick();
     bandNoteLine.value?.focus?.();
-    await runPreflight(token);
+    await runPreflight();
   } finally {
     saving.value = "";
   }
@@ -4047,11 +4041,11 @@ function ownSlots(chain) {
  * was made against. Neither holds the popup back: without the loaders there
  * are no LoRA rows, and without the other there is no band.
  */
-async function loadOwn(key, token, ask) {
+async function loadOwn(key, ask) {
   chainSlots.value = [];
   changesState.value = null;
   if (!runsWorkflowItself.value || !key) return;
-  loadModelChoices(key, token, ask);
+  loadModelChoices(key, ask);
   const [chain, state] = await Promise.all([
     getLoraChain(key).catch((err) => {
       console.warn(`[run] could not read the LoRA loaders of ${key}`, err);
@@ -4062,7 +4056,7 @@ async function loadOwn(key, token, ask) {
       return null;
     }),
   ]);
-  if (token !== loadToken || key !== activeKey.value || ask !== readAsk) return;
+  if (ask !== readAsk) return;
   chainSlots.value = ownSlots(chain);
   changesState.value = state;
 }
@@ -4254,16 +4248,13 @@ async function loadAdapters() {
  * quietly went back to 8 is the thing the design asks to be told about.
  */
 async function loadCard(key, ask, { keepEdits = false } = {}) {
-  // A popup reopened on another source while this read was out has its own
-  // card; this one's answer must not replace it.
-  const token = loadToken;
   formOptions.value = {};
   formNodeNames.value = {};
   // Beside the card, never ahead of it: the options only turn a typed box
   // into a list, so a ComfyUI that does not answer leaves the boxes typed.
   getWorkflowFormInputs(key)
     .then((body) => {
-      if (token === loadToken && key === activeKey.value && ask === readAsk) {
+      if (ask === readAsk) {
         formOptions.value = optionsByAddress(body.nodes);
         formNodeNames.value = nodesByAddress(body.nodes);
       }
@@ -4272,9 +4263,10 @@ async function loadCard(key, ask, { keepEdits = false } = {}) {
       console.warn(`[run] could not read the choices of ${key}`, err);
     });
   const detail = await getWorkflowCard(key);
-  // Nor one the picker has since left: two moves in a row answer in either
-  // order, and the slower must not put its card under the faster's key.
-  if (token !== loadToken || key !== activeKey.value || ask !== readAsk) return;
+  // A read the picker has since left writes nothing: two moves in a row
+  // answer in either order, and the slower must not put its card under the
+  // faster's key.
+  if (ask !== readAsk) return;
   const next = detail?.card || null;
   pins.value = detail?.pins ?? null;
   modelFixes.value = detail?.model_fixes ?? [];
@@ -4325,13 +4317,13 @@ async function loadCard(key, ask, { keepEdits = false } = {}) {
 /** Bumped per pre-flight, so only the newest one's answer is kept. */
 let preflightAsk = 0;
 
-async function runPreflight(token = loadToken) {
+async function runPreflight() {
   // Asked on every edit, around every switch and after every save, and
   // answered in any order: an older answer is about a form that has moved on,
   // and nothing of it (the refusals, the picture rows a pin is written from,
   // the notices, the prompt, a checkpoint offer) may land over a newer one's.
   const ask = (preflightAsk += 1);
-  const mine = () => token === loadToken && ask === preflightAsk;
+  const mine = () => ask === preflightAsk;
   if (!activeKey.value) {
     reasons.value = [];
     bypassed.value = [];
@@ -4366,11 +4358,11 @@ async function runPreflight(token = loadToken) {
         ...choiceFixes.value,
         ...fresh.map((choice) => ({ ...choice, chosen: choice.replacement })),
       ];
-      await runPreflight(token);
+      await runPreflight();
       return;
     }
     reasons.value = all;
-    offerCheckpoints(all, askedFor, token).catch((err) =>
+    offerCheckpoints(all, askedFor).catch((err) =>
       console.warn(`[run] could not offer checkpoints for ${askedFor}`, err),
     );
     bypassed.value = (answer?.groups || []).flatMap((group) => [
@@ -4410,10 +4402,9 @@ async function runPreflight(token = loadToken) {
 }
 
 async function load() {
-  const token = (loadToken += 1);
   const ask = ++readAsk;
   // The open's own writes of the form are a read's, like any other.
-  const mine = () => token === loadToken && ask === readAsk;
+  const mine = () => ask === readAsk;
   // Everything else starts empty: App.vue mounts a fresh popup per source.
   loading.value = true;
   // The caller's own checkbox, explicit false included; else the popup decides.
@@ -4459,7 +4450,7 @@ async function load() {
     if (!mine()) return;
     if (offersPerson.value) void loadPeople();
     if (runsWorkflowItself.value && key) {
-      await loadOwn(key, token, ask);
+      await loadOwn(key, ask);
       if (!mine()) return;
     }
     layOwn();
@@ -4481,7 +4472,7 @@ async function load() {
     }
   } finally {
     // The open's, not the read's: a read that replaced it does not end it.
-    if (token === loadToken) loading.value = false;
+    loading.value = false;
   }
 }
 
