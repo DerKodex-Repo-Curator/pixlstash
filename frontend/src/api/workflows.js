@@ -515,12 +515,23 @@ export async function discardWorkflowChanges(workflowId) {
  * `dry_run: true` answers which verbs are open for that combination and
  * writes nothing. A 409's `detail` is the reason to print.
  *
+ * A save clears what waited, having written it. One with `from_run` wrote
+ * none of it, so it clears only what waited when the run was made and keeps
+ * what was edited in the Workflow tab after it, waiting on the version the
+ * save made. The answer says what became of those: `still_waiting` is how
+ * many changes are left waiting on the workflow (0 for every other save),
+ * and `not_kept` is the ones dropped because the graph this save wrote no
+ * longer has the loader they name, a `WorkflowChanges`, or null when there
+ * are none. A waiting set that was already stale is left as it is, and is
+ * counted whole in `still_waiting`.
+ *
  * @param {string} workflowId
  * @param {{changes?: Object, version?: ?number, from_run?: boolean,
  *   dry_run?: boolean}} [body]
  * @returns {Promise<{workflow_id: string, version: ?number,
  *   new_workflow: boolean, dry_run: boolean, save: ?Object,
- *   save_as_new: ?Object, left_out: Array<Object>}>}
+ *   save_as_new: ?Object, still_waiting: number, not_kept: ?Object,
+ *   left_out: Array<Object>}>}
  */
 export async function saveWorkflow(workflowId, body = {}) {
   return unwrap(apiClient.post(wf(workflowId, "/save"), body));
@@ -530,13 +541,18 @@ export async function saveWorkflow(workflowId, body = {}) {
  * Save as new: the same graph stored as a new manual workflow called `name`.
  * What is stored is what `saveWorkflow` would write: what waits with `changes`
  * on top, or `changes` alone with `from_run`. This workflow is left as it was
- * and what waited on it is cleared.
+ * and what waited on it is cleared, but for a save with `from_run`, which
+ * clears only what waited when the run was made: `still_waiting` is how many
+ * changes are left waiting on THIS workflow, the one saved from (0 for every
+ * other save). `not_kept` is always null here, since this workflow's graph
+ * is not written and can still take every change that waits on it.
  *
  * @param {string} workflowId
  * @param {{name: string, changes?: Object, from_run?: boolean,
  *   dry_run?: boolean}} body
  * @returns {Promise<{workflow_id: string, name: ?string, new_workflow: boolean,
- *   version: ?number, left_out: Array<Object>}>}
+ *   version: ?number, still_waiting: number, not_kept: null,
+ *   left_out: Array<Object>}>}
  */
 export async function saveWorkflowAsNew(workflowId, body) {
   return unwrap(apiClient.post(wf(workflowId, "/save-as-new"), body));
