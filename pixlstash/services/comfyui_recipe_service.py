@@ -224,7 +224,9 @@ def fetch_object_info(base_url: str) -> dict:
     time from a browser) cost six builds of a multi-megabyte answer in a row.
     Nothing outlives the GET: a request after it finishes asks ComfyUI again,
     so the answer is still what ComfyUI has now. Each caller parses its own
-    copy, because callers edit the map they are handed.
+    copy, because callers edit the map they are handed. (The one map the
+    routes keep for a minute, ``routes/comfyui._read_object_info`` with
+    ``cached``, is the exception: its readers share it and must not.)
 
     Args:
         base_url: The ComfyUI base URL, without a trailing slash.

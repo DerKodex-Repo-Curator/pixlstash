@@ -2259,9 +2259,13 @@ can no longer see.
   `missing_models` entry in the `checkpoints` or `diffusion_models` folder.
   - **Asked once per card**, keyed on the card alone: other writes answer
     with a new `detail` too, and none of them is a reason to ask again.
-  - **Each ask is a fresh `object_info` read**, so it waits 250 ms for the
-    selection to settle; a superseded answer is dropped, and an unmounted rail
-    asks nothing.
+  - **Asked the moment the detail is in, with `?cached=true`**: the server
+    judges against the `object_info` it last read (a minute at most) instead
+    of fetching megabytes per card, so the mark can trail a model installed
+    in the last minute; the Run popup's own check never does. The ask used to wait 250 ms and then read ComfyUI afresh, which
+    kept the rows changing most of a second after they were drawn. It only
+    draws; Run… asks without the flag. A superseded answer is dropped, and
+    an unmounted rail asks nothing more.
   - **Once ComfyUI has answered, its answer decides.** A checkpoint the card
     cannot name but ComfyUI has is not missing. Until then, and when it cannot
     be asked, the card decides: `checkpointMissing` (`utils/workflowCard.js`,
@@ -2328,7 +2332,11 @@ can no longer see.
   options come from `GET …/form-inputs`, read beside the detail on every
   selection (`formOptions`, `utils/workflowPins.js::choicesFor`, which keeps
   the row's own value listed where this ComfyUI no longer offers it); a
-  failed read leaves the rows typed. An on-or-off value is the same list
+  failed read leaves the rows typed. **The rows wait for that read**
+  (`formHeld`, "Reading its parameters…"; a workflow with no rows waits for
+  nothing), so a box is never drawn and then
+  swapped for a list; after `FORM_HOLD_MS` (1 s) of a ComfyUI slow to answer
+  they are drawn typed. A quiet re-read holds nothing. An on-or-off value is the same list
   with `true` and `false`, written as the boolean. The Run popup reads the
   same route for its set-each-run rows, and its `coerce` turns the two words
   into the boolean, which as text ComfyUI would read as on.
@@ -2506,9 +2514,12 @@ can no longer see.
     per entry of `default_recipe.models`. A Wan 2.2 pair is two rows under
     one *Checkpoints* label, since a pick is one loader's, and `row.name`
     tells them apart to a screen reader. The options come from
-    `GET …/model-swap?replacing=<file>&slot_kind=`, which answers for a file
+    `GET …/model-swap?replacing=<file>&slot_kind=&cached=true` (`cached`
+    as the pre-flight's: the tab asks on every selection, the Run popup asks
+    without it), which answers for a file
     that is not missing too, so `checkInstalled` asks it **once per row's
-    file per selection** (after its 250 ms settle), not only for a missing
+    file per selection** (once the pre-flight has answered: a missing file is
+    asked about by the graph's spelling of it), not only for a missing
     one, and also when ComfyUI cannot be asked what is missing. The saved
     file is the first option, so choosing it takes the change out; a pick the
     read does not list (one a set filled in) is listed too. A pick is
@@ -2540,7 +2551,11 @@ can no longer see.
     default-recipe LoRA joined to one by digest) carries its slot (`node_id`,
     `field`). Its strength is a number field, written on change as a `loras`
     entry naming the same LoRA; that needs the shelf's digest, so a loader
-    holding a file the shelf does not know keeps its strength as text. Its ×
+    holding a file the shelf does not know keeps its strength as text. The
+    field is its own component (`WorkflowStrengthInput.vue`): Vue writes a
+    bound `value` back on every render of the template an input sits in, so
+    in the tab's own template any answer landing mid-keystroke put the row's
+    number back and Enter changed nothing. Its ×
     is `skip_loras`: the row stays until the save, struck through, marked
     *Removed*, with *Put back*, and focus moves with the control (×, then
     *Put back*, then × again). A default LoRA no loader matches is text.

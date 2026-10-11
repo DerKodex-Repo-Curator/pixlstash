@@ -32,6 +32,7 @@ import os
 import sqlite3
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi.testclient import TestClient
@@ -1420,6 +1421,51 @@ class TestAnEditorGraphIsRecognised:
         comfyui_module._forget_cached_object_info()
         client.get(f"{API}/comfyui/pictures/{pic_id}/recipe?preflight=false")
         assert len(attempts) == 2
+
+
+def test_cached_readers_arriving_together_fetch_the_map_once(monkeypatch):
+    """Selecting a workflow asks several routes at once, on a cold cache too.
+
+    Each used to read the map for itself; now the first reads it and the rest
+    wait for its answer, which is the one object the cache holds.
+    """
+    fetches = []
+
+    def slow(url):
+        fetches.append(url)
+        # Long enough that every thread below is asking before this answers.
+        time.sleep(0.2)
+        return {"KSampler": {}}
+
+    monkeypatch.setattr(comfyui_module, "fetch_object_info", slow)
+    url = "http://127.0.0.1:8188"
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        answers = list(
+            pool.map(
+                lambda _: comfyui_module._read_object_info(url, cached=True),
+                range(4),
+            )
+        )
+    assert answers == [({"KSampler": {}}, None)] * 4
+    assert len(fetches) == 1, fetches
+
+
+def test_a_read_made_now_is_the_callers_own_and_never_the_cached_map(monkeypatch):
+    """A run edits the map it is handed, so it is never the one being drawn from.
+
+    The control for the cached readers sharing one object: a read without
+    ``cached`` neither takes that object nor leaves its own in its place.
+    """
+    monkeypatch.setattr(
+        comfyui_module, "fetch_object_info", lambda url: {"KSampler": {}}
+    )
+    url = "http://127.0.0.1:8188"
+    drawn = comfyui_module._read_object_info(url, cached=True)[0]
+    mine = comfyui_module._read_object_info(url)[0]
+    assert mine is not drawn
+    mine["Edited"] = {}
+    assert comfyui_module._read_object_info(url, cached=True)[0] is drawn
+    assert "Edited" not in drawn
 
 
 class TestTheOpenLinkNamesTheWorkflowOnScreen:

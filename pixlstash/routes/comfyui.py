@@ -3,6 +3,7 @@ import hashlib
 import json
 import math
 import os
+import threading
 import time
 from collections import Counter
 from copy import deepcopy
@@ -1492,11 +1493,12 @@ def _editor_graph_topology(rebuilt: dict | None, editor_graph: dict) -> str | No
 
 
 # How long a fetched `/object_info` map may be reused, and by whom. It is
-# several megabytes on an install with a few node packs, so the one caller that
-# asks as fast as a person presses an arrow key - converting the editor graph
-# of each picture the lightbox steps onto - cannot fetch it per step. A minute
-# is short enough that a node or model installed while the app is open shows up
-# on the next look rather than after a restart.
+# several megabytes on an install with a few node packs, so the callers that
+# ask as fast as a person presses an arrow key - converting the editor graph
+# of each picture the lightbox steps onto, drawing each workflow the inspector
+# selects - cannot fetch it per step. A minute is short enough that a node or
+# model installed while the app is open shows up on the next look rather than
+# after a restart.
 OBJECT_INFO_CACHE_TTL_S = 60.0
 # `{url: (read_at, object_info, error)}`. A FAILURE is cached too: the read this
 # serves is fired per arrow-key, `OBJECT_INFO_TIMEOUT_S` is 15 seconds, and the
@@ -1505,6 +1507,13 @@ OBJECT_INFO_CACHE_TTL_S = 60.0
 # the API down with it. A ComfyUI that comes back is picked up within the
 # minute.
 _object_info_cache: dict[str, tuple[float, dict | None, str | None]] = {}
+# One cold read at a time: selecting a workflow asks several routes at once,
+# and `fetch_object_info` shares the GET between them but hands each its own
+# parse of the megabytes. Held, the rest wait for the first and take the one
+# map it cached. The map is shared, so a cached reader must not edit it.
+# ponytail: one lock for every ComfyUI URL; per-URL locks if a hub ever serves
+# several ComfyUIs at once.
+_object_info_reading = threading.Lock()
 
 
 def _forget_cached_object_info() -> None:
@@ -1522,36 +1531,49 @@ def _read_object_info(
     can be applied *before* the graph is judged.
 
     ``cached`` reuses the last minute's answer - the map OR the failure; see
-    the cache's own note for why a failure counts. **Only for reading an editor
-    graph**, which needs the map to be readable at all; never for deciding
-    whether a graph may run, where the question is what ComfyUI has now.
+    the cache's own note for why a failure counts. **Only for drawing**: an
+    editor graph, which needs the map to be readable at all, and what the
+    inspector shows of a workflow. Never for deciding whether a graph may run,
+    where the question is what ComfyUI has now. The cached map is one object
+    handed to every such reader, so none of them may edit it; a read without
+    ``cached`` is the caller's own copy.
     """
-    now = time.monotonic()
     if cached:
-        entry = _object_info_cache.get(comfyui_url)
-        if entry is not None and (now - entry[0]) < OBJECT_INFO_CACHE_TTL_S:
-            return entry[1], entry[2]
-    result: tuple[dict | None, str | None]
+        with _object_info_reading:
+            return _read_cached_object_info(comfyui_url)
+    return _fetch_object_info(comfyui_url)
+
+
+def _fetch_object_info(comfyui_url: str) -> tuple[dict | None, str | None]:
+    """Ask ComfyUI now: ``(object_info, None)`` or ``(None, why)``."""
     try:
-        result = (fetch_object_info(comfyui_url), None)
+        return fetch_object_info(comfyui_url), None
     except RuntimeError as exc:
         logger.info(
             "[comfyui] Recipe pre-flight skipped, ComfyUI not reachable at %s: %s",
             comfyui_url,
             exc,
         )
-        result = (None, str(exc))
-    if cached:
-        # Pruned on write rather than on a timer: these maps are megabytes, the
-        # keys are ComfyUI URLs, and one the owner has changed away from must
-        # not be pinned for the life of the process.
-        for url, entry in list(_object_info_cache.items()):
-            if (now - entry[0]) >= OBJECT_INFO_CACHE_TTL_S:
-                del _object_info_cache[url]
-        # Stamped when the answer ARRIVED, not when the request left: a fetch
-        # can take `OBJECT_INFO_TIMEOUT_S`, and stamping it `now` would file an
-        # entry a quarter of its own lifetime old.
-        _object_info_cache[comfyui_url] = (time.monotonic(), result[0], result[1])
+        return None, str(exc)
+
+
+def _read_cached_object_info(comfyui_url: str) -> tuple[dict | None, str | None]:
+    """The last minute's answer for *comfyui_url*, fetched when there is none."""
+    now = time.monotonic()
+    entry = _object_info_cache.get(comfyui_url)
+    if entry is not None and (now - entry[0]) < OBJECT_INFO_CACHE_TTL_S:
+        return entry[1], entry[2]
+    result = _fetch_object_info(comfyui_url)
+    # Pruned on write rather than on a timer: these maps are megabytes, the
+    # keys are ComfyUI URLs, and one the owner has changed away from must not
+    # be pinned for the life of the process.
+    for url, entry in list(_object_info_cache.items()):
+        if (now - entry[0]) >= OBJECT_INFO_CACHE_TTL_S:
+            del _object_info_cache[url]
+    # Stamped when the answer ARRIVED, not when the request left: a fetch can
+    # take `OBJECT_INFO_TIMEOUT_S`, and stamping it `now` would file an entry
+    # a quarter of its own lifetime old.
+    _object_info_cache[comfyui_url] = (time.monotonic(), result[0], result[1])
     return result
 
 

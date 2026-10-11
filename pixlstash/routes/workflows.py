@@ -6157,6 +6157,7 @@ def create_router(server) -> APIRouter:
         *,
         extract: bool = False,
         saving: Literal["over", "new"] | None = None,
+        cached: bool = False,
     ) -> Plan:
         """Resolve, judge and prepare every run this body asks for.
 
@@ -6186,6 +6187,9 @@ def create_router(server) -> APIRouter:
         the parameters the owner typed, and the request's own, out of the
         graph: they are rows of the default recipe and keep applying over it.
         A new workflow has no such rows, so it takes them all in its graph.
+
+        *cached* is a pre-flight asked only to draw its answer: ComfyUI's
+        ``object_info`` may be the last minute's. Never a run's.
         """
         hub = _hub()
         opening = opening or saving is not None
@@ -6253,11 +6257,15 @@ def create_router(server) -> APIRouter:
                 recipe_loras = default_loras
         configured = bool(getattr(user, "comfyui_url", None))
         comfyui_url = _comfyui_url(user)
-        object_info, object_info_error = (
-            (None, "not asked: the workflow is extracted, not run")
-            if extract
-            else _read_object_info(comfyui_url)
-        )
+        if extract:
+            object_info, object_info_error = (
+                None,
+                "not asked: the workflow is extracted, not run",
+            )
+        elif cached:
+            object_info, object_info_error = _read_object_info(comfyui_url, cached=True)
+        else:
+            object_info, object_info_error = _read_object_info(comfyui_url)
 
         if body.seed_mode == "fixed" and body.seed is None:
             raise HTTPException(
@@ -6955,9 +6963,21 @@ def create_router(server) -> APIRouter:
         ),
         response_model=RunPreflight,
     )
-    def preflight_run(request: Request, body: RunRequest = Body(...)):
+    def preflight_run(
+        request: Request,
+        body: RunRequest = Body(...),
+        cached: bool = Query(
+            False,
+            description=(
+                "Answer from ComfyUI's object_info as last read, up to a "
+                "minute ago, instead of reading it again. For a screen that "
+                "only shows the answer; a check made before a run leaves it "
+                "off."
+            ),
+        ),
+    ):
         server.auth.ensure_secure_when_required(request)
-        plan = _plan(request, body)
+        plan = _plan(request, body, cached=cached)
         return RunPreflight(
             # `ok` is "the run would submit everything this resolved to", which
             # is not "no group has a reason": a group the owner consented to
@@ -8513,6 +8533,7 @@ def create_router(server) -> APIRouter:
         index: tuple,
         replacing: str,
         kind: str | None,
+        cached: bool = False,
     ) -> tuple[list[ModelFixCandidate], str | None, bool | None]:
         """What the Workflow tab may offer in place of *replacing*.
 
@@ -8646,7 +8667,15 @@ def create_router(server) -> APIRouter:
         narrowed = base_model is not None if kind == FILE_CHECKPOINT else None
         if not candidates and not wider:
             return [], "none_go_with_it", narrowed
-        object_info, error = _read_object_info(_comfyui_url(_user(request)))
+        if cached:
+            # The inspector's ask, once per model row of every workflow it
+            # selects: what each loader lists comes from the map already
+            # held. A pick made from it is checked by the run that loads it.
+            object_info, error = _read_object_info(
+                _comfyui_url(_user(request)), cached=True
+            )
+        else:
+            object_info, error = _read_object_info(_comfyui_url(_user(request)))
 
         def loadable(candidates, info, log=True):
             """The candidates every loader naming the file can load, given *info*."""
@@ -8738,6 +8767,14 @@ def create_router(server) -> APIRouter:
         checkpoint_id: int | None = None,
         replacing: str | None = Query(None, min_length=1, max_length=MAX_VALUE_LENGTH),
         slot_kind: Literal["checkpoint", "vae", "text_encoder"] | None = None,
+        cached: bool = Query(
+            False,
+            description=(
+                "With replacing: read what each loader lists from ComfyUI's "
+                "object_info as last read, up to a minute ago, instead of "
+                "reading it again. For a screen that asks on every selection."
+            ),
+        ),
     ):
         server.auth.ensure_secure_when_required(request)
         hub = _hub()
@@ -8786,6 +8823,7 @@ def create_router(server) -> APIRouter:
                 index,
                 replacing,
                 slot_kind,
+                cached=cached,
             )
             return options
         if checkpoint_id is None:

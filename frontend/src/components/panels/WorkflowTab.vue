@@ -612,11 +612,12 @@
               >
               <!-- The strength is edited where it is read. Only a loader the
                    graph has, holding a LoRA the shelf knows, can be named in
-                   a change; any other keeps its strength as text. -->
-              <input
+                   a change; any other keeps its strength as text. A
+                   component, so an answer landing while a number is half
+                   typed does not put the row's back. -->
+              <WorkflowStrengthInput
                 v-if="lora.canStrength"
                 class="wftab-strength"
-                type="number"
                 step="0.05"
                 min="-10"
                 max="10"
@@ -624,7 +625,7 @@
                 :disabled="!canEdit"
                 :aria-label="`Strength of ${lora.label}`"
                 data-testid="wftab-lora-strength"
-                @change="setLoraStrength(lora, $event.target.value, $event.target)"
+                @change="(raw, field) => setLoraStrength(lora, raw, field)"
               />
               <span v-else-if="lora.strengthText" class="wftab-chain-strength">{{
                 lora.strengthText
@@ -753,7 +754,10 @@
             @click="exposeOpen = true"
           />
         </div>
-        <p v-if="detailPending" class="wftab-note wftab-quiet">
+        <p
+          v-if="detailPending || (formHeld && defaults.length)"
+          class="wftab-note wftab-quiet"
+        >
           Reading its parameters…
         </p>
         <p v-else-if="detailFailed" class="wftab-note wftab-quiet">
@@ -1242,6 +1246,7 @@ import WorkflowDefaultRow from "./WorkflowDefaultRow.vue";
 import WorkflowStarChart from "./WorkflowStarChart.vue";
 import WorkflowLoraPile from "./WorkflowLoraPile.vue";
 import WorkflowRecipesTab from "./WorkflowRecipesTab.vue";
+import WorkflowStrengthInput from "./WorkflowStrengthInput.vue";
 import WorkflowUseSetMenu from "./WorkflowUseSetMenu.vue";
 import WorkflowVersionMenu from "./WorkflowVersionMenu.vue";
 
@@ -1607,9 +1612,6 @@ const MODEL_ROWS = {
 /** What the pre-flight reports for a name the hub forgot: names no file. */
 const FORGOTTEN_MODEL = "(forgotten model)";
 
-/** How long a selection has to settle before ComfyUI is asked about it. */
-const PREFLIGHT_SETTLE_MS = 250;
-
 /**
  * The base-model files the run pre-flight says ComfyUI does not have.
  *
@@ -1622,7 +1624,7 @@ const missingByKind = ref({});
 const missingBaseFiles = computed(() => missingByKind.value.checkpoint ?? []);
 const preflightAnswered = ref(false);
 let installedCheck = 0;
-// A rail that has closed asks nothing: an ask still settling is superseded.
+// A rail that has closed asks nothing more: an ask still out is superseded.
 onBeforeUnmount(() => {
   installedCheck += 1;
 });
@@ -2017,6 +2019,27 @@ const formPending = ref(false);
 const formFailed = ref("");
 const exposeOpen = ref(false);
 
+/**
+ * Whether the parameter rows are waiting for their choices. A row is a plain
+ * box until ComfyUI's list for it is in, and a box that turns into a
+ * drop-down after it was drawn is worse than a row drawn a moment later. Only
+ * for `FORM_HOLD_MS`: a ComfyUI that is slow to answer leaves boxes, which
+ * still set the value.
+ */
+const formHeld = ref(false);
+const FORM_HOLD_MS = 1000;
+let formHold = 0;
+function holdForm(held) {
+  clearTimeout(formHold);
+  formHeld.value = held;
+  if (held) {
+    formHold = setTimeout(() => {
+      formHeld.value = false;
+    }, FORM_HOLD_MS);
+  }
+}
+onBeforeUnmount(() => clearTimeout(formHold));
+
 /** What ComfyUI offers for each parameter that is a choice there. */
 const formOptions = computed(() => optionsByAddress(formNodes.value));
 const formNodeNames = computed(() => nodesByAddress(formNodes.value));
@@ -2056,6 +2079,7 @@ async function loadFormInputs(key, { quiet = false } = {}) {
   if (!quiet) {
     formNodes.value = [];
     formFailed.value = "";
+    holdForm(Boolean(key));
   }
   if (!key) {
     formPending.value = false;
@@ -2076,7 +2100,10 @@ async function loadFormInputs(key, { quiet = false } = {}) {
         ? "PixlStash has no graph for this workflow, so it has no nodes to pick from."
         : errorMessage(err, "Could not read this workflow's nodes just now.");
   } finally {
-    if (read === formRead) formPending.value = false;
+    if (read === formRead) {
+      formPending.value = false;
+      holdForm(false);
+    }
   }
 }
 
@@ -4056,14 +4083,15 @@ watch(
 );
 
 /**
- * Ask the run pre-flight whether the base model loads, once per card./**
  * Ask the run pre-flight whether the base model loads, once per card.
  *
  * Keyed on the card alone: every write answers with a new `detail` too, and a
- * pin toggle is no reason to ask ComfyUI again. Each ask is a fresh
- * `object_info` read, so it waits for the selection to settle - arrowing across
- * the grid asks once, not per card - and a superseded answer is dropped. A
- * failed or unanswerable check leaves the card's own answer standing.
+ * pin toggle is no reason to ask ComfyUI again. Asked the moment the detail is
+ * in, and `cached`: the server answers from the `object_info` it last read
+ * rather than fetching megabytes per card, which is what kept the rows
+ * changing most of a second after they were drawn. This only draws; Run…
+ * asks afresh. A superseded answer is dropped, and a failed or unanswerable
+ * check leaves the card's own answer standing.
  */
 watch(
   () => (detail.value ? selectedKey.value : null),
@@ -4080,15 +4108,11 @@ async function checkInstalled(key, { quiet = false } = {}) {
     replacementsByFile.value = {};
   }
   if (!key) return;
-  if (!quiet) {
-    await new Promise((resolve) => setTimeout(resolve, PREFLIGHT_SETTLE_MS));
-    if (check !== installedCheck) return;
-  }
   try {
-    const answer = await preflightWorkflowRun({
-      workflow_id: key,
-      values: [],
-    });
+    const answer = await preflightWorkflowRun(
+      { workflow_id: key, values: [] },
+      { cached: true },
+    );
     if (check !== installedCheck || !stillOn(key)) return;
     preflightAnswered.value = true;
     const missing = (answer?.groups ?? [])
@@ -4125,7 +4149,7 @@ async function checkInstalled(key, { quiet = false } = {}) {
   ];
   const results = await Promise.allSettled(
     asks.map(([kind, file]) =>
-      readModelSwap(key, { replacing: file, slotKind: kind }),
+      readModelSwap(key, { replacing: file, slotKind: kind, cached: true }),
     ),
   );
   if (check !== installedCheck || !stillOn(key)) return;

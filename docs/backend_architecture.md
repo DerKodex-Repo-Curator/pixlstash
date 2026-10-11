@@ -9589,7 +9589,10 @@ route since #1410. The pieces, all called from `_plan` / `_submit_every` in
 are the detect-then-patch pair `detect_seed_targets`/`apply_seeds` and
 `detect_lora_targets`/`apply_adapter` already are, and they are wired into
 `_plan` in [`routes/workflows.py`](../pixlstash/routes/workflows.py) — one site,
-so `POST /workflows/run/preflight` and `POST /workflows/run` can never disagree.
+so `POST /workflows/run/preflight` and `POST /workflows/run` can never disagree
+about the same `object_info`. (A pre-flight asked with `?cached=true`, the
+Workflow tab's on every selection, is judged against the map read up to a
+minute ago, so it can trail a run's own check by that much; it only draws.)
 
 - **Detect is `preflight_prompt`'s `missing_models` and nothing else**, which is
   the point: a swap aimed anywhere else would patch a field ComfyUI was happy

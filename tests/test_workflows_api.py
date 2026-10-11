@@ -9220,6 +9220,34 @@ def test_the_run_reads_object_info_itself_rather_than_a_cached_map(runnable):
     assert all(not call.get("cached") for call in asked), asked
 
 
+def test_a_preflight_only_drawn_may_answer_from_the_cached_map(runnable):
+    """``?cached=true`` is the Workflow tab's ask, made on every selection.
+
+    It marks a row as missing and submits nothing, so it may be judged against
+    the map the server already holds instead of fetching megabytes per
+    workflow looked at. Without the flag the pre-flight is Run's own check and
+    reads ComfyUI now, as the run after it does.
+    """
+    asked = []
+
+    def spy(url, **kwargs):
+        asked.append(kwargs)
+        return json.loads(json.dumps(RUN_OBJECT_INFO)), None
+
+    runnable.monkeypatch.setattr(workflows_routes, "_read_object_info", spy)
+    body = {"workflow_id": RUN_WF, "values": []}
+    r = runnable.owner.post(
+        f"{API}/workflows/run/preflight", params={"cached": "true"}, json=body
+    )
+    assert r.status_code == 200, r.text
+    assert asked and all(call.get("cached") for call in asked), asked
+
+    asked.clear()
+    r = runnable.owner.post(f"{API}/workflows/run/preflight", json=body)
+    assert r.status_code == 200, r.text
+    assert asked and not any(call.get("cached") for call in asked), asked
+
+
 def test_a_missing_node_pack_is_reported_by_name(runnable):
     info = json.loads(json.dumps(RUN_OBJECT_INFO))
     info.pop("LoraLoader")
@@ -15168,9 +15196,13 @@ def test_the_replacements_go_with_the_checkpoint_and_load_in_the_loader(cloneabl
             }
         }
     }
-    cloneable.monkeypatch.setattr(
-        workflows_routes, "_read_object_info", lambda url: (info, None)
-    )
+    reads = []
+
+    def read_map(url, cached=False):
+        reads.append(cached)
+        return info, None
+
+    cloneable.monkeypatch.setattr(workflows_routes, "_read_object_info", read_map)
 
     def offered(replacing, **params):
         r = cloneable.owner.get(
@@ -15188,6 +15220,15 @@ def test_the_replacements_go_with_the_checkpoint_and_load_in_the_loader(cloneabl
     )["id"]
     assert offered("test-vae-fp8.safetensors") == (["test-vae-bf16.safetensors"], None)
     assert asked == [shelf_id], "evidence asked about another checkpoint"
+    # Read now, as the Run popup's rows are. The inspector asks this once per
+    # model row of every workflow selected and says `cached`: the same offer,
+    # from the map the server already holds.
+    assert reads == [False], reads
+    assert offered("test-vae-fp8.safetensors", cached="true") == (
+        ["test-vae-bf16.safetensors"],
+        None,
+    )
+    assert reads == [False, True], reads
     assert (
         cloneable.owner.get(
             f"{API}/workflows/{RUN_WF}/model-swap",

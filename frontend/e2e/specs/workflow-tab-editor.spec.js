@@ -780,7 +780,9 @@ test.describe("rows as editors", () => {
     await saved.getByRole("button", { name: `Put Checkpoint back to ${CKPT_NAME}` }).click();
     await expect(bar(page)).toBeHidden();
     await expect(checkpointRow(page).getByText("Edited", { exact: true })).toBeHidden();
-    expect(net.changePuts).toHaveLength(2);
+    // Polled: a second write goes out when the first has answered, which
+    // the bar, drawn from the edit itself, does not wait for.
+    await expect.poll(() => net.changePuts.length).toBe(2);
     expect(net.changePuts[1].models).toEqual([]);
   });
 
@@ -799,15 +801,19 @@ test.describe("rows as editors", () => {
     await field.fill("0.45");
     await field.press("Enter");
     await expect(bar(page)).toContainText("2 unsaved changes");
-    expect(net.changePuts.at(-1).loras).toEqual([
-      {
-        node_id: "7",
-        field: "lora_name",
-        sha256: SHA.detail,
-        strength_model: 0.45,
-        strength_clip: 0.45,
-      },
-    ]);
+    // Polled: the strength's write follows the stage's answer (one write on
+    // the wire), and the bar says two before it has left.
+    await expect
+      .poll(() => net.changePuts.at(-1).loras)
+      .toEqual([
+        {
+          node_id: "7",
+          field: "lora_name",
+          sha256: SHA.detail,
+          strength_model: 0.45,
+          strength_clip: 0.45,
+        },
+      ]);
     await expect(
       rail(page).getByTestId("wftab-default-lora").first().getByTestId("wftab-lora-saved"),
     ).toContainText("Saved: 0.60");
@@ -834,7 +840,7 @@ test.describe("rows as editors", () => {
     await page.keyboard.press("Enter");
     await expect(remove).toBeFocused();
     await expect(bar(page)).toBeHidden();
-    expect(net.changePuts.at(-1).skip_loras).toEqual([]);
+    await expect.poll(() => net.changePuts.at(-1).skip_loras).toEqual([]);
   });
 });
 
