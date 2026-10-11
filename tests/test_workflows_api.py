@@ -60,6 +60,7 @@ from pixlstash import auth, mcp_server
 from pixlstash.authz.policy import AccessPolicy
 from pixlstash.authz.registry import ROUTE_POLICIES
 from pixlstash.database import DBPriority
+from pixlstash.route_inventory import iter_api_route_contexts
 from pixlstash.db_models import Face, Picture, Project, ReferenceFolder, UserToken
 from pixlstash.db_models.saved_recipe import SavedRecipe
 from pixlstash.event_types import EventType
@@ -1901,7 +1902,7 @@ def test_a_link_reads_none_of_comfyuis_saved_workflows(
     assert manual_workflow_ids(hub) == before
 
 
-def test_linking_a_comfyui_on_this_computer_writes_a_working_full_access_token(
+def test_linking_a_comfyui_on_this_computer_writes_a_working_comfyui_only_token(
     workflow_env, comfy_at
 ):
     server = workflow_env.server
@@ -1919,14 +1920,16 @@ def test_linking_a_comfyui_on_this_computer_writes_a_working_full_access_token(
     assert written[comfyui_link_service.SETTING_SSL] is True
     assert written[comfyui_link_service.SETTING_CA] == ""
     first = written[comfyui_link_service.SETTING_TOKEN]
-    # Full access: the token reaches an owner-only route a share token cannot.
-    assert ROUTE_POLICIES[("GET", f"{API}/comfyui/link")].policy is (
-        AccessPolicy.OWNER_ONLY
-    )
-    assert _bearer(server, first).get(f"{API}/comfyui/link").status_code == 200
-    assert len(_link_tokens(workflow_env.server)) == 1
+    # The nodes' own access (#1811): an owner-only route they call answers,
+    # an owner-only route they do not is refused.
+    for path in (f"{API}/adapters", f"{API}/comfyui/link"):
+        assert ROUTE_POLICIES[("GET", path)].policy is AccessPolicy.OWNER_ONLY
+    assert _bearer(server, first).get(f"{API}/adapters").status_code == 200
+    assert _bearer(server, first).get(f"{API}/comfyui/link").status_code == 403
+    (link_id,) = _link_tokens(workflow_env.server)
     status = workflow_env.owner.get(f"{API}/comfyui/link").json()
     assert (status["linked"], status["where"]) == (True, "this_computer")
+    assert (status["token_id"], status["all_libraries"]) == (link_id, False)
 
     # Linking again replaces the token: the old one stops working.
     r = workflow_env.owner.post(f"{API}/comfyui/link")
@@ -2026,9 +2029,9 @@ def test_the_link_token_works_only_from_comfyuis_address(
     status = workflow_env.owner.get(f"{API}/comfyui/link").json()
     assert (status["bound_address"], status["refused_from"]) == ("testclient", None)
 
-    # From ComfyUI's own address it is full access.
+    # From ComfyUI's own address it works.
     assert _bearer(server, token).get(f"{API}/sort_mechanisms").status_code == 200
-    assert _bearer(server, token).get(f"{API}/comfyui/link").status_code == 200
+    assert _bearer(server, token).get(f"{API}/pictures").status_code == 200
 
     elsewhere = _from(server, token, LAN_IPV4)
     for method, path in (
@@ -2050,12 +2053,11 @@ def test_the_link_token_works_only_from_comfyuis_address(
         login.headers.update({"X-Forwarded-For": address})
         assert login.post(f"{API}/login", json={"token": token}).status_code == 401
 
-    # Nor a WebSocket from elsewhere; from ComfyUI's address it opens.
-    with _bearer(server, token).websocket_connect(f"{API}/ws/updates") as ws:
-        ws.send_json({"type": "set_filters"})
-    with pytest.raises(WebSocketDisconnect):
-        with elsewhere.websocket_connect(f"{API}/ws/updates"):
-            pass
+    # Nor a WebSocket, from anywhere: the nodes open none.
+    for client in (_bearer(server, token), elsewhere):
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(f"{API}/ws/updates"):
+                pass
 
     # Positive control: an unbound full-access token from that same address
     # works and signs in.
@@ -2071,15 +2073,17 @@ def test_the_link_token_works_only_from_comfyuis_address(
         login = TestClient(server.api)
         login.headers.update({"X-Forwarded-For": LAN_IPV4})
         assert login.post(f"{API}/login", json={"token": control}).status_code == 200
+        with _bearer(server, control).websocket_connect(f"{API}/ws/updates") as ws:
+            ws.send_json({"type": "set_filters"})
     finally:
         workflow_env.owner.delete(f"{API}/users/me/token/{r.json()['token_id']}")
 
 
 def test_the_link_token_cannot_manage_tokens(workflow_env, comfy_at):
-    """From ComfyUI's own address the link token is full access, but it never
-    manages credentials: a fresh unbound token or a password would work from
-    anywhere and outlive the link, and the share-token listings and bulk
-    revoke are the owner's. The owner still can."""
+    """The link token never manages credentials, even from ComfyUI's own
+    address: a fresh unbound token or a password would work from anywhere and
+    outlive the link, and the share-token listings and bulk revoke are the
+    owner's. The owner still can, and may widen the link's key."""
     server = workflow_env.server
     fake = comfy_at("http://127.0.0.1:18188/")
     assert workflow_env.owner.post(f"{API}/comfyui/link").json()["linked"] is True
@@ -2118,8 +2122,19 @@ def test_the_link_token_cannot_manage_tokens(workflow_env, comfy_at):
         for method, path, body in attempts:
             r = linked.request(method, path, json=body)
             assert r.status_code == 403, (method, path, r.text)
-            assert "ComfyUI link key cannot" in r.json()["detail"]
+            assert r.json()["detail"] == auth.COMFYUI_SCOPE_REFUSAL
         assert len(_link_tokens(server)) == 1
+        # Behind the scope, each handler refuses a key bound to an address
+        # by itself: a full-access one, as links were before the scope, gets
+        # past the scope and is still refused all of it.
+        _set_link_key(server, scope="ALL")
+        try:
+            for method, path, body in attempts:
+                r = linked.request(method, path, json=body)
+                assert r.status_code == 403, (method, path, r.text)
+                assert "ComfyUI link key cannot" in r.json()["detail"]
+        finally:
+            _set_link_key(server, scope=auth.COMFYUI_SCOPE)
         # Positive control: the owner reaches the listings, and changes and
         # deletes the token.
         r = workflow_env.owner.get(f"{API}/users/me/token")
@@ -2128,14 +2143,16 @@ def test_the_link_token_cannot_manage_tokens(workflow_env, comfy_at):
             f"{API}/users/me/token/{owners}/libraries", json={"all_libraries": True}
         )
         assert r.status_code == 200, r.text
-        # The owner may widen their own token, but not the link's: that one
-        # stays with the library ComfyUI was linked in.
+        # The owner may widen the link's key too, now that it reaches only
+        # what the nodes call (#1811); the link status says so.
         (link_id,) = _link_tokens(server)
         r = workflow_env.owner.put(
             f"{API}/users/me/token/{link_id}/libraries", json={"all_libraries": True}
         )
-        assert r.status_code == 400, r.text
-        assert "ComfyUI link key" in r.json()["detail"]
+        assert r.status_code == 200, r.text
+        status = workflow_env.owner.get(f"{API}/comfyui/link").json()
+        assert (status["token_id"], status["all_libraries"]) == (link_id, True)
+        assert linked.get(f"{API}/pictures").status_code == 200
         r = workflow_env.owner.get(
             f"{API}/users/me/shared-resource-ids?resource_type=picture"
         )
@@ -2151,6 +2168,416 @@ def test_the_link_token_cannot_manage_tokens(workflow_env, comfy_at):
     finally:
         r = workflow_env.owner.delete(f"{API}/users/me/token/{owners}")
         assert r.status_code == 200, r.text
+
+
+_HEX64 = "a" * 64
+_NO_ROW = 987654321
+
+# One request per route the ComfyUI scope admits: template -> a path that
+# resolves to it, with a body where the route takes one. None needs to
+# succeed; the test asks only that the key is let through to the handler.
+_COMFYUI_SCOPE_REQUESTS = {
+    ("GET", f"{API}/projects"): (f"{API}/projects", None),
+    ("GET", f"{API}/picture_sets"): (f"{API}/picture_sets", None),
+    ("GET", f"{API}/characters"): (f"{API}/characters", None),
+    ("GET", f"{API}/sort_mechanisms"): (f"{API}/sort_mechanisms", None),
+    ("GET", f"{API}/pictures"): (f"{API}/pictures", None),
+    ("GET", f"{API}/pictures/thumbnails/{{id}}.webp"): (
+        f"{API}/pictures/thumbnails/{_NO_ROW}.webp",
+        None,
+    ),
+    ("GET", f"{API}/picture_sets/{{id}}/thumbnail"): (
+        f"{API}/picture_sets/{_NO_ROW}/thumbnail",
+        None,
+    ),
+    ("GET", f"{API}/characters/{{id}}/{{field}}"): (
+        f"{API}/characters/{_NO_ROW}/thumbnail",
+        None,
+    ),
+    ("GET", f"{API}/adapters"): (f"{API}/adapters", None),
+    ("GET", f"{API}/adapters/{{sha256}}"): (f"{API}/adapters/{_HEX64}", None),
+    ("GET", f"{API}/adapters/{{sha256}}/file"): (
+        f"{API}/adapters/{_HEX64}/file",
+        None,
+    ),
+    ("GET", f"{API}/checkpoints"): (f"{API}/checkpoints", None),
+    ("GET", f"{API}/models/workflow-sets"): (f"{API}/models/workflow-sets", None),
+    ("GET", f"{API}/model-icons/{{sha256}}"): (f"{API}/model-icons/{_HEX64}", None),
+    ("GET", f"{API}/workflows/{{workflow_id}}/graph"): (
+        f"{API}/workflows/auto:{_HEX64}/graph",
+        None,
+    ),
+    ("POST", f"{API}/comfyui/workflows/convert"): (
+        f"{API}/comfyui/workflows/convert",
+        {},
+    ),
+    ("GET", f"{API}/pictures/search"): (f"{API}/pictures/search", None),
+    ("GET", f"{API}/pictures/{{id}}/metadata"): (
+        f"{API}/pictures/{_NO_ROW}/metadata",
+        None,
+    ),
+    ("GET", f"{API}/pictures/{{id}}.{{ext}}"): (f"{API}/pictures/{_NO_ROW}.png", None),
+    ("GET", f"{API}/picture_sets/{{id}}/members"): (
+        f"{API}/picture_sets/{_NO_ROW}/members",
+        None,
+    ),
+    ("GET", f"{API}/characters/{{id}}/reference_pictures"): (
+        f"{API}/characters/{_NO_ROW}/reference_pictures",
+        None,
+    ),
+    ("POST", f"{API}/pictures/likeness-search"): (
+        f"{API}/pictures/likeness-search",
+        {},
+    ),
+    ("POST", f"{API}/pictures/face-search"): (f"{API}/pictures/face-search", {}),
+    ("POST", f"{API}/pictures/score_character_likeness"): (
+        f"{API}/pictures/score_character_likeness",
+        {},
+    ),
+    ("POST", f"{API}/pictures/import"): (f"{API}/pictures/import", {}),
+    ("GET", f"{API}/pictures/import/status"): (
+        f"{API}/pictures/import/status",
+        None,
+    ),
+    ("POST", f"{API}/picture_sets/{{id}}/members"): (
+        f"{API}/picture_sets/{_NO_ROW}/members",
+        {},
+    ),
+    ("POST", f"{API}/characters/{{character_id}}/faces"): (
+        f"{API}/characters/{_NO_ROW}/faces",
+        {},
+    ),
+}
+
+# One request per class the scope refuses, each safe for the owner to make
+# (the positive control): template, path, body.
+_COMFYUI_SCOPE_REFUSED = (
+    # Deletes and edits.
+    ("DELETE", f"{API}/pictures/{{id}}", f"{API}/pictures/{_NO_ROW}", None),
+    ("DELETE", f"{API}/picture_sets/{{id}}", f"{API}/picture_sets/{_NO_ROW}", None),
+    ("DELETE", f"{API}/characters/{{id}}", f"{API}/characters/{_NO_ROW}", None),
+    # Settings.
+    ("GET", f"{API}/users/me/config", f"{API}/users/me/config", None),
+    ("PATCH", f"{API}/users/me/config", f"{API}/users/me/config", {}),
+    # Tokens and the owner's account.
+    ("GET", f"{API}/users/me/token", f"{API}/users/me/token", None),
+    ("GET", f"{API}/users/me/auth", f"{API}/users/me/auth", None),
+    # Host operations and the libraries.
+    ("GET", f"{API}/filesystem/browse", f"{API}/filesystem/browse", None),
+    ("GET", f"{API}/libraries", f"{API}/libraries", None),
+    ("GET", f"{API}/snapshots", f"{API}/snapshots", None),
+    # Running a workflow is PixlStash's, not the nodes'.
+    ("POST", f"{API}/workflows/run", f"{API}/workflows/run", {}),
+    # The shape of an admitted template (a character's field), another route.
+    (
+        "GET",
+        f"{API}/characters/{{id}}/faces",
+        f"{API}/characters/{_NO_ROW}/faces",
+        None,
+    ),
+)
+
+
+def _set_link_key(server, **values) -> None:
+    """Write columns of the one live link key, as an older build left them."""
+
+    def write(session):
+        (token_id,) = _link_tokens(server)
+        row = session.get(UserToken, token_id)
+        for name, value in values.items():
+            setattr(row, name, value)
+        session.add(row)
+        session.commit()
+
+    (_only,) = _link_tokens(server)
+    server.auth._db.run_task(write, priority=DBPriority.IMMEDIATE)
+    server.auth._flush_token_cache()
+
+
+def _link_key(server) -> UserToken:
+    (token_id,) = _link_tokens(server)
+    return server.auth._db.run_task(
+        lambda session: session.get(UserToken, token_id),
+        priority=DBPriority.IMMEDIATE,
+    )
+
+
+def test_start_up_narrows_a_link_made_before_the_scope(workflow_env, linked_comfyui):
+    """A link older than the address binding has a full-access key with no
+    address, which the hub cannot tell from the owner's own tokens. Start-up
+    narrows the recorded one, and only that one."""
+    server = workflow_env.server
+    r = workflow_env.owner.post(
+        f"{API}/users/me/token", json={"description": "owner's", "scope": "ALL"}
+    )
+    assert r.status_code == 200, r.text
+    owners = r.json()
+    try:
+        _set_link_key(server, scope="ALL", bound_address=None)
+        assert linked_comfyui.get(f"{API}/users/me/config").status_code == 200
+
+        comfyui_link_service.narrow_recorded_key(server)
+
+        assert _link_key(server).scope == auth.COMFYUI_SCOPE
+        assert linked_comfyui.get(f"{API}/pictures").status_code == 200
+        r = linked_comfyui.get(f"{API}/users/me/config")
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"] == auth.COMFYUI_SCOPE_REFUSAL
+        # The owner's own full-access token is not the link's and keeps its reach.
+        mine = _bearer(server, owners["token"])
+        assert mine.get(f"{API}/users/me/config").status_code == 200
+    finally:
+        workflow_env.owner.delete(f"{API}/users/me/token/{owners['token_id']}")
+
+
+def test_linking_again_keeps_use_in_every_library_for_the_owner_only(
+    workflow_env, linked_comfyui, comfy_at
+):
+    """The owner's choice belongs to the link, not to one key: when the
+    owner's own session links the same ComfyUI again, the key that replaces a
+    widened one is widened. A token that links again, or a link to another
+    address, gets a key for the open library only, or re-linking would be a
+    way for a token to send an every-library key wherever it likes."""
+    server = workflow_env.server
+    owner = workflow_env.owner
+    link = f"{API}/comfyui/link"
+
+    def widen() -> None:
+        r = owner.put(
+            f"{API}/users/me/token/{_link_key(server).id}/libraries",
+            json={"all_libraries": True},
+        )
+        assert r.status_code == 200, r.text
+        assert _link_key(server).all_libraries is True
+
+    # A pinned key is replaced by a pinned key.
+    first = _link_key(server)
+    assert first.all_libraries is False
+    assert owner.post(link).json()["linked"] is True
+    second = _link_key(server)
+    assert (second.public_id != first.public_id, second.all_libraries) == (True, False)
+
+    # The owner's own session: kept.
+    widen()
+    reply = owner.post(link).json()
+    assert reply["linked"] is True, reply
+    third = _link_key(server)
+    assert (third.public_id != second.public_id, third.all_libraries) == (True, True)
+    assert third.scope == auth.COMFYUI_SCOPE
+    assert reply["link"]["all_libraries"] is True
+
+    # A full-access token from this computer may link, but does not carry it.
+    r = owner.post(
+        f"{API}/users/me/token", json={"description": "agent", "scope": "ALL"}
+    )
+    assert r.status_code == 200, r.text
+    agent = r.json()
+    try:
+        reply = _bearer(server, agent["token"]).post(link).json()
+        assert reply["linked"] is True, reply
+        fourth = _link_key(server)
+        assert (fourth.public_id != third.public_id, fourth.all_libraries) == (
+            True,
+            False,
+        )
+    finally:
+        owner.delete(f"{API}/users/me/token/{agent['token_id']}")
+
+    # Nor does the owner's session to a ComfyUI at another address.
+    widen()
+    comfy_at("http://127.0.0.1:18189/")
+    reply = owner.post(link).json()
+    assert reply["linked"] is True, reply
+    assert _link_key(server).all_libraries is False
+
+
+def test_a_comfyui_row_naming_a_resource_is_refused_outright(
+    workflow_env, linked_comfyui
+):
+    """No flow mints one, and the gate would make it the owner on its routes
+    whatever it names, so the middleware refuses the row as it does a
+    full-access one that names a resource."""
+    server = workflow_env.server
+    assert linked_comfyui.get(f"{API}/pictures").status_code == 200
+    _set_link_key(
+        server, resource_type="character", resource_id=workflow_env.character_id
+    )
+    try:
+        r = linked_comfyui.get(f"{API}/pictures")
+        assert r.status_code == 403, r.text
+        assert "Misconfigured token" in r.json()["detail"]
+    finally:
+        _set_link_key(server, resource_type=None, resource_id=None)
+
+
+@pytest.fixture
+def linked_comfyui(workflow_env, comfy_at):
+    """A client holding the key a fresh link wrote into the fake ComfyUI."""
+    fake = comfy_at("http://127.0.0.1:18188/")
+    reply = workflow_env.owner.post(f"{API}/comfyui/link").json()
+    assert reply["linked"] is True, reply
+    return _bearer(
+        workflow_env.server, fake.settings[comfyui_link_service.SETTING_TOKEN]
+    )
+
+
+def test_the_link_key_is_let_through_to_every_route_the_nodes_call(
+    workflow_env, linked_comfyui
+):
+    """In-scope direction (#1811): the key reaches the handler of every route
+    in ``COMFYUI_SCOPE_ROUTES``, owner-only and local-owner-only ones
+    included. The table is the whole list, so an admitted route with no
+    request here fails."""
+    assert set(_COMFYUI_SCOPE_REQUESTS) == auth.COMFYUI_SCOPE_ROUTES
+    for (method, template), (path, body) in _COMFYUI_SCOPE_REQUESTS.items():
+        assert_real_route(workflow_env.server.api, method, path, template)
+        r = linked_comfyui.request(method, path, json=body)
+        assert r.status_code not in {401, 403}, (method, path, r.text)
+        assert r.status_code < 500, (method, path, r.text)
+
+
+def test_the_link_key_is_refused_everything_the_nodes_do_not_call(
+    workflow_env, linked_comfyui
+):
+    """Out-of-scope direction (#1811): deletes, edits, settings, tokens, host
+    operations and a route that merely has an admitted route's shape are all
+    refused, while the owner is let through to the same request."""
+    for method, template, path, body in _COMFYUI_SCOPE_REFUSED:
+        assert (method, template) not in auth.COMFYUI_SCOPE_ROUTES
+        assert_real_route(workflow_env.server.api, method, path, template)
+        r = linked_comfyui.request(method, path, json=body)
+        assert r.status_code == 403, (method, path, r.text)
+        assert r.json()["detail"] == auth.COMFYUI_SCOPE_REFUSAL
+        r = workflow_env.owner.request(method, path, json=body)
+        assert r.status_code not in {401, 403}, (method, path, r.text)
+
+
+def test_each_layer_refuses_the_link_key_by_itself(
+    workflow_env, linked_comfyui, monkeypatch
+):
+    """The middleware and the gate each hold the key to its routes alone, so
+    neither refusal above is the other's. The middleware survives the gate's
+    rollback; the gate is exact where the middleware matches a shape."""
+    server = workflow_env.server
+    settings = f"{API}/users/me/config"
+    assert linked_comfyui.get(f"{API}/pictures").status_code == 200
+    # The shape is the whole path: nothing may trail an admitted one.
+    assert auth.comfyui_scope_admits("GET", f"{API}/pictures")
+    assert not auth.comfyui_scope_admits("GET", f"{API}/pictures\n")
+    assert not auth.comfyui_scope_admits("GET", f"{API}/pictures/")
+
+    # The gate alone: the middleware lets everything through.
+    with monkeypatch.context() as patch:
+        patch.setattr(auth, "comfyui_scope_admits", lambda method, path: True)
+        r = linked_comfyui.get(settings)
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"] == auth.COMFYUI_SCOPE_REFUSAL
+        assert linked_comfyui.get(f"{API}/pictures").status_code == 200
+
+    # The middleware alone: the gate is rolled back to report-only.
+    with monkeypatch.context() as patch:
+        patch.setattr(server.authz, "_enforcing", False)
+        for method, path in (
+            ("GET", settings),
+            ("DELETE", f"{API}/pictures/{_NO_ROW}"),
+        ):
+            r = linked_comfyui.request(method, path)
+            assert r.status_code == 403, (method, path, r.text)
+            assert r.json()["detail"] == auth.COMFYUI_SCOPE_REFUSAL
+        assert linked_comfyui.get(f"{API}/pictures").status_code == 200
+        assert workflow_env.owner.get(settings).status_code == 200
+
+
+def test_the_gate_admits_a_comfyui_key_to_exactly_its_routes(workflow_env):
+    """Every mounted route, by identity: a ComfyUI-scope request is made the
+    owner's on the routes in ``COMFYUI_SCOPE_ROUTES`` and refused on every
+    other one, and nothing else is touched. No handler runs."""
+    server = workflow_env.server
+
+    def request(route, method, scope):
+        return SimpleNamespace(
+            scope={"route": route},
+            method=method,
+            url=SimpleNamespace(path="/"),
+            state=SimpleNamespace(token_scope=scope),
+        )
+
+    def scoped(scope: str):
+        return auth.TokenScope(
+            scope=scope, resource_type=None, resource_id=None, expires_at=None
+        )
+
+    admitted = set()
+    for method, path, route in iter_api_route_contexts(server.api):
+        comfyui = request(route, method, scoped(auth.COMFYUI_SCOPE))
+        try:
+            server.authz._admit_comfyui_scope(comfyui)
+        except HTTPException as refused:
+            assert refused.status_code == 403
+            assert comfyui.state.token_scope is not None
+        else:
+            assert comfyui.state.token_scope is None
+            admitted.add((method, path))
+        # A method the route was not admitted under is refused on the same
+        # route object.
+        with pytest.raises(HTTPException):
+            server.authz._admit_comfyui_scope(
+                request(route, "TRACE", scoped(auth.COMFYUI_SCOPE))
+            )
+        # Any other scope, and the owner, are left exactly as they were.
+        for other in (scoped("READ"), None):
+            untouched = request(route, method, other)
+            server.authz._admit_comfyui_scope(untouched)
+            assert untouched.state.token_scope is other
+    assert admitted == auth.COMFYUI_SCOPE_ROUTES
+
+
+def test_a_comfyui_token_made_by_hand_is_held_to_the_same_scope(
+    workflow_env, forwarded_for
+):
+    """An owner can mint the scope for a ComfyUI set up by hand. It is never a
+    login, a WebSocket or a query-string credential, names no resource, and
+    writes, so the local-network rule for writing tokens covers it."""
+    server = workflow_env.server
+    r = workflow_env.owner.post(
+        f"{API}/users/me/token",
+        json={
+            "description": "by hand",
+            "scope": "COMFYUI",
+            "resource_type": "character",
+            "resource_id": workflow_env.character_id,
+        },
+    )
+    assert r.status_code == 400, r.text
+    r = workflow_env.owner.post(
+        f"{API}/users/me/token", json={"description": "by hand", "scope": "COMFYUI"}
+    )
+    assert r.status_code == 200, r.text
+    token, token_id = r.json()["token"], r.json()["token_id"]
+    try:
+        client = _bearer(server, token)
+        assert client.get(f"{API}/pictures").status_code == 200
+        r = client.get(f"{API}/users/me/config")
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"] == auth.COMFYUI_SCOPE_REFUSAL
+
+        assert (
+            TestClient(server.api)
+            .get(f"{API}/pictures", params={"token": token})
+            .status_code
+            == 401
+        )
+        login = TestClient(server.api)
+        assert login.post(f"{API}/login", json={"token": token}).status_code == 401
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(f"{API}/ws/updates"):
+                pass
+
+        r = _from(server, token, "8.8.8.8").get(f"{API}/pictures")
+        assert r.status_code == 403, r.text
+        assert "local network" in r.json()["detail"]
+    finally:
+        workflow_env.owner.delete(f"{API}/users/me/token/{token_id}")
 
 
 def test_a_token_revoked_while_it_binds_is_refused_and_not_recorded(workflow_env):
