@@ -1,17 +1,18 @@
-// Edit LoRAs (#1478): what the owner sees in the list is exactly what the
-// save sends.
+// Edit LoRAs (#1478, #1850): what the owner sees in the list is exactly what
+// the route is asked about, and the route's answer picks the one button.
 //
 // * A delete strikes the row through and offers Restore; the entry is then
 //   ABSENT from the PUT, which is how the route reads a delete.
 // * A reorder, by keyboard as much as by drag, is the order of `entries`.
 // * Add appends one row at the end, and only a picked LoRA is sent.
-// * Save… is a dry run, and its `changes` are what the second step lists;
-//   only the second step's button (or Enter) writes.
-// * "Over the original" is the default: it sends `overwrite` and selects
-//   nothing new. "A new workflow" is the other choice, named there.
+// * Every gesture is a dry run, and its `changes` are what the dialog lists.
+// * Deletes and shelf strengths end in Apply: nothing is written, and `apply`
+//   carries them to the Workflow tab as a fragment of its unsaved changes.
+// * A loader added or moved, or a strength the shelf has no digest for, ends
+//   in Save: `overwrite` on the PUT, the workflow's next version.
 // * `editable: false` opens read-only, with the planner's sentence.
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 import { setActivePinia, createPinia } from "pinia";
 
@@ -35,13 +36,28 @@ import { useWorkflowsStore } from "../../stores/useWorkflowsStore";
 import EditLorasDialog from "./EditLorasDialog.vue";
 
 const KEY = "a".repeat(64);
-const NEW_KEY = "e".repeat(64);
+
+const APPLY_NOTE =
+  "Apply puts this in the Workflow tab as an unsaved change. Nothing is written until you save there.";
+
+/** What the next dry runs answer; each test sets the kinds its edit makes. */
+let dry;
+const mounted = [];
+
+const DELETED_33 = [
+  { kind: "deleted", node_id: "33", text: "Loader #33 deleted: hairstyle-v3" },
+  { kind: "rewired", node_id: "7", text: "#7 KSampler and 2 text encoders rewired" },
+];
+const MOVED_22 = [
+  { kind: "moved", node_id: "31", text: "#22 and #31 swapped: film-grain-35mm now applies first" },
+];
 
 function loader(nodeId, filename, strength, overrides = {}) {
   const base = filename.split("/").pop();
   return {
     node_id: nodeId,
     class_type: "LoraLoader",
+    field: "lora_name",
     filename,
     name: base.replace(/\.[^.]+$/, ""),
     strength,
@@ -96,8 +112,25 @@ async function mountDialog(props = {}) {
     global: { stubs: { Tooltip: true, teleport: true } },
     attachTo: document.body,
   });
+  mounted.push(wrapper);
   await flushPromises();
   return wrapper;
+}
+
+function primary(wrapper) {
+  return wrapper.find("[data-testid='eld-primary']");
+}
+
+/** The bodies the route was sent, dry runs and writes apart. */
+function sent(dryRun) {
+  return saveLoraChain.mock.calls
+    .map(([, body]) => body)
+    .filter((body) => body.dry_run === dryRun);
+}
+
+async function setStrength(wrapper, index, value) {
+  await wrapper.findAll(".eld-row")[index].find("input[type=number]").setValue(value);
+  await flushPromises();
 }
 
 function textOf(wrapper) {
@@ -141,33 +174,23 @@ beforeEach(() => {
     { filename: "skin-detail-xl.safetensors", sha256: "sha-skin", display_name: "" },
     { filename: "no-digest.safetensors", sha256: null },
   ]);
+  dry = DELETED_33;
   saveLoraChain.mockImplementation(async (_key, body) =>
     body.dry_run
-      ? {
-          dry_run: true,
+      ? { dry_run: true, name: null, workflow_id: null, changes: dry }
+      : {
+          dry_run: false,
           name: null,
-          workflow_id: null,
-          changes: [
-            { kind: "deleted", node_id: "33", text: "Loader #33 deleted: hairstyle-v3" },
-            { kind: "rewired", node_id: "7", text: "#7 KSampler and 2 text encoders rewired" },
-          ],
-        }
-      : body.overwrite
-        ? {
-            dry_run: false,
-            name: null,
-            workflow_id: KEY,
-            overwritten: true,
-            changes: [],
-          }
-        : {
-            dry_run: false,
-            name: "SDXL + face detailer (edited).json",
-            workflow_id: NEW_KEY,
-            changes: [],
-          },
+          workflow_id: KEY,
+          overwritten: true,
+          changes: [],
+        },
   );
   vi.spyOn(console, "warn").mockImplementation(() => {});
+});
+
+afterEach(() => {
+  mounted.splice(0).forEach((wrapper) => wrapper.unmount());
 });
 
 describe("the chain as read", () => {
@@ -202,12 +225,7 @@ describe("the chain as read", () => {
       "Hairstyle-V3.safetensors is missing from your model shelf.",
     );
     expect(said).not.toContain("ignores that loader");
-    // And says what saving does to the original.
-    expect(said).toContain(
-      "Nothing is written yet. Save… asks whether this goes over SDXL + face detailer or is a new workflow.",
-    );
     expect(textOf(wrapper)).toContain("No changes");
-    expect(button(wrapper, "Save…").attributes("disabled")).toBeDefined();
   });
 });
 
@@ -224,16 +242,14 @@ describe("delete and restore", () => {
     const wrapper = await mountDialog();
     await deleteButton(wrapper, 1).trigger("click");
     await flushPromises();
-    await button(wrapper, "Save…").trigger("click");
-    await flushPromises();
     // Shown as 0.86 (two decimals); sending that would re-weight a loader
     // the owner never touched.
-    expect(saveLoraChain.mock.calls[0][1].entries).toEqual([
+    expect(sent(true).at(-1).entries).toEqual([
       { node_id: "14", strength: 0.855 },
     ]);
   });
 
-  it("strikes the row through with Restore, and leaves it out of the PUT", async () => {
+  it("strikes the row through with Put back, and leaves it out of the PUT", async () => {
     const wrapper = await mountDialog();
     await deleteButton(wrapper, 3).trigger("click");
     await flushPromises();
@@ -241,23 +257,33 @@ describe("delete and restore", () => {
     const row = wrapper.findAll(".eld-row")[3];
     expect(row.classes()).toContain("eld-row--deleted");
     expect(row.find(".eld-pos").text()).toBe("—");
-    expect(row.text()).toContain("Restore");
-    // Focus lands on the Restore of the row it happened on.
-    expect(document.activeElement?.textContent?.trim()).toBe("Restore");
-    expect(textOf(wrapper)).toContain("1 change");
+    expect(row.text()).toContain("Put back");
+    // The Workflow tab's words, since the two edit one set of changes.
+    expect(row.find("[data-focus='restore']").attributes("aria-label")).toBe(
+      "Put Hairstyle-V3 back",
+    );
+    expect(row.text()).toContain(", removed");
+    expect(deleteButton(wrapper, 2).attributes("aria-label")).toBe(
+      "Remove film-grain-35mm",
+    );
+    expect(wrapper.find("[role=status][aria-live=polite]").text()).toBe(
+      "Hairstyle-V3 removed. Put back is on the same row.",
+    );
+    // Focus lands on the Put back of the row it happened on.
+    expect(document.activeElement?.textContent?.trim()).toBe("Put back");
+    expect(textOf(wrapper)).toContain("1 loader removed");
 
-    await button(wrapper, "Save…").trigger("click");
-    await flushPromises();
     const body = saveLoraChain.mock.calls[0][1];
     expect(body.dry_run).toBe(true);
     expect(body.entries.map((entry) => entry.node_id)).toEqual(["14", "22", "31"]);
+    expect(sent(false)).toEqual([]);
   });
 
   it("puts a restored row back where it was", async () => {
     const wrapper = await mountDialog();
     await deleteButton(wrapper, 1).trigger("click");
     await flushPromises();
-    await button(wrapper, "Restore").trigger("click");
+    await button(wrapper, "Put back").trigger("click");
     await flushPromises();
 
     const row = wrapper.findAll(".eld-row")[1];
@@ -287,13 +313,14 @@ describe("reordering by keyboard", () => {
       document.activeElement?.closest("[data-row]")?.getAttribute("data-row"),
     ).toBe("n:22");
     // A swap of neighbours is one change, as the owner made it.
-    expect(textOf(wrapper)).toContain("1 change");
+    expect(textOf(wrapper)).toContain("1 loader moved");
 
-    await button(wrapper, "Save…").trigger("click");
-    await flushPromises();
-    expect(
-      saveLoraChain.mock.calls[0][1].entries.map((entry) => entry.node_id),
-    ).toEqual(["14", "31", "22", "33"]);
+    expect(sent(true).at(-1).entries.map((entry) => entry.node_id)).toEqual([
+      "14",
+      "31",
+      "22",
+      "33",
+    ]);
   });
 
 
@@ -305,13 +332,13 @@ describe("reordering by keyboard", () => {
     await handle.trigger("keydown", { key: "ArrowDown", altKey: true });
     await flushPromises();
 
-    await button(wrapper, "Save…").trigger("click");
-    await flushPromises();
     // 22 jumped the struck-through 31 and landed after 33: a real move the
     // save writes, not a swap with a row that is going anyway.
-    expect(
-      saveLoraChain.mock.calls[0][1].entries.map((entry) => entry.node_id),
-    ).toEqual(["14", "33", "22"]);
+    expect(sent(true).at(-1).entries.map((entry) => entry.node_id)).toEqual([
+      "14",
+      "33",
+      "22",
+    ]);
   });
 
   it("does not move a row past the ends", async () => {
@@ -379,11 +406,9 @@ describe("Add a LoRA", () => {
     await select.setValue("sha-skin");
     await flushPromises();
     expect(rowNames(wrapper)[4]).toBe("skin-detail-xl new");
-    expect(textOf(wrapper)).toContain("1 change");
+    expect(textOf(wrapper)).toContain("1 loader added");
 
-    await button(wrapper, "Save…").trigger("click");
-    await flushPromises();
-    expect(saveLoraChain.mock.calls[0][1].entries.at(-1)).toEqual({
+    expect(sent(true).at(-1).entries.at(-1)).toEqual({
       node_id: null,
       sha256: "sha-skin",
       strength: 1,
@@ -463,187 +488,457 @@ describe("Add a LoRA", () => {
   });
 });
 
-describe("the second step", () => {
-  async function toStepTwo() {
-    const wrapper = await mountDialog();
-    await deleteButton(wrapper, 3).trigger("click");
-    await flushPromises();
-    await button(wrapper, "Save…").trigger("click");
-    await flushPromises();
-    return wrapper;
+describe("one button: Apply or Save", () => {
+  const SAVE_NOTE =
+    "cannot wait as an unsaved change. Save writes it straight away: SDXL + face detailer keeps its name and its 184 pictures, and this chain becomes its next version. The version menu in the Workflow tab takes it back.";
+
+  const press = [
+    ["the button", (wrapper) => primary(wrapper).trigger("click")],
+    ["Enter", (wrapper) => wrapper.find(".app-dialog").trigger("keydown", { key: "Enter" })],
+  ];
+
+  function note(wrapper) {
+    return wrapper.find("[data-testid='eld-note']");
   }
 
-  it("lists the dry run's changes and offers to save over the original first", async () => {
-    const wrapper = await toStepTwo();
-    const listed = wrapper
-      .findAll("[data-testid='eld-changes'] li")
-      .map((item) => item.text());
-    expect(listed).toEqual([
-      "Loader #33 deleted: hairstyle-v3",
-      "#7 KSampler and 2 text encoders rewired",
-    ]);
-    // Over the original is the default: no name is asked for, and the note
-    // says what happens to the workflow and to the graph it replaces.
-    const modes = wrapper.findAll("[data-testid='eld-save-mode'] [role=radio]");
-    expect(
-      modes.map((mode) => [mode.text(), mode.attributes("aria-checked")]),
-    ).toEqual([
-      ["Over the original", "true"],
-      ["A new workflow", "false"],
-    ]);
-    expect(wrapper.find("input[type=text]").exists()).toBe(false);
-    expect(textOf(wrapper)).toContain(
-      "SDXL + face detailer keeps its name and its 184 pictures, and this chain becomes its next version.",
+  function footer(wrapper) {
+    return wrapper.findAll(".app-dialog__footer button").map(labelOf);
+  }
+
+  async function swapSecondAndThird(wrapper) {
+    const handle = wrapper.findAll(".eld-row")[1].find("[data-focus='handle']");
+    await handle.trigger("keydown", { key: "ArrowDown", altKey: true });
+    await flushPromises();
+  }
+
+  it("offers nothing to press, and asks the route nothing, before an edit", async () => {
+    const wrapper = await mountDialog();
+    expect(labelOf(primary(wrapper))).toBe("Apply");
+    expect(primary(wrapper).attributes("disabled")).toBeDefined();
+    // The note says what the button does, and is the button's description.
+    expect(note(wrapper).text()).toBe(APPLY_NOTE);
+    expect(note(wrapper).attributes("id")).toBeTruthy();
+    expect(primary(wrapper).attributes("aria-describedby")).toBe(
+      note(wrapper).attributes("id"),
     );
-    expect(textOf(wrapper)).toContain(
-      "The graph it replaces is kept as the version before.",
-    );
-    // A dry run only: nothing is written until the second press.
-    expect(saveLoraChain).toHaveBeenCalledTimes(1);
+    await wrapper.find(".app-dialog").trigger("keydown", { key: "Enter" });
+    await flushPromises();
+    expect(saveLoraChain).not.toHaveBeenCalled();
+    expect(wrapper.emitted("apply")).toBeUndefined();
+    expect(wrapper.emitted("close")).toBeUndefined();
   });
 
-  it("names a new workflow when that is chosen instead", async () => {
-    const wrapper = await toStepTwo();
-    await button(wrapper, "A new workflow").trigger("click");
-    await flushPromises();
-    expect(wrapper.find("input[type=text]").element.value).toBe(
-      "SDXL + face detailer (edited)",
-    );
-    expect(textOf(wrapper)).toContain(
-      "The original keeps its 184 pictures. Nothing made before this edit changes meaning.",
-    );
-    expect(wrapper.find("[role=status][aria-live]").text()).toContain(
-      "Saving as a new workflow, to be named. SDXL + face detailer is not changed.",
-    );
-    expect(saveLoraChain).toHaveBeenCalledTimes(1);
-  });
-
-  it("writes on 'Save as a new workflow' and moves the grid onto the new card", async () => {
-    const wrapper = await toStepTwo();
-    const store = useWorkflowsStore();
-    const refetch = vi.spyOn(store, "refetch").mockResolvedValue();
-    const select = vi.spyOn(store, "select");
-    const notices = useNoticeStore();
-    const push = vi.spyOn(notices, "push");
-
-    await button(wrapper, "A new workflow").trigger("click");
-    await flushPromises();
-    await button(wrapper, "Save as a new workflow").trigger("click");
-    await flushPromises();
-
-    const [key, body] = saveLoraChain.mock.calls[1];
-    expect(key).toBe(KEY);
-    expect(body).toEqual({
-      entries: [
-        { node_id: "14", strength: 1 },
-        { node_id: "22", strength: 0.85 },
-        { node_id: "31", strength: 0.4 },
-      ],
-      name: "SDXL + face detailer (edited)",
-      dry_run: false,
-    });
-    expect(refetch).toHaveBeenCalled();
-    expect(select).toHaveBeenCalledWith(NEW_KEY);
-    expect(push.mock.calls[0][0].text).toBe(
-      "Saved “SDXL + face detailer (edited)” as a new workflow.",
-    );
-    expect(wrapper.emitted("overwritten")).toBeFalsy();
-    expect(wrapper.emitted("close")).toBeTruthy();
-  });
-
-  it.each([
-    ["the button", (wrapper) => button(wrapper, "Overwrite the original").trigger("click")],
-    ["Enter", (wrapper) => wrapper.find(".app-dialog").trigger("keydown", { key: "Enter" })],
-  ])(
-    "saves over the original by default with %s, and tells the rail to read it again",
+  it.each(press)(
+    "applies a delete as an unsaved change with %s, and writes nothing",
     async (_how, accept) => {
-      const wrapper = await toStepTwo();
-      const store = useWorkflowsStore();
-      const refetch = vi.spyOn(store, "refetch").mockResolvedValue();
-      const select = vi.spyOn(store, "select");
+      const wrapper = await mountDialog();
       const push = vi.spyOn(useNoticeStore(), "push");
+      await deleteButton(wrapper, 3).trigger("click");
+      await flushPromises();
+
+      // The rewired line a delete brings with it is listed, and is no Save.
+      const listed = wrapper
+        .findAll("[data-testid='eld-changes'] li")
+        .map((item) => item.text());
+      expect(listed).toEqual([
+        "Loader #33 deleted: hairstyle-v3",
+        "#7 KSampler and 2 text encoders rewired",
+      ]);
+      expect(labelOf(primary(wrapper))).toBe("Apply");
+      expect(primary(wrapper).attributes("disabled")).toBeUndefined();
+      expect(note(wrapper).text()).toBe(APPLY_NOTE);
 
       await accept(wrapper);
       await flushPromises();
 
-      expect(saveLoraChain).toHaveBeenCalledTimes(2);
-      const [key, body] = saveLoraChain.mock.calls[1];
-      expect(key).toBe(KEY);
-      expect(body).toMatchObject({ name: null, dry_run: false, overwrite: true });
+      expect(wrapper.emitted("apply")).toEqual([
+        [{ skip_loras: [{ node_id: "33", field: "lora_name" }], loras: [] }],
+      ]);
+      expect(wrapper.emitted("close")).toHaveLength(1);
+      expect(wrapper.emitted("overwritten")).toBeUndefined();
+      // The dry run is all the route was ever asked.
+      expect(saveLoraChain).toHaveBeenCalledTimes(1);
+      expect(sent(false)).toEqual([]);
+      expect(push).not.toHaveBeenCalled();
+    },
+  );
+
+  it("applies a delete and new strengths in the slots the chain read names", async () => {
+    getLoraChain.mockResolvedValue(
+      chain({
+        loaders: [
+          // Model and CLIP weighted as one number: the CLIP follows.
+          loader("14", "a.safetensors", 1.0, { field: "lora_01" }),
+          // Weighted apart: the CLIP keeps its own.
+          loader("22", "b.safetensors", 0.85, { field: "lora_02", strength_clip: 0.5 }),
+          // A model-only loader has no CLIP strength to set.
+          loader("31", "c.safetensors", 0.4, { strength_clip: null }),
+          loader("33", "d.safetensors", 0.6, { field: "lora_04" }),
+        ],
+      }),
+    );
+    dry = [
+      { kind: "deleted", node_id: "33", text: "Loader #33 deleted: d" },
+      { kind: "strength", node_id: "14", text: "#14 a from 1.00 to 0.90" },
+      { kind: "strength", node_id: "22", text: "#22 b from 0.85 to 0.70" },
+      { kind: "strength", node_id: "31", text: "#31 c from 0.40 to 0.30" },
+      { kind: "rewired", node_id: "7", text: "#7 KSampler rewired" },
+    ];
+    const wrapper = await mountDialog();
+    await setStrength(wrapper, 0, "0.9");
+    await setStrength(wrapper, 1, "0.7");
+    await setStrength(wrapper, 2, "0.3");
+    await deleteButton(wrapper, 3).trigger("click");
+    await flushPromises();
+
+    expect(labelOf(primary(wrapper))).toBe("Apply");
+    await primary(wrapper).trigger("click");
+    await flushPromises();
+
+    expect(wrapper.emitted("apply")).toEqual([
+      [
+        {
+          skip_loras: [{ node_id: "33", field: "lora_04" }],
+          loras: [
+            {
+              node_id: "14",
+              field: "lora_01",
+              sha256: "sha-14",
+              strength_model: 0.9,
+              strength_clip: 0.9,
+            },
+            {
+              node_id: "22",
+              field: "lora_02",
+              sha256: "sha-22",
+              strength_model: 0.7,
+              strength_clip: 0.5,
+            },
+            {
+              node_id: "31",
+              field: "lora_name",
+              sha256: "sha-31",
+              strength_model: 0.3,
+              strength_clip: null,
+            },
+          ],
+        },
+      ],
+    ]);
+    expect(sent(false)).toEqual([]);
+  });
+
+  describe("the button's word changing under the reader", () => {
+    const said = (wrapper) =>
+      wrapper.find("[data-testid='eld-button-said']").text();
+
+    it("says nothing while it still reads Apply, however many removals", async () => {
+      const wrapper = await mountDialog();
+      await deleteButton(wrapper, 3).trigger("click");
+      await flushPromises();
+      await deleteButton(wrapper, 2).trigger("click");
+      await flushPromises();
+      expect(labelOf(primary(wrapper))).toBe("Apply");
+      expect(said(wrapper)).toBe("");
+    });
+
+    it("says the new word and why when an edit turns Apply into Save, and back", async () => {
+      const wrapper = await mountDialog();
+      await deleteButton(wrapper, 3).trigger("click");
+      await flushPromises();
+      expect(said(wrapper)).toBe("");
+
+      // A move on top of the removal: the same button now writes at once.
+      dry = [...DELETED_33, ...MOVED_22];
+      await swapSecondAndThird(wrapper);
+      expect(labelOf(primary(wrapper))).toBe("Save");
+      expect(said(wrapper)).toBe(
+        `The button now reads Save. ${note(wrapper).text()}`,
+      );
+      expect(said(wrapper)).toContain("Moving or adding a loader cannot wait");
+      // The gesture's own words are not overwritten by it.
+      expect(wrapper.find("[role=status][aria-live=polite]").text()).toContain(
+        "moved to",
+      );
+
+      // The move taken back: Apply again, and that is said too.
+      dry = DELETED_33;
+      await swapSecondAndThird(wrapper);
+      expect(labelOf(primary(wrapper))).toBe("Apply");
+      expect(said(wrapper)).toBe(
+        "The button now reads Apply. Apply puts this in the Workflow tab as an unsaved change. Nothing is written until you save there.",
+      );
+    });
+  });
+
+  describe("the same edit made twice", () => {
+    it("is said the second time too", async () => {
+      dry = MOVED_22;
+      const wrapper = await mountDialog();
+      const said = () =>
+        wrapper.find("[data-testid='eld-button-said']").text();
+      await swapSecondAndThird(wrapper);
+      expect(said()).toContain("The button now reads Save.");
+      // Taken back: no edit, the button reads Apply and does nothing.
+      await swapSecondAndThird(wrapper);
+      expect(labelOf(primary(wrapper))).toBe("Apply");
+      expect(said()).toBe("");
+      await swapSecondAndThird(wrapper);
+      expect(said()).toContain("The button now reads Save.");
+    });
+  });
+
+  it("keeps the note in the footer with the button it explains, not in what scrolls", async () => {
+    // In the body it went under the fold of a long chain, and the sentence
+    // saying that Save writes at once was the part cut off.
+    const wrapper = await mountDialog();
+    const footer = wrapper.find(".app-dialog__footer");
+    expect(footer.find("[data-testid='eld-note']").exists()).toBe(true);
+    expect(footer.find("[data-testid='eld-primary']").exists()).toBe(true);
+    expect(
+      wrapper.find(".app-dialog__body [data-testid='eld-note']").exists(),
+    ).toBe(false);
+  });
+
+  describe("the footer's summary", () => {
+    const summary = (wrapper) =>
+      wrapper.find("[data-testid='eld-count']").text();
+
+    it("says what was done in its own words, each kind counted", async () => {
+      const wrapper = await mountDialog();
+      expect(summary(wrapper)).toBe("No changes");
+      await deleteButton(wrapper, 3).trigger("click");
+      await flushPromises();
+      expect(summary(wrapper)).toBe("1 loader removed");
+      await deleteButton(wrapper, 2).trigger("click");
+      await flushPromises();
+      expect(summary(wrapper)).toBe("2 loaders removed");
+      await setStrength(wrapper, 0, "0.5");
+      expect(summary(wrapper)).toBe("2 loaders removed, 1 strength changed");
+    });
+
+    it("counts a move as a move, whatever the dry run has yet to say", async () => {
+      const wrapper = await mountDialog();
+      await swapSecondAndThird(wrapper);
+      expect(summary(wrapper)).toBe("1 loader moved");
+    });
+  });
+
+  it.each(press)(
+    "saves a moved loader straight away with %s, as the next version",
+    async (_how, accept) => {
+      dry = MOVED_22;
+      const wrapper = await mountDialog();
+      const store = useWorkflowsStore();
+      const refetch = vi.spyOn(store, "refetch").mockResolvedValue();
+      const select = vi.spyOn(store, "select");
+      const push = vi.spyOn(useNoticeStore(), "push");
+      await swapSecondAndThird(wrapper);
+
+      expect(labelOf(primary(wrapper))).toBe("Save");
+      expect(primary(wrapper).attributes("disabled")).toBeUndefined();
+      expect(note(wrapper).text()).toBe(`Moving or adding a loader ${SAVE_NOTE}`);
+
+      await accept(wrapper);
+      await flushPromises();
+
+      expect(saveLoraChain.mock.calls.at(-1)[0]).toBe(KEY);
+      expect(sent(false)).toEqual([
+        {
+          entries: [
+            { node_id: "14", strength: 1 },
+            { node_id: "31", strength: 0.4 },
+            { node_id: "22", strength: 0.85 },
+            { node_id: "33", strength: 0.6 },
+          ],
+          name: null,
+          dry_run: false,
+          overwrite: true,
+        },
+      ]);
       expect(refetch).toHaveBeenCalled();
       expect(select).not.toHaveBeenCalled();
       expect(push.mock.calls[0][0].text).toBe("Saved over “SDXL + face detailer”.");
       expect(wrapper.emitted("overwritten")).toEqual([[KEY]]);
-      expect(wrapper.emitted("close")).toBeTruthy();
+      expect(wrapper.emitted("apply")).toBeUndefined();
+      expect(wrapper.emitted("close")).toHaveLength(1);
     },
   );
 
-  it("does not send overwrite for a new workflow, by the button or by Enter", async () => {
-    const wrapper = await toStepTwo();
-    await button(wrapper, "A new workflow").trigger("click");
-    await flushPromises();
-    await wrapper.find(".app-dialog").trigger("keydown", { key: "Enter" });
-    await flushPromises();
-    expect(saveLoraChain).toHaveBeenCalledTimes(2);
-    expect(saveLoraChain.mock.calls[1][1]).not.toHaveProperty("overwrite");
-    expect(wrapper.emitted("overwritten")).toBeFalsy();
-  });
+  it("saves a strength for a LoRA the shelf has no digest for", async () => {
+    dry = [{ kind: "strength", node_id: "33", text: "#33 hairstyle-v3 from 0.60 to 0.70" }];
+    const wrapper = await mountDialog();
+    await setStrength(wrapper, 3, "0.7");
 
-  it("says so in the live region when the choice goes back to the original", async () => {
-    const wrapper = await toStepTwo();
-    await button(wrapper, "A new workflow").trigger("click");
-    await button(wrapper, "Over the original").trigger("click");
-    await flushPromises();
-    expect(wrapper.find("[role=status][aria-live]").text()).toContain(
-      "Saving over SDXL + face detailer, as its next version.",
+    expect(labelOf(primary(wrapper))).toBe("Save");
+    expect(note(wrapper).text()).toBe(
+      `A strength for a LoRA missing from your model shelf ${SAVE_NOTE}`,
     );
+    await primary(wrapper).trigger("click");
+    await flushPromises();
+
+    expect(sent(false)).toHaveLength(1);
+    expect(sent(false)[0]).toMatchObject({ dry_run: false, overwrite: true });
+    expect(sent(false)[0].entries.at(-1)).toEqual({ node_id: "33", strength: 0.7 });
+    expect(wrapper.emitted("overwritten")).toEqual([[KEY]]);
+    expect(wrapper.emitted("apply")).toBeUndefined();
   });
 
   it.each([
-    ["A new workflow", "Save as a new workflow", false],
-    ["Over the original", "Overwrite the original", true],
-  ])(
-    "does not report a landed save as failed when the grid re-read throws (%s)",
-    async (mode, press, overwritten) => {
-      const wrapper = await toStepTwo();
-      const store = useWorkflowsStore();
-      vi.spyOn(store, "refetch").mockRejectedValue(new Error("grid read failed"));
-      saveLoraChain.mockResolvedValueOnce({
-        dry_run: false,
-        name: overwritten ? null : "SDXL + face detailer (edited).json",
-        workflow_id: overwritten ? KEY : NEW_KEY,
-        overwritten,
-        changes: [],
-      });
-      await button(wrapper, mode).trigger("click");
-      await flushPromises();
-      await button(wrapper, press).trigger("click");
-      await flushPromises();
+    [
+      "a loader added",
+      [
+        { kind: "added", node_id: "34", text: "A loader added for skin-detail-xl at 1.00" },
+        { kind: "rewired", node_id: "7", text: "#7 KSampler rewired" },
+      ],
+    ],
+    ["a loader moved beside a delete", [...DELETED_33, ...MOVED_22]],
+    // Not something the planner answers; if it ever did, nothing in the
+    // unsaved changes would stand for it.
+    ["a rewire with no delete", [{ kind: "rewired", node_id: "7", text: "#7 KSampler rewired" }]],
+  ])("reads Save for %s, and hands nothing to the tab", async (_case, changes) => {
+    dry = changes;
+    const wrapper = await mountDialog();
+    await deleteButton(wrapper, 3).trigger("click");
+    await flushPromises();
+    expect(labelOf(primary(wrapper))).toBe("Save");
+    await primary(wrapper).trigger("click");
+    await flushPromises();
+    expect(wrapper.emitted("apply")).toBeUndefined();
+    expect(sent(false)).toHaveLength(1);
+  });
 
-      // Closed, with no alert: left open, a second press writes it again.
-      expect(wrapper.find("[role=alert]").exists()).toBe(false);
-      expect(wrapper.emitted("close")).toBeTruthy();
-      expect(Boolean(wrapper.emitted("overwritten"))).toBe(overwritten);
-      expect(saveLoraChain).toHaveBeenCalledTimes(2);
-    },
-  );
+  it("has Cancel and the one button, and never offers a new workflow", async () => {
+    const wrapper = await mountDialog();
+    await deleteButton(wrapper, 3).trigger("click");
+    await flushPromises();
+    expect(footer(wrapper)).toEqual(["Cancel", "Apply"]);
+    dry = [...DELETED_33, ...MOVED_22];
+    await swapSecondAndThird(wrapper);
+    expect(footer(wrapper)).toEqual(["Cancel", "Save"]);
+
+    expect(wrapper.find("[data-testid='eld-save-mode']").exists()).toBe(false);
+    expect(wrapper.find("[role=radio]").exists()).toBe(false);
+    // No name to ask for: nothing here makes a workflow.
+    expect(wrapper.find("input[type=text]").exists()).toBe(false);
+    expect(textOf(wrapper)).not.toMatch(
+      /new workflow|the original|\bcopy\b|clone|\bfixed\b|\bedited\b/i,
+    );
+  });
+
+  it("keeps focus on the button when its word changes", async () => {
+    const wrapper = await mountDialog();
+    await deleteButton(wrapper, 3).trigger("click");
+    await flushPromises();
+    const element = primary(wrapper).element;
+    element.focus();
+    expect(document.activeElement).toBe(element);
+
+    // A drag moves no focus of its own, unlike Alt+arrow on the handle.
+    dry = [...DELETED_33, ...MOVED_22];
+    const rows = wrapper.findAll(".eld-row");
+    await rows[1].find("[data-focus='handle']").trigger("dragstart");
+    await rows[0].trigger("drop");
+    await flushPromises();
+
+    expect(labelOf(primary(wrapper))).toBe("Save");
+    expect(primary(wrapper).element).toBe(element);
+    expect(document.activeElement).toBe(element);
+  });
+
+  it("waits for the dry run of the edit on screen, one request at a time", async () => {
+    const asked = [];
+    saveLoraChain.mockImplementation(
+      (_key, body) => new Promise((resolve) => asked.push({ body, resolve })),
+    );
+    const wrapper = await mountDialog();
+    await deleteButton(wrapper, 3).trigger("click");
+    await flushPromises();
+    expect(textOf(wrapper)).toContain("Working out what changes…");
+    expect(primary(wrapper).attributes("disabled")).toBeDefined();
+
+    // A second edit while the first is still being asked about.
+    await swapSecondAndThird(wrapper);
+    expect(asked).toHaveLength(1);
+    asked[0].resolve({ dry_run: true, changes: DELETED_33 });
+    await flushPromises();
+
+    // That answer is about the chain before the move: it is not listed and
+    // not pressable, and the route is asked again for what is on screen.
+    expect(wrapper.find("[data-testid='eld-changes']").exists()).toBe(false);
+    expect(primary(wrapper).attributes("disabled")).toBeDefined();
+    expect(asked).toHaveLength(2);
+    expect(asked[1].body.entries.map((entry) => entry.node_id)).toEqual([
+      "14",
+      "31",
+      "22",
+    ]);
+    asked[1].resolve({ dry_run: true, changes: [...DELETED_33, ...MOVED_22] });
+    await flushPromises();
+    expect(labelOf(primary(wrapper))).toBe("Save");
+    expect(primary(wrapper).attributes("disabled")).toBeUndefined();
+
+    // A third edit: the lines listed are the edit before it, so the button
+    // and Enter wait for the route again.
+    await button(wrapper, "Put back").trigger("click");
+    await flushPromises();
+    expect(asked).toHaveLength(3);
+    expect(wrapper.find("[data-testid='eld-changes']").exists()).toBe(true);
+    expect(primary(wrapper).attributes("disabled")).toBeDefined();
+    await wrapper.find(".app-dialog").trigger("keydown", { key: "Enter" });
+    await flushPromises();
+    expect(asked).toHaveLength(3);
+    expect(wrapper.emitted("close")).toBeUndefined();
+  });
+
+  it("says why when the route cannot say what an edit changes, and offers no press", async () => {
+    saveLoraChain.mockRejectedValue({
+      response: { status: 409, data: { detail: "Loader #33 cannot be rewired around." } },
+    });
+    const wrapper = await mountDialog();
+    await deleteButton(wrapper, 3).trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[role=alert]").text()).toContain(
+      "Loader #33 cannot be rewired around.",
+    );
+    expect(primary(wrapper).attributes("disabled")).toBeDefined();
+    await wrapper.find(".app-dialog").trigger("keydown", { key: "Enter" });
+    await flushPromises();
+    expect(wrapper.emitted("apply")).toBeUndefined();
+    expect(saveLoraChain).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not report a landed save as failed when the grid re-read throws", async () => {
+    dry = MOVED_22;
+    const wrapper = await mountDialog();
+    vi.spyOn(useWorkflowsStore(), "refetch").mockRejectedValue(
+      new Error("grid read failed"),
+    );
+    await swapSecondAndThird(wrapper);
+    await primary(wrapper).trigger("click");
+    await flushPromises();
+
+    // Closed, with no alert: left open, a second press writes it again.
+    expect(wrapper.find("[role=alert]").exists()).toBe(false);
+    expect(wrapper.emitted("close")).toBeTruthy();
+    expect(wrapper.emitted("overwritten")).toEqual([[KEY]]);
+    expect(sent(false)).toHaveLength(1);
+  });
 
   it("stays open and says why when the save is refused", async () => {
-    const wrapper = await toStepTwo();
+    dry = MOVED_22;
+    const wrapper = await mountDialog();
+    await swapSecondAndThird(wrapper);
     saveLoraChain.mockRejectedValueOnce({
       response: { status: 503, data: { detail: "ComfyUI did not answer." } },
     });
-    await button(wrapper, "Overwrite the original").trigger("click");
+    await primary(wrapper).trigger("click");
     await flushPromises();
     expect(wrapper.find("[role=alert]").text()).toContain("ComfyUI did not answer.");
     expect(wrapper.emitted("close")).toBeFalsy();
-  });
-
-  it("goes back to the list with the edit intact", async () => {
-    const wrapper = await toStepTwo();
-    await button(wrapper, "Back").trigger("click");
-    await flushPromises();
-    expect(wrapper.findAll(".eld-row")[3].classes()).toContain("eld-row--deleted");
+    expect(wrapper.emitted("overwritten")).toBeUndefined();
+    // The edit is still on screen, and still pressable.
+    expect(primary(wrapper).attributes("disabled")).toBeUndefined();
   });
 });
 
@@ -669,9 +964,7 @@ describe("read-only", () => {
       wrapper.findAll(".eld-row")[0].find("[data-focus='handle']").attributes("draggable"),
     ).toBe("false");
     expect(button(wrapper, "Add a LoRA").attributes("disabled")).toBeDefined();
-    expect(wrapper.findAll("button").some((b) => labelOf(b) === "Save…")).toBe(
-      false,
-    );
+    expect(primary(wrapper).exists()).toBe(false);
     expect(button(wrapper, "Close").exists()).toBe(true);
   });
 });
@@ -681,8 +974,11 @@ describe("opened from Save as recipe", () => {
     const wrapper = await mountDialog({ dropLora: "hairstyle-v3.safetensors" });
     const row = wrapper.findAll(".eld-row")[3];
     expect(row.classes()).toContain("eld-row--deleted");
-    expect(row.text()).toContain("Restore");
-    expect(textOf(wrapper)).toContain("1 change");
+    expect(row.text()).toContain("Put back");
+    expect(textOf(wrapper)).toContain("1 loader removed");
+    // Asked about as it opens, so the delete is one press from the tab.
+    expect(labelOf(primary(wrapper))).toBe("Apply");
+    expect(primary(wrapper).attributes("disabled")).toBeUndefined();
   });
 
   it("says so when the chain has no loader for it", async () => {
@@ -768,11 +1064,9 @@ describe("a forked chain, drawn side by side", () => {
     expect(wrapper.find("[role=status][aria-live=polite]").text()).toBe(
       "detail-tweaker-xl moved to Base pass, at 4.",
     );
-    expect(textOf(wrapper)).toContain("1 change");
+    expect(textOf(wrapper)).toContain("1 loader moved");
 
-    await button(wrapper, "Save…").trigger("click");
-    await flushPromises();
-    const body = saveLoraChain.mock.calls[0][1];
+    const body = sent(true).at(-1);
     expect(body.entries.map((entry) => entry.node_id)).toEqual(["10", "11"]);
     expect(body.lanes.map((lane) => lane.map((entry) => entry.node_id))).toEqual([
       ["12", "13"],
@@ -816,9 +1110,7 @@ describe("a forked chain, drawn side by side", () => {
     await flushPromises();
     await wrapper.find("select").setValue("sha-skin");
     await flushPromises();
-    await button(wrapper, "Save…").trigger("click");
-    await flushPromises();
-    const body = saveLoraChain.mock.calls[0][1];
+    const body = sent(true).at(-1);
     expect(body.lanes[1]).toEqual([
       { node_id: "13", strength: 0.5 },
       { node_id: null, sha256: "sha-skin", strength: 1 },
@@ -845,96 +1137,5 @@ describe("a forked chain, drawn side by side", () => {
     expect(row.findAll("[data-move]").map((item) => item.text())).toEqual([
       "Move to KSampler #15",
     ]);
-  });
-});
-
-describe("on a clone that is not written yet (pending)", () => {
-  const pending = {
-    name: "Portrait · Chroma",
-    clear: true,
-    sourceClass: "UnetLoaderGGUF",
-    rows: null,
-    baseModel: "Chroma",
-    setLoraIds: [3],
-    ranWith: { 4: 5 },
-    checkpointName: "chroma-hd",
-  };
-
-  beforeEach(() => {
-    listAdapters.mockResolvedValue([
-      { id: 1, filename: "flux-only.safetensors", sha256: "sha-flux", base_model: "FLUX.1 dev" },
-      { id: 2, filename: "soft-bokeh.safetensors", sha256: "sha-bokeh", base_model: "Chroma" },
-      { id: 3, filename: "mara-chroma.safetensors", sha256: "sha-mara", base_model: "Chroma" },
-      { id: 4, filename: "film-look.safetensors", sha256: "sha-film", base_model: "Chroma" },
-    ]);
-  });
-
-  it("starts from the clone's chain and offers only its base model's LoRAs", async () => {
-    const wrapper = await mountDialog({ pending });
-    // Cleared: the card's four loaders are not the clone's.
-    expect(wrapper.findAll(".eld-row")).toHaveLength(0);
-    expect(textOf(wrapper)).toContain("UnetLoaderGGUF");
-    expect(textOf(wrapper)).toContain("not saved yet");
-    expect(textOf(wrapper)).toContain(
-      "1 LoRA trained on other base models is not offered.",
-    );
-
-    await button(wrapper, "Insert LoRA between these nodes").trigger("click");
-    await flushPromises();
-    const select = wrapper.find(".eld-row select");
-    // The set's own first, then what ran with its checkpoint, then the rest
-    // of its base model; never the Flux LoRA the clone removed.
-    expect(select.findAll("option").map((option) => option.text())).toEqual([
-      "Pick a LoRA from your shelf…",
-      "mara-chroma",
-      "film-look · 5 recipes",
-      "soft-bokeh",
-    ]);
-    await select.setValue("sha-mara");
-    await flushPromises();
-
-    expect(labelOf(wrapper.findAll(".app-dialog__footer button").at(-1))).toBe(
-      "Done",
-    );
-    await button(wrapper, "Done").trigger("click");
-    await flushPromises();
-    const [[{ body, changes }]] = wrapper.emitted("done");
-    expect(changes).toBe(1);
-    expect(body).toEqual({
-      entries: [{ node_id: null, sha256: "sha-mara", strength: 1 }],
-      lanes: null,
-    });
-    expect(saveLoraChain).not.toHaveBeenCalled();
-  });
-
-  it("says the base model hid the shelf's LoRAs, never that it has none", async () => {
-    listAdapters.mockResolvedValue([
-      { id: 1, filename: "flux-only.safetensors", sha256: "sha-flux", base_model: "FLUX.1 dev" },
-    ]);
-    const wrapper = await mountDialog({ pending });
-    expect(textOf(wrapper)).toContain(
-      "1 LoRA trained on other base models is not offered.",
-    );
-    expect(textOf(wrapper)).not.toContain("Your model shelf has no LoRA to add.");
-  });
-
-  it("offers no Done while the chain is still being read", async () => {
-    getLoraChain.mockReturnValue(new Promise(() => {}));
-    const wrapper = await mountDialog({ pending: { ...pending, clear: false } });
-    const labels = wrapper
-      .findAll(".app-dialog__footer button")
-      .map((b) => labelOf(b));
-    expect(labels).not.toContain("Done");
-    // Enter reaches the same gate: an empty chain is never handed back.
-    wrapper.findComponent({ name: "AppDialog" }).vm.$emit("accept");
-    await flushPromises();
-    expect(wrapper.emitted("done")).toBeUndefined();
-  });
-
-  it("keeps the card's loaders when the base model is the same", async () => {
-    const wrapper = await mountDialog({
-      pending: { ...pending, clear: false, baseModel: "FLUX.1 dev" },
-    });
-    expect(wrapper.findAll(".eld-row")).toHaveLength(4);
   });
 });

@@ -44,6 +44,12 @@ STAGE_ON, STAGE_OFF = "on", "off"
 # waits in the Workflow tab, and what its last run was made with.
 WAITING, RAN = "waiting", "run"
 
+# A key of a run's set beside its changes: what waited on the workflow, on
+# the version it had, when that run was made. A save of what the run changed
+# tells an edit made after the run by it (``routes/workflows._save``). Inside
+# the run's own row, so it lives exactly as long as the run's set does.
+WAITED = "waited"
+
 # Sentinel: this attribute was not in the request, so it stands.
 UNSET = object()
 
@@ -285,10 +291,40 @@ def write_changes(
         )
 
 
-def clear_changes(conn, workflow_id: str) -> None:
+def clear_changes(conn, workflow_id: str, kind: Optional[str] = None) -> None:
     """Drop everything waiting on a workflow, inside the caller's transaction:
-    a save has made it part of the graph, or the owner discarded it."""
-    conn.execute("DELETE FROM workflow_change WHERE workflow_id = ?", (workflow_id,))
+    a save has made it part of the graph, or the owner discarded it. With
+    *kind*, only that set: what a run changed (:data:`RAN`) goes with any
+    save, also one that leaves what waits where it is."""
+    conn.execute(
+        "DELETE FROM workflow_change WHERE workflow_id = ? AND (? IS NULL OR kind = ?)",
+        (workflow_id, kind, kind),
+    )
+
+
+def write_waiting(
+    conn, workflow_id: str, changes: dict, base_version: Optional[int]
+) -> None:
+    """Leave *changes* waiting on *base_version*, inside the caller's
+    transaction, in place of what waited.
+
+    What a save keeps waiting: unlike :func:`write_changes` the set takes
+    *base_version*, the version that save made, since it was carried onto it.
+    """
+    conn.execute(
+        "INSERT INTO workflow_change (workflow_id, kind, changes, "
+        "base_version, updated_at) VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(workflow_id, kind) DO UPDATE SET "
+        "changes = excluded.changes, base_version = excluded.base_version, "
+        "updated_at = excluded.updated_at",
+        (
+            workflow_id,
+            WAITING,
+            json.dumps(changes),
+            base_version,
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
 
 
 def waiting_counts(hub: HubDatabase) -> dict[str, dict]:

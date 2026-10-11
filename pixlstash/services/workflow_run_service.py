@@ -1415,10 +1415,12 @@ def skip_requested_loras(
         }
         kept = sorted(filled - set(asked))
         if kept:
+            # The owner's word for taking a loader out is *Remove*, in the Run
+            # popup and in a save, which prints this too (`_refuse_unapplied`).
             refuse(
                 f"Node {node_id} ({class_type}) also loads "
-                f"{', '.join(shown(f) or f for f in kept)}, and skipping the "
-                "node for this run would skip that too."
+                f"{', '.join(shown(f) or f for f in kept)}, and removing the "
+                "node would remove that too."
             )
             continue
         if object_info is None:

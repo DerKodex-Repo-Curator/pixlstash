@@ -129,8 +129,9 @@
                 class="msp__link"
                 >{{ nameOf(id) || `manual workflow ${i + 1}` }}</router-link
               ></template
-            >; clone {{ manualIds.length === 1 ? "it" : "them" }} with other
-            models to change that.
+            >; pick another model on
+            {{ manualIds.length === 1 ? "its Workflow tab" : "each one's Workflow tab" }}
+            and save to change that.
           </template>
         </span>
         <AppButton

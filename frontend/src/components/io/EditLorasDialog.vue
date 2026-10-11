@@ -2,25 +2,24 @@
   <AppDialog
     :open="open"
     title="Edit LoRAs"
-    :subtitle="pending ? `${pending.name} · not saved yet` : cardName"
+    :subtitle="cardName"
     :size="branched ? 'xl' : 'md'"
     :fullscreen="lanes.length > 2"
     @close="close"
-    @accept="onAccept"
+    @accept="primary"
   >
     <p v-if="loading" class="eld-note eld-quiet">Reading the chain…</p>
     <p v-else-if="loadError" class="eld-note eld-bad" role="alert">
       {{ loadError }}
     </p>
 
-    <!-- ── Step one: the chain ───────────────────────────────────────── -->
-    <template v-else-if="step === 'edit'">
+    <template v-else>
       <!-- The planner's own sentence, shown rather than hit: an edit that
            cannot be saved is not arranged first and refused after. -->
       <div v-if="!editable" class="eld-refusal" role="status">
         <v-icon size="16" class="eld-refusal-glyph">mdi-lock-outline</v-icon>
         <p class="eld-note">
-          {{ refusal || "This chain cannot be edited just now." }}
+          {{ refusal || "This chain cannot be changed just now." }}
           Deleting, dragging and adding are off; the list is shown as read.
         </p>
       </div>
@@ -226,135 +225,104 @@
         {{ firstLoaderNote }}
       </p>
 
-      <p v-if="offerNote" class="eld-note eld-quiet" data-testid="eld-offer-note">
-        {{ offerNote }}
-      </p>
-
-      <p v-if="editable && !pending" class="eld-note eld-quiet">
-        Nothing is written yet. Save… asks whether this goes over
-        <b class="eld-strong">{{ shownName }}</b> or is a new workflow.
-      </p>
-    </template>
-
-    <!-- ── Step two: a named thing, and what it changes ──────────────── -->
-    <template v-else>
-      <!-- Where the edit lands. Over the original is the default: it is a
-           new version, with the ones before kept, so Enter accepts either. -->
-      <div class="eld-where">
-        <span class="section-label">Save it as</span>
-        <Segmented
-          v-model="saveMode"
-          :options="saveModes"
-          aria-label="Save it as"
-          data-testid="eld-save-mode"
-        />
-      </div>
-      <AppInput
-        v-if="!overwriting"
-        v-model="newName"
-        label="Name of the new workflow"
-        :disabled="saving"
-        autofocus
-        @enter="save"
-      />
-      <div>
+      <!-- The dry run's own lines, the rewires included: the part of an
+           edit no owner can see in the list above. -->
+      <div v-if="previewing || previewError || changes.length">
         <span class="section-label">What changes</span>
-        <p v-if="previewing" class="eld-note eld-quiet">
-          Working out what changes…
-        </p>
-        <p v-else-if="previewError" class="eld-note eld-bad" role="alert">
+        <p v-if="previewError" class="eld-note eld-bad" role="alert">
           {{ previewError }}
         </p>
-        <ul v-else class="eld-changes" data-testid="eld-changes">
+        <ul v-else-if="changes.length" class="eld-changes" data-testid="eld-changes">
           <li v-for="(change, index) in changes" :key="`${index}:${change.kind}`">
             {{ change.text }}
           </li>
         </ul>
+        <p v-else class="eld-note eld-quiet">Working out what changes…</p>
       </div>
-      <p v-if="!overwriting" class="eld-note eld-quiet">
-        The original keeps its {{ picturesLabel }}. Nothing made before this
-        edit changes meaning.
-      </p>
-      <p v-else class="eld-note eld-quiet" data-testid="eld-over-note">
-        <b class="eld-strong">{{ shownName }}</b> keeps its name and its
-        {{ picturesLabel }}, and this chain becomes its next version. A recipe
-        naming a LoRA the workflow no longer loads still lists it, and a run
-        leaves it out and says so. The graph it replaces is kept as the version
-        before.
-      </p>
+
       <p v-if="saveError" class="eld-note eld-bad" role="alert">
         {{ saveError }}
       </p>
     </template>
 
     <!-- One live region for the gestures a reader who is not watching the
-         list cannot see: a move, a delete, a restore. -->
+         list cannot see: a move, a removal, a row put back. -->
     <p class="visually-hidden" role="status" aria-live="polite">
       {{ liveMessage }}
     </p>
+    <!-- And one for the primary button changing its word. Its own region:
+         the dry run answers a moment after the gesture, and one region would
+         have it replace "… moved to 3 of 4" before that was read. -->
+    <p
+      class="visually-hidden"
+      role="status"
+      aria-live="polite"
+      data-testid="eld-button-said"
+    >
+      {{ buttonMessage }}
+    </p>
 
     <template #footer>
-      <template v-if="step === 'edit'">
-        <span v-if="editable" class="eld-count" data-testid="eld-count">
-          {{ changeLabel }}
-        </span>
-        <AppButton @click="close">{{ editable ? "Cancel" : "Close" }}</AppButton>
-        <!-- On a clone's pending chain there is nothing to save here: Done
-             hands the chain back and the clone is the one write. -->
-        <AppButton
-          v-if="editable && pending"
-          variant="primary"
-          :disabled="!canFinish"
-          @click="done"
-        >
-          Done
-        </AppButton>
-        <AppButton
-          v-else-if="editable"
-          variant="primary"
-          :disabled="!canContinue"
-          @click="toConfirm"
-        >
-          Save…
-        </AppButton>
-      </template>
-      <template v-else>
-        <AppButton :disabled="saving" @click="step = 'edit'">Back</AppButton>
-        <AppButton
-          variant="primary"
-          :loading="saving"
-          :disabled="!canSave"
-          @click="save"
-        >
-          {{ overwriting ? "Overwrite the original" : "Save as a new workflow" }}
-        </AppButton>
-      </template>
+      <!-- What the one button does with this edit. It names the button, so
+           it is the button's description too, and it is pinned in the footer
+           with it: in the body it scrolled out from under a long chain, and
+           the sentence saying a Save writes at once was the part cut off. -->
+      <p
+        v-if="editable"
+        :id="noteId"
+        class="eld-note eld-quiet eld-foot-note"
+        data-testid="eld-note"
+      >
+        {{ note }}
+      </p>
+      <span v-if="editable" class="eld-count" data-testid="eld-count">
+        {{ changeLabel }}
+      </span>
+      <AppButton @click="close">{{ editable ? "Cancel" : "Close" }}</AppButton>
+      <!-- One button, whose word is what it does with this edit. The same
+           element either way, so a change of word leaves focus where it is. -->
+      <AppButton
+        v-if="editable"
+        variant="primary"
+        :loading="saving"
+        :disabled="!ready"
+        :aria-describedby="noteId"
+        data-testid="eld-primary"
+        @click="primary"
+      >
+        {{ waits ? "Apply" : "Save" }}
+      </AppButton>
     </template>
   </AppDialog>
 </template>
 
 <script setup>
 /**
- * Edit LoRAs (#1478, direction B): a workflow's LoRA chain as one list
- * between two fixed ends, saved as a new workflow or over the one it edits.
+ * Edit LoRAs (#1478, direction B; #1850): a workflow's LoRA chain as one
+ * list between two fixed ends, ending in one button.
  *
  * The model source above, the sink below, and between them the loaders in
  * the order the chain applies them — so dragging row 3 above row 2 genuinely
  * makes a different picture. Three gestures and no others: delete a row, drag
  * a row (Alt+↑/↓ on the focused handle does the same), add one to the end.
  *
- * **Nothing is written until the second step.** Save… asks the route for a dry
- * run and lists the changes it answers with — the rewires included, which are
- * the part no owner can see — beside the choice of where it lands; only the
- * second step's button writes. **Over the original** is the default (owner
- * decision, 2026-10-10; `overwrite` on the PUT): it keeps the card, its name,
- * pictures and recipes and gives it a new version, which is its graph from
- * then on; every version before is kept (an automatic workflow's first
- * overwrite keeps the graph read off its pictures as version 1). It emits
- * `overwritten`, because the card selected does not change and the rail must
- * read it again. **A new workflow** is the other choice: the original card
- * and its pictures do not change. Plain Enter accepts whichever is chosen,
- * since neither loses anything.
+ * **The route's dry run says what an edit is, and the button follows it.**
+ * Every gesture asks `PUT …/lora-chain` for a dry run and lists the changes it
+ * answers with, the rewires included, which are the part no owner can see.
+ * The kinds on that list, and nothing worked out here, decide the button:
+ *
+ * - **Apply**, when every change is a loader deleted or a shelf LoRA's
+ *   strength. Nothing is written: `apply` hands the Workflow tab a fragment of
+ *   the workflow's unsaved changes (`skip_loras` and `loras`, the server's
+ *   `WorkflowChanges` words) and the tab's own bar saves it. The `rewired`
+ *   line a delete brings with it changes nothing here: removing a loader from
+ *   the unsaved changes rewires round it the same way.
+ * - **Save**, when a loader is added or moved, or the strength is of a LoRA
+ *   the shelf cannot name: the unsaved changes have no words for those, so
+ *   the edit is written at once (`overwrite` on the PUT) as the workflow's
+ *   next version, which the tab's version menu takes back. It emits
+ *   `overwritten`, because the card selected does not change and the rail
+ *   must read it again.
  *
  * **Where the model forks** (`lanes` in the read), the chain is drawn as the
  * graph it is: the loaders every pass reads once at the top, then one lane per
@@ -366,16 +334,8 @@
  * loaders that start from different places… The refusal is the server's
  * sentence and is shown instead of letting an edit be arranged that cannot be
  * saved.
- *
- * **Pending mode** (`pending`, Clone onto a workflow set): the same dialog on
- * a clone that is not written yet. It reads the card's chain and then shows
- * the clone's: the source node under its new class, and no loader at all when
- * the clone clears them. Kept loaders are ordinary rows, added ones are new.
- * The picker offers only LoRAs for the clone's base model, the set's own
- * first. *Done* emits `done` with the rows and the chain body and writes
- * nothing; the clone dialog sends that body with its one write.
  */
-import { computed, ref, watch } from "vue";
+import { computed, ref, useId, watch } from "vue";
 import { VIcon } from "vuetify/components";
 
 import { listAdapters } from "../../api/modelShelf";
@@ -384,10 +344,7 @@ import { useNoticeStore } from "../../stores/useNoticeStore";
 import { useWorkflowsStore } from "../../stores/useWorkflowsStore";
 import { errorMessage } from "../../utils/apiError";
 import { focusLater } from "../../utils/dom";
-import {
-  pictureCount as countPictures,
-  rowBaseModel,
-} from "../../utils/workflowSets";
+import { pictureCount as countPictures } from "../../utils/workflowSets";
 import {
   chainEntries,
   countChanges,
@@ -397,36 +354,32 @@ import {
 } from "../../utils/loraChain";
 import AppButton from "../widgets/AppButton.vue";
 import AppDialog from "../widgets/AppDialog.vue";
-import AppInput from "../widgets/AppInput.vue";
-import Segmented from "../widgets/Segmented.vue";
 import EditLorasRow from "./EditLorasRow.vue";
 
 const props = defineProps({
   open: { type: Boolean, default: false },
-  /** The card whose chain is edited. Only an overwrite modifies it. */
+  /** The workflow whose chain is edited. Only Save writes to it. */
   workflowId: { type: String, default: "" },
-  /** What the owner calls the card: the subtitle, and the new name's stem. */
+  /** What the owner calls the workflow: the subtitle, and the Save note. */
   cardName: { type: String, default: "" },
-  /** How many pictures the card made, for "its N pictures stay as they are". */
+  /** How many pictures the workflow made, for "keeps its N pictures". */
   pictureCount: { type: Number, default: 0 },
   /**
    * A LoRA filename to open with its loader already struck through.
    *
    * Save-as-recipe's "The workflow" answer: the owner already said which
-   * entry they meant, so the dialog opens with it deleted and Restore beside
+   * entry they meant, so the dialog opens with it removed and Put back beside
    * it rather than asking them to find it again.
    */
   dropLora: { type: String, default: "" },
-  /**
-   * A clone's pending chain instead of the card's, or null: `{name, clear,
-   * sourceClass, rows, baseModel, setLoraIds, ranWith, checkpointName}`.
-   * `rows` is the last Done's, `ranWith` adapter id -> recipes beside the
-   * set's checkpoint. See "Pending mode" above.
-   */
-  pending: { type: Object, default: null },
 });
 
-const emit = defineEmits(["close", "done", "overwritten"]);
+/**
+ * `apply` carries `{skip_loras: [{node_id, field}], loras: [{node_id, field,
+ * sha256, strength_model, strength_clip}]}` and writes nothing; `overwritten`
+ * carries the workflow id, after a Save. `close` follows either.
+ */
+const emit = defineEmits(["close", "apply", "overwritten"]);
 
 const notices = useNoticeStore();
 const workflows = useWorkflowsStore();
@@ -441,11 +394,7 @@ const rows = ref([]);
 const shelf = ref([]);
 const shelfRead = ref(false);
 
-/** "edit" (the chain) or "confirm" (the name and what changes). */
-const step = ref("edit");
-const newName = ref("");
-/** "over" (this workflow's next version, the default) or "new" (a copy). */
-const saveMode = ref("over");
+/** The dry run's answer for the edit on screen: `[{kind, node_id, text}]`. */
 const changes = ref([]);
 const previewing = ref(false);
 const previewError = ref("");
@@ -457,9 +406,14 @@ const dropMissed = ref("");
 const draggingId = ref(null);
 const overId = ref(null);
 const liveMessage = ref("");
+const buttonMessage = ref("");
 const listEl = ref(null);
+/** The note under the list is the primary button's description. */
+const noteId = useId();
 
 let newRows = 0;
+/** The primary button's word as last said aloud; it opens reading Apply. */
+let saidWord = "Apply";
 /** Bumped per open, so a slow read for a closed dialog writes nothing. */
 let loadToken = 0;
 
@@ -468,15 +422,8 @@ const refusal = computed(() => chain.value?.refusal || "");
 
 const picturesLabel = computed(() => countPictures(props.pictureCount));
 
-const overwriting = computed(() => saveMode.value === "over");
-
 /** The card's name in a sentence, or words for one whose name has not landed. */
 const shownName = computed(() => props.cardName || "this workflow");
-
-const saveModes = computed(() => [
-  { id: "over", label: "Over the original", disabled: saving.value },
-  { id: "new", label: "A new workflow", disabled: saving.value },
-]);
 
 /** One lane per pass when the model forks; empty for a straight chain. */
 const lanes = computed(() => chain.value?.lanes || []);
@@ -539,90 +486,55 @@ const changeCount = computed(() =>
   countChanges(readLoaders.value, effectiveRows.value),
 );
 
+/**
+ * The footer's summary, in the words of what was done: "1 loader removed",
+ * "2 loaders moved, 1 strength changed". Counted off the rows the owner sees,
+ * never off the dry run: it has to read right while that is still out, and a
+ * rewire is a consequence the list under *What changes* already spells out.
+ * What is neither removed, added nor re-weighted was moved.
+ */
 const changeLabel = computed(() => {
   const count = changeCount.value;
   if (!count) return "No changes";
-  return `${count} ${count === 1 ? "change" : "changes"}`;
+  const rowsNow = effectiveRows.value;
+  const removed = rowsNow.filter((row) => !row.isNew && row.deleted).length;
+  const added = rowsNow.filter((row) => row.isNew && row.sha256).length;
+  const strengths = rowsNow.filter(
+    (row) =>
+      !row.isNew &&
+      !row.deleted &&
+      row.hasStrength &&
+      row.strength !== row.readStrength,
+  ).length;
+  const moved = Math.max(0, count - removed - added - strengths);
+  const loaders = (n, did) => `${n} ${n === 1 ? "loader" : "loaders"} ${did}`;
+  return [
+    removed && loaders(removed, "removed"),
+    added && loaders(added, "added"),
+    moved && loaders(moved, "moved"),
+    strengths &&
+      `${strengths} ${strengths === 1 ? "strength" : "strengths"} changed`,
+  ]
+    .filter(Boolean)
+    .join(", ");
 });
 
 function adapterLabel(adapter) {
   return adapter.display_name || loraStem(adapter.filename) || adapter.sha256;
 }
 
-/**
- * On a clone: the shelf's LoRAs grouped as the set would suggest them, and
- * only those for the clone's base model — the same test that decided which
- * LoRAs the clone keeps, so the picker cannot offer one it would remove. With
- * no known base model nothing can be filtered, and every LoRA is offered.
- */
-const pendingOffer = computed(() => {
-  const pend = props.pending;
-  if (!pend) return null;
-  const wanted = String(pend.baseModel || "").trim().toLowerCase();
-  const inSet = new Set(pend.setLoraIds || []);
-  const ran = pend.ranWith || {};
-  const groups = { set: [], ran: [], base: [] };
-  let others = 0;
-  for (const adapter of shelf.value) {
-    const own = String(rowBaseModel(adapter) || "").trim().toLowerCase();
-    // Every group, the set's own included: a LoRA of another base model is
-    // one the clone would have removed.
-    if (wanted && own !== wanted) {
-      others += 1;
-      continue;
-    }
-    if (inSet.has(adapter.id)) groups.set.push(adapter);
-    else if (ran[adapter.id]) groups.ran.push(adapter);
-    else groups.base.push(adapter);
-  }
-  const ranLabel = `Ran with ${pend.checkpointName || "this checkpoint"}`;
-  const baseLabel = wanted ? `Trained on ${pend.baseModel}` : "Your shelf";
-  return {
-    options: [
-      ...groups.set.map((a) => ({ adapter: a, group: "In this set" })),
-      ...groups.ran
-        .sort((a, b) => ran[b.id] - ran[a.id])
-        .map((a) => ({
-          adapter: a,
-          group: ranLabel,
-          hint: `${ran[a.id]} ${ran[a.id] === 1 ? "recipe" : "recipes"}`,
-        })),
-      ...groups.base.map((a) => ({ adapter: a, group: baseLabel })),
-    ],
-    others,
-  };
-});
-
-const offerNote = computed(() => {
-  const others = pendingOffer.value?.others;
-  if (!others) return "";
-  return `${others} ${others === 1 ? "LoRA" : "LoRAs"} trained on other base models ${others === 1 ? "is" : "are"} not offered.`;
-});
-
-const offered = computed(() =>
-  pendingOffer.value
-    ? pendingOffer.value.options.map((o) => o.adapter)
-    : shelf.value,
-);
-
 const pickerOptions = computed(() => [
   { value: "", label: "Pick a LoRA from your shelf…" },
-  ...(pendingOffer.value
-    ? pendingOffer.value.options.map(({ adapter, group, hint }) => ({
-        value: String(adapter.sha256),
-        label: hint ? `${adapterLabel(adapter)} · ${hint}` : adapterLabel(adapter),
-        group,
-      }))
-    : shelf.value.map((adapter) => ({
-        value: String(adapter.sha256),
-        label: adapterLabel(adapter),
-      }))),
+  ...shelf.value.map((adapter) => ({
+    value: String(adapter.sha256),
+    label: adapterLabel(adapter),
+  })),
 ]);
 
 /**
  * No row at all, both ends read, and the chain editable: the button sits on
  * the wire between the two nodes and says so. A deleted row still stands on
- * screen with Restore, so it keeps the list between the nodes and the button
+ * screen with Put back, so it keeps the list between the nodes and the button
  * an Add; a read-only chain offers no insert to name.
  */
 const spliceIn = computed(
@@ -662,30 +574,117 @@ const canAdd = computed(
     editable.value &&
     !saving.value &&
     !unpicked.value &&
-    offered.value.length > 0,
+    shelf.value.length > 0,
 );
 
-/** Done on a clone: a chain that can be handed back, changed or not. */
-const canFinish = computed(
-  () =>
-    editable.value && !unpicked.value && !rows.value.some(strengthInvalid),
+/**
+ * The edit as the dry run is asked about it, or "" for one there is nothing
+ * to ask about: no change, a row with no LoRA picked, a strength that is not
+ * a number. The route answers an unchanged chain with a refusal, so it is
+ * not asked.
+ */
+const previewKey = computed(() =>
+  editable.value &&
+  changeCount.value > 0 &&
+  !unpicked.value &&
+  !rows.value.some(strengthInvalid)
+    ? JSON.stringify(requestBody({ dry_run: true }))
+    : "",
 );
 
-const canContinue = computed(
-  () =>
-    editable.value &&
-    changeCount.value > 0 &&
-    !unpicked.value &&
-    !rows.value.some(strengthInvalid),
+/**
+ * The edit as a fragment of the workflow's unsaved changes, or `null` for
+ * one they cannot hold, which Save writes instead.
+ *
+ * Read off the dry run's kinds. A delete is the loader's slot in
+ * `skip_loras`; a strength is its slot in `loras` with the LoRA it already
+ * loads, which needs the shelf's digest for it. Anything else on the list
+ * (`added`, `moved`, a strength with no digest) has no words there. `rewired`
+ * is what a delete does to the nodes reading the chain, and the unsaved
+ * changes rewire round a removed loader by themselves, so beside a delete it
+ * is carried; with no delete to explain it, it is not.
+ */
+const fragment = computed(() => {
+  const read = readLoaders.value;
+  const set = effectiveRows.value;
+  const out = { skip_loras: [], loras: [] };
+  let rewired = false;
+  for (const change of changes.value) {
+    const id = String(change.node_id);
+    const loader = read.find((entry) => String(entry.node_id) === id);
+    const row = set.find((entry) => entry.nodeId === id);
+    if (change.kind === "deleted" && loader) {
+      out.skip_loras.push({ node_id: id, field: loader.field });
+    } else if (change.kind === "strength" && loader?.sha256 && row) {
+      // One field sets the model strength. The CLIP strength follows it only
+      // where the two were one number, which is what the route's own write
+      // does (`_strength_update`); a loader weighted apart keeps its CLIP.
+      const together =
+        loader.strength_clip !== null &&
+        loader.strength_clip !== undefined &&
+        Number(loader.strength_clip) === Number(loader.strength);
+      out.loras.push({
+        node_id: id,
+        field: loader.field,
+        sha256: loader.sha256,
+        strength_model: row.strength,
+        strength_clip: together ? row.strength : (loader.strength_clip ?? null),
+      });
+    } else if (change.kind === "rewired") {
+      rewired = true;
+    } else {
+      return null;
+    }
+  }
+  return rewired && !out.skip_loras.length ? null : out;
+});
+
+/** Whether the edit can wait as an unsaved change: Apply, else Save. */
+const waits = computed(() => fragment.value !== null);
+
+// The button's word is what it does with the edit, and an edit can change
+// it under a reader who is not looking at it: a removal reads Apply, and
+// moving a loader on top of it turns the same button into Save, which writes
+// at once. So the change is said when it happens, with the note that
+// explains it. Only a change of word: the first Apply is the button as it
+// opened, and a second removal changes nothing about what the button does.
+watch(
+  () => (changes.value.length ? (waits.value ? "Apply" : "Save") : ""),
+  (word) => {
+    if (!word) {
+      // No edit: the button reads Apply again, and does nothing. The line
+      // is cleared with it, or the same edit made again would put the same
+      // words in the region and a screen reader would say nothing.
+      if (!previewing.value) {
+        saidWord = "Apply";
+        buttonMessage.value = "";
+      }
+      return;
+    }
+    if (word === saidWord) return;
+    saidWord = word;
+    buttonMessage.value = `The button now reads ${word}. ${note.value}`;
+  },
 );
 
-const canSave = computed(
-  () =>
-    !saving.value &&
-    !previewing.value &&
-    !previewError.value &&
-    canContinue.value,
+/** The primary acts only on an edit the dry run has answered for. */
+const ready = computed(
+  () => !saving.value && !previewing.value && changes.value.length > 0,
 );
+
+const note = computed(() => {
+  if (waits.value) {
+    return "Apply puts this in the Workflow tab as an unsaved change. Nothing is written until you save there.";
+  }
+  const kinds = new Set(changes.value.map((change) => change.kind));
+  const why =
+    kinds.has("added") || kinds.has("moved")
+      ? "Moving or adding a loader"
+      : kinds.has("strength")
+        ? "A strength for a LoRA missing from your model shelf"
+        : "This edit";
+  return `${why} cannot wait as an unsaved change. Save writes it straight away: ${shownName.value} keeps its name and its ${picturesLabel.value}, and this chain becomes its next version. The version menu in the Workflow tab takes it back.`;
+});
 
 /**
  * Where the first loader goes, said before it is saved.
@@ -853,31 +852,29 @@ function focusRow(rowId, which) {
 async function load() {
   const token = (loadToken += 1);
   const mine = () => token === loadToken;
-  step.value = "edit";
   chain.value = null;
   rows.value = [];
   loadError.value = "";
   saveError.value = "";
   dropMissed.value = "";
-  newName.value = "";
-  saveMode.value = "over";
   changes.value = [];
+  previewError.value = "";
+  saidWord = "Apply";
+  buttonMessage.value = "";
   say("");
   if (!props.workflowId) return;
   loading.value = true;
   try {
-    const read = pendingChain(await getLoraChain(props.workflowId));
+    const read = await getLoraChain(props.workflowId);
     if (!mine()) return;
     chain.value = read;
-    rows.value = props.pending?.rows
-      ? props.pending.rows.map((row) => ({ ...row }))
-      : [
-          ...(read?.loaders || []).map((loader) => rowOf(loader, null)),
-          ...(read?.lanes || []).flatMap((lane, index) =>
-            (lane.loaders || []).map((loader) => rowOf(loader, index)),
-          ),
-        ];
-    if (!props.pending) applyDrop();
+    rows.value = [
+      ...(read?.loaders || []).map((loader) => rowOf(loader, null)),
+      ...(read?.lanes || []).flatMap((lane, index) =>
+        (lane.loaders || []).map((loader) => rowOf(loader, index)),
+      ),
+    ];
+    applyDrop();
   } catch (err) {
     if (!mine()) return;
     console.warn(
@@ -889,28 +886,6 @@ async function load() {
     if (mine()) loading.value = false;
   }
   void loadShelf();
-}
-
-/**
- * The card's chain as the clone will have it: its source under the new
- * loader class, and with no loader left when the clone clears them. A clear
- * empties the READ chain rather than striking the rows, so the count and the
- * body are about what is added, and every loader not sent is deleted.
- */
-function pendingChain(read) {
-  const pend = props.pending;
-  if (!pend || !read) return read;
-  return {
-    ...read,
-    source:
-      read.source && pend.sourceClass
-        ? { ...read.source, class_type: pend.sourceClass }
-        : read.source,
-    loaders: pend.clear ? [] : read.loaders,
-    lanes: (read.lanes || []).map((lane) =>
-      pend.clear ? { ...lane, loaders: [] } : lane,
-    ),
-  };
 }
 
 /**
@@ -935,7 +910,7 @@ function applyDrop() {
     return;
   }
   row.deleted = true;
-  say(`${row.name} is deleted. Restore is on its row.`);
+  say(`${row.name} is removed. Put back is on its row.`);
 }
 
 async function loadShelf() {
@@ -967,7 +942,7 @@ async function remove(row) {
     return;
   }
   row.deleted = true;
-  say(`${row.name} deleted. Restore is on the same row.`);
+  say(`${row.name} removed. Put back is on the same row.`);
   await focusRow(row.id, "restore");
 }
 
@@ -1002,7 +977,7 @@ async function add(lane = null) {
 }
 
 function pick(row, sha256) {
-  const found = offered.value.find((adapter) => String(adapter.sha256) === sha256);
+  const found = shelf.value.find((adapter) => String(adapter.sha256) === sha256);
   row.sha256 = sha256 || "";
   row.name = found
     ? found.display_name || loraStem(found.filename)
@@ -1115,20 +1090,16 @@ function place(from, to, { focus }) {
   if (focus) void focusRow(row.id, "handle");
 }
 
-// ── Saving: a dry run to list the changes, then the write ────────────────
+// ── The dry run after every gesture, then Apply or Save ──────────────────
 
-function requestBody(dryRun) {
+/** `PUT …/lora-chain`'s body for the chain on screen. It names nothing. */
+function requestBody(how) {
   const effective = effectiveRows.value;
   const body = {
     entries: chainEntries(effective.filter((row) => row.lane === null)),
-    name: newName.value.trim() || null,
-    dry_run: dryRun,
+    name: null,
+    ...how,
   };
-  if (!dryRun && overwriting.value) {
-    // Over the original: it keeps its own name, so none is sent.
-    body.name = null;
-    body.overwrite = true;
-  }
   if (branched.value) {
     body.lanes = lanes.value.map((_lane, index) =>
       chainEntries(effective.filter((row) => row.lane === index)),
@@ -1137,66 +1108,82 @@ function requestBody(dryRun) {
   return body;
 }
 
-async function toConfirm() {
-  if (!canContinue.value) return;
-  step.value = "confirm";
-  saveError.value = "";
-  previewError.value = "";
-  if (!newName.value.trim()) {
-    newName.value = props.cardName ? `${props.cardName} (edited)` : "";
+/** A dry run is on its way: the next one waits for it. */
+let asking = false;
+
+/**
+ * Ask the route what the edit on screen changes.
+ *
+ * One request at a time, and the last edit wins: a gesture made while one is
+ * out marks the answer stale (`previewing` stays up, so the button waits) and
+ * the answer, on landing, asks again for what is on screen by then. A held
+ * strength arrow is then as many requests as the route can answer, not one
+ * per step.
+ */
+async function preview() {
+  const key = props.open ? previewKey.value : "";
+  if (!key) {
+    changes.value = [];
+    previewError.value = "";
+    previewing.value = false;
+    return;
   }
   previewing.value = true;
-  changes.value = [];
+  if (asking) return;
+  asking = true;
   const token = loadToken;
+  let answer = null;
+  let failed = "";
   try {
-    const answer = await saveLoraChain(props.workflowId, requestBody(true));
-    if (token !== loadToken) return;
-    changes.value = Array.isArray(answer?.changes) ? answer.changes : [];
+    answer = await saveLoraChain(props.workflowId, JSON.parse(key));
   } catch (err) {
-    if (token !== loadToken) return;
-    console.warn("[workflows] the LoRA chain dry run was refused", err);
-    previewError.value = errorMessage(
+    console.warn(
+      `[workflows] the LoRA chain dry run of ${props.workflowId} was refused`,
+      err,
+    );
+    failed = errorMessage(
       err,
       "PixlStash could not work out what this edit changes.",
     );
-  } finally {
-    if (token === loadToken) previewing.value = false;
   }
+  asking = false;
+  if (token !== loadToken || key !== previewKey.value) {
+    void preview();
+    return;
+  }
+  changes.value = Array.isArray(answer?.changes) ? answer.changes : [];
+  previewError.value = failed;
+  previewing.value = false;
 }
 
 async function save() {
-  if (!canSave.value) return;
   saving.value = true;
   saveError.value = "";
-  let answer;
   try {
-    answer = await saveLoraChain(props.workflowId, requestBody(false));
+    await saveLoraChain(
+      props.workflowId,
+      requestBody({ dry_run: false, overwrite: true }),
+    );
   } catch (err) {
-    console.warn("[workflows] the LoRA chain save was refused", err);
-    saveError.value = errorMessage(err, "Could not save the edited LoRAs.");
+    console.warn(
+      `[workflows] the LoRA chain save of ${props.workflowId} was refused`,
+      err,
+    );
+    saveError.value = errorMessage(err, "Could not save these LoRAs.");
     saving.value = false;
     return;
   }
   // The write landed. Nothing below may read as a failed save: the dialog
   // would stay open, and a second press would write the edit again.
-  const over = Boolean(answer?.overwritten);
   try {
-    const saved = String(answer?.name || newName.value.trim() || "");
     notices.push({
       level: "success",
-      text: over
-        ? `Saved over “${shownName.value}”.`
-        : saved
-          ? `Saved “${saved.replace(/\.json$/i, "")}” as a new workflow.`
-          : "Saved as a new workflow.",
+      text: `Saved over “${shownName.value}”.`,
     });
-    // A new card is a card of its own, so the grid is re-read and the rail
-    // moves onto it: the owner's next look is at what they just made. Over
-    // the original it is the same card, so nothing is selected: the grid is
-    // re-read (a manual workflow's models and version come off its new
-    // document) and the rail is told below to read its chain again.
+    // The same card, so nothing is selected: the grid is re-read (a manual
+    // workflow's models and version come off its new document) and the rail
+    // is told below to read its chain again.
     await workflows.refetch();
-    if (!over && answer?.workflow_id) workflows.select(answer.workflow_id);
   } catch (err) {
     console.warn(
       `[workflows] the LoRA chain of ${props.workflowId} was saved, but the grid could not be shown again`,
@@ -1204,27 +1191,20 @@ async function save() {
     );
   } finally {
     saving.value = false;
-    if (over) emit("overwritten", props.workflowId);
+    emit("overwritten", props.workflowId);
     emit("close");
   }
 }
 
-/** Hand the chain back to the clone dialog; nothing is written here. */
-function done() {
-  if (!canFinish.value) return;
-  const body = requestBody(false);
-  emit("done", {
-    rows: rows.value.map((row) => ({ ...row })),
-    changes: changeCount.value,
-    body: { entries: body.entries, lanes: body.lanes ?? null },
-  });
+/** The one button, and plain Enter: Apply hands the edit on, Save writes it. */
+function primary() {
+  if (!ready.value) return;
+  if (!waits.value) {
+    void save();
+    return;
+  }
+  emit("apply", fragment.value);
   emit("close");
-}
-
-function onAccept() {
-  if (props.pending) done();
-  else if (step.value === "edit") void toConfirm();
-  else void save();
 }
 
 function close() {
@@ -1232,16 +1212,7 @@ function close() {
   emit("close");
 }
 
-// The name field and the note under the changes swap with the choice, which a
-// reader who is not watching the dialog cannot see.
-watch(saveMode, (mode) => {
-  if (step.value !== "confirm") return;
-  say(
-    mode === "over"
-      ? `Saving over ${shownName.value}, as its next version. No new workflow is made.`
-      : `Saving as a new workflow, to be named. ${shownName.value} is not changed.`,
-  );
-});
+watch(previewKey, () => void preview());
 
 watch(
   () => [props.open, props.workflowId],
@@ -1268,11 +1239,6 @@ watch(
 
 .eld-bad {
   color: rgb(var(--v-theme-surface-error));
-}
-
-.eld-strong {
-  color: rgb(var(--v-theme-on-surface));
-  font-weight: var(--weight-semibold);
 }
 
 /* The notice surface's shape: a rail down the left edge in the status hue,
@@ -1480,18 +1446,20 @@ watch(
   gap: var(--space-2);
 }
 
-.eld-where {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--space-2);
-}
-
 .eld-changes {
   margin: var(--space-2) 0 0;
   padding-left: var(--space-5);
   font-size: var(--text-sm);
   line-height: var(--leading-body);
+}
+
+/* The note takes a line of its own above the footer's row. */
+.app-dialog__footer:has(> .eld-foot-note) {
+  flex-wrap: wrap;
+}
+
+.eld-foot-note {
+  flex-basis: 100%;
 }
 
 .eld-count {

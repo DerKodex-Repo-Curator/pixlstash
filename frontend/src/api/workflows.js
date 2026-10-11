@@ -221,20 +221,6 @@ export async function preflightWorkflowRun(body) {
 }
 
 /**
- * Save this workflow with the repairs a run on this ComfyUI makes (#1661):
- * the owner's model replacements, same-model renames, LoRAs this ComfyUI
- * lacks loaded through the ComfyUI-PixlStash loader, and missing seed or text
- * nodes replaced. Written as a NEW workflow; the original is not changed.
- * 409 when nothing needs fixing, 503 when ComfyUI cannot be asked.
- *
- * @param {string} workflowId
- * @returns {Promise<{name: string, workflow_id: ?string, changes: Array<string>}>}
- */
-export async function saveFixedWorkflow(workflowId) {
-  return unwrap(apiClient.post(wf(workflowId, "/fixed-copy")));
-}
-
-/**
  * Run a workflow card.
  *
  * Exactly ONE source: `picture_ids` ("run what made these"), `saved_recipe_id`
@@ -298,7 +284,7 @@ export async function duplicateWorkflow(workflowId) {
 }
 
 /**
- * What the Clone with new models dialog draws for one card.
+ * What a workflow's model files could be changed to.
  *
  * Without `checkpointId`: the model files the card's graph names (each
  * resolved to a shelf row where one fits) and the shelf's checkpoints, VAEs
@@ -308,7 +294,8 @@ export async function duplicateWorkflow(workflowId) {
  * Call it on open and on each checkpoint choice, never per keystroke: the
  * server reads the whole shelf and every recipe to answer.
  *
- * With `replacing` (the Workflow tab's "Replace with…", #1596): also
+ * With `replacing` (the Workflow tab's model pickers and *Replace missing…*,
+ * #1596, #1850): also
  * `replacements`, the shelf models that go with the workflow's checkpoint (for
  * a checkpoint: that share the missing one's base model, where anything says
  * which and any does) and that the loader naming that file can load, and
@@ -330,15 +317,23 @@ export async function readModelSwap(
 }
 
 /**
- * What cloning this workflow onto each workflow set would write.
+ * What taking each workflow set's models would change in this workflow: the
+ * read behind the Workflow tab's *Use a set…* (`WorkflowUseSetMenu.vue`),
+ * which turns a plan's `swaps` into unsaved model picks. Nothing is written.
  *
  * One plan per set asked: the files it takes from the set (`swaps`), each model
  * loader before and after (`loaders`, with the node `pack` a new loader class
  * comes from and whether ComfyUI has it), whether the set's checkpoint has the
- * workflow's base model so its LoRAs are kept, and `fit` / `reason`. Asked once
- * per open, for every set on the shelf, and again for one set when the owner
- * picks which of its files a loader takes (`picks`, the plan's `takes` with
- * the choice made); nothing is written.
+ * workflow's base model so its LoRAs are kept, and `fit` / `reason`.
+ *
+ * The plans are read off the graph with the owner's model replacements
+ * applied (`model_fixes`, "Replace with…"), so `swaps`, `takes`,
+ * `unpaired_bases` and `loaders[].was` name a loader by the file it loads
+ * once they are: the replacement, never the file it took the place of.
+ *
+ * Asked once per open, for every set on the shelf, and again for one set when
+ * the owner picks which of its files a loader takes (`picks`, the plan's
+ * `takes` with the choice made); nothing is written.
  *
  * @param {string} workflowId
  * @param {Array<{key: string, checkpoint_ids: Array<number>, model_ids: Array<number>, picks?: Object<string, number>}>} sets
@@ -346,26 +341,6 @@ export async function readModelSwap(
  */
 export async function planSetClones(workflowId, sets) {
   return unwrap(apiClient.post(wf(workflowId, "/set-clone-plans"), { sets }));
-}
-
-/**
- * Write a copy of this workflow with model files replaced, as a new card.
- *
- * `swaps` maps the graph's filename to the one to load instead; every loader
- * naming it is rewritten. `verified` in the answer is false when ComfyUI was
- * not reachable and the names were written unchecked.
- *
- * `loras`, when given, is the chain to write it with in `PUT …/lora-chain`'s
- * shape (read against the original's chain; `{entries: []}` clears it), and
- * `loaders` in the answer names each loader whose node class changed for a file
- * of another type.
- *
- * @param {string} workflowId
- * @param {{name: string, swaps: Object<string, string>, loras?: Object}} body
- * @returns {Promise<{name: string, workflow_id: ?string, swapped: Array, unswapped: Array, loaders: Array, verified: boolean}>}
- */
-export async function cloneWorkflowWithModels(workflowId, body) {
-  return unwrap(apiClient.post(wf(workflowId, "/clone-with-models"), body));
 }
 
 /**
@@ -472,4 +447,113 @@ export async function getWorkflowFormInputs(workflowId) {
  */
 export async function saveLoraChain(workflowId, body) {
   return unwrap(apiClient.put(wf(workflowId, "/lora-chain"), body));
+}
+
+// --- Saving over a workflow (#1849, #1850) ---------------------------------
+//
+// A workflow's graph is changed and saved with two verbs. A set of changes is
+// one shape everywhere (`WorkflowChanges`), in the words a run body uses:
+// `{models: [{address, filename | sha256}], loras: [{node_id, field, sha256,
+// strength_model, strength_clip}], skip_loras: [{node_id, field}],
+// stages: {stage: bool}, values: [{slot_label, input_name, value}]}`.
+
+/**
+ * What waits on a workflow, unsaved, what its last run changed, and which
+ * verbs are open for each.
+ *
+ * `reason` is the server's sentence for a closed verb and is printed as it
+ * is: the Workflow tab, the Run popup and the Tasks tab must say the same.
+ *
+ * `stale` is true exactly when what waits was made against a version of the
+ * workflow that is no longer its current one (it was saved over, or gone back
+ * on, since). Save is then closed with the server's "changed since" reason,
+ * and `GET …/graph?waiting=true`, which is what *Open in ComfyUI* opens,
+ * leaves the waiting changes out. Save closed for another reason (a change of
+ * checkpoint) is not stale, and that graph carries the changes. A stale set
+ * stays stale when it is edited: it keeps the version it was started on, and
+ * only Discard or Save as new ends it. False when nothing waits. Every write
+ * that answers with this state carries it too; a server from before it sends
+ * no field, which reads as false.
+ *
+ * @param {string} workflowId
+ * @returns {Promise<{workflow_id: string, version: ?number, waiting: ?Object,
+ *   count: number, stale?: boolean, ran: ?Object,
+ *   save: {open: boolean, reason: ?string},
+ *   save_as_new: {open: boolean, reason: ?string},
+ *   ran_save: ?{open: boolean, reason: ?string}}>}
+ */
+export async function getWorkflowChanges(workflowId) {
+  return unwrap(apiClient.get(wf(workflowId, "/changes")));
+}
+
+/**
+ * Replace what waits on a workflow with *changes*; an empty set discards.
+ * Not checked against the graph: a change it cannot take is refused at Save.
+ *
+ * @param {string} workflowId
+ * @param {Object} changes - a `WorkflowChanges`.
+ * @returns {Promise<Object>} the state `getWorkflowChanges` answers.
+ */
+export async function setWorkflowChanges(workflowId, changes) {
+  return unwrap(apiClient.put(wf(workflowId, "/changes"), changes));
+}
+
+/**
+ * Discard what waits on a workflow.
+ *
+ * @param {string} workflowId
+ * @returns {Promise<Object>} the state `getWorkflowChanges` answers.
+ */
+export async function discardWorkflowChanges(workflowId) {
+  return unwrap(apiClient.delete(wf(workflowId, "/changes")));
+}
+
+/**
+ * Save: what waits, with `changes` on top, written over the workflow as its
+ * next version. With `from_run: true` (a run's own changes, which only the
+ * Tasks tab saves) it is `changes` by themselves, never on top of what waits.
+ * `dry_run: true` answers which verbs are open for that combination and
+ * writes nothing. A 409's `detail` is the reason to print.
+ *
+ * A save clears what waited, having written it. One with `from_run` wrote
+ * none of it, so it clears only what waited when the run was made and keeps
+ * what was edited in the Workflow tab after it, waiting on the version the
+ * save made. The answer says what became of those: `still_waiting` is how
+ * many changes are left waiting on the workflow (0 for every other save),
+ * and `not_kept` is the ones dropped because the graph this save wrote no
+ * longer has the loader they name, a `WorkflowChanges`, or null when there
+ * are none. A waiting set that was already stale is left as it is, and is
+ * counted whole in `still_waiting`.
+ *
+ * @param {string} workflowId
+ * @param {{changes?: Object, version?: ?number, from_run?: boolean,
+ *   dry_run?: boolean}} [body]
+ * @returns {Promise<{workflow_id: string, version: ?number,
+ *   new_workflow: boolean, dry_run: boolean, save: ?Object,
+ *   save_as_new: ?Object, still_waiting: number, not_kept: ?Object,
+ *   left_out: Array<Object>}>}
+ */
+export async function saveWorkflow(workflowId, body = {}) {
+  return unwrap(apiClient.post(wf(workflowId, "/save"), body));
+}
+
+/**
+ * Save as new: the same graph stored as a new manual workflow called `name`.
+ * What is stored is what `saveWorkflow` would write: what waits with `changes`
+ * on top, or `changes` alone with `from_run`. This workflow is left as it was
+ * and what waited on it is cleared, but for a save with `from_run`, which
+ * clears only what waited when the run was made: `still_waiting` is how many
+ * changes are left waiting on THIS workflow, the one saved from (0 for every
+ * other save). `not_kept` is always null here, since this workflow's graph
+ * is not written and can still take every change that waits on it.
+ *
+ * @param {string} workflowId
+ * @param {{name: string, changes?: Object, from_run?: boolean,
+ *   dry_run?: boolean}} body
+ * @returns {Promise<{workflow_id: string, name: ?string, new_workflow: boolean,
+ *   version: ?number, still_waiting: number, not_kept: null,
+ *   left_out: Array<Object>}>}
+ */
+export async function saveWorkflowAsNew(workflowId, body) {
+  return unwrap(apiClient.post(wf(workflowId, "/save-as-new"), body));
 }

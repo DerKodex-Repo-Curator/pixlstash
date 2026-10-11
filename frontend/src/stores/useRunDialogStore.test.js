@@ -4,6 +4,7 @@
 import { beforeEach, describe, it, expect } from "vitest";
 import { setActivePinia, createPinia } from "pinia";
 import { useRunDialogStore } from "./useRunDialogStore";
+import { notifySessionReset } from "../utils/apiClient";
 
 describe("useRunDialogStore", () => {
   beforeEach(() => setActivePinia(createPinia()));
@@ -98,6 +99,93 @@ describe("useRunDialogStore", () => {
       const store = useRunDialogStore();
       store.runFailed(null, failure);
       expect(store.failures).toEqual({});
+    });
+  });
+
+  // What the Tasks tab words its offer from (#1850): the popup that knew the
+  // labels is closed by the time the pictures are back.
+  describe("what a workflow's last run changed", () => {
+    const record = {
+      name: "Portrait",
+      count: 2,
+      text: "Checkpoint, Steps.",
+      promptIds: ["p-1", "p-2"],
+    };
+    const completed = (workflowId, promptId) => ({
+      plugin: "ComfyUI",
+      status: "completed",
+      run_id: `comfyui-${promptId}`,
+      workflow_id: workflowId,
+    });
+
+    it("is kept per workflow, and is not ready to offer while the run is out", () => {
+      const store = useRunDialogStore();
+      store.ranWith("wf-a", record);
+      expect(store.ranChanges["wf-a"]).toEqual({ ...record, finished: false });
+      expect(store.ranChanges["wf-b"]).toBeUndefined();
+    });
+
+    it("is ready once one of that run's pictures is back", () => {
+      const store = useRunDialogStore();
+      store.ranWith("wf-a", record);
+      // Another workflow's run, and an earlier run of this one, are not it.
+      store.runEvent(completed("wf-b", "p-1"));
+      store.runEvent(completed("wf-a", "p-0"));
+      expect(store.ranChanges["wf-a"].finished).toBe(false);
+      // A completed run is still not a failure to report.
+      expect(store.runEvent(completed("wf-a", "p-2"))).toBe(null);
+      expect(store.ranChanges["wf-a"].finished).toBe(true);
+    });
+
+    it("is not made ready by a run that failed", () => {
+      const store = useRunDialogStore();
+      store.ranWith("wf-a", record);
+      store.runEvent({ ...completed("wf-a", "p-1"), status: "failed" });
+      expect(store.ranChanges["wf-a"].finished).toBe(false);
+    });
+
+    it("is replaced by the workflow's next run, and taken down by one that changed nothing", () => {
+      const store = useRunDialogStore();
+      store.ranWith("wf-a", record);
+      store.runEvent(completed("wf-a", "p-1"));
+      store.ranWith("wf-a", { ...record, count: 1, promptIds: ["p-3"] });
+      expect(store.ranChanges["wf-a"]).toMatchObject({ count: 1, finished: false });
+      store.ranWith("wf-a", null);
+      expect(store.ranChanges["wf-a"]).toBeUndefined();
+    });
+
+    it("is taken down by a save, which is also said to whoever shows the workflow", () => {
+      const store = useRunDialogStore();
+      store.ranWith("wf-a", record);
+      store.ranWith("wf-b", record);
+      expect(store.saved).toBeNull();
+      store.changesSaved("wf-a", "wf-new");
+      expect(store.ranChanges["wf-a"]).toBeUndefined();
+      expect(store.ranChanges["wf-b"]).toBeDefined();
+      expect(store.saved).toMatchObject({ workflowId: "wf-a", savedAs: "wf-new" });
+    });
+
+    it("records nothing for a run that names no workflow", () => {
+      const store = useRunDialogStore();
+      store.ranWith("", record);
+      store.changesSaved("");
+      expect(store.ranChanges).toEqual({});
+      expect(store.saved).toBeNull();
+    });
+
+    // Both name workflows of the library the session could see: the next
+    // session must be offered nothing from them, and told of no save.
+    it("is forgotten with the session, and so is the last save", () => {
+      const store = useRunDialogStore();
+      store.ranWith("wf-a", record);
+      store.runEvent(completed("wf-a", "p-1"));
+      store.ranWith("wf-b", record);
+      store.changesSaved("wf-b");
+      expect(store.ranChanges["wf-a"]).toBeDefined();
+      expect(store.saved).not.toBeNull();
+      notifySessionReset("test");
+      expect(store.ranChanges).toEqual({});
+      expect(store.saved).toBeNull();
     });
   });
 });

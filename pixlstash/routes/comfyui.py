@@ -362,9 +362,10 @@ def store_over_workflow(
     workflow is not written without it; for an automatic one ``None`` says
     the edit was made on its pictures' graph, before any version.
 
-    *also* is called with the connection once the version is written, inside
-    the same transaction: what a save changes beside the graph (default rows,
-    the changes that waited) lands with the version or not at all.
+    *also* is called with the connection and the version's number once the
+    version is written, inside the same transaction: what a save changes
+    beside the graph (default rows, the changes that waited) lands with the
+    version or not at all.
 
     Returns:
         The number of the version written.
@@ -407,7 +408,7 @@ def store_over_workflow(
             first=None if manual else original,
         )
         if also is not None:
-            also(conn)
+            also(conn, version)
         return version
 
 

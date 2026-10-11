@@ -36,23 +36,6 @@
           alt=""
           loading="lazy"
         />
-        <!-- Made with a model the owner has since replaced in this workflow
-             (a missing checkpoint fixed): the picture is the card's, the
-             model is not the one it runs now. Such covers sort last. -->
-        <span
-          v-if="cell.superseded"
-          class="wf-card__badge wf-card__pic-flag"
-          data-testid="wf-card-superseded"
-        >
-          <Tooltip
-            text="Made with the model this workflow has since replaced"
-            activator="parent"
-          />
-          <v-icon size="12" aria-hidden="true">mdi-alert-outline</v-icon>
-          <span class="visually-hidden"
-            >Made with the model this workflow has since replaced</span
-          >
-        </span>
       </span>
       <span class="wf-card__badge wf-card__badge--end" aria-hidden="true">
         <v-icon size="12">mdi-image-multiple</v-icon>{{ card.picture_count }}
@@ -156,21 +139,33 @@
       </div>
     </div>
 
-    <!-- Came from ComfyUI (#1440). Top-start of the card, the one corner the
-         cover leaves free: the picture count is top-end, the rating
-         bottom-end and a superseded cover's flag bottom-start. The mark is
-         decoration for the sighted, so the name is on the span itself and in
-         the card's accessible name. -->
-    <span
-      v-if="card.origin_category === 'comfyui'"
-      class="wf-card__badge wf-card__badge--origin"
-      role="img"
-      aria-label="From ComfyUI"
-      data-testid="wf-card-comfyui"
-    >
-      <Tooltip text="From ComfyUI" activator="parent" :describe="false" />
-      <ComfyuiIcon :size="12" />
-    </span>
+    <!-- Top-start of the card, the one corner the cover leaves free: the
+         picture count is top-end and the rating bottom-end. Where the
+         workflow came from leads, because that never changes; *Unsaved*
+         follows it, so a badge that comes and goes moves nothing. -->
+    <div class="wf-card__start">
+      <!-- Came from ComfyUI (#1440). The mark is decoration for the sighted,
+           so the name is on the span itself and in the card's accessible
+           name. -->
+      <span
+        v-if="card.origin_category === 'comfyui'"
+        class="wf-card__badge wf-card__badge--origin"
+        role="img"
+        aria-label="From ComfyUI"
+        data-testid="wf-card-comfyui"
+      >
+        <Tooltip text="From ComfyUI" activator="parent" :describe="false" />
+        <ComfyuiIcon :size="12" />
+      </span>
+      <!-- Changes wait on this workflow, neither saved nor discarded (#1850).
+           One badge however many wait: the Workflow tab counts them. -->
+      <span
+        v-if="card.unsaved_changes > 0"
+        class="wf-card__badge"
+        data-testid="wf-card-unsaved"
+        >Unsaved</span
+      >
+    </div>
 
     <InfoPopover :card="card">
       <template #activator="{ props: popoverProps }">
@@ -303,7 +298,6 @@ const coverCells = computed(() => {
     // `?? null`, so a payload served before #1455 offers the menu no picture
     // rather than one named `undefined`.
     id: cover.picture_id ?? null,
-    superseded: Boolean(cover.superseded),
   }));
 });
 // Ratings run 1-5; 0 or null is "not rated".
@@ -526,21 +520,26 @@ const accessibleName = computed(() =>
   object-position: top center;
 }
 
-/* Per picture, so on the cell's own corner - bottom-left, clear of the
-   picture count on the cover's top corner - and hoverable for its
-   tooltip. */
-.wf-card__pic-flag {
-  top: auto;
-  bottom: var(--space-2);
-  left: var(--space-2);
-  z-index: var(--z-raised);
-  color: rgb(var(--v-theme-dark-surface-warning));
-  pointer-events: auto;
-}
-
-.wf-card__badge--origin {
+/* The top-start badges, in a row: the card's, not the cover's, so a card with
+   no pictures wears them too. `pointer-events: none` like the badges in it, so
+   a right-click here still reaches the picture underneath. */
+.wf-card__start {
+  position: absolute;
+  top: var(--space-3);
   left: var(--space-3);
   z-index: var(--z-raised);
+  display: flex;
+  gap: var(--space-2);
+  pointer-events: none;
+}
+
+/* The row places them; the shared badge rule would stack them on one spot. */
+.wf-card__start > .wf-card__badge {
+  position: static;
+}
+
+/* Hoverable, for its tooltip. */
+.wf-card__badge--origin {
   pointer-events: auto;
 }
 

@@ -25,8 +25,8 @@
         <p v-if="row.manual.length" class="rmd-note rmd-quiet">
           {{
             row.manual.length === 1
-              ? `1 manual workflow loads it${row.fixable.length ? " too" : ""}; clone it with other models instead.`
-              : `${row.manual.length} manual workflows load it${row.fixable.length ? " too" : ""}; clone them with other models instead.`
+              ? `1 manual workflow loads it${row.fixable.length ? " too" : ""}; pick another model on its Workflow tab and save.`
+              : `${row.manual.length} manual workflows load it${row.fixable.length ? " too" : ""}; pick another model on each one's Workflow tab and save.`
           }}
         </p>
         <p

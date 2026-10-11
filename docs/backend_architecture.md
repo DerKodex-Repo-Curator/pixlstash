@@ -2430,7 +2430,7 @@ nothing in the vault moves; a manual workflow's own runs are the one exception
 | `workflow_group_attr`, `workflow_group_default`, `workflow_group_pins`, `workflow_group_picture_input` | The owner's name, notes and hidden flag; edits to the default recipe; pins; picture inputs (library-keyed, pictures by `pixel_sha`). All keyed by `workflow_id` and addressed by **address**, never slot label |
 | `workflow_group_hidden` | Which workflows ONE library hides (#1869), a row per `(workflow_id, library_uuid)`; its absence in a library falls back to `workflow_group_attr.hidden`, so a hub written before the table hides the same workflows everywhere |
 | `workflow_key_successor` | Which workflow each card became; written by the cut-over, read by the vault's saved-recipe conversion |
-| `workflow_version` (rows of an `auto:` id) | **The versions the owner saved over an automatic workflow** (Save, a whole graph from ComfyUI or the MCP server, Edit LoRAs *Over the original*; "Saving over a workflow", below). An automatic workflow holds no `workflow_document`, so it has versions only once it is saved over: the first overwrite stores the graph read off its pictures as version 1 (`source` `pictures`) and the edit as version 2, and each later overwrite is the next version (`hub/workflow_versions.append_version`, its `first` argument; the same cap of 50). Its graph is then its highest version: `routes/workflows._edited_graph_for` reads it ahead of every other tier (`workflow_versions.edited_document`, `run_service.FROM_EDIT`, `source: "edit"` on Run, Open and Export) **for the workflow's base card only**: a saved recipe or a picture on another card of the workflow runs that card's own graph. The grid shows it as *Version N* (`workflow_versions.automatic_version_facts`, read once per grid; the overwrite also moves `changed_at`). Its default recipe is then read off that graph, as a manual workflow's is ("Saving over a workflow", below); the grid's models, the LoRA pile and the ghost counts are still read off the pictures. A version that is not an API graph is logged and the pictures' graph runs; the version number still stands, so the next overwrite replaces it. **A saved-over automatic workflow keeps its id** (rule 5 of #1846; "A saved-over automatic workflow keeps its id", below), so its versions are never retired with it; `_carry_group_state` still deletes and logs the rows of a retired id, for the case that should now be impossible. `stranded_workflow_ids` counts the table |
+| `workflow_version` (rows of an `auto:` id) | **The versions the owner saved over an automatic workflow** (Save, a whole graph from ComfyUI or the MCP server, Edit LoRAs for a loader moved or added; "Saving over a workflow", below). An automatic workflow holds no `workflow_document`, so it has versions only once it is saved over: the first overwrite stores the graph read off its pictures as version 1 (`source` `pictures`) and the edit as version 2, and each later overwrite is the next version (`hub/workflow_versions.append_version`, its `first` argument; the same cap of 50). Its graph is then its highest version: `routes/workflows._edited_graph_for` reads it ahead of every other tier (`workflow_versions.edited_document`, `run_service.FROM_EDIT`, `source: "edit"` on Run, Open and Export) **for the workflow's base card only**: a saved recipe or a picture on another card of the workflow runs that card's own graph. The grid shows it as *Version N* (`workflow_versions.automatic_version_facts`, read once per grid; the overwrite also moves `changed_at`). Its default recipe is then read off that graph, as a manual workflow's is ("Saving over a workflow", below); the grid's models, the LoRA pile and the ghost counts are still read off the pictures. A version that is not an API graph is logged and the pictures' graph runs; the version number still stands, so the next overwrite replaces it. **A saved-over automatic workflow keeps its id** (rule 5 of #1846; "A saved-over automatic workflow keeps its id", below), so its versions are never retired with it; `_carry_group_state` still deletes and logs the rows of a retired id, for the case that should now be impossible. `stranded_workflow_ids` counts the table |
 | `workflow_core_successor` | Per (topology, new workflow), the automatic workflow the retired rule put the topology in, each one the live rule puts its variants in, and the old -> new core label map (data step 8 from v1, step 10 from v2, step 13 from v3, step 15 from v4, below) |
 | `workflow_variant_family` | Per variant, its base-model families (`variant_families`), frozen on first derivation: part of its workflow's id, so a later shelf scan never moves it |
 | `workflow_family_pass` | The shelf signature the last successful family pass (`reidentify_families`) ran against; at most one row |
@@ -2563,8 +2563,7 @@ names every one of its LoRAs; otherwise every loader keeps its LoRA. A
 stage the recipe has off stays in for a run that names it in `keep_stages`. `models: [{address, filename | sha256}]` goes through
 `apply_filename_swap`; a model made for another family or modality than the one
 it replaces is **flagged, never blocked** (`RunGroup.flags`, `family_mismatch`;
-`model_shelf_service.families_clash`, which the clone dialog's LoRA flags use
-too). `target` names a workflow to run instead, over the pictures selected,
+`model_shelf_service.families_clash` makes the call). `target` names a workflow to run instead, over the pictures selected,
 with its default recipe applied the same way. A run of pictures alone runs each
 picture's own graph with no workflow default, and reports the workflow its
 variant is in (`RunGroup.workflow_id`); `workflow_key` is no longer a source.
@@ -2832,9 +2831,17 @@ workflow is gone is left as it is.
 name, pictures, recipes and settings, and the graph it replaces becomes the
 version before. *Save as new* stores a new manual workflow and leaves this one
 alone. Manual and automatic workflows take the same changes. The older
-single-purpose routes (`…/model-fix`, `…/fixed-copy`, `…/clone-with-models`,
-`…/set-clone-plans`, `PUT …/lora-chain`, `…/default-lora`) still answer for
-the screens that call them and go when nothing does.
+single-purpose routes still answer, and since #1850 the app calls fewer of
+them: `…/fixed-copy` and `…/clone-with-models` have no caller left in the
+app (the Run popup's *Save fixed workflow* and the clone dialogs are gone);
+they keep answering until a backend change takes them out, with their tests; `…/model-fix` is written only by the Models shelf's *Replace
+missing*; `…/set-clone-plans` is read by the Workflow tab's *Use a set…*,
+which turns a plan into unsaved model changes, and is planned against the
+graph a run submits ("A model pick at a loader that holds a model fix",
+below); `PUT …/lora-chain` is called
+with `overwrite` by Edit LoRAs for a loader moved or added, which has no
+waiting form (`WorkflowChanges` can remove a loader and set its strengths,
+not rewire one); and `…/default-lora` is the *Also used* pile's.
 
 **A change is said in a run's words.** `routes/workflows.WorkflowChanges` is
 `models` (a file per loader address, `RunModel`), `loras` (a loader's LoRA and
@@ -2862,7 +2869,7 @@ the saved graph.
 
 | Table | Holds |
 |---|---|
-| `workflow_change` | Per `(workflow_id, kind)`, one `WorkflowChanges` document: `waiting` is what the Workflow tab holds unsaved, `run` is what the last run of the workflow changed. `base_version` is the workflow's version the set was made against (NULL for an automatic workflow never saved over); a `waiting` set that is replaced keeps it, so editing a stale set does not make it current. Deleted with a manual workflow. Hub rows, so the changes survive a restart |
+| `workflow_change` | Per `(workflow_id, kind)`, one `WorkflowChanges` document: `waiting` is what the Workflow tab holds unsaved, `run` is what the last run of the workflow changed. The `run` document also holds `waited` (`workflow_group_writes.WAITED`): the waiting set as it was when that run was made, or null; a key of the same row, so it lives exactly as long as the run's set and needed no migration. `base_version` is the workflow's version the set was made against (NULL for an automatic workflow never saved over); a `waiting` set that is replaced keeps it, so editing a stale set does not make it current. Deleted with a manual workflow. Hub rows, so the changes survive a restart |
 | `workflow_layout` | `workflow_id` PK, `document`, `structure`, `saved_at`: the editor document a workflow was last saved from ComfyUI with (#1852), scrubbed of people's picks and of the graph's credentials, and the wiring of the graph it arrived with. One row per workflow of either kind, replaced by the next save from ComfyUI, deleted with the workflow and with a retired `auto:` id. Never a version. `GET …/graph` hands it out only while what opens is still wired as `structure` says, and the node uses it only when it converts to that graph ("Saving over a workflow", below). |
 | `workflow_group_default` rows `stage:<name>` | `on` or `off`: the owner's own answer to "does this workflow run its upscale", over the vote of its pictures. Not a parameter (`is_parameter_address`), so `PUT …/defaults` never clears one |
 
@@ -2873,15 +2880,20 @@ the saved graph.
   why** (`save`, `save_as_new`, `ran_save`, each `{open, reason}`): the two
   rules (the checkpoint rule, a workflow changed since) are decided in
   `_verbs` and nowhere else, so every surface prints the same sentence and
-  the save refuses for the same one. A `PUT` is not checked against the
+  the save refuses for the same one. `stale` says the second rule holds for
+  what waits, apart from the sentence: a closed Save alone does not say
+  whether the opened graph carries the changes (it does under the checkpoint
+  rule and does not when they are stale). A `PUT` is not checked against the
   graph: a change naming a loader or a stage the workflow lacks is refused
   when it is saved, with its own sentence (400, 409). `WorkflowCard.unsaved_changes` (grid and
   detail) is the count a card's *Unsaved* badge is drawn from.
 - `POST /workflows/{id}/save` and `POST …/save-as-new`: apply what waits with
   the request's `changes` on top (`WorkflowChanges.over`, thing by thing),
-  store, and clear what waited. `dry_run` answers the verbs for that
-  combination and writes nothing, which is how the Run popup asks about its
-  own edits.
+  store, and clear what waited. With `from_run` the request's `changes` are
+  the whole set, and of what waits only what the run had seen is cleared ("A
+  save of what a run changed", below).
+  `dry_run` answers the verbs for the set the save would write and writes
+  nothing, which is how the Run popup asks about its own edits.
 - `GET /workflows/{id}/versions` and `POST …/versions/{n}/restore`.
 - `PUT /workflows/{id}/graph`: a whole graph saved over the workflow (below).
 - `GET /workflows/{id}/people`: who fits (below).
@@ -2933,18 +2945,138 @@ runs file on it (below). A VAE, a text encoder and LoRAs keep both verbs.
 ComfyUI, going back a version): `waiting.base_version`, or the request's
 `version`, is not the workflow's. Save is refused with the reason, because a
 set of changes applied to a graph it was not made against gives a graph nobody
-chose. Save as new still works.
+chose. Save as new still works. **Whether what waits is stale is decided in
+one place**, `_stored_changes`, which answers `(waiting, stale, ran)`: the
+state's `stale`, `_verbs`' closed Save and `_opening_graph` (which then opens
+the graph without what waits, `waiting_applied: false`) all read that one
+boolean, so the tab is never told the opened graph holds changes the server
+left out. False when nothing waits. A waiting set that is edited keeps the
+version it was started on, so it stays stale until it is discarded.
 
 **A finished run keeps the changes it was made with** (`_keep_run_changes`,
 kind `run`), so the Tasks tab can offer the two verbs afterwards: parameters,
 stages and filename model picks only where they differ from the default
 recipe, since the Run popup sends every parameter it shows; LoRA slots and
-removals as sent. Until the next run of that workflow, a save, or the
-workflow getting another version (the read then answers `ran: null`). Prompt,
+removals as sent. What waits is no part of that set, and is remembered
+beside it (`waited`, below). Until the next run of that
+workflow, a save, or the workflow getting another version (the read then
+answers `ran: null`). Prompt,
 seed, count, the pictures put in and the people picked (`add_loras`) are the
 run's and are never kept. A run from pictures or a saved recipe is a recipe
 laid over the workflow, not a set of changes to it: it keeps none, and being
 the next run of that workflow it ends what an earlier run offered.
+
+**A save of what a run changed stores the workflow as that run used it**
+(`from_run`, `_set_to_save`; #1850). The planner never reads the waiting set:
+a run is the workflow with its request on top. So `ran` is all of what the
+run was made with, and a save with `from_run` writes the request's `changes`
+by themselves, where every other save lays them over what waits. Laid under
+them, a waiting change the owner had put back in the Run popup would be
+saved although the run never used it, and the Tasks tab, which may be
+looking at the run after a reload, has no form left to restate it from (the
+popup's own Save does that restating, `answering`). The rule is the same for
+every kind, and the popup's request is not symmetric, so kind by kind:
+
+- `models`: the popup always sends the checkpoint, so one put back is named
+  at the workflow's own file and `_keep_run_changes` drops it as no change; a
+  VAE or text encoder put back is absent. A loader the run did not name
+  loaded the workflow's file.
+- `loras`, `skip_loras`: only the loaders that differ from the graph are
+  sent, so a strength or a removal put back is absent and the loader ran as
+  the graph has it.
+- `stages`: only the ones switched are sent (`skip_stages`, `keep_stages`),
+  and one that matches the default is dropped; a stage not named ran as the
+  default has it.
+- `values`: every parameter shown is sent, so one put back is named at the
+  workflow's value and dropped.
+
+A waiting change the popup has no control for is sent as it waits, so it is
+in `ran` and is saved; a run made through the API or MCP names only what its
+caller chose, and what waited beside it was not in that run. `_set_to_save` is the one
+place the set is put together, so `ran_save` in the state, a `dry_run` and
+the save itself judge the set that is written: a checkpoint pick that waits
+closes Save for what waits and not for a run that did not use it, and what
+waits being stale does not close a run's save, which was made on the version
+the workflow has (`ran` is null otherwise).
+
+**That save clears only what the run had seen, and keeps what was edited
+after it.** Every other save clears what waits, having written it; this one
+writes none of it, so clearing it all would discard an edit the owner made in
+the Workflow tab after the run, without a word. `_keep_run_changes` therefore
+stores what the run saw of the waiting set inside the run's own row
+(`waited`): the set the caller says it read when it laid its form
+(`RunRequest.waited`, which the Run popup sends: the `waiting` of the
+`GET …/changes` it read on open), else the set as it waits when the run
+arrives. `_save` compares what waits now with it, thing by thing
+(`WorkflowChanges.less`: a model address, a LoRA slot whether set or removed,
+a stage, a parameter):
+
+- **waits now exactly as it waited then**: the run saw it. It carried it (it
+  is in `ran` and is saved) or the owner put it back for the run (it is not
+  saved). Cleared either way.
+- **did not wait then, or waits with another answer**: made after the run.
+  Kept waiting, and written on the version the save made
+  (`workflow_group_writes.write_waiting`, in the save's own transaction:
+  `store_over_workflow` hands `also` the new version's number), so it is not
+  stale and Save is offered for it. A save of only defaults makes no version,
+  and Save as new leaves this workflow on the one it had: there it waits on
+  as it did.
+
+What is kept has to be usable (`_still_applies`, against the graph the save
+wrote). A change the save has just written, a loader removed that the graph
+no longer has, and a model the loader at that address loads by now are
+**done** and dropped: nothing of the owner's is lost, and a waiting change
+that changes nothing would be a phantom *Unsaved*. A LoRA set on a loader
+the graph no longer has (the run removed it), and a model picked for an
+address no loader answers to any more, **cannot be applied** and would
+refuse every later Save (`_refuse_unapplied`): they are dropped, logged, and
+named in the answer's `not_kept`, a `WorkflowChanges`, so the owner is told.
+Stages and parameters are defaults beside the graph and always apply. The
+answer's `still_waiting` is the count left. Three cases are decided on the
+safe side for the owner's edits. **Nothing remembered** (a run's row an
+older build wrote, or one whose workflow got another version since) reads as
+nothing having waited, so everything is kept. **A set that was stale when
+the run was made** is not remembered: no run of that version was made with
+it, so one made afresh afterwards, however alike, is kept. **A set that is
+stale at the save** is left exactly as it is: carried onto the new version
+it would read as made on it, and Save would open for changes nobody made
+against that graph. **What the run saw is the caller's to say.** The Run
+popup lays its form from a read made when it opens, so a waiting change made
+in another window before Run is pressed is not in the run; the popup sends
+the set it read (`waited`), and that change, missing from it, is kept by the
+save like any made after the run. `waited` is a statement and not a write
+(nothing that waits is changed), is validated as any `WorkflowChanges`, has
+people's LoRAs left out, and `{}` says nothing waited, which is not the same
+as leaving it out. Only a caller that sends none (the API, MCP, an older
+client) is left with the limit: what waits when its run arrives counts as
+seen. A run from pictures or a saved recipe keeps no set and ignores the
+field, as the pre-flight does.
+
+**A model pick at a loader that holds a model fix.** A fix
+(`workflow_model_fix`, `PUT …/model-fix`) is by file and not by loader:
+wherever the workflow names `was` in a slot of that kind, `now` loads
+(`_apply_model_fixes`, after the request's models). Three things follow, and
+`test_a_model_pick_wins_over_an_earlier_replacement_at_its_loader` holds
+them. A pick of another file is not `was`, so no fix touches it: it loads in
+the run, in the graph that opens, and in the saved graph, and after the save
+the fix names a file the graph no longer has and is inert (the Workflow tab
+matches a fix to a row by `was` too, so the row stops showing it). Naming
+`was` or `now` at that loader is the workflow's own model and loads `now`;
+`_keep_run_changes` reads both sides of its comparison through the fixes, or
+the replacement the Run popup sends on every run would read as a change to
+save after each one. And `POST …/set-clone-plans` plans against the graph
+with the fixes applied (`_apply_model_fixes` with no `object_info`, as
+`_fix_replacements` reads it: the fix's own spelling, never a swapped-in
+loader), so `swaps` and `takes` are keyed by the file a row shows, and a set
+holding `was` for a loader that loads `now` is no swap there. Putting the
+original back is undoing the fix, which is `PUT …/model-fix` with
+`now: null`, not a change of models. **The pre-flight names the same file.**
+`judge` reads the graph after the fixes, so a replacement ComfyUI has is
+simply loaded. One it does not have leaves its loader naming the original
+(`apply_filename_swap` never writes a name the loader does not list), which
+is missing too, so `_plan` renames that `missing_models` entry to the
+replacement (`_apply_model_fixes`' `unloaded`): the Workflow tab and the Run
+popup look a missing file up by the file the row shows.
 
 **Versions.** `workflow_version.source` is what the version menu's words are
 made from (`workflow_versions.reason`), so no column was added: `models` and
@@ -2954,7 +3086,13 @@ assistant*, `revert:<n>` *went back to version n*, and `pictures` (version 1
 of an automatic workflow) *as PixlStash first read it*. Going back
 (`restore_version`) appends the earlier document, with its conversion, as the
 newest version: the version left is kept, so it can be undone (past the 50 a
-workflow keeps, the oldest after version 1 are pruned as for any save), and
+workflow keeps, the oldest after version 1 are pruned as for any save; never
+the version left, since the prune takes the oldest of the new copy's own
+kind and a version saved from ComfyUI is counted apart). The route answers the list as it then is, newest first: its first row is the new
+copy, marked `current`, and the row directly under it is the version just
+left, which is what the Workflow tab's Undo goes back to
+(`test_going_back_answers_the_new_copy_first_and_the_version_left_under_it`).
+And
 it is not a checkpoint change under rule 2 since every version was already saved on this
 workflow.
 
@@ -9570,7 +9708,10 @@ section, not a site of its own in `_plan`.
   when asked. What it cannot consent to is dropping a LoRA it did not name: a
   stacker holding another filled slot, a loader nothing can be rewired around,
   and any skip while ComfyUI cannot be asked become the blocking reason
-  `lora_not_skippable`. A skip is reported in `bypassed_loras` with
+  `lora_not_skippable`. Its `message` is printed to the owner, by the Run
+  popup and by a refused save (`_refuse_unapplied`), and says *remove*, their
+  word for taking a loader out; the code and `skip_loras` keep theirs. A skip
+  is reported in `bypassed_loras` with
   `requested: true`; the automatic ones carry `requested: false`. A slot no
   graph of the run has is a 400; one named in both `loras` and `skip_loras` is
   a 422; and a skip on a run spanning several cards is a 400, because a node id
@@ -10214,7 +10355,9 @@ replaced loaders are read with the rewrite's own matching (`swap_target`). An
 encoder meeting no replaced loader, or two families, a family missing from the
 map, or a type ComfyUI does not list for that class keeps the graph's own.
 `POST /workflows/{id}/set-clone-plans` runs that same `_swap_files` on a copy
-per set asked, so the dialog's diff is the clone's own rewrite. `_set_swaps`
+per set asked, so the dialog's diff is the clone's own rewrite. The copy is
+the graph with the owner's model fixes applied, so each file it names is the
+one a run loads (§13, "A model pick at a loader that holds a model fix"). `_set_swaps`
 maps a set to the graph: the base slots take the checkpoints the caller names (`checkpoint_ids`, checkpoints or unclassified files, never guessed from the members), paired by `_pair_bases` - one base slot takes the first, and each slot of a two-model graph the untaken one whose filename is closest to its own, so a high-noise expert replaces the high-noise one; a slot left over keeps its file. The VAE and the text-encoder slots are each
 paired with the set's files of that kind in four passes, a file taken once
 (#1831): the owner's own pairing (`picks`, graph filename -> a model of

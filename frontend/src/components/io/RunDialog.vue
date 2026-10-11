@@ -5,17 +5,31 @@
     :title="title"
     :subtitle="subtitle"
     :persistent="submitting || dirty"
-    @close="onRequestClose"
+    @close="close"
     @keydown.esc="onEscape"
   >
-    <p v-if="loadFailed" class="rund-note rund-note--bad" role="alert">
+    <!-- Focusable, for the one failure that takes the control holding focus
+         with it: a save that landed and could not be read again (`keep`). -->
+    <p
+      v-if="loadFailed"
+      :id="loadFailedId"
+      ref="loadFailedLine"
+      class="rund-note rund-note--bad"
+      role="alert"
+      tabindex="-1"
+    >
       {{ loadFailed }}
     </p>
     <p v-else-if="loading" class="rund-note" role="status">
       Reading what this runs…
     </p>
 
-    <div v-else class="rund">
+    <!-- Inert while a band save is out, from its POST until the workflow is
+         read again: an edit made then is in neither the save nor the form
+         that comes back, so it would be lost without a word. This is every
+         control that edits; the band, whose name field keeps the keyboard,
+         and the footer are outside it. -->
+    <div v-else class="rund" :inert="Boolean(saving) || undefined">
       <!-- ── Left: what the run is made from ──────────────────────────────
            168px wide and the picture 168×252, which is the design's own
            measurement and nothing else in the app uses: a component-local
@@ -66,7 +80,7 @@
               variant="ghost"
               icon-left="sitemap-outline"
               tooltip="Close this and show the workflow in the Workflows view"
-              :disabled="submitting"
+              :disabled="submitting || Boolean(saving)"
               @click="openInWorkflows"
             >
               Open in Workflows
@@ -223,46 +237,65 @@
             :placeholder="isEdit ? 'Describe the change, e.g. make it night time' : ''"
             :rows="3"
             :disabled="submitting"
-            :highlight="personTrigger ? [personTrigger] : []"
+            :highlight="personTriggers.map((trigger) => trigger.word)"
             @keydown.stop
           />
-          <!-- The person's LoRA answers to a word the prompt does not say.
-               A suggestion, never a blocker: it goes once the word is typed,
-               and the box then marks the word instead. -->
+          <!-- A picked person's LoRA answers to a word the prompt does not
+               say. A suggestion, never a blocker: a word's button goes once
+               the word is typed, and the box then marks the word instead.
+               ONE line whatever is missing: the words do not shrink, the
+               buttons do, and past three one button adds them all. Said by
+               `triggerLive`, below the form: this line comes and goes. -->
           <p
-            v-if="triggerMissing"
+            v-if="triggerAdds.length"
             class="rund-note rund-note--bad rund-trigger"
-            role="status"
             data-testid="rund-trigger"
           >
-            <v-icon size="14" class="rund-trigger-glyph" aria-hidden="true"
-              >mdi-alert-outline</v-icon
-            >
-            <span>
-              The prompt does not have the trigger word of this person's LoRA:
-              <strong>{{ personTrigger }}</strong>
+            <span class="rund-trigger-text">
+              <v-icon size="14" aria-hidden="true">mdi-alert-outline</v-icon>
+              Trigger word missing
             </span>
-            <AppButton size="sm" :disabled="submitting" @click="addTrigger"
+            <!-- The label is the word alone and may be cut short, so the name
+                 and the tip both say it whole and whose it is. Not the
+                 button's own `tooltip`, which would describe it with the
+                 words it is already named by. -->
+            <Tooltip
+              v-for="add in triggerAdds"
+              :key="add.label"
+              :text="add.hint"
+              :describe="false"
             >
-              Add it
-            </AppButton>
+              <template #activator="{ props: tip }">
+                <AppButton
+                  v-bind="tip"
+                  class="rund-trigger-add"
+                  size="sm"
+                  :aria-label="add.hint"
+                  :disabled="submitting"
+                  @click="addTriggers(add.words)"
+                >
+                  {{ add.label }}
+                </AppButton>
+              </template>
+            </Tooltip>
           </p>
         </div>
 
         <!-- Who the run is of. A workflow run by itself carries no person's
              LoRA (the server leaves it out), so the people whose LoRA works
-             with its checkpoint are offered here, by face. Opened on a person
-             (Create with LoRA…), that person is drawn chosen and fixed. -->
+             with its checkpoint are offered here, by face, and several can be
+             picked. Opened on a person (Create with LoRA…), that person is
+             drawn chosen and fixed, with the others beside them. -->
         <div v-if="showPerson" class="rund-f rund-f--4" data-testid="rund-person">
           <span class="rund-l">Person</span>
           <PersonPicker
             v-if="personTiles.length"
             :people="personTiles"
-            :model-value="chosenPersonId"
-            :fixed="Boolean(fixedPerson)"
+            :model-value="chosenPersonIds"
+            :fixed-id="fixedPerson?.id ?? null"
             :disabled="submitting"
             aria-label="Person"
-            @update:model-value="pickPerson"
+            @toggle="pickPerson"
           />
           <p v-if="personNote" class="rund-note">{{ personNote }}</p>
         </div>
@@ -272,13 +305,13 @@
             LoRAs<span class="rund-sp" /><span class="rund-l2">Strength</span>
             <span class="rund-x-gap" />
           </span>
-          <p v-if="!loraSlots.length" class="rund-note">
+          <p v-if="ownLorasLine" class="rund-note">
             {{ ownLorasLine }}
           </p>
           <template v-for="(row, index) in loras" :key="row.key">
-          <!-- A graph LoRA skipped for this run. The popup never changes the
-               workflow, so its word is Skip, never delete: the row stays,
-               says so, and Use takes it back. -->
+          <!-- A loader of the graph taken out with its ×: the run goes
+               without it, and so does the workflow if this is saved. The row
+               stays, struck through, and Put back takes it back. -->
           <div
             v-if="row.skipped"
             class="rund-lora rund-lora--skipped"
@@ -286,16 +319,17 @@
           >
             <span class="rund-lora-skip-line">
               <span class="rund-lora-name">{{ rowName(row) }}</span>
-              <span class="rund-lora-skipped">Skipped for this run</span>
+              <span class="rund-lora-skipped">Removed</span>
             </span>
             <AppButton
+              class="rund-lora-back"
               size="sm"
-              data-focus="use"
-              :aria-label="`Use ${rowName(row)} in this run`"
+              data-focus="back"
+              :aria-label="`Put ${rowName(row)} back`"
               :disabled="submitting"
               @click="useGraphLora(row)"
             >
-              Use
+              Put back
             </AppButton>
           </div>
           <div v-else class="rund-lora" :data-lora="row.key">
@@ -316,34 +350,33 @@
               :disabled="submitting"
               @keydown.stop
             />
-            <!-- Two different gestures, so two controls. A row the owner ADDED
-                 was never in the graph, and its × takes that override away. A
-                 slot the GRAPH carries gets Skip: this run is sent with that
-                 loader bypassed (`skip_loras`; the server rewires around it),
-                 so the owner can run without a LoRA that does not exist here.
-                 Skip, not a trash: this popup changes no workflow, and a
-                 delete glyph would promise that it does. Editing the chain for
-                 good is Edit LoRAs…, on the Workflows screen. -->
+            <!-- One gesture, ×, on either kind of row. A row the owner ADDED
+                 into a free loader goes with it. A loader the GRAPH carries is
+                 taken out of this run (`skip_loras`; the server rewires around
+                 it) and its row stays, so it can be put back. Moving a loader
+                 between lanes is Edit LoRAs…, on the Workflows screen. -->
             <AppBarButton
-              v-if="row.added"
               class="rund-lora-act"
               icon="close"
-              :tooltip="`Remove LoRA ${index + 1}`"
+              data-focus="remove"
+              :tooltip="row.added ? `Remove LoRA ${index + 1}` : `Remove ${rowName(row)}`"
               :disabled="submitting"
-              @click="removeLora(index)"
+              @click="row.added ? removeLora(index) : skipGraphLora(row)"
             />
-            <AppButton
-              v-else
-              class="rund-lora-act"
-              size="sm"
-              data-focus="skip"
-              :aria-label="`Skip ${rowName(row)} for this run`"
-              :disabled="submitting"
-              @click="skipGraphLora(row)"
-            >
-              Skip
-            </AppButton>
           </div>
+          <!-- A loader set to another LoRA or strength: what the workflow
+               has, and the way back to it. -->
+          <p
+            v-if="loraEdited(row)"
+            class="rund-note rund-lora-was"
+            data-testid="rund-lora-was"
+          >
+            <RunResetChip
+              :value="loraWas(row)"
+              :label="rowName(row)"
+              @reset="resetLora(row)"
+            />
+          </p>
           <p
             v-if="!row.skipped && loraFlag(row)"
             class="rund-note rund-lora-flag"
@@ -357,7 +390,8 @@
           </template>
           <!-- LoRAs this run adds in loaders of their own (`add_loras`):
                nothing the graph loads is replaced, so these work on any
-               workflow. Their × takes the addition away. -->
+               workflow. Their × takes the addition away. The picked people's
+               rows come first, in the order picked. -->
           <div
             v-for="(row, index) in addedLoras"
             :key="row.key"
@@ -366,15 +400,15 @@
           >
             <AppSelect
               v-model="row.sha256"
-              :label="row.person ? 'LoRA of the person' : `Added LoRA ${index + 1}`"
+              :label="addedRowName(row, index)"
               hide-label
               compact
-              :options="row.person ? personLoraOptions : adapterOptions"
+              :options="row.person == null ? adapterOptions : personLoraOptions(row)"
               :disabled="submitting"
             />
             <AppInput
               v-model.number="row.strength"
-              :aria-label="`Strength of added LoRA ${index + 1}`"
+              :aria-label="`Strength of ${addedRowName(row, index)}`"
               type="number"
               min="-10"
               max="10"
@@ -384,10 +418,10 @@
             <!-- Not on a fixed person's row: the popup was opened to make
                  pictures of them, and taking their LoRA off is another run. -->
             <AppBarButton
-              v-if="!(row.person && fixedPerson)"
+              v-if="row.person == null || row.person !== fixedPerson?.id"
               class="rund-lora-act"
               icon="close"
-              :tooltip="`Remove added LoRA ${index + 1}`"
+              :tooltip="`Remove ${addedRowName(row, index)}`"
               :disabled="submitting"
               @click="removeAddedLora(index)"
             />
@@ -398,6 +432,7 @@
           <AppButton
             size="sm"
             icon-left="plus"
+            data-focus="add-lora"
             :disabled="submitting"
             @click="addLora"
           >
@@ -575,8 +610,9 @@
           <label :for="stackId">Stack new pictures with the ones they came from</label>
         </div>
 
-        <!-- The workflow's optional stages the default recipe runs (#1623);
-             an unticked stage is sent as `skip_stages`. -->
+        <!-- The workflow's optional stages (#1623), each ticked as its
+             default recipe has it. One switched off is sent as `skip_stages`,
+             one switched on as `keep_stages`. -->
         <fieldset v-if="stageRows.length" class="rund-f rund-f--4 rund-stages">
           <legend class="rund-l">Stages</legend>
           <div
@@ -620,16 +656,17 @@
             Checkpoint
             <RunResetChip
               v-if="checkpointEdited"
-              :value="checkpointBase"
+              :value="shownModel(checkpointBase)"
               label="Checkpoint"
               @reset="pickCheckpoint(checkpointBase)"
             />
           </span>
-          <!-- A checkpoint this ComfyUI does not have is offered the shelf's
-               of the same base model, so the recipe's LoRAs still fit, or
-               every one the workflow can load when none is known to be. -->
+          <!-- A picker wherever something says what the loader can load: a
+               checkpoint this ComfyUI does not have is offered the shelf's of
+               the same base model, so the recipe's LoRAs still fit, or every
+               one the workflow can load when none is known to be. -->
           <AppSelect
-            v-if="checkpointFix?.options.length"
+            v-if="checkpointOptions.length"
             :model-value="checkpointValue"
             label="Checkpoint"
             hide-label
@@ -650,6 +687,40 @@
           <p v-if="checkpointFix" class="rund-note" data-testid="rund-checkpoint-missing">
             {{ checkpointFixNote }}
           </p>
+        </div>
+
+        <!-- The other models the default recipe loads (a VAE, a text
+             encoder), sent as `models` like the checkpoint when changed. A
+             row is a picker once the server has said what its loader can
+             load, and is read as text until then, or where nothing says. -->
+        <div
+          v-for="row in modelRows"
+          :key="row.key"
+          class="rund-f rund-f--2"
+          data-testid="rund-model"
+        >
+          <span class="rund-l">
+            {{ row.label }}
+            <RunResetChip
+              v-if="row.key in modelEdits"
+              :value="shownModel(row.file)"
+              :label="row.label"
+              @reset="pickModel(row, row.file)"
+            />
+          </span>
+          <AppSelect
+            v-if="modelOptions(row).length"
+            :model-value="modelValue(row)"
+            :label="row.label"
+            hide-label
+            compact
+            :options="modelOptions(row)"
+            :disabled="submitting"
+            @update:model-value="(file) => pickModel(row, file)"
+          />
+          <span v-else class="rund-fixed-value" :title="modelValue(row)">{{
+            shownModel(modelValue(row))
+          }}</span>
         </div>
 
         <div class="rund-f rund-f--4 rund-more">
@@ -741,29 +812,133 @@
           @edit-loras="editLoras"
         />
         </div>
-        <!-- Save fixed workflow: the run changes nodes on this ComfyUI (a
-             replaced seed or text node, a LoRA loaded through the
-             ComfyUI-PixlStash loader), so the repaired graph can be kept as a
-             workflow of its own. The original is not changed. -->
-        <div v-if="canSaveFixed || fixedNote" class="rund-f rund-f--4 rund-fixed">
-          <AppButton
-            v-if="canSaveFixed"
-            size="sm"
-            icon-left="content-save-outline"
-            :loading="savingFixed"
-            :disabled="submitting || savingFixed"
-            tooltip="Save a copy of this workflow with these changes, so it runs on this ComfyUI as it is"
-            @click="saveFixed"
-          >
-            Save fixed workflow
-          </AppButton>
-          <p v-if="fixedNote" class="rund-note" role="status">{{ fixedNote }}</p>
-        </div>
         <p v-if="submitError" class="rund-f rund-f--4 rund-note rund-note--bad" role="alert">
           {{ submitError }}
         </p>
       </div>
     </div>
+
+    <!-- ── Save what you ran (#1850) ────────────────────────────────────
+         Only when the form differs from the workflow it runs: what differs,
+         counted and named, and the two verbs that keep it. A panel in the
+         body and readable at rest, because a count nobody sees is how a
+         one-off gets saved by accident. Run never saves, and neither does
+         closing. -->
+    <template v-if="!loading && !loadFailed">
+      <div
+        v-if="bandShown"
+        ref="bandBox"
+        class="rund-band"
+        :class="{ 'rund-band--naming': naming }"
+        role="group"
+        aria-label="Changes from the workflow"
+        data-testid="rund-band"
+      >
+        <!-- Save as new… is this band's one question: the name. Read-only
+             while the save is out, never disabled: a disabled field cannot
+             hold focus, and a save sent with Enter and refused would leave
+             the keyboard nowhere, beside the sentence saying what to fix.
+             Dimmed by hand for it, as `disabled` would have. -->
+        <template v-if="naming">
+          <AppInput
+            ref="nameField"
+            v-model="newName"
+            class="rund-band-name"
+            :class="{ 'run-refused': Boolean(saving) }"
+            label="Name of the new workflow"
+            :readonly="Boolean(saving)"
+            @enter="saveAsNew"
+            @keydown.esc="backFromName"
+            @keydown.stop
+          />
+          <AppButton
+            variant="ghost"
+            size="sm"
+            :disabled="Boolean(saving)"
+            @click="backFromName"
+          >
+            Back
+          </AppButton>
+          <AppButton
+            ref="bandVerb"
+            size="sm"
+            :loading="saving === 'new'"
+            :aria-disabled="newName.trim() ? undefined : 'true'"
+            :class="{ 'run-refused': !newName.trim() }"
+            @click="saveAsNew"
+          >
+            Save as new workflow
+          </AppButton>
+        </template>
+        <template v-else>
+          <div class="rund-band-text">
+            <b>{{ changesWord(band.count) }} from the workflow</b>
+            <span class="rund-band-list" :title="band.text">{{ band.text }}</span>
+            <!-- A line of its own, never cut: "why did Save not keep my
+                 prompt" is the first question this band invites. -->
+            <span class="rund-band-stays">{{ bandStays }}</span>
+          </div>
+          <AppButton
+            ref="asNewButton"
+            size="sm"
+            :disabled="submitting || Boolean(saving)"
+            @click="askName"
+          >
+            Save as new…
+          </AppButton>
+          <!-- `aria-disabled`, not `disabled`: a closed Save keeps its place
+               in the tab order so the server's reason, which it points at, can
+               be reached. `saveOver` does the refusing. -->
+          <AppButton
+            ref="bandVerb"
+            size="sm"
+            icon-left="content-save-outline"
+            :loading="saving === 'save'"
+            :disabled="submitting"
+            :class="{ 'run-refused': Boolean(saveClosed) }"
+            :aria-disabled="saveClosed ? 'true' : undefined"
+            :aria-describedby="saveClosed ? saveReasonId : undefined"
+            @click="saveOver"
+          >
+            Save
+          </AppButton>
+        </template>
+        <p
+          v-if="saveClosed && !naming"
+          :id="saveReasonId"
+          class="rund-note rund-band-why"
+          data-testid="rund-band-why"
+        >
+          {{ saveClosed }}
+        </p>
+        <p v-if="bandError" class="rund-note rund-note--bad rund-band-why" role="alert">
+          {{ bandError }}
+        </p>
+      </div>
+      <!-- What the last save here did, where the band was, and where focus
+           goes when the band's own buttons leave with it. -->
+      <p
+        v-else-if="bandNote"
+        ref="bandNoteLine"
+        class="rund-note rund-band-done"
+        tabindex="-1"
+        data-testid="rund-band-done"
+      >
+        {{ bandNote }}
+      </p>
+    </template>
+
+    <!-- In the document for as long as the popup is, and only their words
+         change: a reader announces a change to a region it already knows, not
+         a region that arrives holding its sentence. Each is emptied when what
+         it says is no longer so, or the same words coming back change nothing.
+         The band's is said once when it arrives, never per key. -->
+    <p class="visually-hidden" role="status" aria-live="polite" data-testid="rund-band-live">
+      {{ bandLive }}
+    </p>
+    <p class="visually-hidden" role="status" aria-live="polite" data-testid="rund-trigger-live">
+      {{ triggerLive }}
+    </p>
 
     <template #footer>
       <!-- Status, never an alert: it says a gesture is already done, and the
@@ -772,7 +947,14 @@
       <p v-if="keptAs" :id="savedReasonId" class="rund-note rund-kept">
         Already kept as “{{ keptAs.name || "Untitled" }}”.
       </p>
-      <p v-if="runBlocker" :id="blockerId" class="rund-note rund-note--bad">
+      <!-- A wait is the popup's own work and no fault of the form's, so it is
+           not said in a refusal's colour. Focusable: it is here for the whole
+           of a save, which nothing in the band is, so it is where focus waits
+           when a save leaves it nowhere else (`keep`). -->
+      <p v-if="runWait" :id="blockerId" ref="runWaitLine" class="rund-note" tabindex="-1">
+        {{ runWait }}
+      </p>
+      <p v-else-if="runBlocker" :id="blockerId" class="rund-note rund-note--bad">
         {{ runBlocker }}
       </p>
       <!-- `aria-disabled`, not `disabled`, for this dialog's own stated
@@ -781,7 +963,7 @@
            inert. `onSave` does the refusing. -->
       <AppButton
         :icon-left="keptAs ? 'check' : 'bookmark-plus-outline'"
-        :disabled="!activeKey || submitting"
+        :disabled="!activeKey || !formRead || submitting || Boolean(saving)"
         :aria-disabled="keptAs ? 'true' : undefined"
         :aria-describedby="keptAs ? savedReasonId : undefined"
         @click="onSave"
@@ -789,7 +971,7 @@
         {{ keptAs ? "Saved" : "Save as recipe" }}
       </AppButton>
       <span class="rund-sp" />
-      <AppButton :disabled="submitting" @click="onRequestClose">Cancel</AppButton>
+      <AppButton :disabled="submitting || Boolean(saving)" @click="close">Cancel</AppButton>
       <!-- `aria-disabled`, not `disabled`: a natively-disabled button is out of
            the tab order, so a keyboard reader could never reach the reason
            `aria-describedby` points at. `submit()` does the actual refusing.
@@ -800,7 +982,7 @@
         :loading="submitting"
         :class="{ 'run-refused': !canRun }"
         :aria-disabled="canRun ? undefined : 'true'"
-        :aria-describedby="runBlocker ? blockerId : undefined"
+        :aria-describedby="runWhyId"
         @click="submit"
       >
         {{ runLabel }}
@@ -814,7 +996,7 @@
   <SaveRecipeDialog
     v-if="saveOpen"
     :workflow-id="activeKey"
-    :models="checkpointEdited ? runModels : null"
+    :models="formChanges.models.length ? runModels : null"
     :suggested-name="card?.name || ''"
     :prompt="prompt"
     :negative="negative"
@@ -824,7 +1006,7 @@
     :settings-aside="seedMode === 'keep' ? KEEP_SEED_ASIDE : ''"
     :source-picture-id="pictureIds[0] ?? null"
     @close="saveOpen = false"
-    @handoff="emit('close')"
+    @handoff="close"
     @saved="onSaved"
   />
 
@@ -847,9 +1029,13 @@
  * A picture's recipe, a whole selection, or a workflow card off the Workflows
  * view all open this: the left column says what the run is made from and where
  * its output goes, the right is the card's own parameters, prefilled and
- * editable. Nothing here is written back into a workflow - every edit is an
- * override `POST /workflows/run` applies to the graph at submission time, which
- * is what keeps the card's content-addressed identity intact (B7).
+ * editable. Every edit is an override `POST /workflows/run` applies to the
+ * graph at submission time; neither Run nor closing writes one back.
+ *
+ * **A run of a workflow by itself can be kept** (#1850): where the form
+ * differs from the workflow, a band above the footer counts what differs and
+ * offers Save and Save as new…. One reading of the form (`formChanges`) is
+ * what the band counts, what the run sends and what a save writes.
  *
  * **An edited field is marked in its label row**, never beside the control: the
  * four-column grid stays aligned only if a chip cannot change a cell's height.
@@ -858,7 +1044,15 @@
  * (#1480), as the lightbox's Recipe tab has since F6 - without it the second
  * identical row was one press away from here.
  */
-import { computed, nextTick, reactive, ref, useId, watch } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  reactive,
+  ref,
+  useId,
+  watch,
+} from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { VIcon } from "vuetify/components";
 
@@ -868,27 +1062,44 @@ import { pictureThumbnailUrl } from "../../api/pictures";
 import { stackMemberIds } from "../../utils/stackMembers";
 import { listSavedRecipes } from "../../api/recipes";
 import {
+  getLoraChain,
   getWorkflowCard,
+  getWorkflowChanges,
   getWorkflowFormInputs,
   listWorkflowCards,
   preflightWorkflowRun,
   readModelSwap,
   runWorkflowCard,
-  saveFixedWorkflow,
+  saveWorkflow,
+  saveWorkflowAsNew,
   setWorkflowInputs,
   setWorkflowPins,
   workflowCoverUrl,
 } from "../../api/workflows";
 import { useEntityListsStore } from "../../stores/useEntityListsStore";
 import { useRunDialogStore } from "../../stores/useRunDialogStore";
+import { useWorkflowsStore } from "../../stores/useWorkflowsStore";
 import { errorMessage } from "../../utils/apiError";
 import { focusLater } from "../../utils/dom";
 import { editLorasRoute, loraBase, loraStem } from "../../utils/loraChain";
 import { fitPeople, fitWorkflows } from "../../utils/loraWorkflows";
+import { deriveModelName } from "../../utils/modelShelf";
 import { namesWord, triggerWord } from "../../utils/triggerWords";
 import { wouldDuplicate } from "../../utils/recipeKey";
 import { runTaskLabel } from "../../utils/runTaskLabel";
 import { UNMATCHED_REPLACEMENTS_TEXT } from "../../utils/workflowCard";
+import {
+  answering,
+  changesWord,
+  describeChanges,
+  modelWord,
+  noChanges,
+  over,
+  saveFailure,
+  SIZE_INPUTS,
+  suggestedName,
+  whole,
+} from "../../utils/workflowChanges";
 import {
   choicesFor,
   nodesByAddress,
@@ -896,7 +1107,6 @@ import {
   setEachRun,
 } from "../../utils/workflowPins";
 import {
-  changesNodes,
   MISSING_CHOICES,
   PICTURE_INPUT_UNFILLED,
   LORAS_BYPASSED,
@@ -914,6 +1124,7 @@ import AppInput from "../widgets/AppInput.vue";
 import AppSelect from "../widgets/AppSelect.vue";
 import AppTextarea from "../widgets/AppTextarea.vue";
 import PicturePicker from "../widgets/PicturePicker.vue";
+import Tooltip from "../widgets/Tooltip.vue";
 import RunReasonNotice from "./RunReasonNotice.vue";
 import RunResetChip from "./RunResetChip.vue";
 
@@ -944,7 +1155,6 @@ const MAX_SEED = 2n ** 64n - 1n;
 const MAX_VALUES = 200;
 /** The numbers drawn as one-column cells, in this order, when set each run. */
 const SCALAR_PINNED = ["steps", "cfg", "cfg_scale", "guidance"];
-const SIZE_INPUTS = ["width", "height"];
 const CHECKPOINT_INPUT = "ckpt_name";
 /**
  * Said in the Save dialog when the form is set to keep the source's seed.
@@ -960,16 +1170,26 @@ const KEEP_SEED_ASIDE =
 const SEPARATOR = "/";
 
 const blockerId = useId();
+const loadFailedId = useId();
 const picsLabelId = useId();
 const stackId = useId();
 const stageId = useId();
 /** Bumped per open, so a slower earlier read cannot write over a later one. */
 let loadToken = 0;
+/**
+ * Bumped per read of a workflow into the form: the open, a move of the
+ * picker, the read after a band save. Only the newest may write any of the
+ * form. Two reads of ONE workflow can be out at once (picked, left, picked
+ * again), and the key cannot tell those apart.
+ */
+let readAsk = 0;
 const runDialog = useRunDialogStore();
 const entityLists = useEntityListsStore();
+const workflows = useWorkflowsStore();
 
 const loading = ref(false);
 const loadFailed = ref("");
+const loadFailedLine = ref(null);
 const submitting = ref(false);
 const submitError = ref("");
 const preflighting = ref(false);
@@ -1042,8 +1262,10 @@ const seed = ref("0");
 const loras = ref([]);
 /**
  * LoRAs this run ADDS in a loader of their own (`add_loras`), rows of
- * `{key, sha256, strength}`. Nothing the graph loads is replaced, so they work
- * on a workflow with no loader, or one whose loaders are all taken.
+ * `{key, sha256, strength, person}`. Nothing the graph loads is replaced, so
+ * they work on a workflow with no loader, or one whose loaders are all taken.
+ * `person` is the id of the person whose LoRA the row holds, or null; those
+ * rows come first, in the order picked (`settlePeople`).
  */
 const addedLoras = ref([]);
 /** The added rows as the form opened with them, for `dirty`. */
@@ -1124,16 +1346,40 @@ const changedLoras = computed(() =>
     .map((row) => ({
       node_id: row.node_id,
       field: row.field,
-      sha256: row.sha256,
-      strength_model: Number.isFinite(row.strength) ? row.strength : null,
+      ...loraEntry(row),
     })),
 );
 
 /**
- * The graph loaders skipped for this run, as `skip_loras` takes them.
+ * The CLIP strength of a loader of the workflow's own chain, which knows it:
+ * it follows the model strength where the two were one number, and is left as
+ * the graph has it where they were set apart. The rule the Workflow tab
+ * writes a strength by (`utils/workflowEdits.withLoraStrength`), so the two
+ * editors save one loader the same way. A picture's slot names none.
+ */
+function clipStrength(row) {
+  if (row.baseClip === undefined || !Number.isFinite(row.strength)) return {};
+  return { strength_clip: row.clipTied ? row.strength : row.baseClip };
+}
+
+/**
+ * What a row's loader is set to, as a run and a save both state it. The CLIP
+ * strength is said with the model's: left unsaid, a save would write the one
+ * and leave the graph's other beside it.
+ */
+function loraEntry(row) {
+  return {
+    sha256: row.sha256,
+    strength_model: Number.isFinite(row.strength) ? row.strength : null,
+    ...clipStrength(row),
+  };
+}
+
+/**
+ * The graph loaders taken out with their ×, as `skip_loras` takes them.
  *
- * Never also in `loras`: `changedLoras` passes over a skipped row, so a loader
- * is either overridden or skipped, and the route is never asked for both.
+ * Never also in `loras`: `changedLoras` passes over a removed row, so a loader
+ * is either set or removed, and the route is never asked for both.
  */
 const skippedLoras = computed(() =>
   loras.value
@@ -1143,15 +1389,14 @@ const skippedLoras = computed(() =>
 
 const dirty = computed(
   () =>
-    skippedLoras.value.length > 0 ||
-    Object.keys(stageChoice).length > 0 ||
-    checkpointEdited.value ||
+    // What the form changes, against what it opened with: changes waiting in
+    // the Workflow tab are laid over the form, and they are not this popup's
+    // work to lose.
+    JSON.stringify(formChanges.value) !== changesAtOpen.value ||
     prompt.value !== basePrompt.value ||
     negative.value !== baseNegative.value ||
-    Object.keys(edits).length > 0 ||
     Object.keys(picks).length > 0 ||
     loras.value.length !== initialLoraCount.value ||
-    changedLoras.value.length > 0 ||
     addedSignature.value !== addedAtOpen.value,
 );
 
@@ -1194,10 +1439,14 @@ const workflowId = computed({
   },
 });
 
+/**
+ * The owner picked another workflow. Only that: a save that moves the popup
+ * onto the workflow it made goes by `keep`, which leaves the run's own
+ * choices where they are, since that workflow is this graph.
+ */
 async function switchCard(key, keepEdits) {
-  // What the last pre-flight and save said is about the card being left.
-  changedNodes.value = false;
-  fixedNote.value = "";
+  // What the last save and the server's verbs said is about the card left.
+  leaveBand();
   // Addressed by node, which is the card being left's.
   choiceFixes.value = [];
   // A pick is addressed by a slot of the card it was made on; another card's
@@ -1212,14 +1461,54 @@ async function switchCard(key, keepEdits) {
   // would replace the new dialog's refusals with the old gesture's.
   const token = loadToken;
   try {
-    await loadCard(key, { keepEdits });
-    if (token !== loadToken) return;
-    await runPreflight(token);
+    if (await readWorkflow(key, token, keepEdits)) await runPreflight(token);
   } catch (err) {
-    if (token === loadToken) {
+    // A workflow the picker has since left is nobody's failure to be told.
+    if (token === loadToken && key === activeKey.value) {
       loadFailed.value = errorMessage(err, "Could not read that workflow.");
     }
   }
+}
+
+/**
+ * The workflow whose card, loaders and waiting changes the form holds, or "".
+ *
+ * From the instant the picker moves until those are read, the form is still a
+ * reading of the workflow left (its edits, its LoRA rows, its version), and
+ * nothing of it may be saved or run against the one arrived at. So the band
+ * and Run both ask `formRead`, and a read that fails leaves it unset.
+ */
+const formKey = ref("");
+const formRead = computed(() => formKey.value === activeKey.value);
+
+/**
+ * Read the workflow in the picker into the form: its card, and on a run of
+ * the workflow by itself its loaders and what waits on it, laid over the
+ * form. False when the picker moved on, the popup was reopened or a newer
+ * read began meanwhile, and then it has written nothing since: not its card,
+ * not its failure.
+ */
+async function readWorkflow(key, token, keepEdits = false) {
+  const ask = ++readAsk;
+  const stale = () =>
+    token !== loadToken || key !== activeKey.value || ask !== readAsk;
+  formKey.value = "";
+  try {
+    await loadCard(key, ask, { keepEdits });
+    if (stale()) return false;
+    if (runsWorkflowItself.value) {
+      // The loaders, and what waits, are the workflow's: read for this one.
+      await loadOwn(key, token, ask);
+      if (stale()) return false;
+      layOwn();
+    }
+  } catch (err) {
+    // A read a newer one replaced has no failure to report either.
+    if (stale()) return false;
+    throw err;
+  }
+  formKey.value = key;
+  return true;
 }
 
 /**
@@ -1258,6 +1547,16 @@ function baseModelFiles(detailCard) {
 }
 /** The owner's checkpoint, or null while the row is untouched. */
 const checkpointEdit = ref(null);
+/** Whether the last checkpoint set was typed in the row's box (`setCheckpoint`). */
+const typedCheckpoint = ref(false);
+/**
+ * Whether the row holds a name the owner typed in its box, which a list
+ * arriving under the caret would take away. A file picked from a list, or
+ * laid from the Workflow tab (`layOwn`), is not that, and holds no list back.
+ */
+const checkpointTyped = computed(
+  () => typedCheckpoint.value && checkpointEdit.value !== null,
+);
 
 /**
  * The card's parameters. Its `ckpt_name` is left out where the default recipe
@@ -1272,24 +1571,40 @@ const defaults = computed(() => {
 });
 const hasRecipe = computed(() => Boolean(recipe.value));
 /**
- * What the LoRA section says when it has no graph rows to show: a card run
- * reads no picture's recipe, so the workflow's own LoRAs are named from its
- * default recipe and run as it stores them. A person's LoRA is never one of
- * them (the Person field says so).
+ * What the LoRA section says beside its rows. A recipe's run with no loader
+ * says where Add LoRA puts one. A run of the workflow by itself names the
+ * LoRAs of its default recipe that have no row here (the base graph has no
+ * loader holding them), which run as it stores them. A person's LoRA is
+ * never one of them (the Person field says so).
  */
 const ownLorasLine = computed(() => {
   if (hasRecipe.value) {
-    return "This workflow has no LoRA loader. Add LoRA puts one in for this run.";
+    return loraSlots.value.length
+      ? ""
+      : "This workflow has no LoRA loader. Add LoRA puts one in for this run.";
   }
+  const rows = loraSlots.value.length > 0;
   const own = (card.value?.default_recipe?.loras || [])
+    .filter((row) => !loaderOf(row, loraSlots.value))
     .map((row) => loraStem(row.filename || "") || row.filename)
     .filter(Boolean);
   if (own.length) {
-    return `This workflow's own LoRAs run as it stores them: ${own.join(", ")}.`;
+    return rows
+      ? `This workflow also loads ${own.join(", ")}, as it stores ${own.length === 1 ? "it" : "them"}.`
+      : `This workflow's own LoRAs run as it stores them: ${own.join(", ")}.`;
   }
-  return "Add LoRA puts a LoRA in for this run; the workflow keeps its own.";
+  return rows ? "" : "Add LoRA puts a LoRA in for this run; the workflow keeps its own.";
 });
-const loraSlots = computed(() => recipe.value?.lora_slots || []);
+/**
+ * The loaders of the workflow's own graph, for a run of it by itself
+ * (`loadOwn`): `GET …/lora-chain`, the read the Workflow tab lists them from,
+ * so both address one loader the same way.
+ */
+const chainSlots = ref([]);
+/** The LoRA loaders the rows are made of: the picture's recipe's, or the workflow's. */
+const loraSlots = computed(() =>
+  recipe.value ? recipe.value.lora_slots || [] : chainSlots.value,
+);
 const pictureIds = computed(() => props.source?.pictureIds || []);
 const kind = computed(() => props.source?.kind || "picture");
 /**
@@ -1465,9 +1780,11 @@ const checkpointBase = computed(() => inPlaceOf(checkpointNamed.value));
 const checkpointValue = computed(() => checkpointEdit.value ?? checkpointBase.value);
 const checkpointEdited = computed(() => checkpointEdit.value !== null);
 
-function setCheckpoint(raw) {
+/** Set the row, as the box does it: a pick or a laid change says `typed` is false. */
+function setCheckpoint(raw, typed = true) {
   const text = String(raw ?? "").trim();
   checkpointEdit.value = text === checkpointBase.value ? null : text;
+  typedCheckpoint.value = typed;
 }
 
 /**
@@ -1475,7 +1792,7 @@ function setCheckpoint(raw) {
  * nothing in it. The row is always sent, edited or not, for the reason
  * `runBody` sends every value: the form is what runs.
  */
-const runModels = computed(() =>
+const checkpointRunModels = computed(() =>
   checkpointModel.value && checkpointValue.value && !checkpointFiles.value
     ? // Every loader of the one file: two loaders of it read as one row.
       checkpointModels.value.map((model) => ({
@@ -1483,6 +1800,15 @@ const runModels = computed(() =>
         filename: checkpointValue.value,
       }))
     : [],
+);
+/**
+ * Every model this run names: the checkpoint row, with the other rows the
+ * owner changed and the picks still waiting in the Workflow tab on top.
+ */
+const runModels = computed(
+  () =>
+    over({ models: checkpointRunModels.value }, { models: runChanges.value.models })
+      .models,
 );
 
 /** ComfyUI's folders for a base model, as `missing_models` names them. */
@@ -1502,22 +1828,35 @@ const checkpointFix = ref(null);
 /** Bumped per replacement read, so only the latest one's answer lands. */
 let checkpointAsk = 0;
 
-/** The picker's rows: the missing file first, so the row shows what it was. */
+/**
+ * The picker's rows. For a checkpoint that is missing or replaced: that file
+ * first, so the row shows what it was. Otherwise what the loader can load
+ * (`modelChoices`), or none, and the row is a typed box.
+ */
 const checkpointOptions = computed(() => {
   const fix = checkpointFix.value;
-  if (!fix) return [];
-  return [
+  if (!fix?.options.length) {
+    return withCurrent(
+      modelChoices[CHECKPOINT_ROW] || [],
+      checkpointBase.value,
+      checkpointValue.value,
+    );
+  }
+  const offered = [
     {
       value: fix.file,
       label: fix.missing
-        ? `${fix.file} (not on this ComfyUI)`
-        : `${fix.file} (in place of ${fix.was})`,
+        ? `${shownModel(fix.file)} (not on this ComfyUI)`
+        : `${shownModel(fix.file)} (in place of ${shownModel(fix.was)})`,
     },
-    ...fix.options.map((model) => ({
-      value: model.filename,
-      label: model.display_name || model.filename,
-    })),
+    ...modelOptionsOf(fix.options),
   ];
+  // A file laid from the Workflow tab, or brought from another workflow, may
+  // be none of these, and a select whose value is not an option draws empty.
+  const value = checkpointValue.value;
+  return offered.some((option) => option.value === value)
+    ? offered
+    : [{ value, label: shownModel(value) }, ...offered];
 });
 
 const checkpointFixNote = computed(() => {
@@ -1530,7 +1869,7 @@ const checkpointFixNote = computed(() => {
   if (fix.loading) return gone;
   if (fix.options.length) {
     return fix.narrowed
-      ? `${gone} Pick another of the same base model for this run.`
+      ? `${gone} Pick another of the same base model.`
       : `${gone} ${UNMATCHED_REPLACEMENTS_TEXT}`;
   }
   // No `needs_pixlstash_nodes` case: the PixlStash swap loaders are VAE and
@@ -1546,7 +1885,7 @@ const checkpointFixNote = computed(() => {
 });
 
 function pickCheckpoint(filename) {
-  setCheckpoint(filename);
+  setCheckpoint(filename, false);
   void runPreflight();
 }
 
@@ -1592,10 +1931,7 @@ async function offerCheckpoints(found, key, token) {
     token === loadToken && key === activeKey.value && ask === checkpointAsk;
   let answer;
   try {
-    answer = await readModelSwap(key, {
-      replacing: graphFile,
-      slotKind: "checkpoint",
-    });
+    answer = await readSwap(key, graphFile, "checkpoint");
   } catch (err) {
     console.warn(`[run] could not read replacements for ${graphFile} on ${key}`, err);
     // Asked again on the next pre-flight rather than never.
@@ -1604,7 +1940,7 @@ async function offerCheckpoints(found, key, token) {
   }
   if (!current()) return;
   // Typed over while the read was out: the owner's name stays in its box.
-  if (checkpointEdit.value !== null) {
+  if (checkpointTyped.value) {
     checkpointFix.value = null;
     return;
   }
@@ -1619,17 +1955,13 @@ async function offerCheckpoints(found, key, token) {
 }
 
 /**
- * The optional stages the base graph carries, as the rows draw them. Only the
- * ones the default recipe runs: the server cannot switch a recipe-off stage
- * back on, so a tickable row for one would promise a run it will not make.
+ * The optional stages the base graph carries, as the rows draw them: the ones
+ * the default recipe runs ticked, the ones it runs without not (`keep_stages`
+ * switches one of those on for a run, #1849).
  */
 const stageRows = computed(() =>
   (card.value?.specials || [])
-    .filter(
-      (name) =>
-        name in STAGE_LABELS &&
-        card.value?.default_recipe?.stages?.[name] !== false,
-    )
+    .filter((name) => name in STAGE_LABELS)
     .map((name) => ({
       name,
       label: STAGE_LABELS[name],
@@ -1663,10 +1995,12 @@ function clearStages() {
   for (const name of Object.keys(stageChoice)) delete stageChoice[name];
 }
 
-/** The stages this run goes without, as `skip_stages` takes them. */
-const skippedStages = computed(() =>
-  stageRows.value.filter((row) => !stageOn(row.name)).map((row) => row.name),
-);
+/** The stages of a set of changes switched *on* or off, as a run names them. */
+function stagesSet(changes, on) {
+  return Object.keys(changes.stages)
+    .filter((name) => changes.stages[name] === on)
+    .sort();
+}
 
 /** What this run sends for a field: the owner's value, else the default. */
 function runValue(field) {
@@ -1834,7 +2168,8 @@ const fixedFields = computed(() =>
  */
 async function freeField(field) {
   const key = activeKey.value;
-  if (!key || freeing.value) return;
+  // The whole list is the card's: mid-switch that is the workflow left's.
+  if (!key || !formRead.value || freeing.value) return;
   const all = card.value?.defaults || [];
   const current = Array.isArray(pins.value)
     ? pins.value
@@ -2049,6 +2384,9 @@ watch(
 /** The gesture, refused here rather than by a `disabled` nobody can reach. */
 function onSave() {
   if (keptAs.value || !activeKey.value || submitting.value) return;
+  // The recipe is made from the form, so not from one a save or a read is
+  // still putting right.
+  if (saving.value || !formRead.value) return;
   saveOpen.value = true;
 }
 
@@ -2173,7 +2511,9 @@ const offersPerson = computed(
     kind.value === "card" &&
     !pictureIds.value.length &&
     !savedRecipe.value &&
-    !loraSource.value,
+    // Create with LoRA… on a person takes others beside them; on a picture
+    // set it is a run of the set's look, and offers nobody.
+    loraSource.value?.entityType !== "set",
 );
 /** Create with LoRA… on a person: that person, chosen and not changeable. */
 const fixedPerson = computed(() =>
@@ -2193,12 +2533,20 @@ const personFits = computed(() =>
       )
     : { people: [], clash: 0, unknown: 0, family: null },
 );
-/** The person picked for this run, or null for no one. */
-const personId = ref(null);
-const chosenPersonId = computed(() => fixedPerson.value?.id ?? personId.value);
-const personTiles = computed(() =>
-  fixedPerson.value ? [fixedPerson.value] : personFits.value.people,
-);
+/** The people picked for this run, in the order picked; never the fixed one. */
+const personIds = ref([]);
+/** Everyone the run is of: the person it was opened on, then the picks. */
+const chosenPersonIds = computed(() => [
+  ...(fixedPerson.value ? [fixedPerson.value.id] : []),
+  ...personIds.value,
+]);
+const personTiles = computed(() => {
+  const fixed = fixedPerson.value;
+  const offered = personFits.value.people.filter(
+    (person) => person.id !== fixed?.id,
+  );
+  return fixed ? [fixed, ...offered] : offered;
+});
 /** Absent, not empty, in a library where nobody has a LoRA. */
 const showPerson = computed(
   () =>
@@ -2217,71 +2565,170 @@ const personNote = computed(() => {
   if (unknown) parts.push(`${unknown} whose LoRA has no base model recorded`);
   const left = parts.length ? ` Not listed: ${parts.join(", ")}.` : "";
   return people.length
-    ? `A workflow runs without a person's LoRA. Pick someone to add theirs.${left}`
+    ? `A workflow runs without a person's LoRA. Pick people to add theirs.${left}`
     : `No person has a LoRA for this workflow's base model, so it runs with no one's.${left}`;
 });
-/** The LoRAs the person's row offers: theirs that fit, never the whole shelf. */
-const personLoraOptions = computed(() =>
-  (fixedPerson.value
-    ? attachedLoras.value
-    : personFits.value.people.find((person) => person.id === personId.value)
-        ?.loras || []
-  ).map(adapterOption),
-);
+
+function personName(id) {
+  return personTiles.value.find((person) => person.id === id)?.name || "this person";
+}
+
+/** What an added row is called, by whose it is or by where it stands. */
+function addedRowName(row, index) {
+  return row.person == null
+    ? `added LoRA ${index + 1}`
+    : `${personName(row.person)}'s LoRA`;
+}
 
 /**
- * The trigger word of the LoRA on the person's row, or "" when there is no
- * such row or its LoRA needs none. Read off the row's own pick, so changing
- * which of the person's LoRAs runs changes the word.
+ * The LoRAs a person's row offers: theirs that fit, never the whole shelf,
+ * and never the file another person's row already holds, which would be one
+ * loader asked for twice.
  */
-const personTrigger = computed(() => {
-  const sha = addedLoras.value.find((row) => row.person)?.sha256;
-  if (!sha) return "";
-  return triggerWord(
-    [...attachedLoras.value, ...adapters.value, ...unknownLoras.value].find(
-      (row) => row.sha256 === sha,
-    ),
+function personLoraOptions(row) {
+  const own =
+    row.person === fixedPerson.value?.id
+      ? attachedLoras.value
+      : personFits.value.people.find((person) => person.id === row.person)
+          ?.loras || [];
+  const taken = new Set(
+    addedLoras.value
+      .filter((other) => other.person != null && other.key !== row.key)
+      .map((other) => other.sha256),
   );
+  return own.filter((lora) => !taken.has(lora.sha256)).map(adapterOption);
+}
+
+/**
+ * The trigger word of each picked person's LoRA, in the order picked:
+ * `[{word, person}]`, the person by name. Read off each row's own pick, so
+ * changing which of a person's LoRAs runs changes the word; a LoRA that needs
+ * none adds nothing, and a word two people share is listed once.
+ */
+const personTriggers = computed(() => {
+  const shelf = [...attachedLoras.value, ...adapters.value, ...unknownLoras.value];
+  const triggers = [];
+  for (const row of addedLoras.value) {
+    if (row.person == null || !row.sha256) continue;
+    const word = triggerWord(shelf.find((entry) => entry.sha256 === row.sha256));
+    const known = triggers.some(
+      (trigger) => trigger.word.toLowerCase() === word.toLowerCase(),
+    );
+    if (word && !known) triggers.push({ word, person: personName(row.person) });
+  }
+  return triggers;
 });
-/** The word is asked for and the prompt, which can be set here, lacks it. */
-const triggerMissing = computed(
-  () =>
-    Boolean(personTrigger.value) &&
-    !promptUnset.value &&
-    !namesWord(prompt.value, personTrigger.value),
-);
+/** How many missing words get a button each; past it, one adds them all. */
+const MAX_TRIGGER_BUTTONS = 3;
+/**
+ * The buttons of the trigger-word line, `[{label, hint, words}]`: one for each
+ * word the prompt (which can be set here) lacks. Empty is no line at all.
+ */
+const triggerAdds = computed(() => {
+  if (promptUnset.value) return [];
+  const missing = personTriggers.value.filter(
+    (trigger) => !namesWord(prompt.value, trigger.word),
+  );
+  if (missing.length > MAX_TRIGGER_BUTTONS) {
+    const words = missing.map((trigger) => trigger.word);
+    return [
+      {
+        label: `Add all ${words.length}`,
+        hint: `Add all ${words.length} missing trigger words: ${words.join(", ")}`,
+        words,
+      },
+    ];
+  }
+  return missing.map(({ word, person }) => ({
+    label: `Add ${word}`,
+    hint: `Add ${word}, ${person}'s trigger word`,
+    words: [word],
+  }));
+});
+/** The trigger-word line for a reader: the words still missing, or nothing. */
+const triggerLive = computed(() => {
+  const words = triggerAdds.value.flatMap((add) => add.words);
+  return words.length ? `Trigger word missing: ${words.join(", ")}.` : "";
+});
 const promptField = ref(null);
 
-/** Put the word first, where a trigger word goes, and hand the box back. */
-function addTrigger() {
-  const rest = prompt.value.trim();
-  prompt.value = rest ? `${personTrigger.value}, ${rest}` : personTrigger.value;
+/** Put the words first, where a trigger word goes, and hand the box back. */
+function addTriggers(words) {
+  prompt.value = [...words, prompt.value.trim()].filter(Boolean).join(", ");
   // The button goes with the suggestion; focus must not fall to the page.
   promptField.value?.focus?.();
 }
 
 /**
- * Pick the person this run is of: their first matching LoRA becomes an added
- * row (`add_loras`), replacing the last pick's. Null is "No one".
+ * Pick a person for this run, or unpick one already picked. Null is "No one":
+ * every pick comes off. Their rows follow in `settlePeople`.
  */
 function pickPerson(id) {
-  if (fixedPerson.value) return;
-  const person = personFits.value.people.find((entry) => entry.id === id);
-  personId.value = person ? person.id : null;
-  addedLoras.value = addedLoras.value.filter((row) => !row.person);
-  if (person) addedLoras.value.unshift(addedRow(person.loras[0].sha256, 1, true));
+  if (id == null) {
+    personIds.value = [];
+  } else if (personIds.value.includes(id)) {
+    personIds.value = personIds.value.filter((picked) => picked !== id);
+  } else if (id !== fixedPerson.value?.id) {
+    personIds.value = [...personIds.value, id];
+  }
+  settlePeople();
 }
 
-// Another workflow may be for another base model: a pick that no longer fits
-// is taken off rather than sent, and one whose LoRA changed takes the new one.
-watch(personFits, (fits) => {
-  if (personId.value == null) return;
-  const person = fits.people.find((entry) => entry.id === personId.value);
-  const row = addedLoras.value.find((entry) => entry.person);
-  if (!person || !person.loras.some((lora) => lora.sha256 === row?.sha256)) {
-    pickPerson(person ? person.id : null);
+/**
+ * Make the added rows say what the picks say: one row per picked person,
+ * first among the added rows and in the order picked, each holding one of
+ * that person's LoRAs for this workflow.
+ *
+ * A pick the workflow no longer offers comes off rather than being sent, and
+ * a row whose LoRA is no longer that person's takes their first one. No two
+ * people's rows hold one file: a person whose every LoRA is already on
+ * somebody else's row stays picked with no row of their own (that loader IS
+ * theirs too), and gets one the moment the file is free.
+ */
+function settlePeople() {
+  const offered = new Map(
+    personFits.value.people.map((person) => [person.id, person]),
+  );
+  const fixedId = fixedPerson.value?.id ?? null;
+  const picked = personIds.value.filter(
+    (id) => id !== fixedId && offered.has(id),
+  );
+  if (picked.length !== personIds.value.length) personIds.value = picked;
+  const rows = addedLoras.value;
+  const fixedRows =
+    fixedId == null ? [] : rows.filter((row) => row.person === fixedId);
+  const held = new Set(fixedRows.map((row) => row.sha256));
+  const peopleRows = [];
+  for (const id of picked) {
+    const free = offered.get(id).loras.filter((lora) => !held.has(lora.sha256));
+    const row =
+      rows.find(
+        (entry) =>
+          entry.person === id &&
+          free.some((lora) => lora.sha256 === entry.sha256),
+      ) || (free.length ? addedRow(free[0].sha256, 1, id) : null);
+    if (!row) continue;
+    held.add(row.sha256);
+    peopleRows.push(row);
   }
-});
+  const next = [
+    ...fixedRows,
+    ...peopleRows,
+    ...rows.filter((row) => row.person == null),
+  ];
+  // Only a real change is written: this runs from a watcher on the rows.
+  if (next.length !== rows.length || next.some((row, at) => row !== rows[at])) {
+    addedLoras.value = next;
+  }
+}
+
+// Another workflow may be for another base model, the shelf may attach
+// another LoRA, and a row's own select may free a file somebody else's pick
+// was waiting for.
+watch(
+  [personFits, () => addedLoras.value.map((row) => row.sha256).join()],
+  settlePeople,
+);
 
 const setOptions = computed(() => [
   { value: "", label: "No set" },
@@ -2344,7 +2791,26 @@ const runBlocker = computed(() => {
   if (reasonsBlock(reasons.value)) return "This run cannot start; see below.";
   return "";
 });
-const canRun = computed(() => !runBlocker.value && !submitting.value);
+/**
+ * Why Run waits on the popup's own work, or "": the workflow in the picker
+ * not read into the form yet, or a band save still out. Between a save's
+ * POST and the re-read behind it the form is neither the workflow as it was
+ * nor as it is, and a run then would send the one over the other.
+ */
+const runWait = computed(() => {
+  // A read that failed is said where it failed, and is no wait.
+  if (!activeKey.value || loadFailed.value) return "";
+  if (!formRead.value) return "Reading this workflow…";
+  return saving.value ? "Run waits for the save to finish." : "";
+});
+const canRun = computed(
+  () => formRead.value && !saving.value && !runBlocker.value && !submitting.value,
+);
+/** The sentence that says why Run does nothing, wherever it is printed. */
+const runWhyId = computed(() => {
+  if (loadFailed.value) return loadFailedId;
+  return runWait.value || runBlocker.value ? blockerId : undefined;
+});
 /**
  * The refusals drawn as notices. `picture_input_unfilled` is not one of them:
  * the Pictures section draws that as an empty slot, and a second, louder copy
@@ -2357,48 +2823,540 @@ const shownRefusals = computed(() =>
 /** One list on screen: the refusals first, then what the run will do anyway. */
 const runNotes = computed(() => [...shownRefusals.value, ...bypassed.value]);
 
-/** Whether the last pre-flight said the run changes nodes a copy could keep. */
-const changedNodes = ref(false);
-const savingFixed = ref(false);
-/** What the last Save fixed workflow said, success or failure. */
-const fixedNote = ref("");
-const canSaveFixed = computed(() => changedNodes.value && Boolean(activeKey.value));
+// ── The other models (#1850) ──────────────────────────────────────────────
+
+/** The key the checkpoint row's choices are kept under in `modelChoices`. */
+const CHECKPOINT_ROW = "checkpoint";
+/** The kinds `model-swap?replacing=` can answer for, and what a row is called. */
+const MODEL_ROW_LABELS = { vae: "VAE", text_encoder: "Text encoder" };
 
 /**
- * Save fixed workflow: a copy with this ComfyUI's repairs applied, and the
- * popup moved onto it, so this run and the next ones run the copy as saved.
- * The run's own form (prompt, values, LoRAs) is not written into it.
+ * The models beside the checkpoint that the default recipe loads, one row per
+ * file: two loaders of one file read as one row, as the checkpoint's do. Only
+ * on a run of the workflow by itself, where a change can be kept.
  */
-async function saveFixed() {
-  if (!canSaveFixed.value || savingFixed.value) return;
-  savingFixed.value = true;
-  fixedNote.value = "";
-  // The popup can move while the copy is written (another workflow picked, or
-  // closed and reopened on another source): the answer is then about a card
-  // nobody is looking at, and must not pull the popup onto its copy.
-  const token = loadToken;
-  const savedFrom = activeKey.value;
-  const stillHere = () => token === loadToken && savedFrom === activeKey.value;
-  try {
-    const saved = await saveFixedWorkflow(savedFrom);
-    if (!stillHere()) return;
-    const note = `Saved as ${String(saved?.name || "").replace(/\.json$/i, "")}.`;
-    if (saved?.workflow_id) {
-      if (props.source?.pickWorkflow) {
-        cards.value = (await listWorkflowCards()).cards;
-        if (!stillHere()) return;
-      }
-      // After the switch, which clears what was said about the card left.
-      workflowId.value = saved.workflow_id;
-    }
-    fixedNote.value = note;
-  } catch (err) {
-    if (stillHere()) {
-      fixedNote.value = errorMessage(err, "Could not save the fixed workflow.");
-    }
-  } finally {
-    savingFixed.value = false;
+const modelRows = computed(() => {
+  if (!runsWorkflowItself.value) return [];
+  const rows = new Map();
+  for (const model of card.value?.default_recipe?.models || []) {
+    // A model whose name was forgotten has no file to go back to.
+    if (!model.address || model.kind === "checkpoint" || !model.filename) continue;
+    const key = `${model.kind}\n${model.filename}`;
+    const row = rows.get(key) || {
+      key,
+      kind: model.kind,
+      file: model.filename,
+      addresses: [],
+    };
+    row.addresses.push(model.address);
+    rows.set(key, row);
   }
+  const list = [...rows.values()];
+  return list.map((row) => {
+    const word = MODEL_ROW_LABELS[row.kind] || modelWord(row.addresses[0]).one;
+    const alike = list.filter((other) => other.kind === row.kind);
+    return {
+      ...row,
+      label: alike.length > 1 ? `${word} ${alike.indexOf(row) + 1}` : word,
+    };
+  });
+});
+/** row key -> the owner's file, over the default recipe's. */
+const modelEdits = reactive({});
+/** row key -> `[{value, label}]`: what the server says that loader can load. */
+const modelChoices = reactive({});
+
+/** A model file as a person reads it: never its extension or folder. */
+function shownModel(file) {
+  return deriveModelName(file) || loraStem(file) || String(file || "");
+}
+
+/**
+ * Shelf models as a picker's rows: each by the name a person gave it, else
+ * by its file read as a name. Two quantisations of one model read alike, so
+ * those are told apart by their file.
+ */
+function modelOptionsOf(models) {
+  const names = models.map(
+    (model) => model.display_name || shownModel(model.filename),
+  );
+  return models.map((model, at) => ({
+    value: model.filename,
+    label:
+      names.indexOf(names[at]) === names.lastIndexOf(names[at])
+        ? names[at]
+        : loraStem(model.filename),
+  }));
+}
+
+/**
+ * *choices* with the row's own two files among them, first: the one it has
+ * now and the workflow's. A select whose value is not an option draws empty.
+ */
+function withCurrent(choices, base, value) {
+  if (!choices.length) return [];
+  // The shelf may spell the workflow's own file with its folders: that
+  // choice IS the row as saved, so it takes the workflow's spelling.
+  const listed = choices.map((choice) =>
+    loraBase(choice.value) === loraBase(base) ? { ...choice, value: base } : choice,
+  );
+  const own = [...new Set([value, base].filter(Boolean))]
+    .filter((file) => !listed.some((choice) => choice.value === file))
+    .map((file) => ({ value: file, label: shownModel(file) }));
+  return [...own, ...listed];
+}
+
+function modelValue(row) {
+  return modelEdits[row.key] ?? row.file;
+}
+
+function modelOptions(row) {
+  return withCurrent(modelChoices[row.key] || [], row.file, modelValue(row));
+}
+
+function pickModel(row, file) {
+  if (!file || loraBase(file) === loraBase(row.file)) delete modelEdits[row.key];
+  else modelEdits[row.key] = file;
+  void runPreflight();
+}
+
+/**
+ * `model-swap?replacing=` for one loader's file, asked once: the row's choices
+ * and the offer for a missing checkpoint are the same read, and the server
+ * goes over the whole shelf to answer it. A read that failed is asked again.
+ */
+const swapReads = new Map();
+function readSwap(key, file, kind) {
+  const id = `${key}\n${kind}\n${file}`;
+  if (!swapReads.has(id)) {
+    const read = Promise.resolve(
+      readModelSwap(key, { replacing: file, slotKind: kind }),
+    );
+    swapReads.set(id, read);
+    read.catch(() => swapReads.delete(id));
+  }
+  return swapReads.get(id);
+}
+
+/**
+ * Read what each model row may be set to, beside the popup and never ahead of
+ * it: `model-swap?replacing=`, the Workflow tab's own "Replace with…" list
+ * (what goes with the checkpoint and the loader can load). A row nothing
+ * answers for stays as it was: text, or the checkpoint's typed box.
+ */
+function loadModelChoices(key, token, read) {
+  for (const row of Object.keys(modelChoices)) delete modelChoices[row];
+  if (!runsWorkflowItself.value || !key) return;
+  const asks = modelRows.value
+    .filter((row) => row.kind in MODEL_ROW_LABELS)
+    .map((row) => ({ row: row.key, kind: row.kind, file: row.file }));
+  if (checkpointModel.value?.filename && !checkpointFiles.value) {
+    asks.push({
+      row: CHECKPOINT_ROW,
+      kind: "checkpoint",
+      file: inPlaceOf(checkpointModel.value.filename),
+    });
+  }
+  // ponytail: one read per model row per open, each a pass over the shelf.
+  // One route answering for every loader at once is the upgrade if it shows.
+  for (const ask of asks) {
+    readSwap(key, ask.file, ask.kind)
+      .then((answer) => {
+        if (token !== loadToken || key !== activeKey.value || read !== readAsk) return;
+        // Typed over while the read was out: the owner's name stays in its
+        // box, which a list arriving under the caret would take away.
+        if (ask.row === CHECKPOINT_ROW && checkpointTyped.value) return;
+        const options = modelOptionsOf(answer?.replacements || []);
+        if (options.length) modelChoices[ask.row] = options;
+      })
+      .catch((err) => {
+        console.warn(`[run] could not read what may replace ${ask.file} on ${key}`, err);
+      });
+  }
+}
+
+// ── Save what you ran (#1850) ─────────────────────────────────────────────
+
+/**
+ * Whether this popup runs a workflow by itself. Only that run's edits are
+ * changes TO the workflow: a run from pictures or a saved recipe is a recipe
+ * laid over it (rule 8 of #1846), and gets no band.
+ */
+const runsWorkflowItself = computed(
+  () => kind.value === "card" && !pictureIds.value.length && !savedRecipe.value,
+);
+/**
+ * `GET …/changes` for the workflow in the picker, or null: its `version`,
+ * which a save names, and what waits on it in the Workflow tab.
+ */
+const changesState = ref(null);
+/** The part of what waits that the form took as edits of its own (`layOwn`). */
+const laid = ref(noChanges());
+/** The part it has no control for, which a run of the workflow still carries. */
+const carried = ref(noChanges());
+/**
+ * All of what waited as `layOwn` read it, `laid` and `carried` together, or
+ * null where it could not be read: a run's `waited`. Kept by `layOwn` and not
+ * read off `changesState`, which a read that is out has already emptied.
+ */
+const seen = ref(null);
+/** `formChanges` as the form opened, for `dirty`. */
+const changesAtOpen = ref(JSON.stringify(noChanges()));
+const savesOffered = computed(
+  () => runsWorkflowItself.value && formRead.value && changesState.value !== null,
+);
+
+/** The parameters the owner changed; both halves of a Size when either moved. */
+const changedValues = computed(() => {
+  const size = sizeEdited.value ? new Set(sizeFields.value.map(address)) : new Set();
+  return defaults.value
+    .filter((field) => isEdited(field) || size.has(address(field)))
+    .map((field) => ({
+      slot_label: field.slot_label,
+      input_name: field.input_name,
+      value: runValue(field),
+    }))
+    .filter((row) => row.value !== null && row.value !== undefined);
+});
+
+/**
+ * **What this form changes against the workflow**, as a `WorkflowChanges`.
+ *
+ * The one reading of it: the band counts and names this, the run sends it and
+ * a save writes it, so a save can never keep something the run did not use.
+ * It holds what carries a ↺ chip and nothing else: prompt, seed, count, the
+ * pictures put in, the people picked and a LoRA added by hand are the run's,
+ * and have no field here.
+ */
+const formChanges = computed(() => ({
+  models: [
+    ...(checkpointEdited.value ? checkpointRunModels.value : []),
+    ...modelRows.value.flatMap((row) =>
+      row.key in modelEdits
+        ? row.addresses.map((at) => ({ address: at, filename: modelEdits[row.key] }))
+        : [],
+    ),
+  ],
+  loras: changedLoras.value,
+  skip_loras: skippedLoras.value,
+  stages: { ...stageChoice },
+  values: changedValues.value,
+}));
+/** With what still waits in the Workflow tab under it: what a run carries. */
+const runChanges = computed(() => over(carried.value, formChanges.value));
+
+/** What the form says a thing is now, for `answering`. */
+const formAnswers = {
+  model(at) {
+    if (checkpointRunModels.value.some((model) => model.address === at)) {
+      return checkpointValue.value;
+    }
+    const row = modelRows.value.find((entry) => entry.addresses.includes(at));
+    return row ? modelValue(row) : undefined;
+  },
+  lora(nodeId, field) {
+    const row = loraRowAt(nodeId, field);
+    if (!row) return undefined;
+    // `null` only for a row `skippedLoras` also names, which is what
+    // `answering` relies on. Otherwise as a changed row states it.
+    return row.skipped ? null : loraEntry(row);
+  },
+  stage(name) {
+    return stageRows.value.some((row) => row.name === name) ? stageOn(name) : undefined;
+  },
+  value(slotLabel, inputName) {
+    const field = fieldAt(slotLabel, inputName);
+    return field ? (runValue(field) ?? undefined) : undefined;
+  },
+};
+/**
+ * What a save sends: `formChanges`, with the form's present answer stated for
+ * every waiting change it took and the owner then undid (`answering`).
+ */
+const saveChanges = computed(() =>
+  answering(formChanges.value, laid.value, formAnswers),
+);
+
+function fieldAt(slotLabel, inputName) {
+  return defaults.value.find(
+    (field) => field.slot_label === slotLabel && field.input_name === inputName,
+  );
+}
+
+function loraRowAt(nodeId, field) {
+  return loras.value.find(
+    (row) => row.node_id === String(nodeId) && row.field === (field || "lora_name"),
+  );
+}
+
+/** How many things differ, and which: the band's two lines. */
+const band = computed(() =>
+  savesOffered.value
+    ? describeChanges(runChanges.value, {
+        value: (slotLabel, inputName) => fieldAt(slotLabel, inputName)?.label,
+      })
+    : { count: 0, text: "" },
+);
+/** The band's last line: what a save never keeps. */
+const bandStays = computed(() => {
+  const byHand = addedLoras.value.filter((row) => row.person == null && row.sha256);
+  return byHand.length
+    ? `Prompt, seed, count, the people picked and the ${byHand.length === 1 ? "LoRA" : "LoRAs"} added here stay with the run.`
+    : "Prompt, seed, count and the people picked stay with the run.";
+});
+
+/** The last dry run's `{save, save_as_new}`, each `{open, reason}`, or null. */
+const verbs = ref(null);
+/** The server's sentence for a closed Save, printed as sent; "" when it is open. */
+const saveClosed = computed(() =>
+  verbs.value?.save && !verbs.value.save.open
+    ? verbs.value.save.reason || "Save is not open for these changes."
+    : "",
+);
+const saveReasonId = useId();
+/** "save" or "new" while that write is out, else "". */
+const saving = ref("");
+const bandError = ref("");
+/** What the last save here did, shown where the band was. */
+const bandNote = ref("");
+const bandLive = ref("");
+const naming = ref(false);
+const newName = ref("");
+const nameField = ref(null);
+const asNewButton = ref(null);
+const bandNoteLine = ref(null);
+const bandBox = ref(null);
+/** The verb a save is sent with: Save, or the name question's own button. */
+const bandVerb = ref(null);
+const runWaitLine = ref(null);
+
+/** Asked a beat after the last edit, never per keystroke. */
+const VERBS_ASK_MS = 300;
+let verbAsk = 0;
+let verbTimer = null;
+
+// Which verbs are open is the server's to say (the checkpoint rule, a
+// workflow changed since): asked as a dry run of the very save, whenever the
+// set changes. Only the newest question's answer is kept.
+watch(
+  () => (band.value.count ? JSON.stringify(saveChanges.value) : ""),
+  (asked) => {
+    clearTimeout(verbTimer);
+    const ask = ++verbAsk;
+    bandError.value = "";
+    if (!asked) {
+      verbs.value = null;
+      naming.value = false;
+      return;
+    }
+    const key = activeKey.value;
+    verbTimer = setTimeout(async () => {
+      try {
+        const answer = await saveWorkflow(key, {
+          changes: JSON.parse(asked),
+          version: changesState.value?.version ?? null,
+          dry_run: true,
+        });
+        if (ask !== verbAsk || key !== activeKey.value) return;
+        verbs.value = { save: answer?.save, save_as_new: answer?.save_as_new };
+      } catch (err) {
+        // Not knowing is not a refusal: the buttons stay, and the save itself
+        // answers with its reason.
+        if (ask === verbAsk) verbs.value = null;
+        console.warn(`[run] could not ask which saves are open for ${key}`, err);
+      }
+    }, VERBS_ASK_MS);
+  },
+);
+onBeforeUnmount(() => clearTimeout(verbTimer));
+
+/** Whether the band is on screen: something differs, on a form that is drawn. */
+const bandShown = computed(
+  () => band.value.count > 0 && !loading.value && !loadFailed.value,
+);
+
+// The band's arrival is said once; its count and list are there to be read.
+// Unsaid when it goes: the same words written again are no change to say.
+watch(
+  bandShown,
+  (shown) => {
+    if (shown) bandNote.value = "";
+    bandLive.value = shown
+      ? "This run differs from the workflow. Save and Save as new are above the Run button."
+      : "";
+  },
+);
+
+/** Forget what the band said about the workflow being left. */
+function leaveBand() {
+  clearTimeout(verbTimer);
+  verbAsk += 1;
+  verbs.value = null;
+  bandError.value = "";
+  bandNote.value = "";
+  bandLive.value = "";
+  naming.value = false;
+}
+
+/**
+ * Every edit the band counts, taken off the form. The run's own stay. The
+ * LoRA rows are not put back here: every caller reads the workflow again, and
+ * `layOwn` builds them anew from the chain the save left.
+ */
+function clearChanges() {
+  for (const key of Object.keys(edits)) delete edits[key];
+  for (const key of Object.keys(editedLabels)) delete editedLabels[key];
+  for (const key of Object.keys(drafts)) delete drafts[key];
+  for (const key of Object.keys(modelEdits)) delete modelEdits[key];
+  clearStages();
+  checkpointEdit.value = null;
+}
+
+/** A save landed on *key*: the Workflow tab and the grid show the workflow as it was. */
+function tellSaved(key, savedAs = "") {
+  runDialog.changesSaved(key, savedAs);
+  workflows.invalidate();
+}
+
+/**
+ * Save: what the band names, written over the workflow as its next version.
+ * The workflow's values are then what the form shows, so its baseline is read
+ * again and the chips go; prompt, seed, count, people and pictures stay.
+ */
+async function saveOver() {
+  if (saving.value || submitting.value || !band.value.count || saveClosed.value) return;
+  await keep("save", async (key) => {
+    await saveWorkflow(key, {
+      changes: saveChanges.value,
+      version: changesState.value?.version ?? null,
+    });
+    return { key, done: "Saved to this workflow." };
+  });
+}
+
+/**
+ * One band save, either verb. *write* is the POST: it answers the workflow
+ * the form is of afterwards, and the line that says what was done.
+ *
+ * **The save is settled when its POST answers**, and only that failing is
+ * printed as a save that failed. What follows is reading the workflow again,
+ * so the chips go and the LoRA rows are built from the chain the save left;
+ * prompt, seed, count, people and pictures are the run's and are not touched,
+ * for a new workflow as for this one, since the new one is this graph. A
+ * read that fails there is said as that. The form is then a reading of a
+ * workflow that has moved on, so it is taken down (`loadFailed`): nothing of
+ * it can be run over the save, and no second workflow made from it.
+ *
+ * **Focus is never left on nothing by a save.** A keyboard in the band stays
+ * where it is. Focus anywhere else waits on the footer's sentence: a click
+ * does not focus a button everywhere (Safari), so a verb can be pressed with
+ * the caret still in the form, which goes inert. Not on the verb, which is
+ * disabled while it spins, nor on the band, which leaves when the POST lands;
+ * whatever it held waits on that sentence from then. The save's end puts it
+ * on the line saying what was done, or back on the verb where it was refused.
+ */
+async function keep(verb, write) {
+  const waited = !bandBox.value?.contains(document.activeElement);
+  saving.value = verb;
+  bandError.value = "";
+  // Once drawn: the sentence comes with `saving`.
+  const waitInFooter = () => void nextTick(() => runWaitLine.value?.focus());
+  if (waited) waitInFooter();
+  const token = loadToken;
+  const from = activeKey.value;
+  const here = (key) => token === loadToken && key === activeKey.value;
+  try {
+    let saved = null;
+    try {
+      saved = await write(from);
+    } catch (err) {
+      if (here(from)) bandError.value = saveFailure(err);
+    }
+    if (saved) tellSaved(from, saved.key === from ? "" : saved.key);
+    if (!saved?.key || !here(from)) {
+      // The band is still up. Focus that waited goes to the verb pressed,
+      // once that can hold it again; one that had the keyboard gets it back
+      // from `AppButton` itself, and the name field never lost it.
+      saving.value = "";
+      if (waited) {
+        await nextTick();
+        bandVerb.value?.focus?.();
+      }
+      return;
+    }
+    // Saved, so none of these is an edit of the workflow any more. The band
+    // goes with them, and with it whatever in it held focus.
+    const held = document.activeElement;
+    if (!held || held === document.body || bandBox.value?.contains(held)) waitInFooter();
+    clearChanges();
+    formKey.value = "";
+    let at = from;
+    try {
+      if (saved.key !== from && props.source?.pickWorkflow) {
+        // Before the picker moves: its list has no row for the new workflow.
+        cards.value = (await listWorkflowCards()).cards;
+        if (!here(from)) return;
+      }
+      activeKey.value = at = saved.key;
+      if (!(await readWorkflow(at, token))) return;
+    } catch (err) {
+      console.warn(`[run] saved, but could not read ${saved.key} again`, err);
+      if (!here(at)) return;
+      loadFailed.value = `${saved.done} It could not be read again, so it cannot be run from here: close this and open it again.`;
+      // The band's buttons went with the form: focus must not fall to the page.
+      await nextTick();
+      loadFailedLine.value?.focus?.();
+      return;
+    }
+    bandNote.value = saved.done;
+    // The band's buttons went with it: focus must not fall to the page. The
+    // line it lands on is read then, so nothing else announces it.
+    await nextTick();
+    bandNoteLine.value?.focus?.();
+    await runPreflight(token);
+  } finally {
+    saving.value = "";
+  }
+}
+
+/** Save as new…: the band becomes its one question, the name. */
+async function askName() {
+  if (saving.value || submitting.value) return;
+  // The picked checkpoint by the name its picker shows it under.
+  const picked = checkpointEdited.value
+    ? checkpointOptions.value.find((option) => option.value === checkpointValue.value)
+        ?.label || shownModel(checkpointValue.value)
+    : "";
+  newName.value = suggestedName(card.value?.name, picked);
+  bandError.value = "";
+  naming.value = true;
+  await nextTick();
+  nameField.value?.focus?.();
+  nameField.value?.select?.();
+}
+
+async function backFromName() {
+  // The name is the save's while it is out, and its field still has the keys.
+  if (saving.value) return;
+  naming.value = false;
+  await nextTick();
+  asNewButton.value?.focus?.();
+}
+
+/**
+ * Save as new: the same changes stored as a new workflow called *newName*,
+ * and the popup moved onto it. The workflow it was opened on is left alone.
+ */
+async function saveAsNew() {
+  const name = newName.value.trim();
+  if (saving.value || submitting.value || !name || !band.value.count) return;
+  await keep("new", async (key) => {
+    const saved = await saveWorkflowAsNew(key, { name, changes: saveChanges.value });
+    return {
+      key: saved?.workflow_id || "",
+      done: `Saved as ${saved?.name || name}.`,
+    };
+  });
 }
 
 /** The inputs nothing fills, which is what keeps the Run button back. */
@@ -2682,7 +3640,7 @@ function runBody() {
     // shelf could not name has no digest to send, which `RunLora.sha256`
     // requires. Sending those back would refuse the run over a LoRA nobody
     // touched.
-    loras: changedLoras.value,
+    loras: runChanges.value.loras,
     values,
     // Only the pictures picked for this run: a pin, the stored selection and
     // the one open input a selection fills are all the server's to apply, so
@@ -2699,15 +3657,21 @@ function runBody() {
   // Exactly one source, which the route checks before it reads anything: a
   // saved recipe names its own card, with pictures the card is `target`, and
   // without either it IS the source.
-  // The graph's own loaders the owner skipped for this run. Only when there
+  // The graph's own loaders the owner took out. Only when there
   // are any: the route rewires around each, and a key it is not sent cannot
   // refuse a run over a feature nobody used.
-  if (skippedLoras.value.length) body.skip_loras = skippedLoras.value;
+  if (runChanges.value.skip_loras.length) {
+    body.skip_loras = runChanges.value.skip_loras;
+  }
   // LoRAs added in loaders of their own: only when there are any.
   if (addLorasBody.value.length) body.add_loras = addLorasBody.value;
-  // The same for the stages the owner turned off (#1623).
-  if (skippedStages.value.length) body.skip_stages = skippedStages.value;
-  // The checkpoint row, by the default recipe's loader address (#1623).
+  // The same for the stages the owner turned off (#1623), and the ones the
+  // default recipe runs without that this run keeps (#1849).
+  const off = stagesSet(runChanges.value, false);
+  const on = stagesSet(runChanges.value, true);
+  if (off.length) body.skip_stages = off;
+  if (on.length) body.keep_stages = on;
+  // The model rows, by the default recipe's loader address (#1623).
   if (runModels.value.length) body.models = runModels.value;
   if (choiceFixes.value.length) {
     body.choices = choiceFixes.value.map((fix) => ({
@@ -2732,6 +3696,11 @@ function runBody() {
     }
   } else {
     body.workflow_id = activeKey.value;
+    // What waited in the Workflow tab as this form was laid from it, whatever
+    // the owner undid of it here: a save made after the run clears that much
+    // and keeps what was edited in the tab since. Unsent where it could not
+    // be read, and the server reads it for itself.
+    if (seen.value) body.waited = seen.value;
   }
   const setId = picksDestination.value ? destinationSetId.value : props.context?.set_id;
   if (loraSource.value?.entityType === "character") {
@@ -2765,7 +3734,9 @@ function runBody() {
  * nothing to override it with.
  */
 function displayedValues() {
-  const rows = [];
+  // A parameter waiting in the Workflow tab that this form has no field for
+  // is carried as it waits.
+  const rows = [...carried.value.values];
   for (const field of defaults.value) {
     const value = runValue(field);
     if (value === null || value === undefined) continue;
@@ -2795,16 +3766,24 @@ function addLora() {
   addedLoras.value.push(addedRow(""));
 }
 
-/** `person` marks the row holding the LoRA of the person the run is of. */
-function addedRow(sha256, strength = 1, person = false) {
+/** `person` is the id of the person whose LoRA the row holds, or null. */
+function addedRow(sha256, strength = 1, person = null) {
   addedKey += 1;
   return { key: `added-${addedKey}`, sha256, strength, person };
 }
 
 function removeAddedLora(index) {
-  // Taking the picked person's LoRA off is picking no one.
-  if (addedLoras.value[index]?.person) personId.value = null;
+  const person = addedLoras.value[index]?.person;
+  // Taking a picked person's LoRA off is unpicking them.
+  if (personIds.value.includes(person)) {
+    pickPerson(person);
+    // The × went with the row: the keyboard goes to the tile it unpicked,
+    // which is where the pick is taken back.
+    void focusLater(`[data-person="${person}"]`);
+    return;
+  }
   addedLoras.value.splice(index, 1);
+  void focusAfterRow(addedLoras.value[index]);
 }
 
 /**
@@ -2817,8 +3796,10 @@ function removeAddedLora(index) {
  */
 function loraRow(slot, { added = false } = {}) {
   const graphValue = String(slot.value ?? "");
+  // A loader read off the workflow's chain comes with the shelf's digest.
   const sha256 =
-    slot.by === "digest" ? graphValue : shelfDigestFor(graphValue);
+    slot.sha256 ||
+    (slot.by === "digest" ? graphValue : shelfDigestFor(graphValue));
   const strength = Number(slot.strengths?.model ?? 1);
   return {
     key: `${slot.field}@${slot.node_id}`,
@@ -2830,6 +3811,10 @@ function loraRow(slot, { added = false } = {}) {
     skipped: false,
     baseSha: sha256,
     baseStrength: strength,
+    // Only a loader read off the workflow's chain says its CLIP strength,
+    // and whether the graph had it as one number with the model's.
+    baseClip: slot.strengths && "clip" in slot.strengths ? slot.strengths.clip : undefined,
+    clipTied: Boolean(slot.strengths?.tied),
     sha256,
     strength,
   };
@@ -2886,14 +3871,14 @@ function rowName(row) {
     const named = shelf?.display_name || shelf?.filename;
     if (named) return loraStem(named) || named;
   }
-  return String(row.graphValue || "").split(/[\\/]/).pop() || "LoRA";
+  return loraStem(row.graphValue) || "LoRA";
 }
 
 /**
  * The sentence under a graph row that will not load as written, or "".
  *
  * The pre-flight's word first — the run already leaves that loader out — and
- * then the shelf's, which cannot identify the file. The row's Skip is the fix
+ * then the shelf's, which cannot identify the file. The row's × is the fix
  * either way: the owner can run without it on purpose.
  */
 function loraFlag(row) {
@@ -2916,26 +3901,49 @@ function focusLoraRow(key, which) {
 }
 
 /**
- * Skip one of the GRAPH's loaders for this run (`skip_loras`).
+ * Take one of the GRAPH's loaders out (`skip_loras`).
  *
- * Nothing about the workflow changes: the row stays, says it is skipped, and
- * Use takes it back. The pre-flight is asked again, because the answer
- * changes: a loader nothing can be rewired around comes back as
- * `lora_not_skippable`, and a bypassed one is reported as skipped instead.
+ * The run goes without it, and a save writes the workflow without it. The
+ * row stays, says Removed, and Put back takes it back. The pre-flight is
+ * asked again, because the answer changes: a loader nothing can be rewired
+ * around comes back as `lora_not_skippable`, and a bypassed one is reported
+ * as left out instead.
  */
 async function skipGraphLora(row) {
   if (row.added || submitting.value) return;
   row.skipped = true;
-  loraLive.value = `${rowName(row)} is skipped for this run. Use is on the same row.`;
-  await focusLoraRow(row.key, "use");
+  loraLive.value = `${rowName(row)} is removed. Put back is on the same row.`;
+  await focusLoraRow(row.key, "back");
   await runPreflight();
 }
 
 async function useGraphLora(row) {
   row.skipped = false;
-  loraLive.value = `${rowName(row)} is used in this run again.`;
-  await focusLoraRow(row.key, "skip");
+  loraLive.value = `${rowName(row)} is back.`;
+  await focusLoraRow(row.key, "remove");
   await runPreflight();
+}
+
+/** Whether a loader of the graph holds another LoRA or strength than it had. */
+function loraEdited(row) {
+  return (
+    !row.added &&
+    !row.skipped &&
+    // A loader the shelf cannot name has no digest to send it by, so it is
+    // never a change the run carries or the band counts.
+    Boolean(row.sha256) &&
+    (row.sha256 !== row.baseSha || row.strength !== row.baseStrength)
+  );
+}
+
+/** What the loader had, as its reset chip says it: the LoRA and its strength. */
+function loraWas(row) {
+  return `${rowName({ ...row, sha256: row.baseSha })} · ${row.baseStrength}`;
+}
+
+function resetLora(row) {
+  row.sha256 = row.baseSha;
+  row.strength = row.baseStrength;
 }
 
 /**
@@ -2955,6 +3963,186 @@ function optionsFor(row) {
 
 function removeLora(index) {
   loras.value.splice(index, 1);
+  void focusAfterRow(loras.value[index] || addedLoras.value[0]);
+}
+
+/**
+ * A row's × took the row and itself away: the keyboard goes to the × of the
+ * row that moved up into its place, else to Add LoRA, never to the page.
+ */
+async function focusAfterRow(next) {
+  await nextTick();
+  const root = formRoot.value;
+  const target =
+    (next && root?.querySelector(`[data-lora="${next.key}"] .rund-lora-act`)) ||
+    root?.querySelector('[data-focus="add-lora"]');
+  target?.focus?.();
+}
+
+/**
+ * The default recipe's LoRA *lora* among *loaders* (chain loaders, or the
+ * slots made of them): by the shelf's digest, or by file where either side
+ * has none.
+ */
+function loaderOf(lora, loaders) {
+  const digest = String(lora?.sha256 || "").toLowerCase();
+  const file = loraBase(lora?.filename);
+  return loaders.find((loader) => {
+    const held = String(loader.sha256 || "").toLowerCase();
+    if (digest && held) return digest === held;
+    return Boolean(file) && loraBase(loader.filename ?? loader.value) === file;
+  });
+}
+
+/**
+ * The workflow's own loaders as LoRA rows, for a run of it by itself.
+ *
+ * A row for each loader holding a LoRA of the default recipe, at the
+ * recipe's strength: that is what such a run loads. A loader the recipe
+ * leaves out gets none (a run bypasses it, and one holding a person's LoRA is
+ * never the workflow's, rule 4 of #1846). A workflow with no sample to take a
+ * default from runs its graph as it is, so every loader is a row, less the
+ * ones holding a LoRA attached to a person.
+ */
+function ownSlots(chain) {
+  const recipeLoras = card.value?.default_recipe?.loras || [];
+  const asGraph = !card.value?.default_recipe?.sampled && !recipeLoras.length;
+  const ofPerson = new Set(
+    [...adapters.value, ...unknownLoras.value]
+      .filter((row) =>
+        (row.attachments || []).some((entry) => entry.entity_type === "character"),
+      )
+      .map((row) => String(row.sha256 || "").toLowerCase()),
+  );
+  const loaders = [
+    ...(chain?.loaders || []),
+    ...(chain?.lanes || []).flatMap((lane) => lane.loaders || []),
+  ];
+  return loaders.flatMap((loader) => {
+    const own = recipeLoras.find((lora) => loaderOf(lora, [loader]));
+    const digest = String(loader.sha256 || "").toLowerCase();
+    if (!own && (!asGraph || ofPerson.has(digest))) return [];
+    return [
+      {
+        node_id: String(loader.node_id),
+        field: String(loader.field || "lora_name"),
+        by: "filename",
+        value: loader.filename,
+        sha256: digest,
+        strengths: {
+          model: own?.strength ?? loader.strength ?? 1,
+          clip: loader.strength_clip ?? null,
+          tied:
+            loader.strength_clip == null ||
+            loader.strength_clip === loader.strength,
+        },
+      },
+    ];
+  });
+}
+
+/**
+ * Read what a run of the workflow by itself needs beside its card: its
+ * loaders, and what waits on it in the Workflow tab with the version that
+ * was made against. Neither holds the popup back: without the loaders there
+ * are no LoRA rows, and without the other there is no band.
+ */
+async function loadOwn(key, token, ask) {
+  chainSlots.value = [];
+  changesState.value = null;
+  if (!runsWorkflowItself.value || !key) return;
+  loadModelChoices(key, token, ask);
+  const [chain, state] = await Promise.all([
+    getLoraChain(key).catch((err) => {
+      console.warn(`[run] could not read the LoRA loaders of ${key}`, err);
+      return null;
+    }),
+    getWorkflowChanges(key).catch((err) => {
+      console.warn(`[run] could not read what waits on ${key}, so its changes cannot be saved from here`, err);
+      return null;
+    }),
+  ]);
+  if (token !== loadToken || key !== activeKey.value || ask !== readAsk) return;
+  chainSlots.value = ownSlots(chain);
+  changesState.value = state;
+}
+
+/**
+ * Build the workflow's own LoRA rows and lay what waits in the Workflow tab
+ * over the form, as if the owner had made those edits here (rule 7 of
+ * #1846): the model picks, the loaders removed or set, the stages, the
+ * parameters. The chips then show the SAVED value, the band counts them and
+ * Run sends them. A waiting change the form has no control for is `carried`.
+ * Nothing is written: closing leaves what waited exactly as it was.
+ */
+function layOwn() {
+  loras.value = loraSlots.value.map((slot) => loraRow(slot));
+  initialLoraCount.value = loras.value.length;
+  // Edits the owner made on another workflow and brought along are theirs.
+  const clean = JSON.stringify(formChanges.value) === JSON.stringify(noChanges());
+  const waiting = whole(changesState.value?.waiting);
+  const took = noChanges();
+  const left = noChanges();
+  for (const model of waiting.models) {
+    const row = modelRows.value.find((entry) => entry.addresses.includes(model.address));
+    const ours =
+      checkpointRunModels.value.some((entry) => entry.address === model.address) ||
+      Boolean(row);
+    // Named by digest: the form holds files, so it is left as it waits.
+    if (!ours || !model.filename) {
+      left.models.push(model);
+      continue;
+    }
+    if (row) {
+      if (loraBase(model.filename) === loraBase(row.file)) delete modelEdits[row.key];
+      else modelEdits[row.key] = model.filename;
+    } else {
+      setCheckpoint(model.filename, false);
+    }
+    took.models.push(model);
+  }
+  for (const item of waiting.loras) {
+    const row = loraRowAt(item.node_id, item.field);
+    if (!row) {
+      left.loras.push(item);
+      continue;
+    }
+    row.skipped = false;
+    row.sha256 = String(item.sha256 || "").toLowerCase();
+    if (item.strength_model != null) row.strength = item.strength_model;
+    took.loras.push(item);
+  }
+  for (const item of waiting.skip_loras) {
+    const row = loraRowAt(item.node_id, item.field);
+    if (!row) {
+      left.skip_loras.push(item);
+      continue;
+    }
+    row.skipped = true;
+    took.skip_loras.push(item);
+  }
+  for (const [name, on] of Object.entries(waiting.stages)) {
+    if (!stageRows.value.some((row) => row.name === name)) {
+      left.stages[name] = on;
+      continue;
+    }
+    if (on === stageDefault(name)) delete stageChoice[name];
+    else stageChoice[name] = on;
+    took.stages[name] = on;
+  }
+  for (const value of waiting.values) {
+    const field = fieldAt(value.slot_label, value.input_name);
+    if (!field) {
+      left.values.push(value);
+      continue;
+    }
+    setValue(field, value.value);
+    took.values.push(value);
+  }
+  laid.value = took;
+  carried.value = left;
+  seen.value = changesState.value && waiting;
+  changesAtOpen.value = JSON.stringify(clean ? formChanges.value : noChanges());
 }
 
 /**
@@ -2968,7 +4156,7 @@ function removeLora(index) {
 async function dropLoras() {
   loras.value = [];
   addedLoras.value = [];
-  personId.value = null;
+  personIds.value = [];
   await runPreflight();
 }
 
@@ -2981,8 +4169,7 @@ async function dropLoras() {
  */
 function editLoras(workflowId) {
   const key = workflowId || activeKey.value;
-  if (!key) return;
-  emit("close");
+  if (!key || !close()) return;
   void router?.push?.(editLorasRoute(key));
 }
 
@@ -2992,9 +4179,8 @@ function editLoras(workflowId) {
  * because the screen it opens on is behind it.
  */
 function openInWorkflows() {
-  if (!activeKey.value || submitting.value) return;
   const key = activeKey.value;
-  emit("close");
+  if (!key || !close()) return;
   void router?.push?.({ name: "workflows", query: { workflow: key } });
 }
 
@@ -3028,7 +4214,13 @@ async function loadLoraSource() {
   );
   const first = attachedLoras.value[0];
   addedLoras.value = first
-    ? [addedRow(first.sha256, 1, source.entityType === "character")]
+    ? [
+        addedRow(
+          first.sha256,
+          1,
+          source.entityType === "character" ? Number(source.entityId) : null,
+        ),
+      ]
     : [];
 }
 
@@ -3061,7 +4253,7 @@ async function loadAdapters() {
  * switching workflows is a deliberate comparison, and a steps value that
  * quietly went back to 8 is the thing the design asks to be told about.
  */
-async function loadCard(key, { keepEdits = false } = {}) {
+async function loadCard(key, ask, { keepEdits = false } = {}) {
   // A popup reopened on another source while this read was out has its own
   // card; this one's answer must not replace it.
   const token = loadToken;
@@ -3071,7 +4263,7 @@ async function loadCard(key, { keepEdits = false } = {}) {
   // into a list, so a ComfyUI that does not answer leaves the boxes typed.
   getWorkflowFormInputs(key)
     .then((body) => {
-      if (token === loadToken && key === activeKey.value) {
+      if (token === loadToken && key === activeKey.value && ask === readAsk) {
         formOptions.value = optionsByAddress(body.nodes);
         formNodeNames.value = nodesByAddress(body.nodes);
       }
@@ -3080,7 +4272,9 @@ async function loadCard(key, { keepEdits = false } = {}) {
       console.warn(`[run] could not read the choices of ${key}`, err);
     });
   const detail = await getWorkflowCard(key);
-  if (token !== loadToken) return;
+  // Nor one the picker has since left: two moves in a row answer in either
+  // order, and the slower must not put its card under the faster's key.
+  if (token !== loadToken || key !== activeKey.value || ask !== readAsk) return;
   const next = detail?.card || null;
   pins.value = detail?.pins ?? null;
   modelFixes.value = detail?.model_fixes ?? [];
@@ -3091,6 +4285,11 @@ async function loadCard(key, { keepEdits = false } = {}) {
   for (const key2 of Object.keys(drafts)) delete drafts[key2];
   checkpointFix.value = null;
   checkpointAsk += 1;
+  // A model row is one workflow's loader: its pick names nothing on another.
+  const droppedModels = modelRows.value
+    .filter((row) => row.key in modelEdits)
+    .map((row) => row.label);
+  for (const key2 of Object.keys(modelEdits)) delete modelEdits[key2];
   if (!keepEdits) {
     card.value = next;
     fellBack.value = [];
@@ -3099,7 +4298,10 @@ async function loadCard(key, { keepEdits = false } = {}) {
   }
   const addresses = new Set((next?.defaults || []).map(address));
   const lost = Object.keys(edits).filter((key2) => !addresses.has(key2));
-  fellBack.value = lost.map((key2) => editedLabels[key2] || key2);
+  fellBack.value = [
+    ...lost.map((key2) => editedLabels[key2] || key2),
+    ...droppedModels,
+  ];
   for (const key2 of lost) {
     delete edits[key2];
     delete editedLabels[key2];
@@ -3120,8 +4322,16 @@ async function loadCard(key, { keepEdits = false } = {}) {
   card.value = next;
 }
 
+/** Bumped per pre-flight, so only the newest one's answer is kept. */
+let preflightAsk = 0;
+
 async function runPreflight(token = loadToken) {
-  const mine = () => token === loadToken;
+  // Asked on every edit, around every switch and after every save, and
+  // answered in any order: an older answer is about a form that has moved on,
+  // and nothing of it (the refusals, the picture rows a pin is written from,
+  // the notices, the prompt, a checkpoint offer) may land over a newer one's.
+  const ask = (preflightAsk += 1);
+  const mine = () => token === loadToken && ask === preflightAsk;
   if (!activeKey.value) {
     reasons.value = [];
     bypassed.value = [];
@@ -3167,7 +4377,6 @@ async function runPreflight(token = loadToken) {
       ...repairNotices(group),
       ...unplacedNotice(group),
     ]);
-    changedNodes.value = (answer?.groups || []).some(changesNodes);
     plannedRuns.value = Number(answer?.runs) || 0;
     // One group: this popup always runs one workflow (`target`, an id or a saved
     // recipe), so the first group's inputs are the card's.
@@ -3183,7 +4392,6 @@ async function runPreflight(token = loadToken) {
     if (!mine()) return;
     reasons.value = [];
     bypassed.value = [];
-    changedNodes.value = false;
     graphPrompt.value = null;
     // What the card's inputs are is no longer known, so nothing may be
     // written from the last answer: that is how a pin reverted the one before.
@@ -3203,7 +4411,9 @@ async function runPreflight(token = loadToken) {
 
 async function load() {
   const token = (loadToken += 1);
-  const mine = () => token === loadToken;
+  const ask = ++readAsk;
+  // The open's own writes of the form are a read's, like any other.
+  const mine = () => token === loadToken && ask === readAsk;
   // Everything else starts empty: App.vue mounts a fresh popup per source.
   loading.value = true;
   // The caller's own checkbox, explicit false included; else the popup decides.
@@ -3230,7 +4440,7 @@ async function load() {
       (loraSource.value ? workflowOptions.value[0]?.value : "") ||
       "";
     activeKey.value = key;
-    if (key) await loadCard(key);
+    if (key) await loadCard(key, ask);
     if (!mine()) return;
     prompt.value = props.source?.emptyPrompt ? "" : basePrompt.value;
     negative.value = baseNegative.value;
@@ -3246,9 +4456,14 @@ async function load() {
     // simply has no digest to send, which is exactly what leaving it untouched
     // means anyway.
     await loadAdapters();
+    if (!mine()) return;
     if (offersPerson.value) void loadPeople();
-    loras.value = loraSlots.value.map((slot) => loraRow(slot));
-    initialLoraCount.value = loras.value.length;
+    if (runsWorkflowItself.value && key) {
+      await loadOwn(key, token, ask);
+      if (!mine()) return;
+    }
+    layOwn();
+    formKey.value = key;
     addedAtOpen.value = addedSignature.value;
     applySavedRecipe();
     destinationSetId.value =
@@ -3265,7 +4480,8 @@ async function load() {
       loadFailed.value = errorMessage(err, "Could not read what this would run.");
     }
   } finally {
-    if (mine()) loading.value = false;
+    // The open's, not the read's: a read that replaced it does not end it.
+    if (token === loadToken) loading.value = false;
   }
 }
 
@@ -3326,9 +4542,15 @@ function rememberSet(value) {
   }
 }
 
-function onRequestClose() {
-  if (submitting.value) return;
+/**
+ * Close, unless a run or a band save is out: either is this popup's work, and
+ * closing over it would leave its answer nowhere to land. Every close is made
+ * here but the run's own, which is that answer. True when it closed.
+ */
+function close() {
+  if (submitting.value || saving.value) return false;
   emit("close");
+  return true;
 }
 
 /**
@@ -3340,9 +4562,7 @@ function onRequestClose() {
  * to back out of first.
  */
 function onEscape(event) {
-  if (submitting.value) return;
-  event.stopPropagation();
-  emit("close");
+  if (close()) event.stopPropagation();
 }
 
 async function submit() {
@@ -3393,6 +4613,21 @@ async function submit() {
         beforeIds,
       };
     }
+    // What this run changed, in the band's own words, for the Tasks tab to
+    // offer once the pictures are back. A run that changed nothing, or a
+    // recipe's run, is the workflow's next run all the same: it takes down
+    // what an earlier one offered.
+    runDialog.ranWith(
+      activeKey.value,
+      band.value.count
+        ? {
+            name: card.value?.name || "",
+            count: band.value.count,
+            text: band.value.text,
+            promptIds: prompts.map((entry) => String(entry?.prompt_id)),
+          }
+        : null,
+    );
     emit("run", {
       prompts,
       pictureIds: pictureIds.value,
@@ -3557,7 +4792,7 @@ void load();
    value: changed apart, the label stops lining up with the column it names. */
 .rund-form {
   --rund-strength-w: 72px;
-  /* Wide enough for "Skip" and "Use" at the compact button size. */
+  /* The × column, held at the width the design drew it. */
   --rund-act-w: 56px;
 }
 
@@ -3751,8 +4986,8 @@ button.rund-in-tile.rund-in-tile--off {
   line-height: var(--leading-body);
 }
 
-/* A graph row skipped for this run: its name, struck, the words saying so
-   across the select and strength columns, and Use where Skip was. */
+/* A graph row taken out: its name, struck, the word saying so, and Put back
+   at the end of the row. */
 .rund-lora--skipped {
   min-height: var(--control-h);
 }
@@ -3781,10 +5016,112 @@ button.rund-in-tile.rund-in-tile--off {
   color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
 }
 
-/* The last column holds × on an added row and Skip / Use on a graph row, so
-   it is sized for the word and the glyph sits at its end. */
+/* The last column holds a row's ×, at its end. */
 .rund-lora-act {
   justify-self: end;
+}
+
+/* Put back is a word, wider than the × column: it takes the strength column
+   too, which a removed row has nothing in. */
+.rund-lora--skipped .rund-lora-skip-line {
+  grid-column: 1;
+}
+
+.rund-lora-back {
+  grid-column: 2 / 4;
+  justify-self: end;
+}
+
+/* What a changed loader had: the reset chip, on a line of its own under the
+   row so the row's three columns do not move. */
+.rund-lora-was {
+  display: flex;
+}
+
+/* ── Save what you ran ──────────────────────────────────────────────────
+   A panel across both columns, under the form and above the footer. The
+   list of what changed is cut, never wrapped, so the band is one height
+   however much has changed: its coming and going moves the footer by
+   exactly that, once, and not again as the owner types. */
+.rund-band {
+  /* Readable at rest: the form is taller than the window more often than
+     not, and a band at the foot of a scrolled body is a count nobody sees.
+     It holds to the bottom of the body's scrollport, over the form, and is
+     in its own place once the form is scrolled to its end. */
+  position: sticky;
+  bottom: 0;
+  z-index: var(--z-sticky);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid rgb(var(--v-theme-border));
+  border-radius: var(--radius-md);
+  background: rgb(var(--v-theme-panel));
+  color: rgb(var(--v-theme-on-panel));
+}
+
+/* The name question is a labelled field: its buttons sit on the field's own
+   line, not on the middle of the label and the field together. */
+.rund-band--naming {
+  align-items: flex-end;
+}
+
+/* The body's own bottom padding is under a held band, and the form would
+   show through it as a sliver: painted over in the dialog's surface, from
+   under the band's border to a pixel past the padding, since the band can
+   sit on a half pixel and a seam one pixel high shows the tops of letters. */
+.rund-band::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  right: 0;
+  left: 0;
+  height: calc(var(--space-5) + 1px);
+  margin-top: 1px;
+  background: rgb(var(--v-theme-surface));
+}
+
+.rund-band-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+
+.rund-band-text b {
+  font-weight: var(--weight-semibold);
+}
+
+.rund-band-list,
+.rund-band-stays {
+  font-size: var(--text-xs);
+  color: rgba(var(--v-theme-on-panel), var(--opacity-text-secondary));
+}
+
+/* One line: the whole of it is in its `title` when it is cut. What stays
+   with the run is never cut; it is one line unless a LoRA was added by hand,
+   which is not something typing changes. */
+.rund-band-list {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rund-band-name {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The server's reason for a closed Save, and a refusal: under the row. */
+.rund-band-why {
+  flex-basis: 100%;
+}
+
+.rund-band-done {
+  color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
 }
 
 .rund-lora-flag {
@@ -3802,15 +5139,32 @@ button.rund-in-tile.rund-in-tile--off {
   color: rgb(var(--v-theme-surface-error));
 }
 
+/* One line at any width the popup has: nothing wraps, the glyph and the words
+   keep their size, and the buttons give way, each to an ellipsis. */
 .rund-trigger {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-2);
+  gap: var(--space-3);
   margin-top: var(--space-2);
 }
 
-.rund-trigger-glyph {
+.rund-trigger-text {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* A flex item's `min-width: auto` is what would hold a button at its word. */
+.rund-trigger-add {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.rund-trigger-add :deep(.app-btn__label) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 </style>

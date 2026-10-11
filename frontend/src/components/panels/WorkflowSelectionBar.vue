@@ -216,7 +216,7 @@ const emit = defineEmits([
   "hide",
   "export",
   "duplicate",
-  "clone-onto-set",
+  "use-set",
   "delete",
 ]);
 
@@ -492,18 +492,24 @@ const deleteTitle = computed(() => {
 
 const exportTitle = computed(() =>
   single.value
-    ? "Save a shareable copy: prompts and seeds taken out"
+    ? "Save it as a file to share: prompts and seeds taken out"
     : oneOnly("export"),
 );
 
 const duplicateTitle = computed(() =>
-  single.value ? "Make a manual copy of this workflow" : oneOnly("copy"),
+  single.value
+    ? "Make a new manual workflow from this one"
+    : oneOnly("duplicate"),
 );
 
-const cloneTitle = computed(() =>
+/**
+ * *Use a set…* is the Workflow tab's: it fills that tab's model rows, and
+ * nothing is written until the tab's bar saves them (#1850).
+ */
+const useSetTitle = computed(() =>
   single.value
-    ? "Write a copy that loads another workflow set's models"
-    : "Select one workflow to clone it",
+    ? "Fill its model rows from one of your sets, as unsaved changes"
+    : "Select one workflow to use a set on it",
 );
 
 /** Fire a verb and shut whichever surface it was pressed on. */
@@ -523,8 +529,8 @@ function onVerb(verb) {
  * not in the view: every tooltip here is a refusal sentence, and a second copy
  * of them would drift.
  *
- * The order is the design's: what running the card does, then what naming
- * does, then the three that make a copy, then the one that destroys.
+ * The order is the design's: what running the card does, then what changes
+ * the card, then the two that make something new, then the one that destroys.
  */
 const VerbMenu = () => {
   /**
@@ -632,10 +638,17 @@ const VerbMenu = () => {
           title: hideTitle.value,
         },
       ),
+      // With the rows that change the card, not the ones that make a new one:
+      // it fills the Workflow tab's model rows and writes nothing.
+      item("mdi-swap-horizontal", "Use a set…", {
+        verb: "use-set",
+        disabled: !single.value,
+        title: useSetTitle.value,
+      }),
       sep(),
-      // The three that make something rather than changing a card. All single-only:
-      // an export is one save dialog and a duplicate or a clone is one new card,
-      // and doing any of them forty times is a queue feature wearing a menu
+      // The two that make something rather than changing a card. Both
+      // single-only: an export is one save dialog and a duplicate is one new
+      // card, and doing either forty times is a queue feature wearing a menu
       // row's clothes.
       item("mdi-tray-arrow-down", "Export…", {
         verb: "export",
@@ -646,12 +659,6 @@ const VerbMenu = () => {
         verb: "duplicate",
         disabled: !single.value,
         title: duplicateTitle.value,
-      }),
-      // One clone row: per-file picking is the dialog's "Pick files myself".
-      item("mdi-swap-horizontal", "Clone onto a workflow set…", {
-        verb: "clone-onto-set",
-        disabled: !single.value,
-        title: cloneTitle.value,
       }),
       sep(),
       item("mdi-delete-outline", "Delete…", {

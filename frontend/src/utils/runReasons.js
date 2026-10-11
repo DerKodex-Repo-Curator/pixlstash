@@ -49,8 +49,7 @@ export const LORAS_BYPASSED = "loras_bypassed";
  * the ones the server bypassed on its own (`requested: false`, a file this
  * ComfyUI does not have). They are said differently because they ARE
  * different: one is a fact to be warned about, the other is the owner's own
- * choice read back, in the popup's word for it — skipped, never removed,
- * because a run changes no workflow.
+ * choice read back, in the popup's word for it: removed.
  */
 export const LORAS_SKIPPED = "loras_skipped";
 
@@ -88,8 +87,7 @@ export const NODES_REPLACED = "nodes_replaced";
 /**
  * Not a refusal either: a LoRA this ComfyUI lacks, loaded through the
  * ComfyUI-PixlStash loader by its hash (`RunGroup.swapped_loaders`). The run
- * gets the LoRA; the graph that runs is not the one the card names, which is
- * what "Save fixed workflow" keeps.
+ * gets the LoRA; the graph that runs is not the one the card names.
  */
 export const LORAS_FETCHED = "loras_fetched";
 
@@ -228,7 +226,7 @@ export function readReason(reason) {
     case LORAS_SKIPPED: {
       const files = (reason.models || []).filter(Boolean);
       return read(
-        `Skipped for this run: ${files.map((model) => model.file).filter(Boolean).join(", ")}.`,
+        `Removed from this run: ${files.map((model) => model.file).filter(Boolean).join(", ")}.`,
         null,
         [],
         false,
@@ -240,7 +238,7 @@ export function readReason(reason) {
       const file = String(reason.file || "").split(/[\\/]/).pop();
       const said = String(reason.text || reason.detail || reason.message || "").trim();
       return read(
-        `${file || "This LoRA"} cannot be skipped for this run. ${said || "Its loader cannot be taken out of this graph."} Use it, or edit the workflow's LoRAs.`,
+        `${file || "This LoRA"} cannot be removed from this run. ${said || "Its loader cannot be taken out of this graph."} Put it back, or edit the workflow's LoRAs.`,
       );
     }
     case "stage_not_skippable": {
@@ -479,15 +477,3 @@ export function swappedNotice(group) {
   return loaders.length ? [{ code: LORAS_FETCHED, loaders }] : [];
 }
 
-/**
- * Whether a group's run changes nodes of the workflow itself on this ComfyUI -
- * a node replaced, or one of the workflow's own LoRA loaders swapped - which
- * "Save fixed workflow" keeps. A swap for a LoRA the form named
- * (`requested: true`) is not counted: the saved copy writes no form.
- */
-export function changesNodes(group) {
-  return Boolean(
-    (group?.replaced_nodes || []).length ||
-      (group?.swapped_loaders || []).some((loader) => !loader?.requested),
-  );
-}

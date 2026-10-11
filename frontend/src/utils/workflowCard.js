@@ -117,6 +117,10 @@
 //                                       // it yet, [] means it has and the
 //                                       // graph carries none
 //     saved_recipe_count,
+//     unsaved_changes,                  // how many changes wait on the
+//                                       // workflow, neither saved nor
+//                                       // discarded; 0 when none. The card's
+//                                       // *Unsaved* badge (#1850)
 //     defaults: [{ label, slot_label, input_name, value, provenance }],
 //                                       // `provenance` is best | all | edited
 //     // Read by the Workflows grid rather than by the card itself, and listed
@@ -452,6 +456,9 @@ export function cardAccessibleName(card) {
   const facts = factChips(card).map((chip) => chip.label);
   const parts = [
     card.name,
+    // Straight after the name: it is the one thing here that asks for
+    // something, and the model list that follows can run long.
+    card.unsaved_changes > 0 ? "unsaved changes" : null,
     // The precision is SPOKEN, not just drawn. Every chip on the card is
     // `aria-hidden` and this string is the whole of what a screen reader gets,
     // so a badge left out here is a badge that does not exist for that reader -

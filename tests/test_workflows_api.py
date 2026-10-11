@@ -14282,6 +14282,67 @@ def test_a_set_plan_names_the_swap_and_the_loader_before_and_after(cloneable):
     assert _manual_ids(cloneable) == []
 
 
+def test_a_set_plan_is_read_off_the_graph_with_the_owners_replacements(cloneable):
+    """#1850 W5: the Workflow tab finds a row in the plan by the file it shows.
+
+    A row whose model the owner replaced shows the replacement, so the plan
+    has to name the graph as a run submits it. Wrong if `swaps` is still keyed
+    by the file that is gone: no set could then fill that row.
+    """
+    hub = cloneable.server.hub
+    with hub.transaction() as conn:
+        conn.execute(
+            "INSERT INTO model (file_kind, filename, sha256, provenance) "
+            "VALUES ('checkpoint', ?, ?, 'scanned')",
+            (_REPLACEMENT_FILENAME, _h("bf16-digest")),
+        )
+        vae_id = conn.execute(
+            "INSERT INTO model (file_kind, filename, provenance) "
+            "VALUES ('vae', 'ae.safetensors', 'scanned')"
+        ).lastrowid
+    try:
+        original_id = hub.fetchone(
+            "SELECT id FROM model WHERE filename = ?", (_SHELF_FILENAME,)
+        )[0]
+        # Without a replacement the plan names the graph's own file.
+        _body, plans = _plans(cloneable, krea=[cloneable.checkpoint_id])
+        assert plans["krea"]["swaps"] == {_SHELF_FILENAME: CLONE_CHECKPOINT}
+
+        r = cloneable.owner.put(
+            f"{API}/workflows/{RUN_WF}/model-fix",
+            json={"was": _SHELF_FILENAME, "now": _REPLACEMENT_FILENAME},
+        )
+        assert r.status_code == 200, r.text
+        body, plans = _plans(
+            cloneable,
+            krea=[cloneable.checkpoint_id],
+            original=[original_id],
+            no_checkpoint=[vae_id],
+        )
+        assert body["base_filename"] == _REPLACEMENT_FILENAME
+        krea = plans["krea"]
+        assert krea["swaps"] == {_REPLACEMENT_FILENAME: CLONE_CHECKPOINT}
+        assert krea["unpaired_bases"] == []
+        (loader,) = krea["loaders"]
+        assert (loader["was"], loader["now"]) == (
+            [_REPLACEMENT_FILENAME],
+            [f"flux/{CLONE_CHECKPOINT}"],
+        )
+        # A set holding the original the replacement stands in for changes
+        # nothing: named on this workflow, that file loads the replacement.
+        assert plans["original"]["swaps"] == {}
+        assert plans["original"]["fit"] != "wont_load", plans["original"]["reason"]
+        # A base loader the set has nothing for is named the same way: by the
+        # file it loads, which the tab finds its checkpoint row by.
+        assert plans["no_checkpoint"]["unpaired_bases"] == [_REPLACEMENT_FILENAME]
+        # A plan writes nothing, and reads the stored graph without changing it.
+        assert cloneable.graph["1"]["inputs"]["ckpt_name"] == _SHELF_FILENAME
+    finally:
+        # The replacement's row is re-seeded with the hub; this one is not.
+        with hub.transaction() as conn:
+            conn.execute("DELETE FROM model WHERE id = ?", (vae_id,))
+
+
 def test_a_workflow_with_no_checkpoint_says_so_for_every_set(cloneable):
     """Its own reason, not the set's: none of them can be cloned onto."""
     graph = _embedded_export_graph()
@@ -17803,6 +17864,58 @@ def test_changes_made_before_another_version_are_save_as_new_only(saving):
     assert "5" not in copy and copy["2"]["inputs"]["strength_model"] == 0.9
 
 
+def test_the_state_says_when_what_waits_was_made_on_another_version(saving):
+    """`stale`, the one answer the closed Save and the opened graph both read.
+
+    Without it the Workflow tab cannot tell "Save is closed and Open in
+    ComfyUI leaves these out" from "Save is closed for a checkpoint change",
+    where the opened graph does carry them. Wrong if it is true with nothing
+    waiting, or false while `waiting_applied` is.
+    """
+
+    def opened_with_what_waits() -> bool:
+        r = saving.owner.get(
+            f"{API}/workflows/{saving.manual}/graph", params={"waiting": "true"}
+        )
+        assert r.status_code == 200, r.text
+        return r.json()["waiting_applied"]
+
+    assert _changes(saving, saving.manual)["stale"] is False, "nothing waits"
+    assert _put_changes(saving, saving.manual, **SKIP_FIVE)["stale"] is False
+    assert opened_with_what_waits() is True
+
+    # A save from elsewhere puts another version under what waits.
+    newer = json.loads(json.dumps(CHAIN_DOCUMENT))
+    newer["2"]["inputs"]["strength_model"] = 0.9
+    r = saving.owner.put(
+        f"{API}/workflows/{saving.manual}/graph",
+        json={"workflow": newer, "source": "mcp"},
+    )
+    assert r.status_code == 200 and r.json()["version"] == 2, r.text
+    state = _changes(saving, saving.manual)
+    assert (state["stale"], state["count"], state["version"]) == (True, 1, 2)
+    assert state["save"]["open"] is False and state["save_as_new"]["open"] is True
+    assert opened_with_what_waits() is False
+    # Edited further it is still the set started on version 1, and every
+    # write of the changes answers with the same state.
+    assert _put_changes(saving, saving.manual, **SKIP_FIVE)["stale"] is True
+
+    r = saving.owner.delete(f"{API}/workflows/{saving.manual}/changes")
+    assert r.status_code == 200 and r.json()["stale"] is False, r.text
+    # A set started now is made on the version the workflow has.
+    assert _put_changes(saving, saving.manual, **SKIP_FIVE)["stale"] is False
+    assert opened_with_what_waits() is True
+
+    # Going back a version stores the earlier graph as a version of its own.
+    r = saving.owner.post(f"{API}/workflows/{saving.manual}/versions/1/restore")
+    assert r.status_code == 200, r.text
+    state = _changes(saving, saving.manual)
+    assert (state["stale"], state["version"]) == (True, 3)
+    assert opened_with_what_waits() is False
+    r = saving.owner.delete(f"{API}/workflows/{saving.manual}/changes")
+    assert (r.json()["stale"], r.json()["count"]) == (False, 0)
+
+
 def test_a_checkpoint_is_the_same_loader_however_its_address_is_spelled(saving):
     """`core:<label>` and the slot label name one loader, and a run loads a
     model at either: rule 2 has to hold for both."""
@@ -17963,6 +18076,61 @@ def test_going_back_makes_the_earlier_graph_the_newest_version(saving):
     r = saving.owner.post(f"{API}/workflows/{saving.manual}/versions/9/restore")
     assert r.status_code == 404, r.text
     assert len(_versions_of(saving, saving.manual)) == 3
+
+
+def test_going_back_answers_the_new_copy_first_and_the_version_left_under_it(saving):
+    """What the Workflow tab's Undo reads off the restore's own answer: the
+    row marked `current` is the new copy and is first, and the row directly
+    under it is the version just left.
+
+    Also once the workflow is at its cap and going back prunes, and when the
+    version left was saved from ComfyUI, which is counted apart. Wrong if a
+    pruned or re-sorted list puts another version under the current one:
+    Undo would go back to the wrong graph.
+    """
+
+    def go_back(to: int) -> list[dict]:
+        left = workflow_versions.current_version(saving.server.hub, saving.manual)
+        r = saving.owner.post(f"{API}/workflows/{saving.manual}/versions/{to}/restore")
+        assert r.status_code == 200, r.text
+        answer = r.json()
+        rows = answer["versions"]
+        assert [row["version"] for row in rows] == sorted(
+            (row["version"] for row in rows), reverse=True
+        )
+        assert [row["current"] for row in rows] == [True] + [False] * (len(rows) - 1)
+        assert (rows[0]["version"], rows[0]["source"]) == (left + 1, f"revert:{to}")
+        assert answer["version"] == left + 1
+        assert rows[1]["version"] == left, "the version left is not under the new one"
+        return rows
+
+    def append(source: str) -> None:
+        with saving.server.hub.transaction() as conn:
+            workflow_versions.append_version(
+                conn,
+                saving.manual,
+                json.loads(json.dumps(CHAIN_DOCUMENT)),
+                source=source,
+            )
+
+    append("loras")
+    assert [row["version"] for row in go_back(1)] == [3, 2, 1]
+
+    # At the cap: version 1 and the newest 49.
+    for _ in range(workflow_versions.MAX_VERSIONS - 3):
+        append("loras")
+    cap = workflow_versions.MAX_VERSIONS
+    assert [row[0] for row in _versions_of(saving, saving.manual)] == list(
+        range(1, cap + 1)
+    )
+    rows = go_back(5)
+    assert len(rows) == cap, "going back grew the workflow past its cap"
+    assert [row["version"] for row in rows][-2:] == [3, 1], "version 2 was not pruned"
+
+    # Left on a version saved from ComfyUI, which a going-back never prunes.
+    append("comfyui")
+    rows = go_back(7)
+    assert rows[1]["source"] == "comfyui"
 
 
 @pytest.mark.parametrize("stored", ["{not json", "[]"])
@@ -18232,6 +18400,665 @@ def test_a_run_keeps_what_it_changed_until_the_next_run_or_a_save(saving):
     listed = saving.owner.get(f"{API}/workflows/{saving.manual}/versions").json()
     assert listed["versions"][0]["reason"] == "saved from a run"
     assert _changes(saving, saving.manual)["ran"] is None
+
+
+@pytest.fixture
+def sampled(saving):
+    """``saving``, with a manual workflow whose sampler has Steps 20 and CFG 7.
+
+    ``at(name, value)`` is that parameter as a run or a set of changes names it.
+    """
+    document = json.loads(json.dumps(CHAIN_DOCUMENT))
+    document["3"]["inputs"].update({"steps": 20, "cfg": 7.0})
+    manual = workflows_routes.store_manual_workflow(
+        saving.server.hub, "Sampled", document, "import"
+    )
+    values = saving.owner.get(f"{API}/workflows/{manual}").json()["card"][
+        "default_recipe"
+    ]["values"]
+    slots = {value["input_name"]: value["slot_label"] for value in values}
+
+    def at(name: str, value) -> dict:
+        return {"slot_label": slots[name], "input_name": name, "value": value}
+
+    return SimpleNamespace(
+        **{**vars(saving), "manual": manual, "document": document, "at": at}
+    )
+
+
+def _save_what_ran(env, workflow_id, as_new=False, **extra):
+    """The Tasks tab's save: `ran` as the state gives it, said to be a run's."""
+    state = _changes(env, workflow_id)
+    assert state["ran"] is not None, state
+    body = {"changes": state["ran"], "from_run": True, **extra}
+    if not as_new:
+        body["version"] = state["version"]
+    return _save(env, workflow_id, as_new=as_new, **body)
+
+
+def _defaults_written(env, workflow_id) -> dict:
+    """``{input name: value}`` of the default rows a save wrote."""
+    return {
+        row[0].rpartition("/")[2]: row[1]
+        for row in env.server.hub.fetchall(
+            "SELECT address, value FROM workflow_group_default WHERE workflow_id = ?",
+            (workflow_id,),
+        )
+    }
+
+
+def test_saving_what_a_run_changed_stores_what_the_run_used(sampled):
+    """#1850 R2: Steps=30 waits, the run put Steps back to 20 and set CFG=5.
+
+    The Run popup sends every parameter it shows, so the run names Steps at
+    the workflow's own value and `ran` is CFG alone. Saved from the Tasks tab
+    that is the whole set: wrong if Steps 30 is written, which the run never
+    used, or if it still waits afterwards.
+    """
+    at, manual = sampled.at, sampled.manual
+    _put_changes(sampled, manual, values=[at("steps", 30)])
+    submitted = _run(
+        sampled, workflow_id=manual, values=[at("steps", 20), at("cfg", 5.0)]
+    )
+    assert (submitted["3"]["inputs"]["steps"], submitted["3"]["inputs"]["cfg"]) == (
+        20,
+        5.0,
+    )
+    state = _changes(sampled, manual)
+    assert state["ran"]["values"] == [at("cfg", 5.0)]
+    assert state["waiting"]["values"] == [at("steps", 30)]
+
+    r = _save_what_ran(sampled, manual)
+    assert r.status_code == 200, r.text
+    # Steps=30 waited when the run was made, so the run saw it: cleared.
+    assert (r.json()["still_waiting"], r.json()["not_kept"]) == (0, None)
+    assert _defaults_written(sampled, manual) == {"cfg": "5.0"}
+    recipe = sampled.owner.get(f"{API}/workflows/{manual}").json()["card"][
+        "default_recipe"
+    ]
+    assert {v["input_name"]: v["value"] for v in recipe["values"]} == {
+        "steps": 20,
+        "cfg": 5.0,
+    }
+    state = _changes(sampled, manual)
+    assert (state["count"], state["waiting"], state["ran"]) == (0, None, None)
+    # And the next run of the workflow is that run again.
+    again = _run(sampled, workflow_id=manual)["3"]["inputs"]
+    assert (again["steps"], again["cfg"]) == (20, 5.0)
+
+
+def test_a_waiting_change_the_run_carried_is_saved_with_it(sampled):
+    """The other half: what waited and WAS in the run is in its set already.
+
+    The popup lays what waits over its form and sends it, so a run that left
+    Steps at the waiting 30 and loader 5 removed names both. Wrong if a save
+    from the Tasks tab then drops either.
+    """
+    at, manual = sampled.at, sampled.manual
+    _put_changes(sampled, manual, values=[at("steps", 30)], **SKIP_FIVE)
+    _run(
+        sampled,
+        workflow_id=manual,
+        values=[at("steps", 30), at("cfg", 5.0)],
+        **SKIP_FIVE,
+    )
+    r = _save_what_ran(sampled, manual)
+    assert r.status_code == 200, r.text
+    assert r.json()["version"] == 2
+    assert _defaults_written(sampled, manual) == {"steps": "30", "cfg": "5.0"}
+    assert _chain_ids(sampled.owner, manual) == ["2"]
+    assert _changes(sampled, manual)["count"] == 0
+
+
+@pytest.mark.parametrize(
+    "waiting",
+    [
+        lambda env: {
+            "loras": [
+                {"node_id": "2", "sha256": RUN_ADAPTER_DIGEST, "strength_model": 0.3}
+            ]
+        },
+        lambda env: SKIP_FIVE,
+        lambda env: {
+            "models": [
+                {
+                    "address": _model_address(env, env.manual),
+                    "filename": "krea.safetensors",
+                }
+            ]
+        },
+    ],
+    ids=["a LoRA strength", "a removal", "a model pick"],
+)
+def test_a_waiting_change_put_back_for_the_run_is_not_saved_from_it(sampled, waiting):
+    """What the owner put back in the Run popup is not in the run, kind by kind.
+
+    A strength or a removal put back is simply absent from the run's request;
+    the checkpoint is always sent, at the workflow's own file when put back.
+    Either way the run loaded the graph as saved, so a save of what it changed
+    (CFG) leaves the graph alone. Wrong if it makes a version: that is the
+    waiting change, written although the run never used it.
+    """
+    at, manual = sampled.at, sampled.manual
+    _comfyui_lists(sampled, "realvisxl.safetensors", "krea.safetensors")
+    waiting = waiting(sampled)
+    state = _put_changes(sampled, manual, **waiting)
+    assert state["count"] == 1
+    own = {
+        "address": _model_address(sampled, manual),
+        "filename": "realvisxl.safetensors",
+    }
+    submitted = _run(sampled, workflow_id=manual, models=[own], values=[at("cfg", 5.0)])
+    assert submitted["1"]["inputs"]["ckpt_name"] == "realvisxl.safetensors"
+    assert submitted["2"]["inputs"]["strength_model"] == 0.8 and "5" in submitted
+
+    state = _changes(sampled, manual)
+    assert state["ran"] == {**state["ran"], "models": [], "loras": [], "skip_loras": []}
+    # The verb is judged for the set the save writes: a checkpoint pick that
+    # waits closes Save for what waits, and not for what the run changed.
+    assert state["ran_save"] == {"open": True, "reason": None}
+    assert state["save"]["open"] is ("models" not in waiting)
+    dry = _save_what_ran(sampled, manual, dry_run=True)
+    assert dry.status_code == 200 and dry.json()["save"] == state["ran_save"], dry.text
+    assert _changes(sampled, manual)["count"] == 1, "a dry run wrote something"
+
+    r = _save_what_ran(sampled, manual)
+    assert r.status_code == 200, r.text
+    assert [row[0] for row in _versions_of(sampled, manual)] == [1]
+    assert manual_document(sampled.server.hub, manual) == sampled.document
+    assert _defaults_written(sampled, manual) == {"cfg": "5.0"}
+    state = _changes(sampled, manual)
+    assert (state["count"], state["waiting"], state["ran"]) == (0, None, None)
+
+
+def test_a_stage_put_back_for_the_run_is_not_saved_from_it(runnable, monkeypatch):
+    """Upscale waits switched off; the run kept it on and removed a loader.
+
+    A stage the run did not name ran as the default has it. Wrong if the save
+    stores the stage off, or if the next run goes without it.
+    """
+    _upscaled_run(runnable, monkeypatch, object_info=True)
+    with runnable.server.hub.transaction() as conn:
+        conn.execute(
+            "UPDATE workflow_topology_core SET specials = 'upscale' "
+            "WHERE topology_hash = ?",
+            (RUN_TOPOLOGY,),
+        )
+    _put_changes(runnable, RUN_WF, stages={"upscale": False})
+    removed = {"skip_loras": [{"node_id": "2", "field": "lora_name"}]}
+    assert "5" in _run(runnable, workflow_id=RUN_WF, **removed)
+    state = _changes(runnable, RUN_WF)
+    assert (state["ran"]["stages"], state["ran"]["skip_loras"]) == (
+        {},
+        removed["skip_loras"],
+    )
+
+    r = _save_what_ran(runnable, RUN_WF)
+    assert r.status_code == 200, r.text
+    recipe = runnable.owner.get(f"{API}/workflows/{RUN_WF}").json()["card"][
+        "default_recipe"
+    ]
+    assert recipe["stages"] == {"upscale": True}
+    again = _run(runnable, workflow_id=RUN_WF)
+    assert "2" not in again and "5" in again
+    assert _changes(runnable, RUN_WF)["count"] == 0
+
+
+def test_saving_what_a_run_changed_as_a_new_workflow_stores_what_the_run_used(
+    sampled,
+):
+    """Save as new from the Tasks tab, by the same rule: the new workflow is
+    the run, and nothing that waited beside it. This one is left as it was,
+    with nothing waiting."""
+    at, manual = sampled.at, sampled.manual
+    _put_changes(sampled, manual, values=[at("steps", 30)], **SKIP_FIVE)
+    _run(sampled, workflow_id=manual, values=[at("steps", 20), at("cfg", 5.0)])
+
+    r = _save_what_ran(sampled, manual, as_new=True, name="At five")
+    assert r.status_code == 201, r.text
+    copy = manual_document(sampled.server.hub, r.json()["workflow_id"])
+    assert "5" in copy, "the removal the run did not use was saved"
+    assert (copy["3"]["inputs"]["steps"], copy["3"]["inputs"]["cfg"]) == (20, 5.0)
+    assert manual_document(sampled.server.hub, manual) == sampled.document
+    assert _defaults_written(sampled, manual) == {}
+    assert _changes(sampled, manual)["count"] == 0
+
+
+def test_what_waits_on_an_older_version_does_not_close_a_runs_save(sampled):
+    """A run's set leaves what waits out, so its age is not the set's.
+
+    Wrong if `ran_save` is closed for "changed since": the run was made on
+    the version the workflow has.
+    """
+    at, manual = sampled.at, sampled.manual
+    _put_changes(sampled, manual, **SKIP_FIVE)
+    with sampled.server.hub.transaction() as conn:
+        workflow_versions.append_version(
+            conn, manual, json.loads(json.dumps(sampled.document)), source="loras"
+        )
+    _run(sampled, workflow_id=manual, values=[at("cfg", 5.0)])
+    state = _changes(sampled, manual)
+    assert (state["stale"], state["save"]["open"]) == (True, False)
+    assert state["ran_save"] == {"open": True, "reason": None}
+    r = _save_what_ran(sampled, manual)
+    assert r.status_code == 200, r.text
+    assert _chain_ids(sampled.owner, manual) == ["2", "5"]
+    assert _defaults_written(sampled, manual) == {"cfg": "5.0"}
+    # And it is left as it is: carried onto this version it would read as
+    # made on it, and Save would open for a set nobody made against it.
+    assert r.json()["still_waiting"] == 1
+    state = _changes(sampled, manual)
+    assert (state["stale"], state["count"], state["ran"]) == (True, 1, None)
+    assert state["waiting"]["skip_loras"] == SKIP_FIVE["skip_loras"]
+    assert _unsaved(sampled, manual) == 1
+
+
+def _unsaved(env, workflow_id) -> int:
+    """The count the card's *Unsaved* badge is drawn from."""
+    detail = env.owner.get(f"{API}/workflows/{workflow_id}").json()
+    return detail["card"]["unsaved_changes"]
+
+
+def _waits(env, workflow_id) -> dict:
+    """What waits, less the empty kinds, with the state's flags checked.
+
+    After a save of what a run changed, what stays waiting has to be usable:
+    not stale, and counted on the card as the state counts it.
+    """
+    state = _changes(env, workflow_id)
+    assert state["stale"] is False, state
+    assert state["ran"] is None, "a save keeps no run's set"
+    assert _unsaved(env, workflow_id) == state["count"]
+    return {kind: held for kind, held in (state["waiting"] or {}).items() if held}
+
+
+def test_an_edit_made_after_the_run_stays_waiting_when_the_run_is_saved(sampled):
+    """A save of what a run changed clears only what that run had seen.
+
+    Steps=30 waited when the run was made and the owner put it back for the
+    run: seen, not saved, cleared. Loader 5 was removed in the Workflow tab
+    AFTER the run: the run knew nothing of it, so it must still wait, and be
+    offered for Save. Wrong if it is gone (an unsaved edit lost without a
+    word), or if Steps=30 still waits.
+    """
+    at, manual = sampled.at, sampled.manual
+    _put_changes(sampled, manual, values=[at("steps", 30)])
+    _run(sampled, workflow_id=manual, values=[at("steps", 20), at("cfg", 5.0)])
+    _put_changes(sampled, manual, values=[at("steps", 30)], **SKIP_FIVE)
+
+    r = _save_what_ran(sampled, manual)
+    assert r.status_code == 200, r.text
+    assert (r.json()["still_waiting"], r.json()["not_kept"]) == (1, None)
+    assert _defaults_written(sampled, manual) == {"cfg": "5.0"}
+    assert _waits(sampled, manual) == SKIP_FIVE
+    state = _changes(sampled, manual)
+    assert (state["count"], state["save"]["open"]) == (1, True)
+
+    # It is an ordinary waiting change again: Save writes it.
+    r = _save(sampled, manual)
+    assert r.status_code == 200 and r.json()["version"] == 2, r.text
+    assert _chain_ids(sampled.owner, manual) == ["2"]
+    assert _unsaved(sampled, manual) == 0
+
+
+def test_what_stays_waiting_is_carried_onto_the_version_the_save_made(sampled):
+    """The run removed a loader, so its save makes a version; what the owner
+    changed after the run moves onto it.
+
+    Wrong if it is left on the version before: it would be stale, Save closed
+    for it, and the owner's edit good for Save as new only.
+    """
+    at, manual = sampled.at, sampled.manual
+    _run(sampled, workflow_id=manual, **SKIP_FIVE)
+    weaker = {"node_id": "2", "sha256": RUN_ADAPTER_DIGEST, "strength_model": 0.3}
+    _put_changes(sampled, manual, values=[at("steps", 40)], loras=[weaker])
+
+    r = _save_what_ran(sampled, manual)
+    assert r.status_code == 200, r.text
+    assert (r.json()["version"], r.json()["still_waiting"]) == (2, 2)
+    assert r.json()["not_kept"] is None
+    waits = _waits(sampled, manual)
+    assert waits["values"] == [at("steps", 40)]
+    assert [item["strength_model"] for item in waits["loras"]] == [0.3]
+    state = _changes(sampled, manual)
+    assert (state["version"], state["save"]["open"]) == (2, True)
+
+    r = _save(sampled, manual, version=2)
+    assert r.status_code == 200 and r.json()["version"] == 3, r.text
+    stored = _versions_of(sampled, manual)[-1][2]
+    assert "5" not in stored and stored["2"]["inputs"]["strength_model"] == 0.3
+    assert _defaults_written(sampled, manual) == {"steps": "40"}
+
+
+@pytest.mark.parametrize(
+    "after, waits",
+    [(40, 1), (25, 0)],
+    ids=["its own value", "the value the save wrote"],
+)
+def test_an_edit_after_the_run_of_what_the_run_changed(sampled, after, waits):
+    """Steps waited at 30, the run was made at 25, and the owner then typed
+    another value in the Workflow tab.
+
+    The save writes the run's 25. The later value did not wait when the run
+    was made, so it stays, unless it is the 25 just written: a change that
+    changes nothing must not sit there as an unsaved one.
+    """
+    at, manual = sampled.at, sampled.manual
+    _put_changes(sampled, manual, values=[at("steps", 30)])
+    _run(sampled, workflow_id=manual, values=[at("steps", 25)])
+    _put_changes(sampled, manual, values=[at("steps", after)])
+
+    r = _save_what_ran(sampled, manual)
+    assert r.status_code == 200, r.text
+    assert (r.json()["still_waiting"], r.json()["not_kept"]) == (waits, None)
+    assert _defaults_written(sampled, manual) == {"steps": "25"}
+    assert _waits(sampled, manual) == (
+        {"values": [at("steps", after)]} if waits else {}
+    )
+
+
+def test_an_edit_after_the_run_that_the_saved_graph_cannot_take_is_said(sampled):
+    """The run removed loader 5 and is saved; after the run the owner had set
+    a strength on that loader.
+
+    The saved graph has no loader 5, so that change can never be applied:
+    kept waiting it would refuse every later Save. It is dropped and the
+    answer names it (`not_kept`), so the owner is told. The other edit made
+    after the run stays.
+    """
+    at, manual = sampled.at, sampled.manual
+    _run(sampled, workflow_id=manual, **SKIP_FIVE)
+    on_five = {
+        "node_id": "5",
+        "field": "lora_name",
+        "sha256": RUN_ADAPTER_DIGEST,
+        "strength_model": 0.2,
+        "strength_clip": None,
+    }
+    _put_changes(sampled, manual, values=[at("steps", 40)], loras=[on_five])
+
+    r = _save_what_ran(sampled, manual)
+    assert r.status_code == 200, r.text
+    answer = r.json()
+    assert (answer["version"], answer["still_waiting"]) == (2, 1)
+    assert answer["not_kept"] == {
+        "models": [],
+        "loras": [on_five],
+        "skip_loras": [],
+        "stages": {},
+        "values": [],
+    }
+    assert _waits(sampled, manual) == {"values": [at("steps", 40)]}
+    # What is left is saved without a refusal over the loader that is gone.
+    assert _save(sampled, manual, version=2).status_code == 200
+
+
+def test_saving_a_run_as_a_new_workflow_keeps_what_was_edited_after_it(sampled):
+    """Save as new leaves this workflow on the version it had, so what was
+    made after the run waits on exactly as it did; what the run had seen goes.
+
+    Wrong if the later edit is in the new workflow (the run never used it) or
+    gone from this one.
+    """
+    at, manual = sampled.at, sampled.manual
+    _put_changes(sampled, manual, values=[at("steps", 30)])
+    _run(sampled, workflow_id=manual, values=[at("steps", 20), at("cfg", 5.0)])
+    _put_changes(sampled, manual, values=[at("steps", 30)], **SKIP_FIVE)
+
+    r = _save_what_ran(sampled, manual, as_new=True, name="At five")
+    assert r.status_code == 201, r.text
+    assert (r.json()["still_waiting"], r.json()["not_kept"]) == (1, None)
+    copy = manual_document(sampled.server.hub, r.json()["workflow_id"])
+    assert "5" in copy and copy["3"]["inputs"]["steps"] == 20
+    assert _unsaved(sampled, r.json()["workflow_id"]) == 0
+
+    assert _waits(sampled, manual) == SKIP_FIVE
+    state = _changes(sampled, manual)
+    assert (state["version"], state["save"]["open"]) == (1, True)
+    assert manual_document(sampled.server.hub, manual) == sampled.document
+
+
+def test_with_nothing_remembered_of_the_run_everything_that_waits_is_kept(sampled):
+    """A run's set an older build stored says nothing of what waited then.
+
+    Unknown is read as "nothing waited", the safe side: the save cannot tell
+    the owner's later edits from what the run saw, so it discards none.
+    """
+    at, manual = sampled.at, sampled.manual
+    _put_changes(sampled, manual, values=[at("steps", 30)])
+    workflow_group_writes.write_changes(
+        sampled.server.hub, manual, "run", {"values": [at("cfg", 5.0)]}, 1
+    )
+    r = _save_what_ran(sampled, manual)
+    assert r.status_code == 200, r.text
+    assert r.json()["still_waiting"] == 1
+    assert _defaults_written(sampled, manual) == {"cfg": "5.0"}
+    assert _waits(sampled, manual) == {"values": [at("steps", 30)]}
+
+
+def test_a_set_that_was_stale_when_the_run_was_made_is_not_what_the_run_saw(sampled):
+    """What waited on an older version is not remembered for the run: a set
+    made afresh after it, however alike, is the owner's edit and is kept."""
+    at, manual = sampled.at, sampled.manual
+    _put_changes(sampled, manual, values=[at("steps", 30)])
+    with sampled.server.hub.transaction() as conn:
+        workflow_versions.append_version(
+            conn, manual, json.loads(json.dumps(sampled.document)), source="loras"
+        )
+    _run(sampled, workflow_id=manual, values=[at("cfg", 5.0)])
+    # Discarded and made again, on the version the workflow has now.
+    sampled.owner.delete(f"{API}/workflows/{manual}/changes")
+    _put_changes(sampled, manual, values=[at("steps", 30)])
+
+    r = _save_what_ran(sampled, manual)
+    assert r.status_code == 200, r.text
+    assert r.json()["still_waiting"] == 1
+    assert _waits(sampled, manual) == {"values": [at("steps", 30)]}
+
+
+@pytest.mark.parametrize(
+    "said, still",
+    [(True, 1), (False, 0)],
+    ids=["the caller says what it read", "nothing said"],
+)
+def test_a_change_made_before_run_was_pressed_is_not_what_the_run_saw(
+    sampled, said, still
+):
+    """The Run popup lays its form from a read made when it opens. Loader 5
+    is removed in another window before Run is pressed: it waits when the run
+    arrives, and the run knew nothing of it.
+
+    The popup sends the set it read (`waited`), so the save of the run keeps
+    that removal waiting. A caller that says nothing (the API, MCP) is taken
+    to have seen what waited when its run arrived: pinned, because it is the
+    only reading the server has for it. Wrong, with `waited` sent, if the
+    removal is gone after the save: cleared unsaved, and named nowhere.
+    """
+    at, manual = sampled.at, sampled.manual
+    read = _put_changes(sampled, manual, values=[at("steps", 30)])["waiting"]
+    held = _put_changes(sampled, manual, values=[at("steps", 30)], **SKIP_FIVE)
+    _run(
+        sampled,
+        workflow_id=manual,
+        values=[at("steps", 20), at("cfg", 5.0)],
+        **({"waited": read} if said else {}),
+    )
+    # A statement, not a write: what waits is as it was.
+    assert _changes(sampled, manual)["waiting"] == held["waiting"]
+
+    r = _save_what_ran(sampled, manual)
+    assert r.status_code == 200, r.text
+    assert (r.json()["still_waiting"], r.json()["not_kept"]) == (still, None)
+    assert _defaults_written(sampled, manual) == {"cfg": "5.0"}
+    assert _waits(sampled, manual) == (SKIP_FIVE if said else {})
+
+
+def test_a_caller_that_read_nothing_waiting_says_so_with_an_empty_set(sampled):
+    """`{}` is "nothing waited when I read it", which is not the same as
+    saying nothing: everything that waits by the time the run arrives was
+    made after the read, and is kept."""
+    at, manual = sampled.at, sampled.manual
+    _put_changes(sampled, manual, values=[at("steps", 30)])
+    _run(sampled, workflow_id=manual, values=[at("cfg", 5.0)], waited={})
+
+    r = _save_what_ran(sampled, manual)
+    assert r.status_code == 200, r.text
+    assert r.json()["still_waiting"] == 1
+    assert _waits(sampled, manual) == {"values": [at("steps", 30)]}
+
+
+def test_what_the_caller_read_is_checked_and_the_dry_run_ignores_it(sampled):
+    """The pre-flight takes the run's body, so it takes `waited`, and keeps
+    nothing of it. It is a `WorkflowChanges` like any other: one that is not
+    is a 422 on both routes, not a set stored as sent."""
+    at, manual = sampled.at, sampled.manual
+    held = _put_changes(sampled, manual, values=[at("steps", 30)])
+    body = {"workflow_id": manual, "values": [at("cfg", 5.0)]}
+
+    r = sampled.owner.post(
+        f"{API}/workflows/run/preflight", json={**body, "waited": {}}
+    )
+    assert r.status_code == 200, r.text
+    state = _changes(sampled, manual)
+    assert (state["ran"], state["waiting"]) == (None, held["waiting"])
+
+    twice = {"values": [at("steps", 30), at("steps", 40)]}
+    for route in ("run/preflight", "run"):
+        r = sampled.owner.post(
+            f"{API}/workflows/{route}", json={**body, "waited": twice}
+        )
+        assert r.status_code == 422, (route, r.text)
+    assert _changes(sampled, manual)["ran"] is None
+
+    # A run of a saved recipe keeps no set, so there is nothing for `waited`
+    # to be kept beside: it is ignored, not refused.
+    recipe_id = _recipe_on(sampled, manual, manual)
+    _run(sampled, saved_recipe_id=recipe_id, target=manual, waited={})
+    state = _changes(sampled, manual)
+    assert (state["ran"], state["waiting"]) == (None, held["waiting"])
+
+
+@pytest.fixture
+def replaced(runnable):
+    """``runnable``, with RUN_WF's checkpoint gone and replaced by the owner
+    (`model-fix`). ComfyUI lists the replacement and one other checkpoint,
+    krea, which is on the shelf too."""
+    digests = [_h("bf16-digest"), _h("krea-digest")]
+    hub = runnable.server.hub
+    with hub.transaction() as conn:
+        conn.executemany(
+            "INSERT INTO model (file_kind, filename, sha256, provenance) "
+            "VALUES ('checkpoint', ?, ?, 'scanned')",
+            list(zip([_REPLACEMENT_FILENAME, "krea.safetensors"], digests)),
+        )
+    info = json.loads(json.dumps(RUN_OBJECT_INFO))
+    info["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"] = [
+        [_REPLACEMENT_FILENAME, "krea.safetensors"],
+        {},
+    ]
+    runnable.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url, **_: (info, None)
+    )
+    r = runnable.owner.put(
+        f"{API}/workflows/{RUN_WF}/model-fix",
+        json={"was": _SHELF_FILENAME, "now": _REPLACEMENT_FILENAME},
+    )
+    assert r.status_code == 200, r.text
+    yield runnable
+    with hub.transaction() as conn:
+        conn.execute("DELETE FROM model WHERE sha256 IN (?, ?)", digests)
+
+
+def _missing_files(env) -> list[dict]:
+    """What a pre-flight of RUN_WF says this ComfyUI does not have."""
+    payload = _preflight(env.owner, workflow_id=RUN_WF)
+    return [
+        model
+        for group in payload["groups"]
+        for reason in group["reasons"]
+        if reason["code"] == "missing_models"
+        for model in reason["models"]
+    ]
+
+
+def test_the_preflight_names_a_missing_replacement_and_never_its_original(replaced):
+    """The Workflow tab and the Run popup find a row by the file it loads,
+    which for a replaced model is the replacement.
+
+    While ComfyUI has the replacement the pre-flight reads the graph with it
+    in and nothing is missing. Once the replacement is gone too, its loader
+    is left naming the original, which is also gone: the file to say is the
+    replacement, or the row that shows it is told nothing is missing while
+    the run is refused over a file it does not show. Wrong if the original's
+    name comes back.
+    """
+    runnable = replaced
+    assert _missing_files(runnable) == []
+
+    info = json.loads(json.dumps(RUN_OBJECT_INFO))
+    info["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"] = [
+        ["krea.safetensors"],
+        {},
+    ]
+    runnable.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url, **_: (info, None)
+    )
+    assert _missing_files(runnable) == [
+        {"file": _REPLACEMENT_FILENAME, "folder": "checkpoints"}
+    ]
+    # Taking the replacement back names the original again.
+    r = runnable.owner.put(
+        f"{API}/workflows/{RUN_WF}/model-fix",
+        json={"was": _REPLACEMENT_FILENAME, "now": None},
+    )
+    assert r.status_code == 200, r.text
+    assert _missing_files(runnable) == [
+        {"file": _SHELF_FILENAME, "folder": "checkpoints"}
+    ]
+
+
+def test_a_model_pick_wins_over_an_earlier_replacement_at_its_loader(replaced):
+    """A `models` change at a loader that holds a model fix (#1850 W5).
+
+    The fix is by file: wherever the workflow names the original, the
+    replacement loads. So a pick of another file is not the original and is
+    left alone, in the run, in the graph that opens and in the save. Wrong if
+    the run after the save loads the replacement again.
+    """
+    runnable = replaced
+    address = _model_address(runnable, RUN_WF)
+
+    def loaded(**body) -> str:
+        return _run(runnable, workflow_id=RUN_WF, **body)["1"]["inputs"]["ckpt_name"]
+
+    assert loaded() == _REPLACEMENT_FILENAME
+    # The original and its replacement are one file on this workflow: naming
+    # either loads the replacement and is no change. The Run popup sends the
+    # replacement on every run, which must not read as something to save.
+    for own in (_SHELF_FILENAME, _REPLACEMENT_FILENAME):
+        assert loaded(models=[{"address": address, "filename": own}]) == (
+            _REPLACEMENT_FILENAME
+        )
+        assert _changes(runnable, RUN_WF)["ran"] is None, own
+
+    pick = {"models": [{"address": address, "filename": "krea.safetensors"}]}
+    assert _put_changes(runnable, RUN_WF, **pick)["count"] == 1
+    assert loaded(**pick) == "krea.safetensors"
+    opened = runnable.owner.get(
+        f"{API}/workflows/{RUN_WF}/graph", params={"waiting": "true"}
+    ).json()
+    assert opened["waiting_applied"] is True
+    assert opened["workflow"]["1"]["inputs"]["ckpt_name"] == "krea.safetensors"
+
+    # Replacing a checkpoint that is not installed is a repair: Save is open.
+    r = _save(runnable, RUN_WF)
+    assert r.status_code == 200, r.text
+    assert (
+        _versions_of(runnable, RUN_WF)[-1][2]["1"]["inputs"]["ckpt_name"]
+        == "krea.safetensors"
+    )
+    assert _changes(runnable, RUN_WF)["count"] == 0
+    assert loaded() == "krea.safetensors", "the fix replaced the saved pick"
 
 
 def test_a_stage_default_is_saved_and_a_run_can_still_keep_the_stage(

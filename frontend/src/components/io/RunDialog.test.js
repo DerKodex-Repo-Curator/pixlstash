@@ -14,8 +14,8 @@
 //   pictures is `target`, not a second source. Getting this wrong is a 400 on
 //   every run from the grid.
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
-import { mount, flushPromises } from "@vue/test-utils";
+import { afterEach, describe, it, expect, beforeEach, vi } from "vitest";
+import { enableAutoUnmount, mount, flushPromises } from "@vue/test-utils";
 import { setActivePinia, createPinia } from "pinia";
 
 const getWorkflowCard = vi.fn();
@@ -24,10 +24,13 @@ const preflightWorkflowRun = vi.fn();
 const runWorkflowCard = vi.fn();
 const getPictureRecipe = vi.fn();
 const setWorkflowInputs = vi.fn();
-const saveFixedWorkflow = vi.fn();
 const setWorkflowPins = vi.fn();
 const readModelSwap = vi.fn();
 const getWorkflowFormInputs = vi.fn();
+const getLoraChain = vi.fn();
+const getWorkflowChanges = vi.fn();
+const saveWorkflow = vi.fn();
+const saveWorkflowAsNew = vi.fn();
 
 const stackMemberIds = vi.fn();
 vi.mock("../../utils/stackMembers", () => ({
@@ -40,10 +43,13 @@ vi.mock("../../api/workflows", () => ({
   preflightWorkflowRun: (...args) => preflightWorkflowRun(...args),
   runWorkflowCard: (...args) => runWorkflowCard(...args),
   setWorkflowInputs: (...args) => setWorkflowInputs(...args),
-  saveFixedWorkflow: (...args) => saveFixedWorkflow(...args),
   setWorkflowPins: (...args) => setWorkflowPins(...args),
   readModelSwap: (...args) => readModelSwap(...args),
   getWorkflowFormInputs: (...args) => getWorkflowFormInputs(...args),
+  getLoraChain: (...args) => getLoraChain(...args),
+  getWorkflowChanges: (...args) => getWorkflowChanges(...args),
+  saveWorkflow: (...args) => saveWorkflow(...args),
+  saveWorkflowAsNew: (...args) => saveWorkflowAsNew(...args),
   workflowCoverUrl: (cover) => (cover?.url ? `/api/v1${cover.url}` : ""),
 }));
 vi.mock("../../api/comfyui", () => ({
@@ -126,6 +132,23 @@ function sentValue(body, inputName) {
   return (body.values || []).find((v) => v.input_name === inputName);
 }
 
+const OPEN = { open: true, reason: null };
+
+/** `GET /workflows/{id}/changes` for a workflow nothing waits on. */
+function changesOf(id, overrides = {}) {
+  return {
+    workflow_id: id,
+    version: 3,
+    waiting: null,
+    count: 0,
+    ran: null,
+    save: { open: false, reason: "Nothing to save." },
+    save_as_new: OPEN,
+    ran_save: null,
+    ...overrides,
+  };
+}
+
 const AppDialogStub = {
   name: "AppDialog",
   template: "<div><slot /><footer><slot name='footer' /></footer></div>",
@@ -145,6 +168,13 @@ const globalOpts = {
         template: "<button :disabled='disabled'><slot /></button>",
       },
       AppBarButton: true,
+      // The trigger-word buttons sit in a tip's activator slot, which the
+      // stubbed Vuetify tooltip would not draw.
+      Tooltip: {
+        name: "Tooltip",
+        props: ["text", "describe"],
+        template: "<slot name='activator' :props='{}' />",
+      },
       RunReasonNotice: true,
       PicturePicker: true,
       "v-icon": true,
@@ -161,10 +191,21 @@ async function mountRun(source = { kind: "picture", pictureIds: [42] }) {
   return wrapper;
 }
 
+// Every popup a test mounts is taken down again, watchers and all.
+enableAutoUnmount(afterEach);
+
 beforeEach(() => {
   setActivePinia(createPinia());
   vi.clearAllMocks();
   getWorkflowFormInputs.mockResolvedValue({ nodes: [] });
+  // A workflow run by itself reads its own loaders and what waits on it.
+  // Reset, not only cleared: an answer one test gave must not be the next's.
+  readModelSwap.mockReset();
+  readModelSwap.mockResolvedValue({ replacements: [] });
+  saveWorkflowAsNew.mockReset();
+  getLoraChain.mockResolvedValue({ loaders: [], lanes: [] });
+  getWorkflowChanges.mockImplementation(async (id) => changesOf(id));
+  saveWorkflow.mockResolvedValue({ dry_run: true, save: OPEN, save_as_new: OPEN });
   currentRoute.name = "home";
   getWorkflowCard.mockImplementation(async (key) =>
     key === OTHER
@@ -1017,11 +1058,11 @@ describe("the LoRAs a graph already loads", () => {
   });
 });
 
-describe("skipping a graph LoRA for this run", () => {
+describe("removing a graph LoRA", () => {
   // The owner must be able to run without a LoRA that does not exist here.
-  // The popup changes no workflow, so its word is Skip: the row stays, says
-  // it is skipped, and Use takes it back. What goes on the wire is
-  // `skip_loras`, and a skipped row is never ALSO an override in `loras`.
+  // One gesture, ×: the row stays, struck, says Removed, and Put back takes
+  // it back. What goes on the wire is `skip_loras`, and a removed row is
+  // never ALSO an override in `loras`.
   function filenameSlot(value, node = "7") {
     return {
       node_id: node,
@@ -1052,24 +1093,37 @@ describe("skipping a graph LoRA for this run", () => {
     ];
   }
 
-  it("offers Skip on a graph row, never a trash or a delete", async () => {
+  const removes = (wrapper) =>
+    wrapper
+      .findAllComponents({ name: "AppBarButton" })
+      .filter((c) => c.attributes("data-focus") === "remove");
+
+  it("offers a × on a graph row, named for the LoRA it removes", async () => {
     const wrapper = await mountTwo();
+    expect(removes(wrapper).map((c) => c.props("tooltip"))).toEqual([
+      "Remove mira_v2",
+      "Remove somebody-elses",
+    ]);
+    // The words that promised nothing is written are gone.
     const words = wrapper.findAll("button").map((b) => b.text().trim());
-    expect(words.filter((word) => word === "Skip")).toHaveLength(2);
-    expect(wrapper.text()).not.toMatch(/delete|remove/i);
+    expect(words).not.toContain("Skip");
+    expect(wrapper.text()).not.toMatch(/skipped for this run/i);
   });
 
-  it("sends a skipped row in skip_loras and not in loras", async () => {
+  it("sends a removed row in skip_loras and not in loras", async () => {
     const wrapper = await mountTwo();
     // An override on the row first, so leaving `loras` alone would be caught.
     wrapper.vm.loras[0].sha256 = "t".repeat(64);
     await wrapper.vm.$nextTick();
     const before = preflightWorkflowRun.mock.calls.length;
 
-    await buttonReading(wrapper, "Skip", 0).trigger("click");
+    await removes(wrapper)[0].trigger("click");
     await flushPromises();
 
-    expect(wrapper.text()).toContain("Skipped for this run");
+    expect(wrapper.find(".rund-lora--skipped").text()).toContain("Removed");
+    expect(wrapper.vm.loraLive).toBe(
+      "film-grain-35mm is removed. Put back is on the same row.",
+    );
     // The removal set changed, so the pre-flight is asked again with it.
     expect(preflightWorkflowRun.mock.calls.length).toBe(before + 1);
     expect(preflightWorkflowRun.mock.calls.at(-1)[0].skip_loras).toEqual([
@@ -1092,14 +1146,16 @@ describe("skipping a graph LoRA for this run", () => {
     ]);
   });
 
-  it("takes a skip back with Use", async () => {
+  it("takes a removal back with Put back", async () => {
     const wrapper = await mountTwo();
-    await buttonReading(wrapper, "Skip", 1).trigger("click");
+    await removes(wrapper)[1].trigger("click");
     await flushPromises();
-    await buttonReading(wrapper, "Use").trigger("click");
+    const back = buttonReading(wrapper, "Put back");
+    expect(back.attributes("aria-label")).toBe("Put somebody-elses back");
+    await back.trigger("click");
     await flushPromises();
 
-    expect(wrapper.text()).not.toContain("Skipped for this run");
+    expect(wrapper.find(".rund-lora--skipped").exists()).toBe(false);
     await wrapper.vm.submit();
     await flushPromises();
     expect(runWorkflowCard.mock.calls[0][0]).not.toHaveProperty("skip_loras");
@@ -1674,13 +1730,14 @@ describe("the body it sends", () => {
 
     it("asks again after a read that failed", async () => {
       preflightWorkflowRun.mockResolvedValue(missing());
-      readModelSwap.mockRejectedValueOnce(new Error("offline"));
+      readModelSwap.mockRejectedValue(new Error("offline"));
       const wrapper = await mountRun({ kind: "card", workflowId: KEY });
       expect(wrapper.vm.checkpointFix).toBeNull();
+      const failed = readModelSwap.mock.calls.length;
       readModelSwap.mockResolvedValue({ replacements: [], replacements_reason: "none_loadable" });
       await wrapper.vm.runPreflight();
       await flushPromises();
-      expect(readModelSwap).toHaveBeenCalledTimes(2);
+      expect(readModelSwap).toHaveBeenCalledTimes(failed + 1);
       expect(wrapper.vm.checkpointFix?.reason).toBe("none_loadable");
       // Not narrowed, so it names no base model.
       expect(wrapper.vm.checkpointFixNote).toContain(
@@ -1723,9 +1780,9 @@ describe("the body it sends", () => {
       expect(wrapper.vm.checkpointOptions).toEqual([
         {
           value: "juggernautXL.safetensors",
-          label: "juggernautXL.safetensors (in place of RealVisXL_V5.safetensors)",
+          label: "juggernautXL (in place of RealVisXL V5)",
         },
-        { value: "dreamshaperXL.safetensors", label: "dreamshaperXL.safetensors" },
+        { value: "dreamshaperXL.safetensors", label: "dreamshaperXL" },
       ]);
       expect(wrapper.vm.checkpointFixNote).toContain(
         "RealVisXL_V5.safetensors is not on this ComfyUI, so this workflow loads juggernautXL.safetensors in its place",
@@ -1737,10 +1794,10 @@ describe("the body it sends", () => {
       ]);
     });
 
-    it("asks nothing for a missing file that is not a base model", async () => {
+    it("offers no replacement for a missing file that is not a base model", async () => {
       preflightWorkflowRun.mockResolvedValueOnce(missing("loras"));
       const wrapper = await mountRun({ kind: "card", workflowId: KEY });
-      expect(readModelSwap).not.toHaveBeenCalled();
+      expect(wrapper.vm.checkpointFix).toBeNull();
       expect(wrapper.find("[data-testid='rund-checkpoint-missing']").exists()).toBe(false);
     });
   });
@@ -1889,9 +1946,10 @@ describe("the body it sends", () => {
     ]);
   });
 
-  it("offers no row for a stage the default recipe runs without", async () => {
-    // The server cannot switch a recipe-off stage back on, so a tickable
-    // row for it would promise a run it will not make.
+  it("offers a stage the default recipe runs without, off, and keeps it when ticked", async () => {
+    // `keep_stages` switches a recipe-off stage on for a run (#1849), so the
+    // row is there, unticked. It is never sent as skipped: the recipe already
+    // runs without it, and a stage asked off by name can refuse the run.
     getWorkflowCard.mockResolvedValue({
       card: card({
         specials: ["upscale", "face_detailer"],
@@ -1905,10 +1963,21 @@ describe("the body it sends", () => {
     });
     const wrapper = await mountRun({ kind: "card", workflowId: KEY });
     const labels = wrapper.findAll("fieldset label").map((l) => l.text());
-    expect(labels).toEqual(["Face detailer"]);
+    expect(labels).toEqual(["Upscale", "Face detailer"]);
+    expect(wrapper.findAll("fieldset input").map((box) => box.element.checked)).toEqual([
+      false,
+      true,
+    ]);
     await wrapper.vm.submit();
     await flushPromises();
     expect(runWorkflowCard.mock.calls[0][0]).not.toHaveProperty("skip_stages");
+    expect(runWorkflowCard.mock.calls[0][0]).not.toHaveProperty("keep_stages");
+
+    await wrapper.vm.setStage("upscale", true);
+    await wrapper.vm.submit();
+    await flushPromises();
+    expect(runWorkflowCard.mock.calls[1][0].keep_stages).toEqual(["upscale"]);
+    expect(runWorkflowCard.mock.calls[1][0]).not.toHaveProperty("skip_stages");
   });
 
   it("sends no skip_stages while every stage is on", async () => {
@@ -2837,9 +2906,57 @@ describe("Create with LoRA", () => {
     const fixed = wrapper.find('[data-testid="person-fixed"]');
     expect(fixed.text()).toBe("Example");
     // A statement, not a control: nobody else to pick, and no "No one".
-    expect(wrapper.find('[role="radio"]').exists()).toBe(false);
-    expect(wrapper.vm.addedLoras[0].person).toBe(true);
+    expect(fixed.attributes("aria-checked")).toBe("true");
+    expect(wrapper.find("button[role='checkbox']").exists()).toBe(false);
+    expect(wrapper.vm.addedLoras[0].person).toBe(3);
     expect(wrapper.findComponent({ name: "AppBarButton" }).exists()).toBe(false);
+  });
+
+  it("takes other people beside the fixed one, who stays first and fixed", async () => {
+    const OTHER_LORA = {
+      sha256: "j".repeat(64),
+      filename: "example-friend-krea2.safetensors",
+      base_model_family: "krea2",
+      attachments: [{ entity_type: "character", entity_id: 4 }],
+    };
+    const own = {
+      ...PERSON_LORA,
+      attachments: [{ entity_type: "character", entity_id: 3 }],
+    };
+    listCharacters.mockResolvedValue([
+      { id: 3, name: "Example" },
+      { id: 4, name: "Friend" },
+    ]);
+    listAdapters.mockImplementation(async ({ fileKind, characterId } = {}) => {
+      if (characterId) return fileKind === "adapter" ? [own] : [];
+      return fileKind ? [] : [own, OTHER_LORA];
+    });
+    getWorkflowCard.mockImplementation(async (key) => ({
+      card: card({ id: key, name: key, models: model("krea2") }),
+    }));
+    const wrapper = await mountRun(fromPerson);
+    // The fixed person is drawn once, as the statement, and never as a toggle.
+    expect(wrapper.findAll('[data-testid="person-fixed"]')).toHaveLength(1);
+    expect(wrapper.find('[data-person="3"]').exists()).toBe(false);
+    expect(wrapper.find('[data-person="null"]').exists()).toBe(false);
+
+    await wrapper.find('[data-person="4"]').trigger("click");
+    expect(wrapper.find('[data-person="4"]').attributes("aria-checked")).toBe("true");
+    expect(wrapper.vm.addedLoras.map((row) => row.person)).toEqual([3, 4]);
+    // Only the added person's row can be taken off.
+    const removes = wrapper.findAllComponents({ name: "AppBarButton" });
+    expect(removes.map((c) => c.props("tooltip"))).toEqual(["Remove Friend's LoRA"]);
+    await wrapper.vm.submit();
+    const body = runWorkflowCard.mock.calls[0][0];
+    expect(body.add_loras.map((row) => row.sha256)).toEqual([
+      PERSON_LORA.sha256,
+      OTHER_LORA.sha256,
+    ]);
+    // Still filed to the person the popup was opened on.
+    expect(body.destination.character_id).toBe(3);
+
+    await wrapper.find('[data-person="4"]').trigger("click");
+    expect(wrapper.vm.addedLoras.map((row) => row.person)).toEqual([3]);
   });
 
   it("suggests the fixed person's trigger word too", async () => {
@@ -3037,6 +3154,175 @@ describe("the person a workflow run alone is of", () => {
     expect(wrapper.vm.addedLoras).toEqual([]);
   });
 
+  describe("several people", () => {
+    const TOVE = {
+      sha256: "o".repeat(64),
+      filename: "tove-sdxl.safetensors",
+      base_model_family: "sdxl",
+      attachments: of(9),
+    };
+    const TOVE_ALT = {
+      sha256: "p".repeat(64),
+      filename: "tove-sdxl-v2.safetensors",
+      base_model_family: "sdxl",
+      attachments: of(9),
+    };
+    const rowsOf = (wrapper) =>
+      wrapper.vm.addedLoras.map((row) => [row.person, row.sha256]);
+    const selects = (wrapper) =>
+      wrapper
+        .findAllComponents({ name: "AppSelect" })
+        .filter((c) => /'s LoRA$/.test(c.props("label")));
+    const checked = (wrapper, id) => tile(wrapper, id).attributes("aria-checked");
+
+    beforeEach(() => {
+      listCharacters.mockResolvedValue([
+        { id: 7, name: "Mira" },
+        { id: 9, name: "Tove" },
+      ]);
+      listAdapters.mockImplementation(async ({ fileKind } = {}) =>
+        fileKind ? [] : [MIRA, TOVE, TOVE_ALT],
+      );
+    });
+
+    it("adds one LoRA per person, in the order picked", async () => {
+      const wrapper = await mountRun(fromCard);
+      // Tove first, though Mira is drawn first.
+      await tile(wrapper, 9).trigger("click");
+      await tile(wrapper, 7).trigger("click");
+      expect(checked(wrapper, 9)).toBe("true");
+      expect(checked(wrapper, 7)).toBe("true");
+      expect(checked(wrapper, "null")).toBe("false");
+      wrapper.vm.addedLoras[1].strength = 0.6;
+      await wrapper.vm.submit();
+      expect(runWorkflowCard.mock.calls[0][0].add_loras).toEqual([
+        { sha256: TOVE.sha256, strength_model: 1 },
+        { sha256: MIRA.sha256, strength_model: 0.6 },
+      ]);
+      // The pre-flight is asked about the same people.
+      await wrapper.vm.runPreflight();
+      expect(preflightWorkflowRun.mock.calls.at(-1)[0].add_loras).toHaveLength(2);
+      // And a recipe saved from the run keeps both.
+      expect(wrapper.vm.recipeLoras.map((row) => row.sha256)).toEqual([
+        TOVE.sha256,
+        MIRA.sha256,
+      ]);
+    });
+
+    it("keeps people's rows ahead of a LoRA added by hand", async () => {
+      const wrapper = await mountRun(fromCard);
+      wrapper.vm.addLora();
+      wrapper.vm.addedLoras[0].sha256 = "s".repeat(64);
+      await tile(wrapper, 7).trigger("click");
+      await tile(wrapper, 9).trigger("click");
+      expect(rowsOf(wrapper)).toEqual([
+        [7, MIRA.sha256],
+        [9, TOVE.sha256],
+        [null, "s".repeat(64)],
+      ]);
+    });
+
+    it("takes a person's row away when they are picked again, and nobody else's", async () => {
+      const wrapper = await mountRun(fromCard);
+      await tile(wrapper, 7).trigger("click");
+      await tile(wrapper, 9).trigger("click");
+      await tile(wrapper, 7).trigger("click");
+      expect(checked(wrapper, 7)).toBe("false");
+      expect(rowsOf(wrapper)).toEqual([[9, TOVE.sha256]]);
+    });
+
+    it("unpicks the person whose row is taken off with its ×", async () => {
+      const wrapper = await mountRun(fromCard);
+      await tile(wrapper, 7).trigger("click");
+      await tile(wrapper, 9).trigger("click");
+      const remove = wrapper
+        .findAllComponents({ name: "AppBarButton" })
+        .find((c) => c.props("tooltip") === "Remove Mira's LoRA");
+      await remove.trigger("click");
+      expect(checked(wrapper, 7)).toBe("false");
+      expect(checked(wrapper, 9)).toBe("true");
+      expect(rowsOf(wrapper)).toEqual([[9, TOVE.sha256]]);
+    });
+
+    it("puts the keyboard on the tile when a person's row is taken off", async () => {
+      const wrapper = mount(RunDialog, {
+        props: { source: fromCard, context: {} },
+        attachTo: document.body,
+        ...globalOpts,
+      });
+      await flushPromises();
+      await tile(wrapper, 7).trigger("click");
+      wrapper.vm.removeAddedLora(0);
+      await flushPromises();
+      // The × is gone with its row; focus must not fall to the page.
+      expect(document.activeElement).toBe(tile(wrapper, 7).element);
+    });
+
+    it("offers each row that person's LoRAs, and keeps the one chosen", async () => {
+      const wrapper = await mountRun(fromCard);
+      await tile(wrapper, 7).trigger("click");
+      await tile(wrapper, 9).trigger("click");
+      const [mira, tove] = selects(wrapper);
+      expect(mira.props("label")).toBe("Mira's LoRA");
+      expect(mira.props("options").map((o) => o.value)).toEqual([MIRA.sha256]);
+      expect(tove.props("options").map((o) => o.value)).toEqual([
+        TOVE.sha256,
+        TOVE_ALT.sha256,
+      ]);
+      // Tove's other LoRA is still Tove's: the row is not put back to the first.
+      wrapper.vm.addedLoras[1].sha256 = TOVE_ALT.sha256;
+      await flushPromises();
+      expect(rowsOf(wrapper)).toEqual([
+        [7, MIRA.sha256],
+        [9, TOVE_ALT.sha256],
+      ]);
+    });
+
+    it("takes every pick off for No one", async () => {
+      const wrapper = await mountRun(fromCard);
+      await tile(wrapper, 7).trigger("click");
+      await tile(wrapper, 9).trigger("click");
+      await tile(wrapper, "null").trigger("click");
+      expect(checked(wrapper, "null")).toBe("true");
+      expect(wrapper.vm.addedLoras).toEqual([]);
+    });
+
+    it("never asks for one file twice when two people share a LoRA", async () => {
+      const SHARED = { ...MIRA, attachments: [...of(7), ...of(9)] };
+      listAdapters.mockImplementation(async ({ fileKind } = {}) =>
+        fileKind ? [] : [SHARED],
+      );
+      const wrapper = await mountRun(fromCard);
+      await tile(wrapper, 7).trigger("click");
+      await tile(wrapper, 9).trigger("click");
+      // Both are picked; the one loader is both people's.
+      expect(checked(wrapper, 9)).toBe("true");
+      expect(rowsOf(wrapper)).toEqual([[7, SHARED.sha256]]);
+      await wrapper.vm.submit();
+      expect(runWorkflowCard.mock.calls[0][0].add_loras).toHaveLength(1);
+      // Unpicking the row's person leaves the file to the other.
+      await tile(wrapper, 7).trigger("click");
+      expect(rowsOf(wrapper)).toEqual([[9, SHARED.sha256]]);
+    });
+
+    it("does not offer a row the file another person's row holds", async () => {
+      const SHARED = { ...MIRA, attachments: [...of(7), ...of(9)] };
+      listAdapters.mockImplementation(async ({ fileKind } = {}) =>
+        fileKind ? [] : [SHARED, TOVE],
+      );
+      const wrapper = await mountRun(fromCard);
+      await tile(wrapper, 7).trigger("click");
+      await tile(wrapper, 9).trigger("click");
+      expect(rowsOf(wrapper)).toEqual([
+        [7, SHARED.sha256],
+        [9, TOVE.sha256],
+      ]);
+      expect(selects(wrapper)[1].props("options").map((o) => o.value)).toEqual([
+        TOVE.sha256,
+      ]);
+    });
+  });
+
   it("is not offered on a recipe's run, which keeps its own LoRAs", async () => {
     const wrapper = await mountRun();
     expect(wrapper.find('[data-testid="rund-person"]').exists()).toBe(false);
@@ -3057,7 +3343,7 @@ describe("the person a workflow run alone is of", () => {
   it("offers no one on a workflow whose base model is not known", async () => {
     getWorkflowCard.mockResolvedValue({ card: card({ models: [] }) });
     const wrapper = await mountRun(fromCard);
-    expect(wrapper.find('[role="radio"]').exists()).toBe(false);
+    expect(wrapper.find('[role="checkbox"]').exists()).toBe(false);
     expect(wrapper.text()).toContain("This workflow's base model is not known");
   });
 
@@ -3109,6 +3395,136 @@ describe("the person a workflow run alone is of", () => {
       expect(suggestion(wrapper).exists()).toBe(false);
     });
 
+    it("is said by a region that was there before it, and unsaid once the word is typed", async () => {
+      const live = (wrapper) => wrapper.find('[data-testid="rund-trigger-live"]');
+      const wrapper = await mountRun(fromCard);
+      const region = live(wrapper).element;
+      expect(region.getAttribute("role")).toBe("status");
+      expect(region.textContent.trim()).toBe("");
+      await tile(wrapper, 7).trigger("click");
+      expect(region.textContent.trim()).toBe("Trigger word missing: Mira Vale.");
+      // The line comes and goes with the word, so it is not what says it: a
+      // reader is told of a change to a region, not of one arriving full.
+      expect(suggestion(wrapper).attributes("role")).toBeUndefined();
+      await typePrompt(wrapper, "mira vale on a beach");
+      expect(region.textContent.trim()).toBe("");
+      expect(live(wrapper).element).toBe(region);
+    });
+
+    describe("with several people picked", () => {
+      const person = (id, name, word) => ({
+        sha256: String(id).repeat(64),
+        filename: `${name.toLowerCase()}-sdxl.safetensors`,
+        base_model_family: "sdxl",
+        attachments: of(id),
+        trigger_words: word ? [word] : [],
+      });
+      const PEOPLE = [
+        [1, "Ada", "ada lovelace"],
+        [2, "Bea", "beaxyz"],
+        [3, "Cyd", "cyd"],
+        [4, "Dot", "dotty"],
+      ];
+      const buttons = (wrapper) => suggestion(wrapper).findAll("button");
+      const pick = async (wrapper, ids) => {
+        for (const id of ids) await tile(wrapper, id).trigger("click");
+      };
+
+      beforeEach(() => {
+        listCharacters.mockResolvedValue(PEOPLE.map(([id, name]) => ({ id, name })));
+        listAdapters.mockImplementation(async ({ fileKind } = {}) =>
+          fileKind ? [] : PEOPLE.map((row) => person(...row)),
+        );
+      });
+
+      it("offers one button for each word the prompt lacks, named for whose it is", async () => {
+        const wrapper = await mountRun(fromCard);
+        await pick(wrapper, [2, 1]);
+        await typePrompt(wrapper, "two friends on a beach");
+        expect(suggestion(wrapper).text()).toContain("Trigger word missing");
+        // In the order picked, each labelled with the word it adds.
+        expect(buttons(wrapper).map((b) => b.text())).toEqual([
+          "Add beaxyz",
+          "Add ada lovelace",
+        ]);
+        const names = ["Add beaxyz, Bea's trigger word", "Add ada lovelace, Ada's trigger word"];
+        expect(buttons(wrapper).map((b) => b.attributes("aria-label"))).toEqual(names);
+        const tips = suggestion(wrapper).findAllComponents({ name: "Tooltip" });
+        expect(tips.map((tip) => tip.props("text"))).toEqual(names);
+        // The name already says it: the tip must not describe it again.
+        expect(tips.every((tip) => tip.props("describe") === false)).toBe(true);
+        // Every picked person's word is marked in the box, not only the first.
+        expect(box(wrapper).props("highlight")).toEqual(["beaxyz", "ada lovelace"]);
+
+        await buttons(wrapper)[1].trigger("click");
+        expect(wrapper.vm.prompt).toBe("ada lovelace, two friends on a beach");
+        expect(buttons(wrapper).map((b) => b.text())).toEqual(["Add beaxyz"]);
+        await buttons(wrapper)[0].trigger("click");
+        expect(wrapper.vm.prompt).toBe("beaxyz, ada lovelace, two friends on a beach");
+        // The line goes with the last word.
+        expect(suggestion(wrapper).exists()).toBe(false);
+      });
+
+      it("keeps a button each up to three words, and one for all of them past that", async () => {
+        const wrapper = await mountRun(fromCard);
+        await pick(wrapper, [1, 2, 3]);
+        expect(buttons(wrapper)).toHaveLength(3);
+        await pick(wrapper, [4]);
+        expect(buttons(wrapper).map((b) => b.text())).toEqual(["Add all 4"]);
+        expect(buttons(wrapper)[0].attributes("aria-label")).toBe(
+          "Add all 4 missing trigger words: ada lovelace, beaxyz, cyd, dotty",
+        );
+        await typePrompt(wrapper, "at a table");
+        await buttons(wrapper)[0].trigger("click");
+        expect(wrapper.vm.prompt).toBe("ada lovelace, beaxyz, cyd, dotty, at a table");
+        expect(suggestion(wrapper).exists()).toBe(false);
+      });
+
+      it("counts the words still missing, not the people picked", async () => {
+        const wrapper = await mountRun(fromCard);
+        await pick(wrapper, [1, 2, 3, 4]);
+        await typePrompt(wrapper, "Cyd at a table");
+        expect(buttons(wrapper).map((b) => b.text())).toEqual([
+          "Add ada lovelace",
+          "Add beaxyz",
+          "Add dotty",
+        ]);
+      });
+
+      it("asks once for a word two people's LoRAs share", async () => {
+        listAdapters.mockImplementation(async ({ fileKind } = {}) =>
+          fileKind ? [] : [person(1, "Ada", "twins"), person(2, "Bea", "Twins")],
+        );
+        const wrapper = await mountRun(fromCard);
+        await pick(wrapper, [1, 2]);
+        expect(buttons(wrapper).map((b) => b.text())).toEqual(["Add twins"]);
+      });
+
+      it("hands the prompt box the keyboard after a word is added", async () => {
+        const focus = vi.fn();
+        const wrapper = mount(RunDialog, {
+          props: { source: fromCard, context: {} },
+          global: {
+            stubs: {
+              ...globalOpts.global.stubs,
+              AppTextarea: {
+                name: "AppTextarea",
+                props: ["label", "highlight", "modelValue"],
+                template: "<textarea />",
+                methods: { focus },
+              },
+            },
+          },
+        });
+        await flushPromises();
+        await pick(wrapper, [1, 2]);
+        await buttons(wrapper)[0].trigger("click");
+        // One word is still missing, and the keyboard is in the box all the same.
+        expect(buttons(wrapper)).toHaveLength(1);
+        expect(focus).toHaveBeenCalledTimes(1);
+      });
+    });
+
     it("says nothing for a LoRA that needs no trigger word", async () => {
       listAdapters.mockImplementation(async ({ fileKind } = {}) =>
         fileKind ? [] : [{ ...MIRA, trigger_words: [], trigger_words_source: "recorded" }],
@@ -3147,107 +3563,1890 @@ describe("Add LoRA", () => {
   });
 });
 
-describe("Save fixed workflow", () => {
-  const saveButton = (wrapper) =>
-    wrapper.findAll("button").find((b) => b.text() === "Save fixed workflow");
-  const swapping = {
-    ok: true,
-    runs: 1,
-    groups: [
-      {
-        reasons: [],
-        swapped_loaders: [
+
+// ── Save what you ran (#1850) ────────────────────────────────────────────
+//
+// The popup counts what differs from the workflow it runs and offers to keep
+// it. What can silently go wrong here is all of one kind: the band, the run
+// and the save reading three different things. So most of this asserts that
+// they read ONE (`formChanges`), and the rest that nothing is written unless
+// one of the band's two buttons is pressed.
+describe("Save what you ran", () => {
+  const CKPT = "core:CheckpointLoader/ckpt_name";
+  const VAE = "core:VAELoader/vae_name";
+  const MIRA_SHA = "s".repeat(64);
+  const GRAIN_SHA = "t".repeat(64);
+  const fromCard = { kind: "card", workflowId: KEY };
+  const ownCard = (overrides = {}) =>
+    card({
+      specials: ["upscale", "face_detailer"],
+      default_recipe: {
+        sampled: 12,
+        models: [
+          { address: CKPT, kind: "checkpoint", filename: "realvisXL_v5.safetensors" },
+          { address: VAE, kind: "vae", filename: "sdxl_vae.safetensors" },
+        ],
+        loras: [
+          { filename: "mira_v2.safetensors", sha256: MIRA_SHA, strength: 0.6 },
+          { filename: "loras/film-grain-35mm.safetensors", sha256: GRAIN_SHA, strength: 0.4 },
+        ],
+        values: [],
+        stages: { upscale: true, face_detailer: false },
+      },
+      ...overrides,
+    });
+  const loader = (node, filename, sha256, strength, clip = strength) => ({
+    node_id: node,
+    field: "lora_name",
+    filename,
+    name: filename,
+    strength,
+    strength_clip: clip,
+    sha256,
+    on_shelf: true,
+  });
+  const CHAIN = {
+    loaders: [
+      // The graph has it at 0.8; the default recipe, which is what runs, at 0.6.
+      loader("7", "mira_v2.safetensors", MIRA_SHA, 0.8),
+      loader("8", "loras/film-grain-35mm.safetensors", GRAIN_SHA, 0.4),
+      // In the graph and not in the default recipe: a run bypasses it.
+      loader("9", "example-person.safetensors", "p".repeat(64), 1),
+    ],
+    lanes: [],
+  };
+  const band = (wrapper) => wrapper.find('[data-testid="rund-band"]');
+  const button = (wrapper, text) =>
+    wrapper.findAll("button").find((b) => b.text().trim() === text);
+  const field = (wrapper, name) =>
+    wrapper.vm.defaults.find((entry) => entry.input_name === name);
+  const said = (wrapper) => band(wrapper).text().replace(/\s+/g, " ");
+  /** Every call of the save route that would have written something. */
+  const writes = () => saveWorkflow.mock.calls.filter(([, body]) => !body?.dry_run);
+  const refusal = (status, detail) => ({ response: { status, data: { detail } } });
+  /** A read or a write the test answers when it chooses. */
+  function held() {
+    let resolve, reject;
+    const promise = new Promise((yes, no) => {
+      resolve = yes;
+      reject = no;
+    });
+    return { promise, resolve, reject };
+  }
+  /** The save's POST held open; the dry run that asks which verbs are open is not. */
+  function heldSave() {
+    const post = held();
+    saveWorkflow.mockImplementation((_key, body) =>
+      body?.dry_run ? Promise.resolve({ save: OPEN, save_as_new: OPEN }) : post.promise,
+    );
+    return post;
+  }
+  const runButton = (wrapper) =>
+    wrapper.findAll("button").find((b) => b.text().trim().startsWith("Run"));
+  /** The sentence the Run button points a reader at, or "". */
+  const runWhy = (wrapper) => {
+    const id = runButton(wrapper).attributes("aria-describedby");
+    return id ? wrapper.find(`[id="${id}"]`).text() : "";
+  };
+  /** The workflow as it reads once Steps 32 on another checkpoint is saved to it. */
+  const savedCard = async (key) => {
+    const own = ownCard({
+      id: key,
+      defaults: card().defaults.map((entry) =>
+        entry.input_name === "steps" ? { ...entry, value: 32 } : entry,
+      ),
+    });
+    own.default_recipe.models[0].filename = "juggernautXL.safetensors";
+    return { card: own };
+  };
+  // Buttons and fields that take focus, in a popup that is in the document:
+  // where the keyboard is can only be asked of those.
+  const focusable = {
+    AppButton: {
+      props: ["disabled"],
+      template: "<button :disabled='disabled'><slot /></button>",
+      methods: {
+        focus() {
+          this.$el.focus();
+        },
+      },
+    },
+    AppInput: {
+      name: "AppInput",
+      props: ["modelValue", "label", "ariaLabel"],
+      emits: ["update:modelValue", "enter"],
+      template:
+        "<input :value='modelValue' :aria-label='label || ariaLabel' @input=\"$emit('update:modelValue', $event.target.value)\" />",
+      methods: {
+        focus() {
+          this.$el.focus();
+        },
+        select() {},
+      },
+    },
+  };
+  async function mountFocusable() {
+    const wrapper = mount(RunDialog, {
+      props: { source: fromCard, context: {} },
+      attachTo: document.body,
+      global: { stubs: { ...globalOpts.global.stubs, ...focusable } },
+    });
+    await flushPromises();
+    return wrapper;
+  }
+  const nameBox = (wrapper) =>
+    wrapper.find('input[aria-label="Name of the new workflow"]');
+
+  /** Three changes, one of each kind the mock-up shows. */
+  async function changeThree(wrapper) {
+    wrapper.vm.pickCheckpoint("juggernautXL.safetensors");
+    await wrapper.vm.skipGraphLora(wrapper.vm.loras[1]);
+    wrapper.vm.setValue(field(wrapper, "steps"), 32);
+    await flushPromises();
+  }
+
+  beforeEach(() => {
+    getWorkflowCard.mockImplementation(async (key) => ({ card: ownCard({ id: key }) }));
+    getLoraChain.mockResolvedValue(CHAIN);
+  });
+
+  describe("the band", () => {
+    it("is absent on a plain run, which asks the server nothing about saving", async () => {
+      const wrapper = await mountRun(fromCard);
+      expect(band(wrapper).exists()).toBe(false);
+      expect(wrapper.vm.band.count).toBe(0);
+      await wrapper.vm.submit();
+      expect(saveWorkflow).not.toHaveBeenCalled();
+    });
+
+    it("counts what differs from the workflow and names it", async () => {
+      const wrapper = await mountRun(fromCard);
+      await changeThree(wrapper);
+      expect(said(wrapper)).toContain("3 changes from the workflow");
+      expect(band(wrapper).find(".rund-band-list").text()).toBe(
+        "Checkpoint, 1 LoRA removed, Steps.",
+      );
+      // What stays with the run is a line of its own, which is never cut.
+      expect(band(wrapper).find(".rund-band-stays").text()).toBe(
+        "Prompt, seed, count and the people picked stay with the run.",
+      );
+      // Neutral, small, and beside them nothing amber: Run stays the one.
+      expect(button(wrapper, "Save")).toBeTruthy();
+      expect(button(wrapper, "Save as new…")).toBeTruthy();
+    });
+
+    it("says one change in the singular", async () => {
+      const wrapper = await mountRun(fromCard);
+      await wrapper.vm.setStage("upscale", false);
+      await flushPromises();
+      expect(said(wrapper)).toContain("1 change from the workflow");
+      expect(said(wrapper)).toContain("Upscale off.");
+    });
+
+    it("never counts what belongs to the run", async () => {
+      const wrapper = await mountRun(fromCard);
+      wrapper.vm.prompt = "another prompt";
+      wrapper.vm.count = 4;
+      wrapper.vm.seedMode = "fixed";
+      wrapper.vm.seed = "7";
+      wrapper.vm.addLora();
+      wrapper.vm.addedLoras[0].sha256 = MIRA_SHA;
+      await flushPromises();
+      expect(band(wrapper).exists()).toBe(false);
+      expect(wrapper.vm.formChanges).toEqual({
+        models: [],
+        loras: [],
+        skip_loras: [],
+        stages: {},
+        values: [],
+      });
+
+      // Beside a real change, the added LoRA is named as staying with the run.
+      wrapper.vm.setValue(field(wrapper, "steps"), 32);
+      await flushPromises();
+      expect(said(wrapper)).toContain("1 change from the workflow");
+      expect(band(wrapper).find(".rund-band-list").text()).toBe("Steps.");
+      expect(band(wrapper).find(".rund-band-stays").text()).toBe(
+        "Prompt, seed, count, the people picked and the LoRA added here stay with the run.",
+      );
+      expect(wrapper.vm.saveChanges.loras).toEqual([]);
+    });
+
+    it("counts a Size once and sends both of its numbers", async () => {
+      const wrapper = await mountRun(fromCard);
+      wrapper.vm.setValue(field(wrapper, "width"), 1024);
+      await flushPromises();
+      expect(said(wrapper)).toContain("1 change from the workflow");
+      expect(said(wrapper)).toContain("Size.");
+      expect(wrapper.vm.formChanges.values).toEqual([
+        { slot_label: "EmptyLatentImage", input_name: "width", value: 1024 },
+        { slot_label: "EmptyLatentImage", input_name: "height", value: 1216 },
+      ]);
+    });
+
+    it("is not offered on a picture's own run, which is a recipe laid over the workflow", async () => {
+      const wrapper = await mountRun();
+      wrapper.vm.setValue(field(wrapper, "steps"), 32);
+      await flushPromises();
+      expect(band(wrapper).exists()).toBe(false);
+      expect(getWorkflowChanges).not.toHaveBeenCalled();
+      expect(saveWorkflow).not.toHaveBeenCalled();
+    });
+
+    it("is not offered on a saved recipe's run", async () => {
+      const wrapper = await mountRun({
+        kind: "card",
+        workflowId: KEY,
+        savedRecipe: { id: 4, name: "Rainy", prompt: "rain", overrides: { "KSampler/steps": 30 } },
+      });
+      expect(wrapper.vm.isEdited(field(wrapper, "steps"))).toBe(true);
+      expect(band(wrapper).exists()).toBe(false);
+      expect(getWorkflowChanges).not.toHaveBeenCalled();
+    });
+
+    it("is not offered where what waits on the workflow could not be read", async () => {
+      getWorkflowChanges.mockRejectedValue(new Error("offline"));
+      const wrapper = await mountRun(fromCard);
+      wrapper.vm.setValue(field(wrapper, "steps"), 32);
+      await flushPromises();
+      expect(band(wrapper).exists()).toBe(false);
+    });
+
+    it("says its arrival once, in words that do not move with the count", async () => {
+      const wrapper = await mountRun(fromCard);
+      expect(wrapper.vm.bandLive).toBe("");
+      wrapper.vm.setValue(field(wrapper, "steps"), 32);
+      await flushPromises();
+      const arrival = wrapper.vm.bandLive;
+      expect(arrival).toContain("differs from the workflow");
+      wrapper.vm.setValue(field(wrapper, "cfg"), 4);
+      wrapper.vm.setValue(field(wrapper, "steps"), 33);
+      await flushPromises();
+      expect(wrapper.vm.bandLive).toBe(arrival);
+    });
+  });
+
+  describe("one reading of the form", () => {
+    it("sends in the run everything the band would save", async () => {
+      const wrapper = await mountRun(fromCard);
+      await changeThree(wrapper);
+      wrapper.vm.loras[0].strength = 0.9;
+      await wrapper.vm.setStage("upscale", false);
+      await wrapper.vm.setStage("face_detailer", true);
+      wrapper.vm.pickModel(wrapper.vm.modelRows[0], "ae.safetensors");
+      await flushPromises();
+      const changes = wrapper.vm.formChanges;
+      expect(wrapper.vm.band.count).toBe(7);
+
+      await wrapper.vm.submit();
+      const body = runWorkflowCard.mock.calls[0][0];
+      expect(body.models).toEqual(expect.arrayContaining(changes.models));
+      expect(changes.models).toEqual([
+        { address: CKPT, filename: "juggernautXL.safetensors" },
+        { address: VAE, filename: "ae.safetensors" },
+      ]);
+      expect(body.loras).toEqual(changes.loras);
+      expect(body.skip_loras).toEqual(changes.skip_loras);
+      expect(body.skip_stages).toEqual(["upscale"]);
+      expect(body.keep_stages).toEqual(["face_detailer"]);
+      expect(changes.stages).toEqual({ upscale: false, face_detailer: true });
+      for (const value of changes.values) expect(body.values).toContainEqual(value);
+      // The pre-flight is asked about the same run.
+      expect(preflightWorkflowRun.mock.calls.at(-1)[0].skip_loras).toEqual(
+        changes.skip_loras,
+      );
+    });
+
+    it("saves only the parameters the owner changed, though the run sends them all", async () => {
+      const wrapper = await mountRun(fromCard);
+      wrapper.vm.setValue(field(wrapper, "steps"), 32);
+      await flushPromises();
+      await button(wrapper, "Save").trigger("click");
+      await flushPromises();
+      expect(writes()[0][1].changes.values).toEqual([
+        { slot_label: "KSampler", input_name: "steps", value: 32 },
+      ]);
+      await wrapper.vm.submit();
+      expect(runWorkflowCard.mock.calls[0][0].values.length).toBeGreaterThan(1);
+    });
+  });
+
+  describe("which verbs are open", () => {
+    const CLOSED = {
+      open: false,
+      reason: "A checkpoint change is saved as a new workflow.",
+    };
+
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    });
+    afterEach(() => vi.useRealTimers());
+
+    const settle = async () => {
+      await vi.advanceTimersByTimeAsync(400);
+      await flushPromises();
+    };
+
+    it("is asked of the server, as a dry run of the very save, a beat after the edit", async () => {
+      const wrapper = await mountRun(fromCard);
+      // Three keystrokes, each seen by the form before the next.
+      for (const typed of [30, 31, 32]) {
+        wrapper.vm.setValue(field(wrapper, "steps"), typed);
+        await flushPromises();
+      }
+      // Not per keystroke.
+      expect(saveWorkflow).not.toHaveBeenCalled();
+      await settle();
+      expect(saveWorkflow).toHaveBeenCalledTimes(1);
+      expect(saveWorkflow).toHaveBeenCalledWith(KEY, {
+        changes: wrapper.vm.saveChanges,
+        version: 3,
+        dry_run: true,
+      });
+    });
+
+    it("prints the server's reason for a closed Save, and does not send one", async () => {
+      saveWorkflow.mockResolvedValue({ dry_run: true, save: CLOSED, save_as_new: OPEN });
+      const wrapper = await mountRun(fromCard);
+      wrapper.vm.pickCheckpoint("juggernautXL.safetensors");
+      await settle();
+      const why = wrapper.find('[data-testid="rund-band-why"]');
+      // As sent: the rule is the server's and is not reworded here.
+      expect(why.text()).toBe(CLOSED.reason);
+      const save = button(wrapper, "Save");
+      // Reachable, with its reason: never a dead grey button with no words.
+      expect(save.attributes("disabled")).toBeUndefined();
+      expect(save.attributes("aria-disabled")).toBe("true");
+      expect(save.attributes("aria-describedby")).toBe(why.attributes("id"));
+      await save.trigger("click");
+      await flushPromises();
+      expect(writes()).toEqual([]);
+      // Save as new… is still open.
+      expect(button(wrapper, "Save as new…").attributes("aria-disabled")).toBeUndefined();
+    });
+
+    it("keeps the newest answer when an older one lands after it", async () => {
+      const answers = [];
+      saveWorkflow.mockImplementation(
+        () => new Promise((resolve) => answers.push(resolve)),
+      );
+      const wrapper = await mountRun(fromCard);
+      wrapper.vm.pickCheckpoint("juggernautXL.safetensors");
+      await settle();
+      wrapper.vm.pickCheckpoint("realvisXL_v5.safetensors");
+      wrapper.vm.setValue(field(wrapper, "steps"), 32);
+      await settle();
+      expect(answers).toHaveLength(2);
+      // The newer question (steps alone) is answered first, the older last.
+      answers[1]({ dry_run: true, save: OPEN, save_as_new: OPEN });
+      await flushPromises();
+      answers[0]({ dry_run: true, save: CLOSED, save_as_new: OPEN });
+      await flushPromises();
+      expect(wrapper.vm.saveClosed).toBe("");
+      expect(wrapper.find('[data-testid="rund-band-why"]').exists()).toBe(false);
+    });
+  });
+
+  describe("Save", () => {
+    it("writes what the band names, against the version the popup read", async () => {
+      const wrapper = await mountRun(fromCard);
+      await changeThree(wrapper);
+      await button(wrapper, "Save").trigger("click");
+      await flushPromises();
+      expect(writes()).toEqual([
+        [
+          KEY,
           {
-            node_id: "7",
-            class_type: "LoraLoader",
-            file: "loras/example-subject.safetensors",
-            sha256: "s".repeat(64),
+            changes: {
+              models: [{ address: CKPT, filename: "juggernautXL.safetensors" }],
+              loras: [],
+              skip_loras: [{ node_id: "8", field: "lora_name" }],
+              stages: {},
+              values: [{ slot_label: "KSampler", input_name: "steps", value: 32 }],
+            },
+            version: 3,
           },
         ],
-      },
-    ],
-  };
-
-  it("is not offered when the run changes no node", async () => {
-    const wrapper = await mountRun({ kind: "card", workflowId: KEY });
-    expect(saveButton(wrapper)).toBeUndefined();
-  });
-
-  it("is offered when a loader is swapped, and says why", async () => {
-    preflightWorkflowRun.mockResolvedValue(swapping);
-    const wrapper = await mountRun({ kind: "card", workflowId: KEY });
-    expect(saveButton(wrapper)).toBeTruthy();
-    expect(wrapper.vm.bypassed.map((note) => note.code)).toContain(
-      "loras_fetched",
-    );
-  });
-
-  it("saves a copy and moves the popup onto it", async () => {
-    preflightWorkflowRun.mockResolvedValueOnce(swapping);
-    saveFixedWorkflow.mockResolvedValue({
-      name: "Cinematic portrait (fixed).json",
-      workflow_id: OTHER,
-      changes: [
-        "Loads example-subject through the ComfyUI-PixlStash LoRA loader.",
-      ],
+      ]);
     });
-    const wrapper = await mountRun({ kind: "card", workflowId: KEY });
-    await saveButton(wrapper).trigger("click");
-    await flushPromises();
-    expect(saveFixedWorkflow).toHaveBeenCalledWith(KEY);
-    expect(getWorkflowCard).toHaveBeenLastCalledWith(OTHER);
-    expect(wrapper.text()).toContain("Saved as Cinematic portrait (fixed).");
-    // The copy loads the LoRA as saved, so nothing is left to fix.
-    expect(saveButton(wrapper)).toBeUndefined();
+
+    it("re-reads the workflow, so the chips go and the run's own fields stay", async () => {
+      const wrapper = await mountRun(fromCard);
+      wrapper.vm.prompt = "a rainy tram platform";
+      wrapper.vm.count = 4;
+      wrapper.vm.seedMode = "fixed";
+      wrapper.vm.seed = "99";
+      wrapper.vm.setValue(field(wrapper, "steps"), 32);
+      await flushPromises();
+      expect(wrapper.findAllComponents({ name: "RunResetChip" }).length).toBeGreaterThan(0);
+
+      // What the workflow holds once the save has landed.
+      getWorkflowCard.mockImplementation(async (key) => ({
+        card: ownCard({
+          id: key,
+          defaults: card().defaults.map((entry) =>
+            entry.input_name === "steps" ? { ...entry, value: 32 } : entry,
+          ),
+        }),
+      }));
+      getWorkflowChanges.mockImplementation(async (id) => changesOf(id, { version: 4 }));
+      const reads = getWorkflowCard.mock.calls.length;
+      await button(wrapper, "Save").trigger("click");
+      await flushPromises();
+
+      // The baseline was read again, not merely hidden.
+      expect(getWorkflowCard.mock.calls.length).toBe(reads + 1);
+      expect(wrapper.vm.baseOf(field(wrapper, "steps"))).toBe(32);
+      // Only the prompt keeps its chip: it is the run's, and was not saved.
+      expect(
+        wrapper.findAllComponents({ name: "RunResetChip" }).map((c) => c.props("label")),
+      ).toEqual(["Prompt"]);
+      expect(band(wrapper).exists()).toBe(false);
+      expect(wrapper.find('[data-testid="rund-band-done"]').text()).toBe(
+        "Saved to this workflow.",
+      );
+      // Still open, on the same workflow, with what the owner typed for the run.
+      expect(wrapper.emitted("close")).toBeUndefined();
+      expect(wrapper.vm.activeKey).toBe(KEY);
+      expect(wrapper.vm.prompt).toBe("a rainy tram platform");
+      expect(wrapper.vm.count).toBe(4);
+      expect(wrapper.vm.seed).toBe("99");
+      // The next save is made against the version this one wrote.
+      expect(wrapper.vm.changesState.version).toBe(4);
+      // The Workflow tab and the Tasks tab are told.
+      expect(useRunDialogStore().saved).toMatchObject({ workflowId: KEY, savedAs: "" });
+    });
+
+    it("builds the LoRA rows anew, so a saved removal or strength is not counted again", async () => {
+      const wrapper = await mountRun(fromCard);
+      wrapper.vm.loras[0].strength = 0.9;
+      await wrapper.vm.skipGraphLora(wrapper.vm.loras[1]);
+      await flushPromises();
+      expect(wrapper.vm.formChanges.loras).toHaveLength(1);
+      expect(wrapper.vm.formChanges.skip_loras).toHaveLength(1);
+
+      // What the workflow holds once the save has landed: loader 7 at 0.9 in
+      // the graph and the default recipe, loader 8 gone from both.
+      getWorkflowCard.mockImplementation(async (key) => {
+        const own = ownCard({ id: key });
+        own.default_recipe.loras = [
+          { filename: "mira_v2.safetensors", sha256: MIRA_SHA, strength: 0.9 },
+        ];
+        return { card: own };
+      });
+      getLoraChain.mockResolvedValue({
+        loaders: [loader("7", "mira_v2.safetensors", MIRA_SHA, 0.9)],
+        lanes: [],
+      });
+      await button(wrapper, "Save").trigger("click");
+      await flushPromises();
+
+      expect(wrapper.vm.loras.map((row) => [row.node_id, row.strength, row.skipped])).toEqual([
+        ["7", 0.9, false],
+      ]);
+      expect(wrapper.vm.formChanges.loras).toEqual([]);
+      expect(wrapper.vm.formChanges.skip_loras).toEqual([]);
+      expect(band(wrapper).exists()).toBe(false);
+    });
+
+    it("leaves nothing for the close guard to protect", async () => {
+      const wrapper = await mountRun(fromCard);
+      wrapper.vm.setValue(field(wrapper, "steps"), 32);
+      await flushPromises();
+      expect(wrapper.vm.dirty).toBe(true);
+      await button(wrapper, "Save").trigger("click");
+      await flushPromises();
+      expect(wrapper.vm.dirty).toBe(false);
+    });
+
+    it("prints the server's sentence when the save is refused, and keeps the changes", async () => {
+      const wrapper = await mountRun(fromCard);
+      wrapper.vm.setValue(field(wrapper, "steps"), 32);
+      await flushPromises();
+      saveWorkflow.mockRejectedValue(
+        refusal(409, "This workflow got a newer version since these changes were made."),
+      );
+      await button(wrapper, "Save").trigger("click");
+      await flushPromises();
+      expect(band(wrapper).find('[role="alert"]').text()).toBe(
+        "This workflow got a newer version since these changes were made.",
+      );
+      expect(wrapper.vm.isEdited(field(wrapper, "steps"))).toBe(true);
+      expect(useRunDialogStore().saved).toBeNull();
+    });
+
+    it("says ComfyUI did not answer on a 503", async () => {
+      const wrapper = await mountRun(fromCard);
+      await wrapper.vm.skipGraphLora(wrapper.vm.loras[0]);
+      await flushPromises();
+      saveWorkflow.mockRejectedValue(refusal(503, "upstream said something else"));
+      await button(wrapper, "Save").trigger("click");
+      await flushPromises();
+      expect(band(wrapper).find('[role="alert"]').text()).toContain(
+        "ComfyUI did not answer, so nothing was saved.",
+      );
+    });
   });
 
-  it("does not count a swap for a LoRA the form asked for", async () => {
-    preflightWorkflowRun.mockResolvedValue({
-      ...swapping,
+  describe("Save as new…", () => {
+
+    it("turns the band into its one question, and Back gives the band back", async () => {
+      const wrapper = await mountFocusable();
+      wrapper.vm.pickCheckpoint("juggernautXL.safetensors");
+      await flushPromises();
+      await button(wrapper, "Save as new…").trigger("click");
+      await flushPromises();
+
+      expect(document.activeElement).toBe(nameBox(wrapper).element);
+      // Named for what changed, never for where it came from.
+      expect(nameBox(wrapper).element.value).toBe("Cinematic portrait (juggernautXL)");
+      expect(nameBox(wrapper).element.value).not.toMatch(/copy|clone|fixed|edited/i);
+      expect(button(wrapper, "Save")).toBeUndefined();
+
+      await button(wrapper, "Back").trigger("click");
+      await flushPromises();
+      expect(nameBox(wrapper).exists()).toBe(false);
+      expect(document.activeElement).toBe(button(wrapper, "Save as new…").element);
+      expect(saveWorkflowAsNew).not.toHaveBeenCalled();
+    });
+
+    it("offers a name with the picked checkpoint as its picker shows it", async () => {
+      readModelSwap.mockImplementation(async (_key, { slotKind }) =>
+        slotKind === "checkpoint"
+          ? {
+              replacements: [
+                { id: 7, filename: "juggernautXL_v9.safetensors", display_name: "Juggernaut XL v9" },
+              ],
+            }
+          : { replacements: [] },
+      );
+      const wrapper = await mountFocusable();
+      wrapper.vm.pickCheckpoint("juggernautXL_v9.safetensors");
+      await flushPromises();
+      await button(wrapper, "Save as new…").trigger("click");
+      await flushPromises();
+      // The name the owner just picked it by, not the file read as a name.
+      expect(nameBox(wrapper).element.value).toBe("Cinematic portrait (Juggernaut XL v9)");
+    });
+
+    it("stores the changes under the name given and moves the popup onto the new workflow", async () => {
+      saveWorkflowAsNew.mockResolvedValue({
+        workflow_id: OTHER,
+        name: "Portrait on Juggernaut",
+        new_workflow: true,
+        version: 1,
+      });
+      const wrapper = await mountFocusable();
+      await changeThree(wrapper);
+      const changes = JSON.parse(JSON.stringify(wrapper.vm.saveChanges));
+      await button(wrapper, "Save as new…").trigger("click");
+      await flushPromises();
+      await nameBox(wrapper).setValue("  Portrait on Juggernaut ");
+      await button(wrapper, "Save as new workflow").trigger("click");
+      await flushPromises();
+
+      expect(saveWorkflowAsNew).toHaveBeenCalledWith(KEY, {
+        name: "Portrait on Juggernaut",
+        changes,
+      });
+      // Nothing was written over the workflow it was opened on.
+      expect(writes()).toEqual([]);
+      expect(wrapper.vm.activeKey).toBe(OTHER);
+      expect(getWorkflowCard).toHaveBeenLastCalledWith(OTHER);
+      // The new workflow holds the changes: none is an edit of it.
+      expect(wrapper.vm.band.count).toBe(0);
+      expect(wrapper.find('[data-testid="rund-band-done"]').text()).toBe(
+        "Saved as Portrait on Juggernaut.",
+      );
+      expect(document.activeElement).toBe(
+        wrapper.find('[data-testid="rund-band-done"]').element,
+      );
+      expect(useRunDialogStore().saved).toMatchObject({ workflowId: KEY, savedAs: OTHER });
+    });
+
+    it("asks for a name before it sends anything", async () => {
+      const wrapper = await mountFocusable();
+      wrapper.vm.setValue(field(wrapper, "steps"), 32);
+      await flushPromises();
+      await button(wrapper, "Save as new…").trigger("click");
+      await flushPromises();
+      await nameBox(wrapper).setValue("   ");
+      await button(wrapper, "Save as new workflow").trigger("click");
+      await flushPromises();
+      expect(saveWorkflowAsNew).not.toHaveBeenCalled();
+      expect(button(wrapper, "Save as new workflow").attributes("aria-disabled")).toBe(
+        "true",
+      );
+    });
+
+    it("keeps the keyboard in the name while the save is out, and beside its refusal", async () => {
+      const post = held();
+      saveWorkflowAsNew.mockReturnValue(post.promise);
+      const wrapper = await mountFocusable();
+      wrapper.vm.setValue(field(wrapper, "steps"), 32);
+      await flushPromises();
+      await button(wrapper, "Save as new…").trigger("click");
+      await flushPromises();
+      await nameBox(wrapper).setValue("Taken");
+      // Sent with Enter, from the field.
+      const send = (popup) =>
+        popup
+          .findAllComponents({ name: "AppInput" })
+          .find((input) => input.element === nameBox(popup).element)
+          .vm.$emit("enter");
+      send(wrapper);
+      await flushPromises();
+      expect(wrapper.vm.saving).toBe("new");
+
+      // Read-only, so the name sent is the name shown; never disabled, which
+      // cannot hold focus. Nor is it in the part of the popup that goes inert
+      // for the save, which could not hold it either.
+      expect(nameBox(wrapper).element.disabled).toBe(false);
+      expect(nameBox(wrapper).element.readOnly).toBe(true);
+      expect(wrapper.find(".rund").element.hasAttribute("inert")).toBe(true);
+      expect(nameBox(wrapper).element.closest("[inert]")).toBeNull();
+      expect(document.activeElement).toBe(nameBox(wrapper).element);
+      // Escape still reaches a field that has the keys, and does not walk
+      // away from a save that is out.
+      await nameBox(wrapper).trigger("keydown", { key: "Escape" });
+      expect(nameBox(wrapper).exists()).toBe(true);
+
+      const refused = () => band(wrapper).find('[role="alert"]');
+      post.reject(refusal(409, "A workflow is already called Taken."));
+      await flushPromises();
+      expect(refused().text()).toBe("A workflow is already called Taken.");
+      expect(nameBox(wrapper).element.readOnly).toBe(false);
+      expect(document.activeElement).toBe(nameBox(wrapper).element);
+
+      // Refused again in the same words: the line is taken down while the
+      // save is out and put up anew, which is what makes an alert speak twice.
+      const once = refused().element;
+      const again = held();
+      saveWorkflowAsNew.mockReturnValue(again.promise);
+      send(wrapper);
+      await flushPromises();
+      expect(refused().exists()).toBe(false);
+      again.reject(refusal(409, "A workflow is already called Taken."));
+      await flushPromises();
+      expect(refused().text()).toBe("A workflow is already called Taken.");
+      expect(refused().element).not.toBe(once);
+      expect(document.activeElement).toBe(nameBox(wrapper).element);
+    });
+  });
+
+  describe("Save as new…, and what is the run's", () => {
+    it("keeps the pictures picked for this run, as Save does", async () => {
+      const row = {
+        slot_label: "LoadImage",
+        input_name: "image",
+        title: "Start frame",
+        mode: "picker",
+        fill: "request",
+        picture_id: 9,
+      };
+      preflightWorkflowRun.mockResolvedValue({
+        ok: true,
+        runs: 1,
+        groups: [{ reasons: [], picture_inputs: [row] }],
+      });
+      saveWorkflowAsNew.mockResolvedValue({ workflow_id: OTHER, name: "Mine" });
+      const wrapper = await mountRun(fromCard);
+      wrapper.vm.pickerFor = row;
+      await wrapper.vm.onPicked({ id: 9 });
+      wrapper.vm.setValue(field(wrapper, "steps"), 32);
+      await flushPromises();
+      const pick = { slot_label: "LoadImage", input_name: "image", picture_id: 9 };
+      expect(Object.values(wrapper.vm.picks)).toEqual([pick]);
+
+      await button(wrapper, "Save as new…").trigger("click");
+      wrapper.vm.newName = "Mine";
+      await wrapper.vm.saveAsNew();
+      await flushPromises();
+
+      // The new workflow is this graph, slots and all: the pick is still its.
+      expect(wrapper.vm.activeKey).toBe(OTHER);
+      expect(Object.values(wrapper.vm.picks)).toEqual([pick]);
+      expect(preflightWorkflowRun.mock.calls.at(-1)[0]).toMatchObject({
+        workflow_id: OTHER,
+        inputs: [pick],
+      });
+      await wrapper.vm.submit();
+      expect(runWorkflowCard.mock.calls[0][0]).toMatchObject({
+        workflow_id: OTHER,
+        inputs: [pick],
+      });
+    });
+
+    it("drops them when the owner picks another workflow, whose slots are other slots", async () => {
+      const wrapper = await mountRun({ ...fromCard, pickWorkflow: true });
+      wrapper.vm.picks["LoadImage/image"] = {
+        slot_label: "LoadImage",
+        input_name: "image",
+        picture_id: 9,
+      };
+      wrapper.vm.workflowId = OTHER;
+      await flushPromises();
+      expect(wrapper.vm.picks).toEqual({});
+    });
+  });
+
+  describe("where focus is while a save is out", () => {
+    const waitLine = (wrapper) => wrapper.find("footer p[tabindex='-1']");
+    /** The caret in the form, which a click on a verb does not move in Safari. */
+    function caretInForm(wrapper) {
+      const box = wrapper.find(".rund input").element;
+      box.focus();
+      expect(document.activeElement).toBe(box);
+    }
+    async function edited() {
+      const wrapper = await mountFocusable();
+      wrapper.vm.setValue(field(wrapper, "steps"), 32);
+      await flushPromises();
+      return wrapper;
+    }
+
+    it("waits in the footer when Save is clicked with the caret in the form, and is on Save after a refusal", async () => {
+      const wrapper = await edited();
+      caretInForm(wrapper);
+      const post = heldSave();
+      // A dispatched click, which focuses nothing: the button as Safari clicks it.
+      await button(wrapper, "Save").trigger("click");
+      await flushPromises();
+      // Not in the form, which is inert, and not on the page.
+      expect(document.activeElement).toBe(waitLine(wrapper).element);
+      expect(waitLine(wrapper).text()).toBe("Run waits for the save to finish.");
+
+      post.reject(refusal(409, "This workflow got a newer version since."));
+      await flushPromises();
+      expect(band(wrapper).find('[role="alert"]').text()).toBe(
+        "This workflow got a newer version since.",
+      );
+      expect(document.activeElement).toBe(button(wrapper, "Save").element);
+    });
+
+    it("does the same for the name question's own button", async () => {
+      const post = held();
+      saveWorkflowAsNew.mockReturnValue(post.promise);
+      const wrapper = await edited();
+      await button(wrapper, "Save as new…").trigger("click");
+      await flushPromises();
+      await nameBox(wrapper).setValue("Taken");
+      caretInForm(wrapper);
+      await button(wrapper, "Save as new workflow").trigger("click");
+      await flushPromises();
+      expect(document.activeElement).toBe(waitLine(wrapper).element);
+
+      post.reject(refusal(409, "A workflow is already called Taken."));
+      await flushPromises();
+      expect(document.activeElement).toBe(
+        button(wrapper, "Save as new workflow").element,
+      );
+    });
+
+    it("leaves a keyboard that is on the verb where it is, through the save and its refusal", async () => {
+      const wrapper = await edited();
+      const save = button(wrapper, "Save").element;
+      save.focus();
+      const post = heldSave();
+      await button(wrapper, "Save").trigger("click");
+      await flushPromises();
+      expect(document.activeElement).toBe(save);
+      post.reject(refusal(409, "This workflow got a newer version since."));
+      await flushPromises();
+      expect(document.activeElement).toBe(save);
+    });
+
+    it("is not dropped on the page when the band leaves, before the line that says Saved is there", async () => {
+      const wrapper = await edited();
+      button(wrapper, "Save").element.focus();
+      const post = heldSave();
+      await button(wrapper, "Save").trigger("click");
+      await flushPromises();
+      // The POST has landed and the workflow is being read again: the band,
+      // and the verb that had the keyboard, are gone.
+      const reread = held();
+      getWorkflowCard.mockReturnValueOnce(reread.promise);
+      post.resolve({ workflow_id: KEY, version: 4 });
+      await flushPromises();
+      expect(band(wrapper).exists()).toBe(false);
+      expect(document.activeElement).toBe(waitLine(wrapper).element);
+      expect(waitLine(wrapper).text()).toBe("Reading this workflow…");
+
+      reread.resolve(await savedCard(KEY));
+      await flushPromises();
+      expect(document.activeElement).toBe(
+        wrapper.find('[data-testid="rund-band-done"]').element,
+      );
+    });
+
+    it("does not take focus from somewhere else that stays, when the band leaves", async () => {
+      const wrapper = await edited();
+      button(wrapper, "Save").element.focus();
+      const post = heldSave();
+      await button(wrapper, "Save").trigger("click");
+      await flushPromises();
+      // Tabbed on to the footer while the save was out.
+      const run = runButton(wrapper).element;
+      run.focus();
+      const reread = held();
+      getWorkflowCard.mockReturnValueOnce(reread.promise);
+      post.resolve({ workflow_id: KEY, version: 4 });
+      await flushPromises();
+      expect(document.activeElement).toBe(run);
+      reread.resolve(await savedCard(KEY));
+      await flushPromises();
+    });
+  });
+
+  describe("while a save is out", () => {
+    it("holds Run back until the workflow is read again, and says why", async () => {
+      const wrapper = await mountRun(fromCard);
+      wrapper.vm.setValue(field(wrapper, "steps"), 32);
+      wrapper.vm.pickCheckpoint("juggernautXL.safetensors");
+      await flushPromises();
+      const post = heldSave();
+      await button(wrapper, "Save").trigger("click");
+      await flushPromises();
+      expect(wrapper.vm.saving).toBe("save");
+      expect(runButton(wrapper).attributes("aria-disabled")).toBe("true");
+      expect(runWhy(wrapper)).toBe("Run waits for the save to finish.");
+      await wrapper.vm.submit();
+
+      // The POST has landed and the workflow is being read again: the edits
+      // are off the form and its baseline is still the one before the save,
+      // so a run now would send 8 steps over the 32 just saved.
+      const reread = held();
+      getWorkflowCard.mockReturnValueOnce(reread.promise);
+      post.resolve({ workflow_id: KEY, version: 4 });
+      await flushPromises();
+      expect(writes()).toHaveLength(1);
+      expect(runButton(wrapper).attributes("aria-disabled")).toBe("true");
+      await wrapper.vm.submit();
+      expect(runWorkflowCard).not.toHaveBeenCalled();
+      expect(wrapper.emitted("close")).toBeUndefined();
+
+      reread.resolve(await savedCard(KEY));
+      await flushPromises();
+      expect(runButton(wrapper).attributes("aria-disabled")).toBeUndefined();
+      expect(runWhy(wrapper)).toBe("");
+      await wrapper.vm.submit();
+      const body = runWorkflowCard.mock.calls[0][0];
+      expect(sentValue(body, "steps").value).toBe(32);
+      expect(body.models).toContainEqual({
+        address: CKPT,
+        filename: "juggernautXL.safetensors",
+      });
+    });
+
+    it("takes the form out of reach, from the POST until the workflow is read again", async () => {
+      const wrapper = await mountRun(fromCard);
+      const form = () => wrapper.find(".rund").element;
+      wrapper.vm.setValue(field(wrapper, "steps"), 32);
+      await flushPromises();
+      expect(form().hasAttribute("inert")).toBe(false);
+
+      const post = heldSave();
+      await button(wrapper, "Save").trigger("click");
+      await flushPromises();
+      // An edit made now would be in neither the save nor the form that
+      // comes back. Every control that edits is in the part that is inert.
+      expect(form().hasAttribute("inert")).toBe(true);
+      const controls = [
+        ...wrapper.findAll("input, select, textarea"),
+        ...["AppInput", "AppSelect", "AppTextarea"].flatMap((name) =>
+          wrapper.findAllComponents({ name }),
+        ),
+      ];
+      expect(controls.length).toBeGreaterThan(5);
+      for (const control of controls) {
+        expect(control.element.closest("[inert]")).toBe(form());
+      }
+      // The band and the footer are not: the save's own spinner, Cancel and
+      // the sentence Run waits by stay where the keyboard can be.
+      for (const live of [band(wrapper), runButton(wrapper), button(wrapper, "Cancel")]) {
+        expect(live.element.closest("[inert]")).toBeNull();
+      }
+
+      const reread = held();
+      getWorkflowCard.mockReturnValueOnce(reread.promise);
+      post.resolve({ workflow_id: KEY, version: 4 });
+      await flushPromises();
+      expect(form().hasAttribute("inert")).toBe(true);
+      reread.resolve(await savedCard(KEY));
+      await flushPromises();
+      expect(form().hasAttribute("inert")).toBe(false);
+    });
+
+    it("lets nothing close the popup, or take its form somewhere else", async () => {
+      const wrapper = await mountRun(fromCard);
+      wrapper.vm.setValue(field(wrapper, "steps"), 32);
+      await flushPromises();
+      const post = heldSave();
+      await button(wrapper, "Save").trigger("click");
+      await flushPromises();
+
+      const escape = { stopPropagation: vi.fn() };
+      wrapper.vm.close();
+      wrapper.vm.onEscape(escape);
+      wrapper.vm.openInWorkflows();
+      wrapper.vm.editLoras(KEY);
+      wrapper.vm.onSave();
+      expect(wrapper.emitted("close")).toBeUndefined();
+      expect(push).not.toHaveBeenCalled();
+      expect(wrapper.vm.saveOpen).toBe(false);
+      // An Escape this popup did not act on is not swallowed either.
+      expect(escape.stopPropagation).not.toHaveBeenCalled();
+
+      post.resolve({ workflow_id: KEY, version: 4 });
+      await flushPromises();
+      wrapper.vm.openInWorkflows();
+      expect(wrapper.emitted("close")).toHaveLength(1);
+      expect(push).toHaveBeenCalledWith({ name: "workflows", query: { workflow: KEY } });
+    });
+  });
+
+  describe("pre-flights answered out of order", () => {
+    const row = {
+      slot_label: "LoadImage",
+      input_name: "image",
+      title: "Start frame",
+      mode: "picker",
+      fill: "request",
+      picture_id: 9,
+    };
+    const NEWER = {
+      ok: true,
+      runs: 3,
+      groups: [
+        { reasons: [], picture_inputs: [row], prompt: { positive_text: "the newer prompt" } },
+      ],
+    };
+    // Everything a pre-flight answer writes, each unlike the newer one's.
+    const OLDER = {
+      ok: false,
+      runs: 1,
       groups: [
         {
-          ...swapping.groups[0],
-          swapped_loaders: [{ ...swapping.groups[0].swapped_loaders[0], requested: true }],
+          reasons: [
+            {
+              code: "missing_models",
+              models: [{ folder: "checkpoints", file: "realvisXL_v5.safetensors" }],
+            },
+          ],
+          picture_inputs: [],
+          prompt: { positive_text: "the older prompt" },
+          unplaced_loras: ["mira_v2.safetensors"],
+          workflow_id: KEY,
         },
       ],
+    };
+    const asked = () => {
+      const asks = [];
+      preflightWorkflowRun.mockImplementation(() => {
+        const ask = held();
+        asks.push(ask);
+        return ask.promise;
+      });
+      return asks;
+    };
+    const newerStands = (wrapper) => {
+      expect(wrapper.vm.reasons).toEqual([]);
+      expect(wrapper.vm.bypassed).toEqual([]);
+      expect(wrapper.vm.pictureInputs).toEqual([row]);
+      expect(wrapper.vm.inputsKey).toBe(KEY);
+      expect(wrapper.vm.plannedRuns).toBe(3);
+      expect(wrapper.vm.graphPrompt).toEqual({ positive_text: "the newer prompt" });
+      expect(wrapper.vm.preflightError).toBe("");
+      // No offer for a checkpoint the newer answer does not call missing.
+      expect(wrapper.vm.checkpointFix).toBeNull();
+      expect(wrapper.vm.preflighting).toBe(false);
+      expect(wrapper.vm.canRun).toBe(true);
+    };
+
+    it("leave what the newer one said, whatever the older one says after it", async () => {
+      const wrapper = await mountRun(fromCard);
+      const asks = asked();
+      const older = wrapper.vm.runPreflight();
+      const newer = wrapper.vm.runPreflight();
+      asks[1].resolve(NEWER);
+      await newer;
+      asks[0].resolve(OLDER);
+      await older;
+      await flushPromises();
+      newerStands(wrapper);
     });
-    const wrapper = await mountRun({ kind: "card", workflowId: KEY });
-    // Said, since the run does it; not offered, since the copy would not.
-    expect(wrapper.vm.bypassed.map((note) => note.code)).toContain("loras_fetched");
-    expect(saveButton(wrapper)).toBeUndefined();
+
+    it("leave it too when the older one comes back refused", async () => {
+      const wrapper = await mountRun(fromCard);
+      const asks = asked();
+      const older = wrapper.vm.runPreflight();
+      const newer = wrapper.vm.runPreflight();
+      asks[1].resolve(NEWER);
+      await newer;
+      asks[0].reject(refusal(400, "Name exactly one source."));
+      await older;
+      await flushPromises();
+      newerStands(wrapper);
+    });
   });
 
-  it("does not move the popup when it moved while the copy was written", async () => {
-    preflightWorkflowRun.mockResolvedValueOnce(swapping);
-    let finish;
-    saveFixedWorkflow.mockReturnValue(
-      new Promise((resolve) => {
-        finish = resolve;
-      }),
-    );
-    const wrapper = await mountRun({ kind: "card", workflowId: KEY });
-    await saveButton(wrapper).trigger("click");
-    wrapper.vm.workflowId = OTHER;
-    await flushPromises();
-    finish({ name: "Cinematic portrait (fixed).json", workflow_id: "auto:fixed" });
-    await flushPromises();
-    expect(getWorkflowCard).not.toHaveBeenCalledWith("auto:fixed");
-    expect(wrapper.text()).not.toContain("Saved as");
+  describe("while the picker moves to another workflow", () => {
+    const picked = { ...fromCard, pickWorkflow: true };
+    const THIRD = `auto:${"c".repeat(64)}`;
+
+    beforeEach(() => {
+      getWorkflowChanges.mockImplementation(async (id) =>
+        changesOf(id, { version: id === OTHER ? 9 : 3 }),
+      );
+    });
+
+    it("offers no save and sends no run until the workflow arrived at is read", async () => {
+      const wrapper = await mountRun(picked);
+      wrapper.vm.setValue(field(wrapper, "steps"), 32);
+      await wrapper.vm.skipGraphLora(wrapper.vm.loras[1]);
+      await flushPromises();
+      expect(band(wrapper).exists()).toBe(true);
+
+      const next = held();
+      getWorkflowCard.mockReturnValueOnce(next.promise);
+      wrapper.vm.workflowId = OTHER;
+      // From the instant it moves, not from the next read's answer.
+      expect(wrapper.vm.band.count).toBe(0);
+      expect(wrapper.vm.canRun).toBe(false);
+      await flushPromises();
+      expect(band(wrapper).exists()).toBe(false);
+      expect(runButton(wrapper).attributes("aria-disabled")).toBe("true");
+      expect(runWhy(wrapper)).toBe("Reading this workflow…");
+      // The form is still the workflow left: its removed loader, its version.
+      await wrapper.vm.saveOver();
+      wrapper.vm.newName = "Mine";
+      await wrapper.vm.saveAsNew();
+      await wrapper.vm.submit();
+      wrapper.vm.onSave();
+      await wrapper.vm.freeField(field(wrapper, "denoise"));
+      expect(writes()).toEqual([]);
+      expect(saveWorkflowAsNew).not.toHaveBeenCalled();
+      expect(runWorkflowCard).not.toHaveBeenCalled();
+      expect(wrapper.vm.saveOpen).toBe(false);
+      // Nor its pin list, which is written whole.
+      expect(setWorkflowPins).not.toHaveBeenCalled();
+
+      next.resolve({ card: ownCard({ id: OTHER }) });
+      await flushPromises();
+      // Steps came along, as an edit the owner brought; the loader taken out
+      // was a row of the workflow left, and this one's rows are its own.
+      expect(said(wrapper)).toContain("1 change from the workflow");
+      await button(wrapper, "Save").trigger("click");
+      await flushPromises();
+      expect(writes()).toEqual([
+        [
+          OTHER,
+          {
+            changes: {
+              models: [],
+              loras: [],
+              skip_loras: [],
+              stages: {},
+              values: [{ slot_label: "KSampler", input_name: "steps", value: 32 }],
+            },
+            version: 9,
+          },
+        ],
+      ]);
+    });
+
+    it("is not read until its loaders and what waits on it are, as well as its card", async () => {
+      const wrapper = await mountRun(picked);
+      wrapper.vm.setValue(field(wrapper, "steps"), 32);
+      await flushPromises();
+      const waits = held();
+      getWorkflowChanges.mockReturnValueOnce(waits.promise);
+      wrapper.vm.workflowId = OTHER;
+      await flushPromises();
+      expect(wrapper.vm.card.id).toBe(OTHER);
+      expect(band(wrapper).exists()).toBe(false);
+      await wrapper.vm.submit();
+      expect(runWorkflowCard).not.toHaveBeenCalled();
+
+      waits.resolve(changesOf(OTHER, { version: 9 }));
+      await flushPromises();
+      expect(band(wrapper).exists()).toBe(true);
+      await wrapper.vm.submit();
+      expect(runWorkflowCard.mock.calls[0][0].workflow_id).toBe(OTHER);
+    });
+
+    it("keeps the workflow it ended on when an earlier move answers last", async () => {
+      const wrapper = await mountRun(picked);
+      const slow = held();
+      getWorkflowCard.mockReturnValueOnce(slow.promise);
+      wrapper.vm.workflowId = OTHER;
+      wrapper.vm.workflowId = THIRD;
+      await flushPromises();
+      slow.resolve({ card: ownCard({ id: OTHER, defaults: [def("Steps", "steps", 20)] }) });
+      await flushPromises();
+      expect(wrapper.vm.card.id).toBe(THIRD);
+      expect(wrapper.find('[role="alert"]').exists()).toBe(false);
+      await wrapper.vm.submit();
+      const body = runWorkflowCard.mock.calls[0][0];
+      expect(body.workflow_id).toBe(THIRD);
+      expect(sentValue(body, "steps").value).toBe(8);
+    });
+
+    it("does not report a workflow it has since left as the one that could not be read", async () => {
+      const wrapper = await mountRun(picked);
+      const slow = held();
+      getWorkflowCard.mockReturnValueOnce(slow.promise);
+      wrapper.vm.workflowId = OTHER;
+      wrapper.vm.workflowId = THIRD;
+      await flushPromises();
+      slow.reject(new Error("Network Error"));
+      await flushPromises();
+      expect(wrapper.vm.loadFailed).toBe("");
+      expect(wrapper.vm.canRun).toBe(true);
+    });
+
+    it("runs nothing of a workflow that could not be read", async () => {
+      const wrapper = await mountRun(picked);
+      getWorkflowCard.mockRejectedValueOnce(new Error("Network Error"));
+      wrapper.vm.workflowId = OTHER;
+      await flushPromises();
+      const failure = wrapper.find('[role="alert"]');
+      expect(failure.exists()).toBe(true);
+      expect(runButton(wrapper).attributes("aria-disabled")).toBe("true");
+      expect(runWhy(wrapper)).toBe(failure.text());
+      await wrapper.vm.submit();
+      expect(runWorkflowCard).not.toHaveBeenCalled();
+    });
   });
 
-  it("says why when the save is refused", async () => {
-    preflightWorkflowRun.mockResolvedValue(swapping);
-    saveFixedWorkflow.mockRejectedValue({
-      response: {
-        status: 409,
-        data: {
-          detail: "Nothing in this workflow needs fixing on this ComfyUI.",
+  describe("a save that landed and could not be read again", () => {
+    const failure = (wrapper) => wrapper.find('[role="alert"]');
+
+    it("is said as that, never as a save that failed, and leaves nothing stale to run", async () => {
+      const wrapper = await mountRun(fromCard);
+      wrapper.vm.setValue(field(wrapper, "steps"), 32);
+      await wrapper.vm.skipGraphLora(wrapper.vm.loras[1]);
+      await flushPromises();
+      getWorkflowCard.mockRejectedValueOnce(new Error("Network Error"));
+      await button(wrapper, "Save").trigger("click");
+      await flushPromises();
+
+      // The write was made, and everything is told so.
+      expect(writes()).toHaveLength(1);
+      expect(useRunDialogStore().saved).toMatchObject({ workflowId: KEY, savedAs: "" });
+      expect(wrapper.vm.bandError).toBe("");
+      expect(failure(wrapper).text()).toBe(
+        "Saved to this workflow. It could not be read again, so it cannot be run from here: close this and open it again.",
+      );
+      // No form is left to say the saved changes are unsaved, or to send the
+      // values from before the save over it, or to save a second time.
+      expect(band(wrapper).exists()).toBe(false);
+      expect(wrapper.find(".rund").exists()).toBe(false);
+      expect(runButton(wrapper).attributes("aria-disabled")).toBe("true");
+      expect(runWhy(wrapper)).toBe(failure(wrapper).text());
+      await wrapper.vm.submit();
+      await wrapper.vm.saveOver();
+      expect(runWorkflowCard).not.toHaveBeenCalled();
+      expect(writes()).toHaveLength(1);
+      // Closing is what is left, and it works.
+      wrapper.vm.close();
+      expect(wrapper.emitted("close")).toHaveLength(1);
+    });
+
+    it("does not offer Save as new again once the new workflow exists", async () => {
+      saveWorkflowAsNew.mockResolvedValue({ workflow_id: OTHER, name: "Mine" });
+      const wrapper = await mountRun({ ...fromCard, pickWorkflow: true });
+      wrapper.vm.setValue(field(wrapper, "steps"), 32);
+      await flushPromises();
+      await button(wrapper, "Save as new…").trigger("click");
+      wrapper.vm.newName = "Mine";
+      // The picker's list, read again for the row of the new workflow.
+      listWorkflowCards.mockRejectedValueOnce(new Error("Network Error"));
+      await wrapper.vm.saveAsNew();
+      await flushPromises();
+
+      expect(wrapper.vm.bandError).toBe("");
+      expect(failure(wrapper).text()).toContain("Saved as Mine.");
+      expect(useRunDialogStore().saved).toMatchObject({ workflowId: KEY, savedAs: OTHER });
+      expect(band(wrapper).exists()).toBe(false);
+      wrapper.vm.newName = "Mine";
+      await wrapper.vm.saveAsNew();
+      await wrapper.vm.submit();
+      expect(saveWorkflowAsNew).toHaveBeenCalledTimes(1);
+      expect(runWorkflowCard).not.toHaveBeenCalled();
+    });
+
+    it("still says Saved where only what waits on the workflow could not be read", async () => {
+      const wrapper = await mountRun(fromCard);
+      wrapper.vm.setValue(field(wrapper, "steps"), 32);
+      wrapper.vm.pickCheckpoint("juggernautXL.safetensors");
+      await flushPromises();
+      getWorkflowCard.mockImplementation(savedCard);
+      getWorkflowChanges.mockRejectedValue(new Error("offline"));
+      await button(wrapper, "Save").trigger("click");
+      await flushPromises();
+      // No band without that read, and the line that says Saved is not its.
+      expect(band(wrapper).exists()).toBe(false);
+      expect(wrapper.find('[data-testid="rund-band-done"]').text()).toBe(
+        "Saved to this workflow.",
+      );
+      await wrapper.vm.submit();
+      expect(sentValue(runWorkflowCard.mock.calls[0][0], "steps").value).toBe(32);
+    });
+  });
+
+  describe("the band's announcement", () => {
+    const live = (wrapper) => wrapper.find('[data-testid="rund-band-live"]');
+    const WAITS = { waiting: { values: [{ slot_label: "KSampler", input_name: "steps", value: 30 }] }, count: 1 };
+
+    it("is made in a region that was in the document before it had anything to say", async () => {
+      getWorkflowChanges.mockImplementation(async (id) => changesOf(id, WAITS));
+      const reading = held();
+      preflightWorkflowRun.mockReturnValueOnce(reading.promise);
+      const wrapper = await mountRun(fromCard);
+      // Still reading: the changes are known, the band is not drawn, and the
+      // region that will say it is here and silent.
+      expect(wrapper.vm.loading).toBe(true);
+      const region = live(wrapper).element;
+      expect(region.getAttribute("role")).toBe("status");
+      expect(region.textContent.trim()).toBe("");
+
+      reading.resolve({ ok: true, runs: 1, groups: [] });
+      await flushPromises();
+      expect(band(wrapper).exists()).toBe(true);
+      expect(live(wrapper).element).toBe(region);
+      expect(region.textContent).toContain("differs from the workflow");
+    });
+
+    it("is unsaid when the band goes, so its coming back is a change to say", async () => {
+      const wrapper = await mountRun(fromCard);
+      const region = live(wrapper).element;
+      wrapper.vm.setValue(field(wrapper, "steps"), 32);
+      await flushPromises();
+      const arrival = region.textContent.trim();
+      expect(arrival).toContain("differs from the workflow");
+      wrapper.vm.resetValue(field(wrapper, "steps"));
+      await flushPromises();
+      expect(region.textContent.trim()).toBe("");
+      wrapper.vm.setValue(field(wrapper, "steps"), 33);
+      await flushPromises();
+      expect(region.textContent.trim()).toBe(arrival);
+      expect(live(wrapper).element).toBe(region);
+    });
+
+    it("is said again for the next workflow, from the same region", async () => {
+      getWorkflowChanges.mockImplementation(async (id) => changesOf(id, WAITS));
+      const wrapper = await mountRun({ ...fromCard, pickWorkflow: true });
+      const region = live(wrapper).element;
+      const arrival = region.textContent.trim();
+      expect(arrival).toContain("differs from the workflow");
+      const next = held();
+      getWorkflowCard.mockReturnValueOnce(next.promise);
+      wrapper.vm.workflowId = OTHER;
+      await flushPromises();
+      expect(region.textContent.trim()).toBe("");
+      next.resolve({ card: ownCard({ id: OTHER }) });
+      await flushPromises();
+      expect(region.textContent.trim()).toBe(arrival);
+      expect(live(wrapper).element).toBe(region);
+    });
+  });
+
+  describe("nothing is saved unless a save is pressed", () => {
+    it("runs without saving", async () => {
+      const wrapper = await mountRun(fromCard);
+      await changeThree(wrapper);
+      await wrapper.vm.submit();
+      expect(runWorkflowCard).toHaveBeenCalledTimes(1);
+      expect(writes()).toEqual([]);
+      expect(saveWorkflowAsNew).not.toHaveBeenCalled();
+    });
+
+    it("closes without saving", async () => {
+      const wrapper = await mountRun(fromCard);
+      await changeThree(wrapper);
+      wrapper.vm.close();
+      wrapper.unmount();
+      await flushPromises();
+      expect(writes()).toEqual([]);
+      expect(saveWorkflowAsNew).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("the workflow's own LoRA loaders", () => {
+    it("are rows at the strength the default recipe runs them, and only those it runs", async () => {
+      const wrapper = await mountRun(fromCard);
+      expect(getLoraChain).toHaveBeenCalledWith(KEY);
+      expect(
+        wrapper.vm.loras.map((row) => [row.node_id, row.sha256, row.strength]),
+      ).toEqual([
+        ["7", MIRA_SHA, 0.6],
+        ["8", GRAIN_SHA, 0.4],
+      ]);
+      // Every default LoRA has its row, so no line repeats them.
+      expect(wrapper.text()).not.toContain("run as it stores them");
+      // Add LoRA never fills a loader the workflow left empty.
+      wrapper.vm.addLora();
+      expect(wrapper.vm.loras).toHaveLength(2);
+      expect(wrapper.vm.addedLoras).toHaveLength(1);
+    });
+
+    it("lists every loader of a workflow with no pictures, less a person's", async () => {
+      getWorkflowCard.mockResolvedValue({
+        card: ownCard({
+          default_recipe: { sampled: 0, models: [], loras: [], values: [], stages: {} },
+        }),
+      });
+      listAdapters.mockResolvedValue([
+        {
+          sha256: "p".repeat(64),
+          filename: "example-person.safetensors",
+          attachments: [{ entity_type: "character", entity_id: 3 }],
+        },
+      ]);
+      const wrapper = await mountRun(fromCard);
+      expect(wrapper.vm.loras.map((row) => row.node_id)).toEqual(["7", "8"]);
+    });
+
+    it("names the default LoRAs the graph has no loader for", async () => {
+      getLoraChain.mockResolvedValue({ loaders: [CHAIN.loaders[0]], lanes: [] });
+      const wrapper = await mountRun(fromCard);
+      expect(wrapper.text()).toContain(
+        "This workflow also loads film-grain-35mm, as it stores it.",
+      );
+    });
+
+    it("counts a changed strength, keeps what it was readable, and puts it back", async () => {
+      const wrapper = await mountRun(fromCard);
+      wrapper.vm.loras[0].strength = 0.9;
+      await flushPromises();
+      expect(said(wrapper)).toContain("1 LoRA changed.");
+      // CLIP follows the model strength where the loader had them as one.
+      expect(wrapper.vm.formChanges.loras).toEqual([
+        {
+          node_id: "7",
+          field: "lora_name",
+          sha256: MIRA_SHA,
+          strength_model: 0.9,
+          strength_clip: 0.9,
+        },
+      ]);
+      const was = wrapper.find('[data-testid="rund-lora-was"]');
+      const chip = was.findComponent({ name: "RunResetChip" });
+      expect(chip.props("value")).toBe("mira_v2 · 0.6");
+      await chip.trigger("click");
+      await flushPromises();
+      expect(wrapper.vm.loras[0].strength).toBe(0.6);
+      expect(band(wrapper).exists()).toBe(false);
+    });
+
+    it("leaves a CLIP strength the graph set apart where it was", async () => {
+      getLoraChain.mockResolvedValue({
+        loaders: [loader("7", "mira_v2.safetensors", MIRA_SHA, 0.6, 0.3)],
+        lanes: [],
+      });
+      const wrapper = await mountRun(fromCard);
+      wrapper.vm.loras[0].strength = 0.9;
+      await flushPromises();
+      expect(wrapper.vm.formChanges.loras[0].strength_clip).toBe(0.3);
+    });
+  });
+
+  describe("the model rows", () => {
+    const VAES = {
+      replacements: [
+        { id: 4, filename: "vae/sdxl_vae.safetensors", display_name: "SDXL VAE" },
+        { id: 5, filename: "ae.safetensors" },
+      ],
+    };
+    const row = (wrapper) => wrapper.find('[data-testid="rund-model"]');
+    const select = (wrapper) => row(wrapper).findComponent({ name: "AppSelect" });
+
+    it("is a picker over what the server says the loader can load", async () => {
+      readModelSwap.mockImplementation(async (_key, { slotKind }) =>
+        slotKind === "vae" ? VAES : { replacements: [] },
+      );
+      const wrapper = await mountRun(fromCard);
+      expect(readModelSwap).toHaveBeenCalledWith(KEY, {
+        replacing: "sdxl_vae.safetensors",
+        slotKind: "vae",
+      });
+      expect(row(wrapper).text()).toContain("VAE");
+      // The shelf's spelling of the workflow's own file is the row as saved.
+      expect(select(wrapper).props("options")).toEqual([
+        { value: "sdxl_vae.safetensors", label: "SDXL VAE" },
+        { value: "ae.safetensors", label: "ae" },
+      ]);
+      expect(select(wrapper).props("modelValue")).toBe("sdxl_vae.safetensors");
+      // No file is shown with its extension.
+      for (const option of select(wrapper).props("options")) {
+        expect(option.label).not.toMatch(/\.safetensors/);
+      }
+
+      await select(wrapper).vm.$emit("update:modelValue", "ae.safetensors");
+      await flushPromises();
+      expect(said(wrapper)).toContain("1 change from the workflow");
+      expect(said(wrapper)).toContain("VAE.");
+      const chip = row(wrapper).findComponent({ name: "RunResetChip" });
+      expect(chip.props("value")).toBe("sdxl vae");
+      expect(chip.props("label")).toBe("VAE");
+      await wrapper.vm.submit();
+      expect(runWorkflowCard.mock.calls[0][0].models).toEqual([
+        { address: CKPT, filename: "realvisXL_v5.safetensors" },
+        { address: VAE, filename: "ae.safetensors" },
+      ]);
+    });
+
+    it("is read as text where nothing says what the loader can load", async () => {
+      readModelSwap.mockRejectedValue(new Error("offline"));
+      const wrapper = await mountRun(fromCard);
+      expect(select(wrapper).exists()).toBe(false);
+      expect(row(wrapper).find(".rund-fixed-value").text()).toBe("sdxl vae");
+      // The checkpoint keeps its typed box.
+      expect(wrapper.find("[aria-label='Checkpoint']").exists()).toBe(true);
+    });
+
+    it("makes the checkpoint a picker too, whether or not it is missing", async () => {
+      readModelSwap.mockImplementation(async (_key, { slotKind }) =>
+        slotKind === "checkpoint"
+          ? { replacements: [{ id: 7, filename: "juggernautXL.safetensors" }] }
+          : { replacements: [] },
+      );
+      const wrapper = await mountRun(fromCard);
+      expect(wrapper.vm.checkpointFix).toBeNull();
+      expect(wrapper.vm.checkpointOptions).toEqual([
+        { value: "realvisXL_v5.safetensors", label: "realvisXL v5" },
+        { value: "juggernautXL.safetensors", label: "juggernautXL" },
+      ]);
+      expect(wrapper.find("[aria-label='Checkpoint']").exists()).toBe(false);
+    });
+
+    describe("with a checkpoint pick waiting in the Workflow tab", () => {
+      const SHELF = {
+        replacements: [
+          { id: 7, filename: "juggernautXL.safetensors" },
+          { id: 8, filename: "dreamshaper.safetensors" },
+        ],
+      };
+      const shelfIs = (answer) =>
+        readModelSwap.mockImplementation((_key, { slotKind }) =>
+          slotKind === "checkpoint" ? answer : Promise.resolve({ replacements: [] }),
+        );
+
+      beforeEach(() => {
+        getWorkflowChanges.mockImplementation(async (id) =>
+          changesOf(id, {
+            waiting: { models: [{ address: CKPT, filename: "juggernautXL.safetensors" }] },
+            count: 1,
+          }),
+        );
+      });
+
+      it("is a picker all the same, whichever read answers first", async () => {
+        // The shelf answers before the pick is laid over the form.
+        shelfIs(Promise.resolve(SHELF));
+        const first = await mountRun(fromCard);
+        expect(first.vm.checkpointOptions.map((option) => option.value)).toEqual([
+          "realvisXL_v5.safetensors",
+          "juggernautXL.safetensors",
+          "dreamshaper.safetensors",
+        ]);
+
+        // And after: a laid pick is not a name being typed, so it holds no
+        // list back.
+        const shelf = held();
+        shelfIs(shelf.promise);
+        const second = await mountRun(fromCard);
+        expect(second.vm.checkpointValue).toBe("juggernautXL.safetensors");
+        shelf.resolve(SHELF);
+        await flushPromises();
+        expect(second.vm.checkpointOptions).toEqual(first.vm.checkpointOptions);
+        expect(second.find("[aria-label='Checkpoint']").exists()).toBe(false);
+      });
+
+      it("is in the list a replaced checkpoint is offered, though the shelf did not name it", async () => {
+        getWorkflowCard.mockImplementation(async (key) => ({
+          card: ownCard({ id: key }),
+          model_fixes: [
+            {
+              slot_kind: "checkpoint",
+              was: "realvisXL_v5.safetensors",
+              now: "dreamshaper.safetensors",
+            },
+          ],
+        }));
+        shelfIs(Promise.resolve({ replacements: [{ id: 9, filename: "sdxl_base.safetensors" }] }));
+        const wrapper = await mountRun(fromCard);
+        expect(wrapper.vm.checkpointFix?.was).toBe("realvisXL_v5.safetensors");
+        // A select whose value is not an option draws empty.
+        expect(wrapper.vm.checkpointOptions.map((option) => option.value)).toEqual([
+          "juggernautXL.safetensors",
+          "dreamshaper.safetensors",
+          "sdxl_base.safetensors",
+        ]);
+      });
+    });
+
+    it("is not drawn on a picture's own run", async () => {
+      const wrapper = await mountRun();
+      expect(row(wrapper).exists()).toBe(false);
+    });
+  });
+
+  describe("what waits in the Workflow tab", () => {
+    const WAITING = {
+      models: [{ address: CKPT, filename: "juggernautXL.safetensors" }],
+      loras: [
+        {
+          node_id: "7",
+          field: "lora_name",
+          sha256: MIRA_SHA,
+          strength_model: 0.9,
+          strength_clip: 0.9,
+        },
+      ],
+      skip_loras: [{ node_id: "8", field: "lora_name" }],
+      stages: { upscale: false },
+      values: [{ slot_label: "KSampler", input_name: "steps", value: 28 }],
+    };
+    const setWorkflowChanges = vi.fn();
+
+    beforeEach(() => {
+      setWorkflowChanges.mockReset();
+      getWorkflowChanges.mockImplementation(async (id) =>
+        changesOf(id, { waiting: WAITING, count: 5, version: 6 }),
+      );
+    });
+
+    it("is laid over the form: counted, run, and shown against the SAVED value", async () => {
+      const wrapper = await mountRun(fromCard);
+      expect(getWorkflowChanges).toHaveBeenCalledWith(KEY);
+      expect(said(wrapper)).toContain("5 changes from the workflow");
+      expect(said(wrapper)).toContain(
+        "Checkpoint, 1 LoRA changed, 1 LoRA removed, Upscale off, Steps.",
+      );
+      // The chip names what the workflow has saved, not what waits.
+      const steps = wrapper
+        .findAllComponents({ name: "RunResetChip" })
+        .find((chip) => chip.props("label") === "Steps");
+      expect(steps.props("value")).toBe(8);
+      expect(wrapper.vm.currentValue(field(wrapper, "steps"))).toBe(28);
+      expect(wrapper.vm.checkpointValue).toBe("juggernautXL.safetensors");
+      expect(wrapper.vm.loras[1].skipped).toBe(true);
+      expect(wrapper.vm.stageOn("upscale")).toBe(false);
+
+      // "Run with changes…" runs the unsaved graph.
+      await wrapper.vm.submit();
+      const body = runWorkflowCard.mock.calls[0][0];
+      expect(body.models).toEqual(WAITING.models);
+      expect(body.loras).toEqual(WAITING.loras);
+      expect(body.skip_loras).toEqual(WAITING.skip_loras);
+      expect(body.skip_stages).toEqual(["upscale"]);
+      expect(body.values).toContainEqual(WAITING.values[0]);
+    });
+
+    it("is not this popup's work, so closing is not guarded", async () => {
+      const wrapper = await mountRun(fromCard);
+      expect(wrapper.vm.band.count).toBe(5);
+      expect(wrapper.vm.dirty).toBe(false);
+    });
+
+    it("is saved against the version the read answered", async () => {
+      const wrapper = await mountRun(fromCard);
+      await button(wrapper, "Save").trigger("click");
+      await flushPromises();
+      expect(writes()[0][1].version).toBe(6);
+    });
+
+    it("states the form's own answer for every waiting change the owner undid", async () => {
+      // The server saves what waits with the request on top. Left unsaid, each
+      // of these would be saved as it waits, though the form put it back.
+      const wrapper = await mountRun(fromCard);
+      wrapper.vm.pickCheckpoint("realvisXL_v5.safetensors");
+      wrapper.vm.resetLora(wrapper.vm.loras[0]);
+      await wrapper.vm.useGraphLora(wrapper.vm.loras[1]);
+      await wrapper.vm.setStage("upscale", true);
+      wrapper.vm.resetValue(field(wrapper, "steps"));
+      // One change of the owner's own, so there is something to save.
+      wrapper.vm.setValue(field(wrapper, "cfg"), 4);
+      await flushPromises();
+      expect(said(wrapper)).toContain("1 change from the workflow");
+
+      await button(wrapper, "Save").trigger("click");
+      await flushPromises();
+      expect(writes()[0][1].changes).toEqual({
+        // The saved file for that address.
+        models: [{ address: CKPT, filename: "realvisXL_v5.safetensors" }],
+        // Each loader set with its own LoRA and strength, instead of changed
+        // or removed.
+        // The clip strength with it, by the rule a changed row follows: the
+        // graph has loader 7 at 0.8 for both, so both are saved at 0.6.
+        loras: [
+          {
+            node_id: "7",
+            field: "lora_name",
+            sha256: MIRA_SHA,
+            strength_model: 0.6,
+            strength_clip: 0.6,
+          },
+          {
+            node_id: "8",
+            field: "lora_name",
+            sha256: GRAIN_SHA,
+            strength_model: 0.4,
+            strength_clip: 0.4,
+          },
+        ],
+        skip_loras: [],
+        // The stage's boolean.
+        stages: { upscale: true },
+        values: [
+          { slot_label: "KSampler", input_name: "cfg", value: 4 },
+          { slot_label: "KSampler", input_name: "steps", value: 8 },
+        ],
+      });
+    });
+
+    it("carries a waiting change it has no control for, and counts it", async () => {
+      getWorkflowChanges.mockImplementation(async (id) =>
+        changesOf(id, {
+          waiting: {
+            skip_loras: [{ node_id: "44", field: "lora_name" }],
+            values: [{ slot_label: "Other", input_name: "tile", value: 512 }],
+          },
+          count: 2,
+        }),
+      );
+      const wrapper = await mountRun(fromCard);
+      expect(said(wrapper)).toContain("2 changes from the workflow");
+      await wrapper.vm.submit();
+      const body = runWorkflowCard.mock.calls[0][0];
+      expect(body.skip_loras).toEqual([{ node_id: "44", field: "lora_name" }]);
+      expect(body.values).toContainEqual({
+        slot_label: "Other",
+        input_name: "tile",
+        value: 512,
+      });
+      // The form cannot answer for them, so a save leaves them to what waits.
+      expect(wrapper.vm.saveChanges).toEqual({
+        models: [],
+        loras: [],
+        skip_loras: [],
+        stages: {},
+        values: [],
+      });
+    });
+
+    it("leaves a pick named by digest as it waits, rather than answering over it", async () => {
+      // The form holds files, so a pick named by digest is not laid on its
+      // row. Answered for all the same, a save would put the row's own file
+      // back over the pick that waits.
+      const pick = { address: VAE, sha256: "v".repeat(64) };
+      getWorkflowChanges.mockImplementation(async (id) =>
+        changesOf(id, { waiting: { models: [pick] }, count: 1 }),
+      );
+      const wrapper = await mountRun(fromCard);
+      expect(wrapper.vm.modelEdits).toEqual({});
+      expect(said(wrapper)).toContain("1 change from the workflow");
+      wrapper.vm.setValue(field(wrapper, "steps"), 32);
+      await flushPromises();
+      expect(wrapper.vm.saveChanges.models).toEqual([]);
+      await wrapper.vm.submit();
+      expect(runWorkflowCard.mock.calls[0][0].models).toContainEqual(pick);
+    });
+
+    it("is read again for the workflow the picker moves to", async () => {
+      listWorkflowCards.mockResolvedValue({
+        cards: [
+          { id: KEY, name: "One" },
+          { id: OTHER, name: "Other" },
+        ],
+      });
+      getWorkflowChanges.mockImplementation(async (id) =>
+        changesOf(id, id === OTHER ? { version: 9 } : { waiting: WAITING, version: 6 }),
+      );
+      const wrapper = await mountRun({ ...fromCard, pickWorkflow: true });
+      expect(wrapper.vm.band.count).toBe(5);
+      wrapper.vm.workflowId = OTHER;
+      await flushPromises();
+      expect(getLoraChain).toHaveBeenLastCalledWith(OTHER);
+      expect(wrapper.vm.changesState.version).toBe(9);
+      // What waited on the first workflow's loaders is not laid on this one.
+      expect(wrapper.vm.loras.every((entry) => !entry.skipped)).toBe(true);
+    });
+
+    // A later save clears what the run saw waiting and keeps what was edited
+    // in the tab since. Only the popup knows what it saw, so the run says it.
+    describe("as the run says it saw it", () => {
+      const NOTHING = { models: [], loras: [], skip_loras: [], stages: {}, values: [] };
+      const picked = { ...fromCard, pickWorkflow: true };
+      const waited = () => runWorkflowCard.mock.calls[0][0].waited;
+
+      it("is the whole set the form was laid from", async () => {
+        const wrapper = await mountRun(fromCard);
+        await wrapper.vm.submit();
+        expect(waited()).toEqual(WAITING);
+      });
+
+      it("is what was read, whatever the owner undid of it in the form", async () => {
+        const wrapper = await mountRun(fromCard);
+        wrapper.vm.resetValue(field(wrapper, "steps"));
+        await wrapper.vm.setStage("upscale", true);
+        await flushPromises();
+        await wrapper.vm.submit();
+        const body = runWorkflowCard.mock.calls[0][0];
+        expect(sentValue(body, "steps").value).toBe(8);
+        expect(body).not.toHaveProperty("skip_stages");
+        expect(body.waited).toEqual(WAITING);
+      });
+
+      it("is an empty set, every list present, where nothing waited", async () => {
+        getWorkflowChanges.mockImplementation(async (id) => changesOf(id));
+        const wrapper = await mountRun(fromCard);
+        await wrapper.vm.submit();
+        expect(waited()).toEqual(NOTHING);
+      });
+
+      it("is not said on a run from pictures, which reads none of it", async () => {
+        const wrapper = await mountRun();
+        await wrapper.vm.submit();
+        expect(runWorkflowCard.mock.calls[0][0]).not.toHaveProperty("waited");
+      });
+
+      it("is not said where it could not be read", async () => {
+        getWorkflowChanges.mockRejectedValue(new Error("offline"));
+        const wrapper = await mountRun(fromCard);
+        await wrapper.vm.submit();
+        expect(runWorkflowCard.mock.calls[0][0]).not.toHaveProperty("waited");
+      });
+
+      it("is the reading of the workflow the picker moved to", async () => {
+        const cfg = { slot_label: "KSampler", input_name: "cfg", value: 5 };
+        getWorkflowChanges.mockImplementation(async (id) =>
+          changesOf(id, { waiting: id === OTHER ? { values: [cfg] } : WAITING }),
+        );
+        const wrapper = await mountRun(picked);
+        wrapper.vm.workflowId = OTHER;
+        await flushPromises();
+        await wrapper.vm.submit();
+        expect(runWorkflowCard.mock.calls[0][0].workflow_id).toBe(OTHER);
+        expect(waited()).toEqual({ ...NOTHING, values: [cfg] });
+      });
+
+    });
+
+    // Picked, left and picked again, the first pick's card answering last:
+    // two reads of one workflow, which no check of the key can tell apart.
+    describe("with an earlier read of the same workflow still out", () => {
+      const THIRD = `auto:${"c".repeat(64)}`;
+      /** The popup back on OTHER and read, and the first read's held card. */
+      async function backOnOther() {
+        const wrapper = await mountRun({ ...fromCard, pickWorkflow: true });
+        const slow = held();
+        getWorkflowCard.mockReturnValueOnce(slow.promise);
+        wrapper.vm.workflowId = OTHER;
+        wrapper.vm.workflowId = THIRD;
+        await flushPromises();
+        wrapper.vm.workflowId = OTHER;
+        await flushPromises();
+        return { wrapper, slow };
+      }
+
+      it("keeps the form the newer read made when the older one lands", async () => {
+        const { wrapper, slow } = await backOnOther();
+        const rows = JSON.stringify(wrapper.vm.loras);
+        const reads = getWorkflowChanges.mock.calls.length;
+        // Whatever the older read would go on to read is never answered.
+        getWorkflowChanges.mockReturnValue(held().promise);
+        getLoraChain.mockReturnValue(held().promise);
+        slow.resolve({ card: ownCard({ id: OTHER, defaults: [def("Steps", "steps", 20)] }) });
+        await flushPromises();
+
+        expect(getWorkflowChanges).toHaveBeenCalledTimes(reads);
+        expect(wrapper.vm.changesState.version).toBe(6);
+        expect(said(wrapper)).toContain("5 changes from the workflow");
+        expect(JSON.stringify(wrapper.vm.loras)).toBe(rows);
+        expect(wrapper.vm.loras.map((row) => row.skipped)).toEqual([false, true]);
+        expect(field(wrapper, "cfg")).toBeTruthy();
+        expect(wrapper.vm.canRun).toBe(true);
+
+        await wrapper.vm.submit();
+        const body = runWorkflowCard.mock.calls[0][0];
+        expect(body.loras).toEqual(WAITING.loras);
+        expect(body.skip_loras).toEqual(WAITING.skip_loras);
+        expect(body.models).toEqual(WAITING.models);
+        expect(sentValue(body, "steps").value).toBe(28);
+        expect(body.waited).toEqual(WAITING);
+      });
+
+      it("is not taken down when the older read fails", async () => {
+        const { wrapper, slow } = await backOnOther();
+        slow.reject(new Error("Network Error"));
+        await flushPromises();
+        expect(wrapper.vm.loadFailed).toBe("");
+        expect(wrapper.find('[role="alert"]').exists()).toBe(false);
+        expect(said(wrapper)).toContain("5 changes from the workflow");
+        expect(wrapper.vm.canRun).toBe(true);
+      });
+    });
+  });
+
+  describe("the offer the Tasks tab makes afterwards", () => {
+    it("is recorded with the band's own words when a changed run is queued", async () => {
+      const wrapper = await mountRun(fromCard);
+      await changeThree(wrapper);
+      await wrapper.vm.submit();
+      expect(useRunDialogStore().ranChanges[KEY]).toEqual({
+        name: "Cinematic portrait",
+        count: 3,
+        text: "Checkpoint, 1 LoRA removed, Steps.",
+        promptIds: ["p1"],
+        finished: false,
+      });
+    });
+
+    it("is taken down by the workflow's next run when that one changes nothing", async () => {
+      const store = useRunDialogStore();
+      store.ranWith(KEY, { name: "x", count: 1, text: "Steps.", promptIds: ["p0"] });
+      const wrapper = await mountRun(fromCard);
+      await wrapper.vm.submit();
+      expect(store.ranChanges[KEY]).toBeUndefined();
+    });
+  });
+});
+
+describe("a LoRA row's ×, for the keyboard", () => {
+  // The × goes with its row, and focus with it: to the page, unless it is
+  // handed on. To the × that moved up, else to Add LoRA.
+  async function mountReal() {
+    const wrapper = mount(RunDialog, {
+      props: { source: { kind: "card", workflowId: KEY }, context: {} },
+      attachTo: document.body,
+      global: {
+        stubs: {
+          ...globalOpts.global.stubs,
+          AppBarButton: { template: "<button type='button'><slot /></button>" },
         },
       },
     });
-    const wrapper = await mountRun({ kind: "card", workflowId: KEY });
-    await saveButton(wrapper).trigger("click");
     await flushPromises();
-    expect(wrapper.text()).toContain("Nothing in this workflow needs fixing");
+    return wrapper;
+  }
+  const removes = (wrapper) => wrapper.findAll(".rund-lora-act");
+
+  it("goes to the next row's ×, and to Add LoRA after the last", async () => {
+    const wrapper = await mountReal();
+    wrapper.vm.addLora();
+    wrapper.vm.addLora();
+    await flushPromises();
+    await removes(wrapper)[0].trigger("click");
+    await flushPromises();
+    expect(removes(wrapper)).toHaveLength(1);
+    expect(document.activeElement).toBe(removes(wrapper)[0].element);
+    await removes(wrapper)[0].trigger("click");
+    await flushPromises();
+    expect(document.activeElement).toBe(
+      wrapper.find('[data-focus="add-lora"]').element,
+    );
   });
 });

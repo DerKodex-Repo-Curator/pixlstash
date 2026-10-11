@@ -86,6 +86,7 @@ from pixlstash.hub.workflow_group_writes import (
     LORA_ADDRESS_PREFIX,
     RAN,
     STAGE_ADDRESS_PREFIX,
+    WAITED,
     STAGE_OFF,
     STAGE_ON,
     WAITING,
@@ -96,6 +97,7 @@ from pixlstash.hub.workflow_group_writes import (
     waiting_counts,
     write_changes,
     write_saved_defaults,
+    write_waiting,
     replace_group_picture_inputs,
     replace_group_pins,
     replace_parameter_defaults,
@@ -1437,6 +1439,17 @@ class RunRequest(BaseModel):
     # that this workflow made the picture is not checked here. Ignored unless
     # the request names exactly one picture.
     replay: bool = False
+    # What waited on the workflow as the caller read it when it laid its form
+    # (#1850): the `waiting` of the `GET …/changes` the Run popup read when it
+    # opened, the whole set. The caller's statement of what the run saw and
+    # not a write: nothing that waits is changed by it. Kept beside what the
+    # run changed, so a save of the run can tell a change made since (in
+    # another window, before Run was pressed) from one the run saw. Left
+    # out, what waits when the run arrives is taken as seen; `{}` says
+    # nothing waited. Only a run of a workflow by itself (`workflow_id`)
+    # keeps anything, so it is ignored with pictures or a saved recipe, as
+    # `replay` is where it does not apply, and by the pre-flight.
+    waited: WorkflowChanges | None = None
 
     @field_validator("inputs")
     @classmethod
@@ -1593,6 +1606,35 @@ class WorkflowChanges(BaseModel):
             values=list(values.values()),
         )
 
+    def less(self, other: "WorkflowChanges") -> "WorkflowChanges":
+        """These changes without each one *other* holds exactly.
+
+        Thing by thing: a model address, a LoRA slot (set or removed), a
+        stage, a parameter. One that *other* answers differently stays.
+        """
+        models = {m.address: m for m in other.models}
+        values = {(v.slot_label, v.input_name): v for v in other.values}
+        # A slot *other* removes is held as None, one it sets as the entry.
+        slots = {
+            **{(i.node_id, i.field): i for i in other.loras},
+            **{(i.node_id, i.field): None for i in other.skip_loras},
+        }
+        return WorkflowChanges.model_construct(
+            models=[m for m in self.models if models.get(m.address) != m],
+            loras=[i for i in self.loras if slots.get((i.node_id, i.field)) != i],
+            skip_loras=[
+                i
+                for i in self.skip_loras
+                if slots.get((i.node_id, i.field), i) is not None
+            ],
+            stages={
+                s: on for s, on in self.stages.items() if other.stages.get(s) != on
+            },
+            values=[
+                v for v in self.values if values.get((v.slot_label, v.input_name)) != v
+            ],
+        )
+
     def too_many(self) -> bool:
         """Whether this is more than one save takes: the limits of each list,
         which two sets laid over each other can pass together."""
@@ -1615,6 +1657,11 @@ class WorkflowChanges(BaseModel):
             + len(self.stages)
             + len(self.values)
         )
+
+
+# `RunRequest.waited` names the class above, which is written in a run's own
+# types and so comes after it.
+RunRequest.model_rebuild()
 
 
 class SaveVerb(BaseModel):
@@ -1644,6 +1691,15 @@ class WorkflowChangesState(BaseModel):
         None, description="The changes waiting, unsaved. Null when there are none."
     )
     count: int = Field(0, description="How many changes wait.")
+    stale: bool = Field(
+        False,
+        description=(
+            "What waits was made against a version of the workflow that is "
+            "no longer its current one: Save is closed for it, and "
+            "`GET …/graph?waiting=true` opens the workflow without it. False "
+            "when nothing waits."
+        ),
+    )
     ran: WorkflowChanges | None = Field(
         None,
         description=(
@@ -1657,8 +1713,8 @@ class WorkflowChangesState(BaseModel):
     ran_save: SaveVerb | None = Field(
         None,
         description=(
-            "Save, for what is waiting with `ran` on top: what the Tasks tab "
-            "offers after a run. Null when `ran` is."
+            "Save, for `ran` by itself, which is what a save with `from_run` "
+            "writes: what the Tasks tab offers after a run. Null when `ran` is."
         ),
     )
 
@@ -1670,7 +1726,8 @@ class SaveRequest(BaseModel):
         None,
         description=(
             "Changes to save on top of what is waiting, thing by thing: what "
-            "the Run popup changed, or `ran` after a run."
+            "the Run popup changed. With `from_run`, the whole set: `ran` "
+            "after a run."
         ),
     )
     version: int | None = Field(
@@ -1683,7 +1740,14 @@ class SaveRequest(BaseModel):
     )
     from_run: bool = Field(
         False,
-        description="The changes are what a run was made with; the version says so.",
+        description=(
+            "`changes` are what a run was made with, and are saved by "
+            "themselves: a run never uses what is waiting, so none of it is "
+            "laid under them. Of what waits, the save clears what already "
+            "waited when the run was made, and an edit made after the run "
+            "stays waiting (`still_waiting`). The version says it was saved "
+            "from a run."
+        ),
     )
     name: str | None = Field(
         None,
@@ -1694,8 +1758,9 @@ class SaveRequest(BaseModel):
     dry_run: StrictBool = Field(
         False,
         description=(
-            "Answer which verbs are open for what is waiting with `changes` "
-            "on top, and write nothing."
+            "Answer which verbs are open for the set the save would write "
+            "(what is waiting with `changes` on top, or `changes` alone with "
+            "`from_run`), and write nothing."
         ),
     )
 
@@ -1719,6 +1784,23 @@ class WorkflowSaved(BaseModel):
     dry_run: bool = False
     save: SaveVerb | None = None
     save_as_new: SaveVerb | None = None
+    still_waiting: int = Field(
+        0,
+        description=(
+            "How many changes still wait on the workflow saved from. Only a "
+            "save with `from_run` leaves any: the changes made after that "
+            "run, which it did not use, carried onto the version the save "
+            "made. Every other save clears what waited."
+        ),
+    )
+    not_kept: WorkflowChanges | None = Field(
+        None,
+        description=(
+            "Changes made after the run that could not stay waiting, because "
+            "the graph this save wrote no longer has the loader they name. "
+            "They are gone and were not saved. Null when there are none."
+        ),
+    )
     left_out: list[dict] = Field(
         default_factory=list,
         description=(
@@ -3699,6 +3781,7 @@ def create_router(server) -> APIRouter:
         graph: dict,
         object_info: dict | None,
         swapped: dict[str, tuple[dict, dict]] | None = None,
+        unloaded: list[dict] | None = None,
     ) -> list[dict]:
         """Load each model the owner replaced on this card's graph, in place.
 
@@ -3708,7 +3791,9 @@ def create_router(server) -> APIRouter:
         replacement, a PixlStash loader is swapped in (#1605) and the node
         added to *swapped*, which the caller records with
         :func:`_record_loader_swaps` once the graph is final. Returns the
-        substitutions made.
+        substitutions made. A replacement that could not be loaded leaves its
+        loader naming the original and is added to *unloaded*, as
+        ``{was, now, reason}``.
         """
         fixes = {
             (kind, normalized_filename(was)): now
@@ -3787,6 +3872,8 @@ def create_router(server) -> APIRouter:
                 miss["was"],
                 miss["reason"],
             )
+        if unloaded is not None:
+            unloaded.extend(missed)
         return done
 
     def _swap_in_pixlstash_loaders(
@@ -6590,7 +6677,10 @@ def create_router(server) -> APIRouter:
             # name what this workflow loads now, and the same-bytes swap below
             # only rescues a name still missing after them.
             swapped: dict[str, tuple[dict, dict]] = {}
-            group.substitutions = _apply_model_fixes(card, graph, object_info, swapped)
+            unloaded: list[dict] = []
+            group.substitutions = _apply_model_fixes(
+                card, graph, object_info, swapped, unloaded
+            )
             if object_info is not None:
                 same_model = apply_model_swap(
                     graph,
@@ -6705,6 +6795,22 @@ def create_router(server) -> APIRouter:
             if unfed:
                 found = run_service.with_pixlstash_refusals(found, unfed)
             group.reasons = [r.as_dict() for r in found]
+            # A replacement this ComfyUI does not have left its loader naming
+            # the original, which is missing too. The file to name is the one
+            # this workflow loads there: the replacement, which is what the
+            # Workflow tab and the Run popup show on that row.
+            stands_in = {miss["was"]: miss["now"] for miss in unloaded}
+            for reason in group.reasons if stands_in else ():
+                if reason["code"] == run_service.MISSING_MODELS:
+                    named = [
+                        {**model, "file": stands_in.get(model["file"], model["file"])}
+                        for model in reason["models"]
+                    ]
+                    reason["models"] = list(
+                        {
+                            (model["file"], model["folder"]): model for model in named
+                        }.values()
+                    )
             built.append((graph, source, card, swapped))
             if extract:
                 # Stored, never submitted: nothing here stops it.
@@ -7455,10 +7561,8 @@ def create_router(server) -> APIRouter:
         hub = _hub()
         unsaved = WorkflowChanges()
         if waiting:
-            held, base, _ = _stored_changes(hub, workflow.workflow_id)
-            if held is not None and base == workflow_versions.current_version(
-                hub, workflow.workflow_id
-            ):
+            held, stale, _ran, _waited = _stored_changes(hub, workflow.workflow_id)
+            if held is not None and not stale:
                 unsaved = held
             elif held is not None:
                 # Save's own rule (`_CHANGED_SINCE`): applied here they would
@@ -8903,7 +9007,13 @@ def create_router(server) -> APIRouter:
             "class too, when a file of another type needs another loader, and "
             "the node pack that loader comes from), whether the set's "
             "checkpoint has the workflow's base model so its LoRAs are kept, "
-            "and, when the clone would be refused, why. Nothing is written."
+            "and, when the clone would be refused, why. Read off the graph a "
+            "run submits: where the owner replaced a model this machine lacks "
+            "(`model-fix`), every file named for the graph (`swaps` and "
+            "`takes` keys, `loaders[].was`, `base_filename`, "
+            "`unpaired_bases`) is the replacement, and a set holding the "
+            "original it stands in for changes nothing there. Nothing is "
+            "written."
         ),
         response_model=SetClonePlans,
         responses={
@@ -8917,9 +9027,20 @@ def create_router(server) -> APIRouter:
         _workflow, card = _require_base(hub, workflow_id)
         # Once per request, for every set: the dialog asks on open.
         object_info, error = _read_object_info(_comfyui_url(_user(request)))
-        graph = _card_source(
-            card, workflow_id=_workflow.workflow_id, object_info=object_info
-        ).graph
+        graph = deepcopy(
+            _card_source(
+                card, workflow_id=_workflow.workflow_id, object_info=object_info
+            ).graph
+        )
+        # The graph a run submits, with the owner's replacements for models
+        # this machine lacks in it, as `_fix_replacements` reads it: every
+        # file the plan names is the one its loader loads, so a row that
+        # holds a replacement is found by the file it shows. Written as the
+        # fix names them (no `object_info`), never as a swapped-in loader.
+        stands_for = {
+            normalized_filename(fix["now"]): normalized_filename(fix["was"])
+            for fix in _apply_model_fixes(card, graph, None)
+        }
         models = _swap_models(hub)
         index = recipe_asset_index(hub)
         found = _swap_slots(graph, models, index)
@@ -8974,6 +9095,13 @@ def create_router(server) -> APIRouter:
                 bases[0][1] if bases else None,
             )
             swaps, filled = _set_swaps(found, bases, members, ask.picks)
+            # The original a replacement stands in for is no change: wherever
+            # this workflow names it, the replacement is what loads.
+            swaps = {
+                was: now
+                for was, now in swaps.items()
+                if stands_for.get(normalized_filename(was)) != normalized_filename(now)
+            }
             new_base = _base_key(checkpoint.base_model) if checkpoint else None
             keeps = old_base is not None and new_base == old_base
             pending = deepcopy(graph)
@@ -9399,23 +9527,33 @@ def create_router(server) -> APIRouter:
 
     def _stored_changes(
         hub, workflow_id: str
-    ) -> tuple[WorkflowChanges | None, int | None, WorkflowChanges | None]:
-        """``(waiting, the version they were made against, ran)`` of a workflow.
+    ) -> tuple[
+        WorkflowChanges | None, bool, WorkflowChanges | None, WorkflowChanges | None
+    ]:
+        """``(waiting, stale, ran, waited)`` of a workflow.
 
-        *ran* is ``None`` once the workflow has another version than the one
-        that run was made on: what it changed no longer applies to this graph.
+        *stale*: what waits was made against a version of the workflow that
+        is no longer its current one. Decided here and nowhere else, so the
+        state's ``stale``, the closed Save (``_CHANGED_SINCE``) and the graph
+        that opens without what waits are one answer. False when nothing
+        waits. *ran* is ``None`` once the workflow has another version than
+        the one that run was made on: what it changed no longer applies to
+        this graph. *waited* is what waited, on that version, when the run
+        was made (``_keep_run_changes``), and goes with *ran*: ``None`` when
+        nothing did, or nothing was remembered.
         """
         stored = read_changes(hub, workflow_id)
-        waiting, base = stored.get(WAITING, (None, None))
+        current = workflow_versions.current_version(hub, workflow_id)
+        raw, base = stored.get(WAITING, (None, None))
+        waiting = _changes_of(raw, workflow_id, WAITING)
         ran, ran_base = stored.get(RAN, (None, None))
-        if ran is not None and ran_base != workflow_versions.current_version(
-            hub, workflow_id
-        ):
+        if ran_base != current:
             ran = None
         return (
-            _changes_of(waiting, workflow_id, WAITING),
-            base,
+            waiting,
+            waiting is not None and base != current,
             _changes_of(ran, workflow_id, RAN),
+            _changes_of((ran or {}).get(WAITED), workflow_id, RAN),
         )
 
     def _run_with(workflow_id: str, changes: WorkflowChanges) -> RunRequest:
@@ -9440,6 +9578,18 @@ def create_router(server) -> APIRouter:
         value that is the default is not a change. Prompt, seed, count, the
         pictures put in and the people picked (``add_loras``) are the run's
         and are never kept. Never fails the run, which is queued by now.
+
+        What waits on the workflow is not part of the set: a run is the
+        workflow with its request on top, so the set kept here is all of what
+        the run was made with, and a save of it stands alone
+        (``_set_to_save``). It is remembered beside the set (``WAITED``) so
+        that save can tell what the run had seen from an edit made after it
+        (``_save``): as the caller read it when it laid its form, where the
+        request says (``RunRequest.waited``; the Run popup reads it when it
+        opens, and a change made in another window before Run is pressed is
+        not in the run), else as it waits at this moment. Where what waits
+        is stale by now nothing is remembered: no run of this version was
+        made with it, whoever read it.
 
         A run from pictures or a saved recipe is a recipe laid over the
         workflow, not a set of changes to it: it keeps none, and it is still
@@ -9474,6 +9624,27 @@ def create_router(server) -> APIRouter:
             # sent with its digest would read as a change on every run. One
             # the shelf does not hold was not loaded, so it changed nothing.
             by_digest = _shelf_files_of(hub, asked.models)
+            # A model the owner replaced (`model-fix`) is its replacement
+            # wherever this workflow names it, so the two are one file here:
+            # the Run popup sends the replacement on every run. Read only
+            # for a run that names a model.
+            topology = (
+                _require_workflow(hub, asked.workflow_id).base_topology
+                if asked.models
+                else None
+            )
+            replaced = {
+                (kind, normalized_filename(was)): normalized_filename(now)
+                for _label, was, now, kind in (
+                    model_fixes(hub, topology) if topology else []
+                )
+            }
+
+            def loaded(address: str, filename: str) -> str:
+                """The file a loader at *address* naming *filename* loads."""
+                name = normalized_filename(filename)
+                widget = address.rpartition(OVERRIDE_ADDRESS_SEPARATOR)[2]
+                return replaced.get((model_fix_kind("", widget), name), name)
 
             # An address the recipe does not spell that way is read off the
             # graph, where the same loader answers to either spelling; the
@@ -9488,15 +9659,16 @@ def create_router(server) -> APIRouter:
                 if not filename:
                     return False
                 # A name the hub forgot is no answer: the graph has one.
+                now = loaded(model.address, filename)
                 if models.get(model.address):
-                    return normalized_filename(filename) != models[model.address]
+                    return now != loaded(model.address, models[model.address])
                 if files_at is None:
                     files_at = _graph_files_at(
                         hub, asked.workflow_id, _owner_object_info()
                     )
-                loaded = {normalized_filename(f) for f in files_at(model.address)}
+                own = {loaded(model.address, f) for f in files_at(model.address)}
                 # A loader the graph has not got loaded nothing.
-                return bool(loaded) and normalized_filename(filename) not in loaded
+                return bool(own) and now not in own
 
             changes = _without_people(
                 WorkflowChanges(
@@ -9519,11 +9691,20 @@ def create_router(server) -> APIRouter:
                     ],
                 )
             )
+            waiting, stale, _ran, _waited = _stored_changes(hub, asked.workflow_id)
+            seen = waiting if asked.waited is None else _without_people(asked.waited)
             write_changes(
                 hub,
                 asked.workflow_id,
                 RAN,
-                changes.model_dump() if changes.count() else None,
+                {
+                    **changes.model_dump(),
+                    WAITED: seen.model_dump()
+                    if seen is not None and not stale
+                    else None,
+                }
+                if changes.count()
+                else None,
                 workflow_versions.current_version(hub, asked.workflow_id),
             )
         except Exception:
@@ -9580,20 +9761,17 @@ def create_router(server) -> APIRouter:
         return found
 
     def _graph_files_at(hub, workflow_id: str, object_info: dict | None):
-        """A read of the files the workflow's graph loads at a model address.
-
-        By either spelling of the address: a loader is named by its slot
-        label or by its `core:` label, a run loads a model at both
-        (``_apply_models``), and the default recipe knows it by one of them
-        only. A workflow with no graph answers nothing for every address,
-        said in the log.
+        """A read of the files the workflow's graph loads at a model address
+        (:func:`_files_at`). A workflow with no graph answers nothing for
+        every address, said in the log.
         """
         try:
             _workflow, card = _require_base(hub, workflow_id)
-            graph = _card_source(
-                card, workflow_id=workflow_id, object_info=object_info
-            ).graph
-            labels, core = _graph_labels(graph, "models")
+            return _files_at(
+                _card_source(
+                    card, workflow_id=workflow_id, object_info=object_info
+                ).graph
+            )
         except HTTPException as exc:
             logger.info(
                 "[workflows] Workflow %s has no graph to read a model address "
@@ -9601,7 +9779,17 @@ def create_router(server) -> APIRouter:
                 workflow_id,
                 exc.detail,
             )
-            graph, labels, core = {}, {}, {}
+            return lambda _address: []
+
+    def _files_at(graph: dict):
+        """A read of the files *graph* loads at a model address.
+
+        By either spelling of the address: a loader is named by its slot
+        label or by its `core:` label, a run loads a model at both
+        (``_apply_models``), and the default recipe knows it by one of them
+        only.
+        """
+        labels, core = _graph_labels(graph, "models")
 
         def files_at(address: str) -> list[str]:
             slot_label, _, widget = address.rpartition(OVERRIDE_ADDRESS_SEPARATOR)
@@ -9678,21 +9866,54 @@ def create_router(server) -> APIRouter:
             return SaveVerb(open=False, reason=_CHECKPOINT_CHANGED), as_new
         return SaveVerb(open=True), as_new
 
+    def _set_to_save(
+        waiting: WorkflowChanges | None,
+        stale: bool,
+        asked: WorkflowChanges,
+        from_run: bool,
+    ) -> tuple[WorkflowChanges, bool]:
+        """``(the set a save writes, whether it was made on an older version)``.
+
+        What waits with *asked* on top, thing by thing. **A run's set stands
+        alone** (*from_run*): a run is the workflow with its request on top
+        and never reads what waits, so whatever waited and was in the run is
+        in its set already (the Run popup sends it), and what waited and is
+        not in it the run did not use. Kind by kind, for what waits:
+
+        * ``models``: a loader the run did not name loaded the workflow's own
+          file, and one it named with that file is no change;
+        * ``loras``, ``skip_loras``: a loader the run did not name ran as the
+          graph has it, so a strength or a removal put back is not saved;
+        * ``stages``: one the run did not name ran as the default has it;
+        * ``values``: a parameter the run did not name, or named at the
+          workflow's own value, is the workflow's.
+
+        Laid under it, a waiting change the owner put back for the run
+        would be saved as if the run had used it. What waits is not stale
+        for a set that leaves it out. One function, so the verb the state
+        offers (``ran_save``), a dry run and the save judge the set that is
+        written. What such a save then does to what waits is ``_save``'s.
+        """
+        if from_run:
+            return asked, False
+        return (waiting or WorkflowChanges()).over(asked), stale
+
     def _changes_state(hub, workflow_id: str) -> WorkflowChangesState:
-        waiting, base, ran = _stored_changes(hub, workflow_id)
-        current = workflow_versions.current_version(hub, workflow_id)
+        waiting, stale, ran, _waited = _stored_changes(hub, workflow_id)
         held = waiting or WorkflowChanges()
-        stale = waiting is not None and base != current
         save, save_as_new = _verbs(hub, workflow_id, held, stale)
         return WorkflowChangesState(
             workflow_id=workflow_id,
-            version=current,
+            version=workflow_versions.current_version(hub, workflow_id),
             waiting=waiting,
             count=held.count(),
+            stale=stale,
             ran=ran,
             save=save,
             save_as_new=save_as_new,
-            ran_save=_verbs(hub, workflow_id, held.over(ran), stale)[0]
+            ran_save=_verbs(
+                hub, workflow_id, *_set_to_save(waiting, stale, ran, from_run=True)
+            )[0]
             if ran is not None
             else None,
         )
@@ -9706,7 +9927,9 @@ def create_router(server) -> APIRouter:
             "`save` and `save_as_new` say which of the two verbs is offered "
             "for what is waiting, and the sentence why one is not: a change "
             "of a checkpoint this machine has is Save as new only, and so are "
-            "changes made before the workflow got another version."
+            "changes made before the workflow got another version, which "
+            "`stale` says by itself: those are also left out of the graph "
+            "`GET …/graph?waiting=true` opens."
         ),
         response_model=WorkflowChangesState,
         responses={404: {"description": "This machine has no such workflow."}},
@@ -9967,17 +10190,108 @@ def create_router(server) -> APIRouter:
                 gone.append(address)
         return gone
 
+    def _still_applies(
+        changes: WorkflowChanges, graph: dict
+    ) -> tuple[WorkflowChanges, WorkflowChanges]:
+        """``(kept, lost)`` of *changes* a save leaves waiting, against the
+        *graph* it wrote.
+
+        A change stays waiting only where that graph can still take it and
+        it would still change something. *Lost*, and said in the save's
+        answer: a LoRA set on a loader the graph no longer has, and a model
+        picked for an address no loader of it answers to (a loader the save
+        removed, or swapped for another). Done already, and dropped without
+        a word because nothing of the owner's is lost: a loader removed that
+        the graph no longer has, and a model the loader at that address
+        loads by now. Stages and parameters are defaults beside the graph
+        and always apply.
+        """
+        files_at = _files_at(graph) if changes.models else None
+
+        def has(item: RunLoraSlot | RunLora) -> bool:
+            node = graph.get(item.node_id)
+            return isinstance(node, dict) and item.field in (node.get("inputs") or {})
+
+        loaded = {
+            model.address: {normalized_filename(f) for f in files_at(model.address)}
+            for model in changes.models
+        }
+        lost = WorkflowChanges.model_construct(
+            models=[m for m in changes.models if not loaded[m.address]],
+            loras=[item for item in changes.loras if not has(item)],
+            skip_loras=[],
+            stages={},
+            values=[],
+        )
+        done = WorkflowChanges.model_construct(
+            models=[
+                m
+                for m in changes.models
+                if m.filename and normalized_filename(m.filename) in loaded[m.address]
+            ],
+            loras=[],
+            skip_loras=[item for item in changes.skip_loras if not has(item)],
+            stages={},
+            values=[],
+        )
+        return changes.less(lost).less(done), lost
+
     def _save(
         request: Request, workflow_id: str, payload: SaveRequest, as_new: bool
     ) -> WorkflowSaved:
-        """Save and Save as new: one path, two places the graph lands."""
+        """Save and Save as new: one path, two places the graph lands.
+
+        **What a save does to what waits.** Every save clears it, having
+        written it, but one of what a run changed (``from_run``), which
+        writes none of it (``_set_to_save``). That one clears only what the
+        run had seen: a change that waits now exactly as it waited when the
+        run was made (``waited``) was either carried by the run, and is
+        saved, or put back for it, and is not. A change that did not wait
+        then, or waits with another answer, was made after the run: it stays
+        waiting, on the version the save made, less what that graph can no
+        longer take (``_still_applies``) and what the save has just written.
+        Nothing remembered reads as nothing having waited, so everything is
+        kept. A set that is stale already is left as it is: carried onto a
+        new version it would read as made on it.
+        """
         hub = _hub()
         workflow, card = _require_base(hub, workflow_id)
         workflow_id = workflow.workflow_id
-        waiting, base, _ran = _stored_changes(hub, workflow_id)
-        changes = (waiting or WorkflowChanges()).over(
-            _without_people(payload.changes or WorkflowChanges())
+        waiting, waiting_stale, _ran, waited = _stored_changes(hub, workflow_id)
+        changes, stale = _set_to_save(
+            waiting,
+            waiting_stale,
+            _without_people(payload.changes or WorkflowChanges()),
+            payload.from_run,
         )
+        untouched = payload.from_run and waiting_stale
+        newer = (
+            waiting.less(waited or WorkflowChanges())
+            if payload.from_run and waiting is not None and not waiting_stale
+            else WorkflowChanges()
+        )
+
+        def settle(conn, kept: WorkflowChanges, version: int | None) -> None:
+            """Leave *kept* waiting on *version*, and drop the rest."""
+            if untouched:
+                clear_changes(conn, workflow_id, RAN)
+                return
+            clear_changes(conn, workflow_id)
+            if kept.count():
+                write_waiting(conn, workflow_id, kept.model_dump(), version)
+
+        def saved(kept: WorkflowChanges, **answer) -> WorkflowSaved:
+            still = waiting.count() if untouched else kept.count()
+            if still:
+                logger.info(
+                    "[workflows] Workflow %s: %d change(s) %s still wait after "
+                    "the save of what its run changed.",
+                    workflow_id,
+                    still,
+                    "made on an older version" if untouched else "made after the run",
+                )
+            return WorkflowSaved(still_waiting=still, **answer)
+
         if changes.too_many():
             raise HTTPException(
                 status_code=422,
@@ -9988,7 +10302,7 @@ def create_router(server) -> APIRouter:
                 ),
             )
         current = workflow_versions.current_version(hub, workflow_id)
-        stale = (waiting is not None and base != current) or (
+        stale = stale or (
             "version" in payload.model_fields_set and payload.version != current
         )
         save, save_as_new = _verbs(hub, workflow_id, changes, stale)
@@ -10026,7 +10340,9 @@ def create_router(server) -> APIRouter:
             )
             with hub.transaction() as conn:
                 write_saved_defaults(conn, landed, [], rows)
-                clear_changes(conn, workflow_id)
+                # This workflow has the version it had: what was made after
+                # the run waits on as it did.
+                settle(conn, newer, current)
             _announce(request, [landed], "imported")
             _announce(request, [workflow_id], "changed")
             logger.info(
@@ -10037,22 +10353,25 @@ def create_router(server) -> APIRouter:
                 name,
                 changes.count(),
             )
-            return WorkflowSaved(
+            return saved(
+                newer,
                 workflow_id=landed,
                 name=name,
                 new_workflow=True,
                 version=1,
                 left_out=left_out,
             )
+        # A change made after the run that the save has just written is done.
+        newer = newer.less(changes)
         if not changes.changes_the_graph():
             # Stages and parameters are defaults stored beside the graph: the
             # graph is as it was, so there is no version to make.
             rows = _default_rows(changes, stages, every=False)
             with hub.transaction() as conn:
                 write_saved_defaults(conn, workflow_id, [], rows)
-                clear_changes(conn, workflow_id)
+                settle(conn, newer, current)
             _announce(request, [workflow_id], "changed")
-            return WorkflowSaved(workflow_id=workflow_id, version=current)
+            return saved(newer, workflow_id=workflow_id, version=current)
         # The graph before the save: version 1 of an automatic workflow saved
         # over for the first time, and where each changed loader's LoRA is read.
         before = _card_source(
@@ -10086,9 +10405,20 @@ def create_router(server) -> APIRouter:
             ["loras"] if changes.loras or changes.skip_loras else []
         )
 
-        def also(conn) -> None:
+        kept, lost = _still_applies(newer, graph)
+        if lost.count():
+            logger.warning(
+                "[workflows] Workflow %s: %d change(s) made after the run name "
+                "a loader the saved graph no longer has, so they are not kept "
+                "waiting: %s",
+                workflow_id,
+                lost.count(),
+                lost.model_dump(exclude_defaults=True),
+            )
+
+        def also(conn, made: int) -> None:
             write_saved_defaults(conn, workflow_id, superseded, rows)
-            clear_changes(conn, workflow_id)
+            settle(conn, kept, made)
 
         version = _store_over(
             hub,
@@ -10102,8 +10432,12 @@ def create_router(server) -> APIRouter:
             changed="This workflow got a newer version while it was being saved.",
         )
         _announce(request, [workflow_id], "changed")
-        return WorkflowSaved(
-            workflow_id=workflow_id, version=version, left_out=left_out
+        return saved(
+            kept,
+            workflow_id=workflow_id,
+            version=version,
+            left_out=left_out,
+            not_kept=lost if lost.count() else None,
         )
 
     _SAVE_RESPONSES = {
@@ -10136,8 +10470,14 @@ def create_router(server) -> APIRouter:
             "repair and is saved), and for changes made before the workflow "
             "got another version: Save as new takes both. A LoRA attached to "
             "a person is never written. A saved recipe still runs on the "
-            "graph it was saved from. `dry_run` answers which verbs are open "
-            "and writes nothing."
+            "graph it was saved from. With `from_run`, `changes` are what a "
+            "run was made with and are saved by themselves, with nothing that "
+            "waited under them: the workflow as that run used it. Of what "
+            "waits, that save clears only what waited when the run was made; "
+            "a change made after the run stays waiting, on the version the "
+            "save made (`still_waiting`), unless the saved graph can no "
+            "longer take it (`not_kept`). `dry_run` answers which verbs are "
+            "open and writes nothing."
         ),
         response_model=WorkflowSaved,
         responses=_SAVE_RESPONSES,
@@ -10156,7 +10496,10 @@ def create_router(server) -> APIRouter:
             "and store the result as a new manual workflow called `name`. "
             "This workflow is left as it was and what waited on it is "
             "cleared. Open for every set of changes, a checkpoint change "
-            "included. A LoRA attached to a person is never written."
+            "included. A LoRA attached to a person is never written. With "
+            "`from_run`, `changes` are saved by themselves, as for Save, and "
+            "a change made on this workflow after the run stays waiting on it "
+            "(`still_waiting`)."
         ),
         response_model=WorkflowSaved,
         status_code=201,
@@ -10873,7 +11216,7 @@ def create_router(server) -> APIRouter:
             hub, workflow_id, before.workflow_version, payload.opening, source
         )
 
-        def also(conn) -> None:
+        def also(conn, _made: int) -> None:
             if payload.opening and source == workflow_versions.FROM_COMFYUI:
                 conn.execute(
                     "UPDATE workflow_version SET opening = ? WHERE workflow_id = ? "
@@ -10909,15 +11252,10 @@ def create_router(server) -> APIRouter:
                         (workflow_id, version_to_delete),
                     )
             write_saved_defaults(conn, workflow_id, superseded, rows)
-            if payload.waiting_applied:
-                clear_changes(conn, workflow_id)
-            else:
-                # What a run changed was changed in the graph this replaces.
-                # What waits is kept, for the owner to discard or save as new.
-                conn.execute(
-                    "DELETE FROM workflow_change WHERE workflow_id = ? AND kind = ?",
-                    (workflow_id, RAN),
-                )
+            # What a run changed was changed in the graph this replaces.
+            # What waits is kept unless the graph holds it already, for the
+            # owner to discard or save as new.
+            clear_changes(conn, workflow_id, None if payload.waiting_applied else RAN)
 
         version = _store_over(
             hub,

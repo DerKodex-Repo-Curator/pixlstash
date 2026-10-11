@@ -418,3 +418,67 @@ describe("the two menus cannot diverge", () => {
     expect(wrapper.emitted("rename")).toHaveLength(1);
   });
 });
+
+// #1850, part 3: the clone dialogs went, and what they did is the Workflow
+// tab's *Use a set…*, which this row asks for.
+describe("Use a set…", () => {
+  const rowOf = (wrapper, name) =>
+    verbMenus(wrapper)[0]
+      .findAll(".ctx-item")
+      .find((el) => el.attributes("data-verb") === name);
+
+  it("is offered for one workflow, and asks for it", async () => {
+    const { wrapper } = bar(["a"]);
+    const row = rowOf(wrapper, "use-set");
+    expect(row.find(".ctx-label-text").text()).toBe("Use a set…");
+    expect(row.attributes("aria-disabled")).toBeUndefined();
+    expect(row.find(".tip").attributes("data-text")).toBe(
+      "Fill its model rows from one of your sets, as unsaved changes",
+    );
+    await row.trigger("click");
+    expect(wrapper.emitted("use-set")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it("is refused for several, with why", async () => {
+    const { wrapper } = bar(["a", "b"]);
+    const row = rowOf(wrapper, "use-set");
+    expect(row.attributes("aria-disabled")).toBe("true");
+    expect(row.find(".tip").attributes("data-text")).toBe(
+      "Select one workflow to use a set on it",
+    );
+    await row.trigger("click");
+    expect(wrapper.emitted("use-set")).toBeUndefined();
+    wrapper.unmount();
+  });
+
+  it("sits with the rows that change the card, before the ones that make one", () => {
+    const { wrapper } = bar(["a"]);
+    const verbs = rowVerbs(verbMenus(wrapper)[0]);
+    expect(verbs.slice(verbs.indexOf("rename"))).toEqual([
+      "rename",
+      "hide",
+      "use-set",
+      "export",
+      "duplicate",
+      "delete",
+    ]);
+    wrapper.unmount();
+  });
+
+  it("no row, tooltip or name says copy or clone (rule 9 of #1846)", () => {
+    // One selected and several: the refusals are sentences of their own.
+    for (const keys of [["a"], ["a", "b"]]) {
+      const { wrapper } = bar(keys);
+      const said = [
+        wrapper.text(),
+        ...wrapper.findAll(".tip").map((el) => el.attributes("data-text")),
+        ...wrapper.findAll("[data-tooltip]").map((el) => el.attributes("data-tooltip")),
+        ...wrapper.findAll("[aria-label]").map((el) => el.attributes("aria-label")),
+      ].join("\n");
+      expect(said).toContain("Duplicate");
+      expect(said).not.toMatch(/\b(cop(y|ies|ied)|clon(e|ed|ing)|fixed|edited|original)\b/i);
+      wrapper.unmount();
+    }
+  });
+});

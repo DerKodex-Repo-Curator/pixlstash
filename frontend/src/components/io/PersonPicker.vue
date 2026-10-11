@@ -1,69 +1,66 @@
 <template>
-  <!-- Fixed: the popup was opened ON this person, so there is nothing to pick
-       and the tile is a statement, not a control. -->
-  <div v-if="fixed" class="personpick" role="group" :aria-label="ariaLabel || undefined">
-    <span
-      v-for="o in options"
-      :key="String(o.id)"
-      class="persontile persontile--on"
-      data-testid="person-fixed"
-    >
-      <span class="persontile__face">
-        <img v-if="faceOf(o)" :src="faceOf(o)" alt="" @error="broken.add(o.id)" />
-        <v-icon v-else aria-hidden="true">mdi-account-outline</v-icon>
+  <div class="personpick" role="group" :aria-label="ariaLabel || undefined">
+    <template v-for="o in options" :key="String(o.id)">
+      <!-- Fixed: the popup was opened ON this person, so the tile is a
+           statement, not a control. Said as a checkbox that cannot be
+           cleared, so it reads like the tiles beside it. -->
+      <span
+        v-if="o.fixed"
+        class="persontile persontile--on"
+        role="checkbox"
+        aria-checked="true"
+        aria-disabled="true"
+        data-testid="person-fixed"
+      >
+        <span class="persontile__face">
+          <img v-if="faceOf(o)" :src="faceOf(o)" alt="" @error="broken.add(o.id)" />
+          <v-icon v-else aria-hidden="true">mdi-account-outline</v-icon>
+        </span>
+        <span class="persontile__name">{{ o.label }}</span>
       </span>
-      <span class="persontile__name">{{ o.label }}</span>
-    </span>
-  </div>
-  <div
-    v-else
-    role="radiogroup"
-    class="personpick"
-    :aria-label="ariaLabel || undefined"
-    @keydown="onKeydown"
-  >
-    <button
-      v-for="o in options"
-      :key="String(o.id)"
-      type="button"
-      role="radio"
-      class="persontile"
-      :class="{ 'persontile--on': o.id === modelValue }"
-      :aria-checked="o.id === modelValue ? 'true' : 'false'"
-      :tabindex="o.id === tabStop ? 0 : -1"
-      :disabled="disabled"
-      :data-person="String(o.id)"
-      @click="select(o)"
-    >
-      <span class="persontile__face">
-        <img
-          v-if="faceOf(o)"
-          :src="faceOf(o)"
-          alt=""
-          loading="lazy"
-          @error="broken.add(o.id)"
-        />
-        <v-icon v-else aria-hidden="true">{{
-          o.id === NO_ONE ? "mdi-account-off-outline" : "mdi-account-outline"
-        }}</v-icon>
-      </span>
-      <span class="persontile__name">{{ o.label }}</span>
-    </button>
+      <button
+        v-else
+        type="button"
+        role="checkbox"
+        class="persontile"
+        :class="{ 'persontile--on': isOn(o) }"
+        :aria-checked="isOn(o) ? 'true' : 'false'"
+        :disabled="disabled"
+        :data-person="String(o.id)"
+        @click="emit('toggle', o.id)"
+      >
+        <span class="persontile__face">
+          <img
+            v-if="faceOf(o)"
+            :src="faceOf(o)"
+            alt=""
+            loading="lazy"
+            @error="broken.add(o.id)"
+          />
+          <v-icon v-else aria-hidden="true">{{
+            o.id === NO_ONE ? "mdi-account-off-outline" : "mdi-account-outline"
+          }}</v-icon>
+        </span>
+        <span class="persontile__name">{{ o.label }}</span>
+      </button>
+    </template>
   </div>
 </template>
 
 <script setup>
 /**
- * Pick the person a run is of, by face: one tile per person, and "No one".
+ * Pick the people a run is of, by face: one tile per person, and "No one".
  *
- * A radiogroup like OptionRows, and it follows that component's rule: NO
- * FILL. The chosen tile is an olive ring round the face and a medium-weight
- * name; hover is the ink wash, which follows the pointer and not the value.
+ * Several can be picked, so each tile is a checkbox (`aria-checked`, a choice
+ * and not a press) and a tab stop of its own; pressing a picked tile unpicks
+ * it. "No one" is the tile for the empty pick: on while nobody is picked, and
+ * pressing it takes everyone off. It follows OptionRows' rule: NO FILL. A
+ * picked tile is an olive ring round the face and a medium-weight name; hover
+ * is the ink wash, which follows the pointer and not the value.
  */
 import { computed, reactive } from "vue";
 import { VIcon } from "vuetify/components";
 import { characterThumbnailUrl } from "../../api/characters";
-import { arrowStep, tabStopId } from "../../utils/radioGroup.js";
 
 /** The id of the "No one" tile: no person is a choice, not an absence. */
 const NO_ONE = null;
@@ -71,20 +68,32 @@ const NO_ONE = null;
 const props = defineProps({
   /** `[{ id, name }]`: the people offered, in the order to draw them. */
   people: { type: Array, required: true },
-  /** The chosen person's id, or null for no one. */
-  modelValue: { type: [Number, String, null], default: null },
-  /** Draw the people as given, chosen, with nothing to press. */
-  fixed: { type: Boolean, default: false },
+  /** The ids of the people picked, the fixed one included. */
+  modelValue: { type: Array, default: () => [] },
+  /** The person the run was opened on: drawn picked, with nothing to press. */
+  fixedId: { type: [Number, String, null], default: null },
   disabled: { type: Boolean, default: false },
   ariaLabel: { type: String, default: "" },
 });
 
-const emit = defineEmits(["update:modelValue"]);
+/** `toggle(id)`: a tile was pressed. Null is "No one". */
+const emit = defineEmits(["toggle"]);
 
 const options = computed(() => [
-  ...(props.fixed ? [] : [{ id: NO_ONE, label: "No one" }]),
-  ...props.people.map((person) => ({ id: person.id, label: person.name })),
+  // With somebody fixed the run is never of no one.
+  ...(props.fixedId == null ? [{ id: NO_ONE, label: "No one" }] : []),
+  ...props.people.map((person) => ({
+    id: person.id,
+    label: person.name,
+    fixed: person.id === props.fixedId,
+  })),
 ]);
+
+function isOn(option) {
+  return option.id === NO_ONE
+    ? !props.modelValue.length
+    : props.modelValue.includes(option.id);
+}
 
 /** People whose thumbnail would not load: they keep their tile, with a glyph. */
 const broken = reactive(new Set());
@@ -92,21 +101,6 @@ const broken = reactive(new Set());
 function faceOf(option) {
   if (option.id === NO_ONE || broken.has(option.id)) return "";
   return characterThumbnailUrl(option.id);
-}
-
-const tabStop = computed(() => tabStopId(options.value, props.modelValue));
-
-function select(option) {
-  if (props.disabled) return;
-  if (option.id !== props.modelValue) emit("update:modelValue", option.id);
-}
-
-function onKeydown(event) {
-  if (props.disabled) return;
-  const id = arrowStep(event, options.value, props.modelValue);
-  if (id !== undefined && id !== props.modelValue) {
-    emit("update:modelValue", id);
-  }
 }
 </script>
 

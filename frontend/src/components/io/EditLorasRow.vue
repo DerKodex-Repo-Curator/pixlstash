@@ -70,7 +70,7 @@
               row.onShelf || row.isNew ? row.name : row.fileBase
             }}</span>
             <span v-if="row.isNew" class="eld-tag">new</span>
-            <span v-if="row.deleted" class="visually-hidden">, deleted</span>
+            <span v-if="row.deleted" class="visually-hidden">, removed</span>
           </span>
 
           <span
@@ -93,19 +93,21 @@
             @keydown.stop
           />
 
-          <!-- Delete, not ×: the entry leaves the workflow, and an × in this
-               app closes things. A deleted row stays on screen with Restore
-               until the dialog is saved or cancelled. -->
+          <!-- A bin, not ×: the loader leaves the workflow, and an × in a
+               dialog closes it. The words are the Workflow tab's, since the
+               two edit one set of changes: *Remove*, and a removed row stays
+               on screen with *Put back* until the dialog is applied, saved
+               or cancelled. -->
           <span class="eld-actions">
             <AppButton
               v-if="row.deleted"
               size="sm"
               data-focus="restore"
-              :aria-label="`Restore ${row.name || 'this LoRA'}`"
+              :aria-label="`Put ${row.name || 'this LoRA'} back`"
               :disabled="saving"
               @click="emit('restore')"
             >
-              Restore
+              Put back
             </AppButton>
             <template v-else>
               <!-- The keyboard's way across the fork, where drag is the
@@ -137,7 +139,7 @@
               <AppBarButton
                 icon="delete-outline"
                 data-focus="delete"
-                :tooltip="`Delete ${row.name || 'this LoRA'}`"
+                :tooltip="`Remove ${row.name || 'this LoRA'}`"
                 :disabled="!editable || saving"
                 @click="emit('remove')"
               />

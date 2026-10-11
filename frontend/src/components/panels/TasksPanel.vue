@@ -7,10 +7,15 @@
        rail, which never gives `.inspector-body` a height, and a real pin to
        the bottom on `/workflows`, where the inspector's footer slot makes the
        body `flex: 1` (`.inspector-content--footed`). That difference is pre-existing and left alone. -->
-  <div v-if="tasksStore.activeEntries.length === 0" class="tm-idle-msg">
+  <!-- An offer to save what a run changed is not an active task, and the
+       panel is not empty with one in it either: the idle line gives way. -->
+  <div
+    v-if="tasksStore.activeEntries.length === 0 && offers.length === 0"
+    class="tm-idle-msg"
+  >
     No active tasks
   </div>
-  <div v-else class="tm-worker-list">
+  <div v-if="tasksStore.activeEntries.length" class="tm-worker-list">
     <template v-for="entry in tasksStore.activeEntries" :key="entry.key">
       <!-- ComfyUI runs in flight, as the backend reports them: a progress
            bar + abort, which stops them all -->
@@ -110,6 +115,117 @@
       </div>
     </template>
   </div>
+  <!-- What the last run of a workflow changed (#1850): the Run popup's two
+       verbs again, once the pictures are back. Rows of the same list, not a
+       toast: pictures get rated before this is decided, so the offer stays
+       until that workflow runs again or the changes are saved. -->
+  <div v-if="offers.length" class="tm-worker-list" data-testid="tm-offers">
+    <div
+      v-for="offer in offers"
+      :key="offer.workflowId"
+      class="tm-worker-row tm-offer"
+      role="group"
+      :aria-label="`Changes the last run of ${offer.name} was made with`"
+      :data-offer="offer.workflowId"
+    >
+      <div class="tm-worker-row-top">
+        <span class="tm-worker-label">{{ offer.name }}</span>
+      </div>
+      <p class="tm-offer-text">
+        Ran with <b>{{ changesWord(offer.count) }} from the workflow</b
+        ><template v-if="offer.text">: {{ offer.text }}</template
+        ><template v-else>.</template>
+      </p>
+      <!-- Save as new… is the row's one question: the name. One write is out
+           at a time, and while it is every verb of every row says so. The
+           field is `readonly` for it, not `disabled`: Enter leaves the
+           keyboard in it, a disabled field cannot hold the keyboard, and a
+           refusal has to find it there. -->
+      <template v-if="naming === offer.workflowId">
+        <AppInput
+          :ref="(el) => keep(nameFields, offer.workflowId, el)"
+          v-model="newName"
+          label="Name of the new workflow"
+          :readonly="Boolean(busy)"
+          :class="{ 'tm-offer-refused': Boolean(busy) }"
+          @enter="saveAsNew(offer)"
+          @keydown.esc="backFromName(offer)"
+          @keydown.stop
+        />
+        <div class="tm-offer-acts">
+          <AppButton
+            variant="ghost"
+            size="sm"
+            :disabled="Boolean(busy)"
+            @click="backFromName(offer)"
+          >
+            Back
+          </AppButton>
+          <AppButton
+            size="sm"
+            :loading="busy === `new:${offer.workflowId}`"
+            :disabled="Boolean(busy)"
+            :class="{ 'tm-offer-refused': !newName.trim() }"
+            :aria-disabled="newName.trim() ? undefined : 'true'"
+            @click="saveAsNew(offer)"
+          >
+            Save as new workflow
+          </AppButton>
+        </div>
+      </template>
+      <div v-else class="tm-offer-acts">
+        <AppButton
+          :ref="(el) => keep(asNewButtons, offer.workflowId, el)"
+          size="sm"
+          :disabled="Boolean(busy)"
+          @click="askName(offer)"
+        >
+          Save as new…
+        </AppButton>
+        <!-- `aria-disabled`, not `disabled`: a closed Save stays reachable,
+             with the server's reason as its description. -->
+        <AppButton
+          size="sm"
+          icon-left="content-save-outline"
+          :loading="busy === `save:${offer.workflowId}`"
+          :disabled="Boolean(busy)"
+          :class="{ 'tm-offer-refused': Boolean(offer.closed) }"
+          :aria-disabled="offer.closed ? 'true' : undefined"
+          :aria-describedby="offer.closed ? `${whyId}-${offer.workflowId}` : undefined"
+          @click="save(offer)"
+        >
+          Save
+        </AppButton>
+      </div>
+      <p
+        v-if="offer.closed && naming !== offer.workflowId"
+        :id="`${whyId}-${offer.workflowId}`"
+        class="tm-offer-why"
+      >
+        {{ offer.closed }}
+      </p>
+      <p v-if="errors[offer.workflowId]" class="tm-offer-why tm-offer-bad" role="alert">
+        {{ errors[offer.workflowId] }}
+      </p>
+    </div>
+  </div>
+  <!-- What the last save here did, and where focus goes when the row and its
+       buttons leave with the offer: read on landing there, so it is no live
+       region as well. It stands until an offer arrives after it. What the
+       save left of the Workflow tab's changes is inside it, so it is read
+       with it and goes with it: two lines to the eye, and a space between
+       them for whatever reads the text. -->
+  <p
+    v-if="doneNote"
+    ref="doneLine"
+    class="tm-offer-done"
+    tabindex="-1"
+    data-testid="tm-offer-done"
+  >
+    {{ doneNote }}
+    <span v-if="doneLost" class="tm-offer-lost">{{ doneLost }}</span
+    >{{ " " }}<span v-if="doneWaits">{{ doneWaits }}</span>
+  </p>
   <div v-if="tmSystemItems.length" class="tm-system-bar">
     <div v-for="item in tmSystemItems" :key="item.label" class="tm-system-item">
       <span class="tm-system-label">{{ item.label }}</span>
@@ -160,13 +276,273 @@ export function tasksTabFor(tasksStore) {
 // component owns only the view: canvas sparkline drawing and the label / number
 // formatting - and, while it is mounted, the store's fast poll cadence.
 
-import { computed, onMounted, onUnmounted, watch } from "vue";
+import {
+  computed,
+  nextTick,
+  onMounted,
+  onUnmounted,
+  reactive,
+  ref,
+  useId,
+  watch,
+} from "vue";
 
+import {
+  getWorkflowChanges,
+  saveWorkflow,
+  saveWorkflowAsNew,
+} from "../../api/workflows";
+import { useNoticeStore } from "../../stores/useNoticeStore";
+import { useRunDialogStore } from "../../stores/useRunDialogStore";
 import { useTasksStore } from "../../stores/useTasksStore";
+import { useWorkflowsStore } from "../../stores/useWorkflowsStore";
 import { isReadOnly } from "../../utils/apiClient";
+import {
+  changesWord,
+  describeChanges,
+  saveFailure,
+  suggestedName,
+} from "../../utils/workflowChanges";
+import AppButton from "../widgets/AppButton.vue";
+import AppInput from "../widgets/AppInput.vue";
 import Tooltip from "../widgets/Tooltip.vue";
 
 const tasksStore = useTasksStore();
+
+// ── Save what a run changed (#1850) ────────────────────────────────────────
+//
+// Whether there is an offer is the server's to say: `GET …/changes` answers
+// `ran`, the set the workflow's last run was made with, until it runs again,
+// is saved, or gets another version. The Run popup leaves a record of the run
+// in `useRunDialogStore` (the band's own words, and when its pictures are
+// back), which is what an offer is WORDED from and when it appears; the
+// record is never the reason one is drawn. After a reload the record is gone
+// and the server's `ran` is not, so the one workflow selected on the
+// Workflows screen is asked about too, and offered with a count alone.
+
+const runDialog = useRunDialogStore();
+const workflows = useWorkflowsStore();
+const whyId = useId();
+
+/** The workflows there may be an offer for. None in a read-only session. */
+const candidates = computed(() => {
+  if (isReadOnly.value) return [];
+  const ids = Object.keys(runDialog.ranChanges).filter(
+    (id) => runDialog.ranChanges[id].finished,
+  );
+  const selected =
+    workflows.selectedKeys.length === 1 ? workflows.selectedKeys[0] : "";
+  // One whose run is on record and still out is not offered yet.
+  if (selected && !(selected in runDialog.ranChanges)) ids.push(selected);
+  return ids;
+});
+/** workflow id -> what the server answered, for the ones it has a `ran` for. */
+const confirmed = ref({});
+let confirmAsk = 0;
+
+/** Ask the server about every candidate; only the newest asking is kept. */
+async function confirmOffers() {
+  const ask = ++confirmAsk;
+  const ids = candidates.value;
+  const answers = await Promise.all(
+    ids.map((id) =>
+      getWorkflowChanges(id).catch((err) => {
+        console.warn(`[tasks] could not read what the last run of ${id} changed`, err);
+        return null;
+      }),
+    ),
+  );
+  if (ask !== confirmAsk) return;
+  confirmed.value = Object.fromEntries(
+    ids.map((id, at) => [id, answers[at]]).filter(([, state]) => state?.ran),
+  );
+}
+
+// Asked before anything is drawn, and again whenever a workflow may have
+// changed: a save made in this tab (`saved`), and the grid being read again,
+// which is how a save from another tab or from ComfyUI arrives here.
+watch(
+  [() => candidates.value.join("\n"), () => runDialog.saved, () => workflows.cards],
+  confirmOffers,
+  { immediate: true },
+);
+
+const offers = computed(() =>
+  candidates.value.flatMap((id) => {
+    const state = confirmed.value[id];
+    if (!state) return [];
+    const record = runDialog.ranChanges[id];
+    const card = workflows.cards.find((entry) => entry.id === id);
+    return [
+      {
+        workflowId: id,
+        name: record?.name || card?.name || "This workflow",
+        // The band's own count and sentence where this tab saw the run; a
+        // count alone otherwise, since the labels were the popup's.
+        count: record?.count ?? describeChanges(state.ran).count,
+        text: record?.text || "",
+        ran: state.ran,
+        version: state.version ?? null,
+        // The server's sentence for a closed Save, printed as sent.
+        closed:
+          state.ran_save && !state.ran_save.open
+            ? state.ran_save.reason || "Save is not open for these changes."
+            : "",
+      },
+    ];
+  }),
+);
+
+/** `save:<id>` or `new:<id>` while that write is out, else "". */
+const busy = ref("");
+/** workflow id -> why its last save here did not land. */
+const errors = reactive({});
+/** The workflow whose row is asking for a name, or "". */
+const naming = ref("");
+const newName = ref("");
+// Each row's name field and Save as new… button, by workflow. Vue hands a
+// function ref the element when it mounts and null when it leaves, and rows
+// patch in order: one variable shared by the rows would be emptied by a later
+// row's field leaving after an earlier row's had arrived.
+const nameFields = new Map();
+const asNewButtons = new Map();
+/** What the last save here did, or "". */
+const doneNote = ref("");
+const doneLine = ref(null);
+// A save here writes what the run used. A change made in the Workflow tab
+// after the run is not part of it: the server keeps it waiting
+// (`still_waiting`), or drops it where the saved workflow can no longer take
+// it (`not_kept`), and says which once, in the save's answer. `still_waiting`
+// also counts a waiting set that was already stale, which the save leaves
+// untouched and which was not necessarily made after the run, so its sentence
+// says only that they wait and were not part of this save. Both are said
+// in the receipt, inside the line that takes focus, so they are read with it
+// and stand as long as it does. Not a notice while there is a line: a card
+// is announced politely just as focus moves here and holds one sentence,
+// clamped to three lines, and what was not kept needs its names and reason.
+const doneLost = ref("");
+const doneWaits = ref("");
+
+function keep(kept, workflowId, el) {
+  if (el) kept.set(workflowId, el);
+  else kept.delete(workflowId);
+}
+
+// The line is the receipt of the last save made here, and is taken down as
+// the Run popup's is: when there is something to save again. An offer that
+// arrives after it is news the line would sit beside as if it were current.
+// One that was on screen before it is not, and a later save writes its own
+// line over this one.
+watch(
+  () => offers.value.map((offer) => offer.workflowId),
+  async (now, before) => {
+    const arrived = now.find((id) => !before.includes(id));
+    if (!arrived || !doneNote.value) return;
+    // Taken down from under the keyboard, it hands focus to what took its place.
+    const held = document.activeElement === doneLine.value;
+    doneNote.value = "";
+    if (!held) return;
+    await nextTick();
+    asNewButtons.get(arrived)?.focus?.();
+  },
+);
+
+/** A save landed: the offer goes, and so must not take the keyboard with it. */
+async function landed(offer, note, saved, savedAs = "") {
+  doneNote.value = note;
+  // Named as the offer names changes, without the popup's word for a
+  // parameter, which left with the popup: what cannot be kept is a LoRA or a
+  // model, and neither needs one.
+  const lost = describeChanges(saved?.not_kept);
+  doneLost.value = lost.text
+    ? `Could not keep ${changesWord(lost.count)} made after the run: ${lost.text} The saved workflow no longer has what was changed, so this is gone: not saved, and not left waiting.`
+    : "";
+  // They wait on the workflow the offer was for, which Save as new left alone.
+  const waits = Number(saved?.still_waiting) || 0;
+  doneWaits.value = waits
+    ? `${offer.name} still has ${changesWord(waits)} waiting in the Workflow tab. They were not part of this save.`
+    : "";
+  // Its own name question goes with it; another row's is still being answered.
+  if (naming.value === offer.workflowId) naming.value = "";
+  const next = { ...confirmed.value };
+  delete next[offer.workflowId];
+  confirmed.value = next;
+  runDialog.changesSaved(offer.workflowId, savedAs);
+  workflows.invalidate();
+  await nextTick();
+  doneLine.value?.focus?.();
+  // No line to say it on: the tab was closed while the save was out. What was
+  // not kept is said this once and shows nowhere else, so a notice carries
+  // it, and stays until it is dismissed.
+  if (!doneLine.value && doneLost.value) {
+    useNoticeStore().warning(`${note} ${doneLost.value}`, { timeout: 0 });
+  }
+}
+
+/** Save: what that run changed, written over the workflow as its next version. */
+async function save(offer) {
+  if (busy.value || offer.closed) return;
+  busy.value = `save:${offer.workflowId}`;
+  delete errors[offer.workflowId];
+  try {
+    const saved = await saveWorkflow(offer.workflowId, {
+      changes: offer.ran,
+      version: offer.version,
+      from_run: true,
+    });
+    await landed(offer, `Saved to ${offer.name}.`, saved);
+  } catch (err) {
+    errors[offer.workflowId] = saveFailure(err);
+  } finally {
+    busy.value = "";
+  }
+}
+
+async function askName(offer) {
+  if (busy.value) return;
+  delete errors[offer.workflowId];
+  newName.value = suggestedName(offer.name);
+  naming.value = offer.workflowId;
+  await nextTick();
+  const field = nameFields.get(offer.workflowId);
+  field?.focus?.();
+  field?.select?.();
+}
+
+async function backFromName(offer) {
+  // Escape reaches here from a field that is only read-only while a write is
+  // out: it waits as the Back button does.
+  if (busy.value) return;
+  naming.value = "";
+  await nextTick();
+  asNewButtons.get(offer.workflowId)?.focus?.();
+}
+
+/** Save as new: the same changes stored as a new workflow; this one is left alone. */
+async function saveAsNew(offer) {
+  const name = newName.value.trim();
+  if (busy.value || !name) return;
+  busy.value = `new:${offer.workflowId}`;
+  delete errors[offer.workflowId];
+  try {
+    const saved = await saveWorkflowAsNew(offer.workflowId, {
+      name,
+      changes: offer.ran,
+      from_run: true,
+    });
+    await landed(
+      offer,
+      `Saved as ${saved?.name || name}.`,
+      saved,
+      saved?.workflow_id || "",
+    );
+  } catch (err) {
+    errors[offer.workflowId] = saveFailure(err);
+  } finally {
+    busy.value = "";
+  }
+}
+
 const TM_WINDOW_SECONDS = 120; // sparkline x-axis span, seconds
 const tmCanvasRefs = new Map(); // key → { el, observer }
 
@@ -594,6 +970,49 @@ const tmSystemItems = computed(() => {
   flex-shrink: 0;
 }
 
+/* ── What a run changed, offered for saving ────────────────────────────────── */
+.tm-offer {
+  gap: var(--space-3);
+  padding: var(--space-3);
+}
+.tm-offer-text,
+.tm-offer-why,
+.tm-offer-done {
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: var(--leading-body);
+  color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
+}
+.tm-offer-text b {
+  font-weight: var(--weight-semibold);
+  color: rgb(var(--v-theme-on-surface));
+}
+.tm-offer-acts {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-3);
+}
+/* A closed verb stays reachable (`aria-disabled`), and so does the name field
+   while a write is out (`readonly`), so each is dimmed by hand, as far as a
+   natively disabled button is. */
+.tm-offer-refused {
+  opacity: var(--opacity-disabled);
+}
+.tm-offer-bad {
+  color: rgb(var(--v-theme-surface-error));
+}
+.tm-offer-done {
+  padding: var(--space-2) 0;
+}
+/* What the save left, each on a line of its own under the receipt. */
+.tm-offer-done span {
+  display: block;
+  margin-top: var(--space-1);
+}
+/* The one outcome that loses something. */
+.tm-offer-lost {
+  color: rgb(var(--v-theme-surface-warning));
+}
 .tm-system-bar {
   margin-top: auto;
   padding-top: var(--space-3);

@@ -2,7 +2,6 @@ import { computed, onScopeDispose, ref } from "vue";
 import { defineStore } from "pinia";
 
 import {
-  cloneWorkflowWithModels,
   deleteWorkflow,
   duplicateWorkflow,
   listWorkflowCards,
@@ -506,22 +505,6 @@ export const useWorkflowsStore = defineStore("workflows", () => {
   }
 
   /**
-   * Write a copy of one card with model files replaced, as a card of its own.
-   *
-   * `duplicateCard` with a body: the grid is re-read rather than patched, and
-   * the answer is handed back for the notice. `null` on failure, with the
-   * reason in `error`.
-   */
-  function cloneCardWithModels(key, body) {
-    return busyCall(
-      "clone-with-models",
-      key,
-      "Could not clone that workflow.",
-      () => cloneWorkflowWithModels(key, body),
-    );
-  }
-
-  /**
    * Delete every selected MANUAL workflow.
    *
    * Their pictures stay, back on their automatic workflows. An automatic
@@ -682,17 +665,19 @@ export const useWorkflowsStore = defineStore("workflows", () => {
   }
 
   /**
-   * The card *Clone onto a workflow set…* is asked for, or "".
+   * The workflow *Use a set…* is asked for from outside the Workflow tab, or "".
    *
-   * The same shape as `pictureToOpen`: the Workflow tab's button lives in the
-   * rail, the dialog in `WorkflowsView`, and the selection bar's row asks the
-   * same way, so both entry points open one dialog.
+   * The same shape as `pictureToOpen`, the other way round: the menu lives in
+   * the Workflow tab's Models head, and the grid's own *Use a set…* row is in
+   * `WorkflowsView`. The tab watches this, opens its menu on that workflow
+   * and puts it back to "", so asking for the same workflow twice is two
+   * requests.
    */
-  const cloneOntoSetKey = ref("");
+  const useSetKey = ref("");
 
-  /** Ask the Workflows view to open *Clone onto a workflow set…* on one card. */
-  function requestCloneOntoSet(key) {
-    cloneOntoSetKey.value = key || "";
+  /** Ask the Workflow tab to open *Use a set…* on one workflow. "" takes it back. */
+  function requestUseSet(key) {
+    useSetKey.value = key || "";
   }
 
   return {
@@ -701,8 +686,8 @@ export const useWorkflowsStore = defineStore("workflows", () => {
     onWorkflowsChanged,
     pictureToOpen,
     requestOpenPicture,
-    cloneOntoSetKey,
-    requestCloneOntoSet,
+    useSetKey,
+    requestUseSet,
     cards,
     oneOffs,
     hidden,
@@ -729,7 +714,6 @@ export const useWorkflowsStore = defineStore("workflows", () => {
     hideSelected,
     renameCard,
     duplicateCard,
-    cloneCardWithModels,
     deleteSelected,
     select,
     selectRange,
