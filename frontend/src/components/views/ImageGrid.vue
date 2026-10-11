@@ -1243,6 +1243,7 @@ import {
   API_BASE_URL,
   appendShareToken,
   isReadOnly,
+  newOperationBatchId,
 } from "../../utils/apiClient";
 import {
   getPictureMetadata,
@@ -4006,7 +4007,7 @@ async function deleteSelected(idsOverride = null, moveTo = null) {
   }
 
   if (moveTo) {
-    // The copy is one request with nothing to watch, so say that it started.
+    // Copying can take time, so say that it started.
     // Same key as the outcome, which replaces this card when it lands.
     noticeStore.info(`Moving to ${moveTo.name}…`, {
       key: "pictures-move",
@@ -4014,6 +4015,9 @@ async function deleteSelected(idsOverride = null, moveTo = null) {
     });
   }
 
+  // Retain confirmed successes if a later chunk fails or loses its response.
+  // Named by the server, never inferred from a missing skip/failure outcome.
+  const movedIds = new Set();
   try {
     // Soft-delete via the bulk endpoint instead of one DELETE per id, which
     // floods the browser/Electron per-host connection pool on large selections
@@ -4030,14 +4034,12 @@ async function deleteSelected(idsOverride = null, moveTo = null) {
     const inOtherScrapheap = new Set();
     const notCopied = new Set();
     const copiedButLocked = new Set();
-    // Named by the server, never derived here: an id in none of its lists (a
-    // picture another tab already deleted) is not one this move took, so it is
-    // neither announced as moved nor has its tile dropped by this.
-    const movedIds = new Set();
+    // One selection remains one undo batch across request chunks.
+    const moveBatchId = moveTo ? newOperationBatchId() : undefined;
     for (let i = 0; i < idsToRemove.length; i += BULK_DELETE_CHUNK) {
       const chunk = idsToRemove.slice(i, i + BULK_DELETE_CHUNK);
       const resp = moveTo
-        ? await movePicturesToLibrary(chunk, moveTo.uuid)
+        ? await movePicturesToLibrary(chunk, moveTo.uuid, moveBatchId)
         : await deletePictures(chunk);
       const skipped = resp?.skipped_locked;
       if (Array.isArray(skipped)) {
@@ -4111,6 +4113,18 @@ async function deleteSelected(idsOverride = null, moveTo = null) {
     }
   } catch (err) {
     console.error(moveTo ? "Move to library failed" : "Bulk delete failed", err);
+    if (moveTo) {
+      // Earlier chunks may have committed, and even the failed request may
+      // have committed before its response was lost. Drop confirmed moves
+      // immediately and re-read the grid and sidebar for the actual state.
+      removeImagesById([...movedIds]);
+      if (movedIds.has(String(lastSelectedImageId.value))) {
+        lastSelectedImageId.value = null;
+      }
+      preserveScrollOnNextFetch.value = true;
+      debouncedFetchAllGridImages();
+      emit("refresh-sidebar");
+    }
     noticeStore.error(
       moveTo
         ? `Couldn't move those pictures to ${moveTo.name}. ${errorDetail(err)}`

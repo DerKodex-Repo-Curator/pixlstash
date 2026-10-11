@@ -171,6 +171,22 @@ def _move(client, other, ids, **kwargs):
 
 
 class TestAMove:
+    def test_two_requests_in_one_gesture_are_restored_by_one_undo(
+        self, server, owner, other
+    ):
+        first = _add(server, _png())
+        second = _add(server, _png())
+        headers = {"X-Operation-Batch-Id": "cli-move-chunks-test"}
+
+        assert _move(owner, other, [first], headers=headers).json()["moved"] == [first]
+        assert _move(owner, other, [second], headers=headers).json()["moved"] == [second]
+        assert _here(server, first).deleted is True
+        assert _here(server, second).deleted is True
+
+        assert owner.post(f"{API}/operations/undo").status_code == 200
+        assert _here(server, first).deleted is False
+        assert _here(server, second).deleted is False
+
     def test_the_picture_arrives_with_what_the_owner_gave_it(
         self, server, owner, other
     ):

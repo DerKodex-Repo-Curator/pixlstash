@@ -4,7 +4,12 @@
 // have already migrated; the counts, scores, thumbnails, and export endpoints
 // join it as the grid and overlay move over.
 
-import { apiClient, appendShareToken, API_BASE_URL} from "../utils/apiClient";
+import {
+  apiClient,
+  appendShareToken,
+  API_BASE_URL,
+  operationBatchHeaders,
+} from "../utils/apiClient";
 import { unwrap } from "../utils/unwrap";
 
 /**
@@ -428,15 +433,17 @@ export async function deletePictures(pictureIds) {
  *
  * @param {Array<number|string>} pictureIds
  * @param {string} libraryUuid - the target's stable id, from the libraries list.
+ * @param {string} [batchId] - one gesture id shared across request chunks.
  * @returns {Promise<Object>} `{ library_name, moved_count, moved,
- *   skipped_locked, skipped_already_there, skipped_scrapheaped, failed }`.
+ *   skipped_locked, copied_but_locked, skipped_already_there,
+ *   skipped_scrapheaped, failed }`.
  */
-export async function movePicturesToLibrary(pictureIds, libraryUuid) {
+export async function movePicturesToLibrary(pictureIds, libraryUuid, batchId) {
   return unwrap(
     apiClient.post(
       `/pictures/move-to-library`,
       { picture_ids: pictureIds, library_uuid: libraryUuid },
-      { timeout: 0 },
+      { ...operationBatchHeaders(batchId), timeout: 0 },
     ),
   );
 }
