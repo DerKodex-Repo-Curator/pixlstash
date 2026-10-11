@@ -389,7 +389,7 @@
       <div
         ref="moveSubmenuWrapRef"
         class="ctx-submenu-wrap"
-        @mouseenter="moveSubmenuOpen = true"
+        @mouseenter="selectedCount > 0 && (moveSubmenuOpen = true)"
         @mouseleave="moveSubmenuOpen = false"
       >
         <button class="ctx-item" :disabled="selectedCount === 0">

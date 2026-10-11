@@ -716,7 +716,7 @@
       >
         <div
           class="ctx-submenu-wrap"
-          @mouseenter="moveSubmenuOpen = true"
+          @mouseenter="selectedImageIds.length && (moveSubmenuOpen = true)"
           @mouseleave="moveSubmenuOpen = false"
         >
           <button class="ctx-item" :disabled="!selectedImageIds.length">
