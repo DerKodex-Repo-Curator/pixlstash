@@ -17886,6 +17886,38 @@ def test_a_person_row_that_cannot_be_taken_out_is_refused_not_stored():
     assert graph["2"]["inputs"]["lora_name_1"] == "person.safetensors"
 
 
+def test_a_person_slot_the_graph_does_not_hold_is_refused_not_passed_over():
+    """Neither a missing node nor a field that is no LoRA slot may read as
+    taken out: the caller stores the graph on that answer."""
+    graph = {
+        "2": {
+            "class_type": "LoraLoader",
+            "inputs": {"lora_name": "person.safetensors", "model": ["1", 0]},
+        },
+    }
+    taken, refused = run_service.take_out_person_loras(
+        graph, [("7", "lora_name"), ("2", "model")], None
+    )
+    assert taken == []
+    assert [(entry["node_id"], entry["field"]) for entry in refused] == [
+        ("2", "model"),
+        ("7", "lora_name"),
+    ]
+
+
+def test_a_row_with_no_strength_of_its_own_does_not_take_the_removed_rows():
+    """The style row moved up under the person's strength."""
+    graph = _with_people_loader(("a" * 64, 0.8), ("b" * 64, 0.4))
+    del graph["9"]["inputs"]["strength_model_2"]
+    taken, refused = run_service.take_out_person_loras(
+        graph, [("9", "adapter_sha256")], None
+    )
+    assert (len(taken), refused) == (1, [])
+    rows = graph["9"]["inputs"]
+    assert (rows["adapter_sha256"], rows["strength_clip"]) == ("b" * 64, 0.4)
+    assert "strength_model" not in rows
+
+
 def test_each_row_of_the_multi_adapter_loader_is_a_slot_with_its_own_strengths():
     """`adapter_sha256_2` read the first row's strengths before #1849, and was
     no slot at all, so a picture made with the node misread."""

@@ -1494,12 +1494,10 @@ def take_out_person_loras(
         node = graph.get(node_id)
         inputs = node.get("inputs") if isinstance(node, dict) else None
         if not isinstance(inputs, dict):
-            continue
+            inputs = {}
         here = lora_slot_fields(inputs)
-        asked = sorted(fields & set(here))
-        if not asked:
-            continue
-        class_type = node.get("class_type")
+        asked = sorted(fields)
+        class_type = node.get("class_type") if isinstance(node, dict) else None
         entries = [
             {
                 "node_id": node_id,
@@ -1522,7 +1520,14 @@ def take_out_person_loras(
         ]
         rows = all(LORA_DIGEST_FIELD_RE.match(slot_field) for slot_field in asked)
         message = None
-        if kept and not rows:
+        if fields - set(here):
+            # A write: a slot this cannot find is refused, never passed over
+            # as though it had been taken out.
+            message = (
+                f"Node {node_id} ({class_type}) has no LoRA slot "
+                f"{', '.join(sorted(fields - set(here)))} PixlStash can empty."
+            )
+        elif kept and not rows:
             message = (
                 f"Node {node_id} ({class_type}) also loads "
                 f"{', '.join(str(inputs[f]) for f in kept)}, and it has no empty "
@@ -1589,7 +1594,11 @@ def _close_adapter_rows(inputs: dict) -> None:
         value, strengths = filled[index] if index < len(filled) else ("", None)
         inputs[digest] = value
         for widget, strength in zip(widgets, strengths or ()):
-            if strength is not None:
+            # A row with no strength of its own moves as that: never under
+            # the strength of the row it replaces.
+            if strength is None:
+                inputs.pop(f"{widget}{suffix(digest)}", None)
+            else:
                 inputs[f"{widget}{suffix(digest)}"] = strength
 
 
