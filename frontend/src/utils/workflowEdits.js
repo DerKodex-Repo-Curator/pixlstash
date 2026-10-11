@@ -12,29 +12,11 @@
 // that all read as saved.
 
 import { loraBase } from "./loraChain";
-import { over } from "./workflowChanges";
-
-/**
- * A set with every list present, from what a read answered (`waiting`, null
- * when nothing waits). Parameters (`values`) are never edited here and are
- * carried through as they came.
- *
- * @param {?Object} waiting
- * @returns {{models: Array, loras: Array, skip_loras: Array, stages: Object, values: Array}}
- */
-export function changesOf(waiting) {
-  return {
-    models: [...(waiting?.models ?? [])],
-    loras: [...(waiting?.loras ?? [])],
-    skip_loras: [...(waiting?.skip_loras ?? [])],
-    stages: { ...(waiting?.stages ?? {}) },
-    values: [...(waiting?.values ?? [])],
-  };
-}
+import { over, slotKey, slotOf, whole } from "./workflowChanges";
 
 /** How many rows differ: the number the bar says before the server answers. */
 export function countChanges(changes) {
-  const set = changesOf(changes);
+  const set = whole(changes);
   return (
     set.models.length +
     set.loras.length +
@@ -43,15 +25,6 @@ export function countChanges(changes) {
     set.values.length
   );
 }
-
-const sameSlot = (a, b) =>
-  String(a.node_id) === String(b.node_id) && a.field === b.field;
-
-/** A LoRA slot as the server addresses it: a node and a field, as strings. */
-const slotOf = (slot) => ({
-  node_id: String(slot.node_id),
-  field: slot.field || "lora_name",
-});
 
 /** The file picked for a loader address, or null when the row is as saved. */
 export function modelPick(changes, address) {
@@ -66,7 +39,7 @@ export function modelPick(changes, address) {
  * (`saved`, whatever its folders) or nothing puts the row back.
  */
 export function withModel(changes, address, filename, saved) {
-  const set = changesOf(changes);
+  const set = whole(changes);
   set.models = set.models.filter((model) => model.address !== address);
   if (filename && loraBase(filename) !== loraBase(saved ?? "")) {
     set.models.push({ address, filename });
@@ -82,7 +55,7 @@ export function stageOn(changes, name, saved) {
 
 /** Switch a stage; back to `saved` leaves the set. */
 export function withStage(changes, name, on, saved) {
-  const set = changesOf(changes);
+  const set = whole(changes);
   delete set.stages[name];
   if (Boolean(on) !== Boolean(saved)) set.stages[name] = Boolean(on);
   return set;
@@ -90,12 +63,16 @@ export function withStage(changes, name, on, saved) {
 
 /** Whether a loader waits to be removed. */
 export function loraRemoved(changes, slot) {
-  return (changes?.skip_loras ?? []).some((entry) => sameSlot(entry, slot));
+  return (changes?.skip_loras ?? []).some(
+    (entry) => slotKey(entry) === slotKey(slot),
+  );
 }
 
 /** The strength waiting on a loader, or null when it is as saved. */
 export function loraStrength(changes, slot) {
-  const entry = (changes?.loras ?? []).find((item) => sameSlot(item, slot));
+  const entry = (changes?.loras ?? []).find(
+    (item) => slotKey(item) === slotKey(slot),
+  );
   return entry ? (entry.strength_model ?? null) : null;
 }
 
@@ -104,10 +81,12 @@ export function loraStrength(changes, slot) {
  * with it: the server takes a slot as set or removed, never both.
  */
 export function withLoraRemoved(changes, slot, removed) {
-  const set = changesOf(changes);
-  set.skip_loras = set.skip_loras.filter((entry) => !sameSlot(entry, slot));
+  const set = whole(changes);
+  set.skip_loras = set.skip_loras.filter(
+    (entry) => slotKey(entry) !== slotKey(slot),
+  );
   if (removed) {
-    set.loras = set.loras.filter((entry) => !sameSlot(entry, slot));
+    set.loras = set.loras.filter((entry) => slotKey(entry) !== slotKey(slot));
     set.skip_loras.push(slotOf(slot));
   }
   return set;
@@ -129,13 +108,15 @@ export function withLoraRemoved(changes, slot, removed) {
  * @param {{strength: ?number, strength_clip: ?number}} saved
  */
 export function withLoraStrength(changes, slot, strength, saved = {}) {
-  const set = changesOf(changes);
-  set.loras = set.loras.filter((entry) => !sameSlot(entry, slot));
+  const set = whole(changes);
+  set.loras = set.loras.filter((entry) => slotKey(entry) !== slotKey(slot));
   if (!slot.sha256 || !Number.isFinite(strength)) return set;
   if (strength === saved.strength) return set;
   const tied =
     saved.strength_clip == null || saved.strength_clip === saved.strength;
-  set.skip_loras = set.skip_loras.filter((entry) => !sameSlot(entry, slot));
+  set.skip_loras = set.skip_loras.filter(
+    (entry) => slotKey(entry) !== slotKey(slot),
+  );
   set.loras.push({
     ...slotOf(slot),
     sha256: slot.sha256,
@@ -154,7 +135,7 @@ export function withLoraStrength(changes, slot, strength, saved = {}) {
  * named outright, and `over` stores an entry as it was given.
  */
 export function withFragment(changes, fragment) {
-  const top = changesOf(fragment);
+  const top = whole(fragment);
   return over(changes, {
     ...top,
     loras: top.loras.map((entry) => ({ ...entry, ...slotOf(entry) })),
@@ -167,8 +148,8 @@ export function withFragment(changes, fragment) {
  * left of a waiting set once a chain edit has taken loaders out of the graph.
  */
 export function withoutGoneLoaders(changes, slots) {
-  const set = changesOf(changes);
-  const live = (entry) => slots.some((slot) => sameSlot(slot, entry));
+  const set = whole(changes);
+  const live = (entry) => slots.some((slot) => slotKey(slot) === slotKey(entry));
   set.loras = set.loras.filter(live);
   set.skip_loras = set.skip_loras.filter(live);
   return set;

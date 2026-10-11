@@ -14319,12 +14319,8 @@ def test_a_set_plan_is_read_off_the_graph_with_the_owners_replacements(cloneable
     by the file that is gone: no set could then fill that row.
     """
     hub = cloneable.server.hub
+    _shelve_replacement(cloneable.server)
     with hub.transaction() as conn:
-        conn.execute(
-            "INSERT INTO model (file_kind, filename, sha256, provenance) "
-            "VALUES ('checkpoint', ?, ?, 'scanned')",
-            (_REPLACEMENT_FILENAME, _h("bf16-digest")),
-        )
         vae_id = conn.execute(
             "INSERT INTO model (file_kind, filename, provenance) "
             "VALUES ('vae', 'ae.safetensors', 'scanned')"
@@ -18527,11 +18523,8 @@ def _save_what_ran(env, workflow_id, as_new=False, **extra):
 def _defaults_written(env, workflow_id) -> dict:
     """``{input name: value}`` of the default rows a save wrote."""
     return {
-        row[0].rpartition("/")[2]: row[1]
-        for row in env.server.hub.fetchall(
-            "SELECT address, value FROM workflow_group_default WHERE workflow_id = ?",
-            (workflow_id,),
-        )
+        address.rpartition("/")[2]: value
+        for address, value in _group_defaults(env.server.hub, workflow_id).items()
     }
 
 

@@ -45,6 +45,18 @@ describe("a set with every list present", () => {
     // Callers push onto the lists: two readers must not share them.
     expect(whole(null).loras).not.toBe(whole(null).loras);
   });
+
+  it("copies: the set it was given is never the one it hands back", () => {
+    const given = { models: [], stages: {} };
+    const made = whole(given);
+    made.models.push({});
+    made.stages.upscale = true;
+    expect(given).toEqual({ models: [], stages: {} });
+  });
+
+  it("carries nothing but the five things a set holds", () => {
+    expect(whole({ stages: {}, count: 3, version: 2 })).toEqual(noChanges());
+  });
 });
 
 describe("laying one set over another", () => {

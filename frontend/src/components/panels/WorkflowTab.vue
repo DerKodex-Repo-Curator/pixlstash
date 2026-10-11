@@ -1218,9 +1218,9 @@ import {
   parameterAddress,
   setEachRun,
 } from "../../utils/workflowPins";
+import { slotOf, whole } from "../../utils/workflowChanges";
 import { pictureCount } from "../../utils/workflowSets";
 import {
-  changesOf,
   countChanges,
   loraRemoved,
   loraStrength,
@@ -1918,8 +1918,7 @@ function loadersOf(body) {
  */
 function slotOfLoader(loader) {
   return {
-    node_id: String(loader.node_id),
-    field: loader.field || "lora_name",
+    ...slotOf(loader),
     sha256: loader.sha256 ? String(loader.sha256).toLowerCase() : "",
   };
 }
@@ -2725,7 +2724,7 @@ const shownChanges = computed(() =>
 const waiting = computed(() =>
   intent.value?.key === selectedKey.value
     ? intent.value.changes
-    : changesOf(shownChanges.value?.waiting),
+    : whole(shownChanges.value?.waiting),
 );
 
 /** How many: the server's count, or the rows' own while an edit is out. */

@@ -7,7 +7,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  changesOf,
   countChanges,
   loraRemoved,
   loraStrength,
@@ -23,15 +22,8 @@ import {
 
 const SLOT = { node_id: "22", field: "lora_name", sha256: "s2" };
 
-describe("changesOf and countChanges", () => {
-  it("answers a whole, empty set for nothing waiting", () => {
-    expect(changesOf(null)).toEqual({
-      models: [],
-      loras: [],
-      skip_loras: [],
-      stages: {},
-      values: [],
-    });
+describe("countChanges", () => {
+  it("counts nothing for nothing waiting", () => {
     expect(countChanges(null)).toBe(0);
   });
 
@@ -45,14 +37,6 @@ describe("changesOf and countChanges", () => {
         values: [{ slot_label: "s", input_name: "steps", value: 8 }],
       }),
     ).toBe(6);
-  });
-
-  it("copies: the set it was given is never the one it hands back", () => {
-    const given = { models: [], stages: {} };
-    const made = changesOf(given);
-    made.models.push({});
-    made.stages.upscale = true;
-    expect(given).toEqual({ models: [], stages: {} });
   });
 });
 

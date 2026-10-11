@@ -268,7 +268,6 @@ def write_changes(
     editing it further does not make a stale set current. A run's set is the
     run's, so each run writes its own.
     """
-    rebase = ", base_version = excluded.base_version" if kind == RAN else ""
     with hub.transaction() as conn:
         if changes is None:
             conn.execute(
@@ -276,19 +275,36 @@ def write_changes(
                 (workflow_id, kind),
             )
             return
-        conn.execute(
-            "INSERT INTO workflow_change (workflow_id, kind, changes, "
-            "base_version, updated_at) VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(workflow_id, kind) DO UPDATE SET "
-            "changes = excluded.changes, updated_at = excluded.updated_at" + rebase,
-            (
-                workflow_id,
-                kind,
-                json.dumps(changes),
-                base_version,
-                datetime.now(timezone.utc).isoformat(),
-            ),
+        _upsert_changes(
+            conn, workflow_id, kind, changes, base_version, rebase=kind == RAN
         )
+
+
+def _upsert_changes(
+    conn,
+    workflow_id: str,
+    kind: str,
+    changes: dict,
+    base_version: Optional[int],
+    *,
+    rebase: bool,
+) -> None:
+    """Store one kind of a workflow's changes in place of what was there.
+    A row that is replaced takes *base_version* only with *rebase*."""
+    conn.execute(
+        "INSERT INTO workflow_change (workflow_id, kind, changes, "
+        "base_version, updated_at) VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(workflow_id, kind) DO UPDATE SET "
+        "changes = excluded.changes, updated_at = excluded.updated_at"
+        + (", base_version = excluded.base_version" if rebase else ""),
+        (
+            workflow_id,
+            kind,
+            json.dumps(changes),
+            base_version,
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
 
 
 def clear_changes(conn, workflow_id: str, kind: Optional[str] = None) -> None:
@@ -311,20 +327,7 @@ def write_waiting(
     What a save keeps waiting: unlike :func:`write_changes` the set takes
     *base_version*, the version that save made, since it was carried onto it.
     """
-    conn.execute(
-        "INSERT INTO workflow_change (workflow_id, kind, changes, "
-        "base_version, updated_at) VALUES (?, ?, ?, ?, ?) "
-        "ON CONFLICT(workflow_id, kind) DO UPDATE SET "
-        "changes = excluded.changes, base_version = excluded.base_version, "
-        "updated_at = excluded.updated_at",
-        (
-            workflow_id,
-            WAITING,
-            json.dumps(changes),
-            base_version,
-            datetime.now(timezone.utc).isoformat(),
-        ),
-    )
+    _upsert_changes(conn, workflow_id, WAITING, changes, base_version, rebase=True)
 
 
 def waiting_counts(hub: HubDatabase) -> dict[str, dict]:
