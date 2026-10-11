@@ -440,6 +440,10 @@ jobs:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # tests/test_architecture_guardrails.py reads the ComfyUI-PixlStash
+          # nodes (a public submodule) to hold the ComfyUI token scope to them.
+          submodules: true
       - uses: ./.github/actions/setup-backend
 
       - name: Backend tests (shard ${{ matrix.shard }} of 8)
@@ -721,6 +725,10 @@ jobs:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # tests/test_architecture_guardrails.py reads the ComfyUI-PixlStash
+          # nodes (a public submodule) to hold the ComfyUI token scope to them.
+          submodules: true
       - uses: ./.github/actions/setup-backend
 
       - name: Full suite in collection order (block ${{ matrix.shard }} of 6)
@@ -959,6 +967,10 @@ jobs:
       PYTHONFAULTHANDLER: 1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # tests/test_architecture_guardrails.py reads the ComfyUI-PixlStash
+          # nodes (a public submodule) to hold the ComfyUI token scope to them.
+          submodules: true
 
       # The wheel build (pip install . below) runs `npm ci` via setup.py. Set up
       # Node with an npm cache so that step pulls tarballs from the warm cache

@@ -92,7 +92,6 @@ function makeHarness({
     triggerNewImageHighlight: vi.fn(),
     updateVisibleThumbnails: vi.fn(),
     fetchThumbnailsBatch: vi.fn(),
-    maybeRefreshOverlayForComfyui: vi.fn(),
     startSmartScoreProgress,
     completeSmartScoreProgress,
     onGridFetchStart: vi.fn(),

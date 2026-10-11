@@ -109,7 +109,6 @@ export function useGridFetch(
     triggerNewImageHighlight,
     updateVisibleThumbnails,
     fetchThumbnailsBatch,
-    maybeRefreshOverlayForComfyui,
     startSmartScoreProgress,
     completeSmartScoreProgress,
     onGridFetchStart,
@@ -1562,7 +1561,6 @@ export function useGridFetch(
         fetchThumbnailsBatch(visibleStart.value, prefetchEnd);
       }
       await refreshExpandedStacksAfterFetch();
-      await maybeRefreshOverlayForComfyui();
       requestAnimationFrame(() => {
         if (initialRender.value) {
           initialRender.value = false;

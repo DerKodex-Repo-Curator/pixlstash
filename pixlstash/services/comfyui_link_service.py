@@ -1,4 +1,4 @@
-"""Link a local owner's ComfyUI to PixlStash: one full-access token, written in.
+"""Link a local owner's ComfyUI to PixlStash: one ComfyUI-only token, written in.
 
 The ComfyUI-PixlStash nodes call back into PixlStash with a URL, a token and a
 certificate choice they read from ComfyUI's own persisted settings
@@ -8,7 +8,13 @@ settings written over ComfyUI's HTTP API; the pack needs no route of its own.
 
 Owner decisions (2026-10-06), which this module implements and nothing more:
 
-* The token is an ``ALL`` owner token. ComfyUI gets full access.
+* The token carries the ComfyUI scope (#1811, ``auth.COMFYUI_SCOPE``): the
+  routes the ComfyUI-PixlStash nodes call and nothing else, so it cannot
+  delete, change settings or make tokens.
+* It covers the library that is open when ComfyUI is linked. The owner can
+  set it to cover every library afterwards
+  (``AuthService.set_token_libraries``); the owner's own session linking the
+  same ComfyUI again keeps that.
 * The token works only from ComfyUI's own address (#1810). ComfyUI serves its
   settings, token included, to anyone who can reach it, so the token is bound
   to the source address PixlStash sees on the link's round-trip check, and
@@ -38,7 +44,12 @@ from cryptography import x509
 from fastapi import HTTPException, Request
 from sqlmodel import select
 
-from pixlstash.auth import TOKEN_BIND_PENDING, is_local_ip
+from pixlstash.auth import (
+    COMFYUI_SCOPE,
+    TOKEN_BIND_PENDING,
+    is_local_ip,
+    token_follows_active_library,
+)
 from pixlstash.database import DBPriority
 from pixlstash.db_models import UserToken
 from pixlstash.pixl_logging import get_logger
@@ -256,10 +267,13 @@ def link_status(server) -> dict:
     """The live link. ``bound_address`` is where its token works from;
     ``refused_from`` the last other address it was used from since start-up
     (ComfyUI's address changed, or somebody else has the key); ``exposure``
-    whether other computers can reach the linked ComfyUI (see :func:`exposure`).
+    whether other computers can reach the linked ComfyUI (see :func:`exposure`);
+    ``token_id`` and ``all_libraries`` the key's row and whether it covers
+    every library, which ``PUT /users/me/token/{token_id}/libraries`` changes.
     """
     record = server._server_config.get(LINK_CONFIG_KEY) or {}
     public_id = record.get("token_public_id")
+    token = _token(server, public_id) if public_id else None
     return {
         "linked": bool(public_id),
         "comfyui_url": record.get("comfyui_url"),
@@ -271,6 +285,8 @@ def link_status(server) -> dict:
             server.auth.bound_token_refusals.get(public_id) if public_id else None
         ),
         "exposure": record.get("exposure"),
+        "token_id": token.id if token else None,
+        "all_libraries": bool(token and token_follows_active_library(token)),
     }
 
 
@@ -287,10 +303,12 @@ def exposure(where: Optional[str], probe: dict) -> Optional[str]:
     return None
 
 
-def _bound_address(server, public_id: str) -> Optional[str]:
+def _token(server, public_id: str) -> Optional[UserToken]:
+    """The link's token row, or None when it is gone."""
+
     def find(session):
         return session.exec(
-            select(UserToken.bound_address).where(UserToken.public_id == public_id)
+            select(UserToken).where(UserToken.public_id == public_id)
         ).first()
 
     return server.auth._db.run_task(find, priority=DBPriority.IMMEDIATE)
@@ -447,9 +465,43 @@ def _link(server, request: Request, saved_url: Optional[str]) -> dict:
         return reply()
 
     minted = server.auth.create_token(
-        request, TOKEN_DESCRIPTION, scope="ALL", bound_address=TOKEN_BIND_PENDING
+        request,
+        TOKEN_DESCRIPTION,
+        scope=COMFYUI_SCOPE,
+        bound_address=TOKEN_BIND_PENDING,
     )
     public_id = minted["public_id"]
+    previous = server._server_config.get(LINK_CONFIG_KEY) or {}
+    replaced = previous.get("token_public_id")
+    old_key = _token(server, replaced) if replaced else None
+    if (
+        old_key is not None
+        and token_follows_active_library(old_key)
+        and previous.get("comfyui_url") == comfyui_url
+    ):
+        # Linking the same ComfyUI again must not quietly undo "Use in every
+        # library". Through the owner's own operation, so a token that links
+        # again gets a key for the open library only, as on a first link.
+        try:
+            server.auth.set_token_libraries(request, minted["token_id"], True)
+        except HTTPException as refused:
+            if refused.status_code != 403:
+                _revoke(server, request, public_id)
+                raise
+            logger.info(
+                "ComfyUI link token %s replaces one that covered every "
+                "library, but covers only the open one: %s",
+                public_id,
+                refused.detail,
+            )
+        except Exception:
+            logger.exception(
+                "Could not carry every-library reach over to ComfyUI link "
+                "token %s; revoking it.",
+                public_id,
+            )
+            _revoke(server, request, public_id)
+            raise
     try:
         _write_settings(
             pinned,
@@ -497,11 +549,11 @@ def _link(server, request: Request, saved_url: Optional[str]) -> dict:
         except Exception:
             # The new link is recorded and works; failing the request now would
             # report a link that exists as broken. The replaced token is still
-            # a live full-access key, so say so here and in the reply.
+            # a live key, so say so here and in the reply.
             logger.exception(
                 "ComfyUI is linked with token %s, but revoking the token it "
-                "replaced (public id %s) failed: that full-access token is "
-                "STILL LIVE. Delete it under Account > API Tokens.",
+                "replaced (public id %s) failed: that token is STILL LIVE. "
+                "Delete it under Account > API Tokens.",
                 public_id,
                 old_token,
             )
@@ -510,7 +562,7 @@ def _link(server, request: Request, saved_url: Optional[str]) -> dict:
                 "and still works: delete the older one under Account › API Tokens."
             )
     logger.info(
-        "ComfyUI at %s linked to %s with full access (token %s; replaced %s).",
+        "ComfyUI at %s linked to %s with a ComfyUI-only key (token %s; replaced %s).",
         comfyui_url,
         pixlstash_url,
         minted["token_id"],
@@ -518,11 +570,20 @@ def _link(server, request: Request, saved_url: Optional[str]) -> dict:
     )
     steps["link"] = _step(
         "done",
-        " ".join(filter(None, [f"Full access, through {pixlstash_url}.", leftover])),
+        " ".join(
+            filter(
+                None,
+                [
+                    f"A key for the PixlStash nodes only, through {pixlstash_url}.",
+                    leftover,
+                ],
+            )
+        ),
     )
 
     problem = _check_round_trip(pinned, minted["token"])
-    bound = None if problem else _bound_address(server, public_id)
+    token = None if problem else _token(server, public_id)
+    bound = token.bound_address if token else None
     if not problem and bound in (None, TOKEN_BIND_PENDING):
         # A 200 that did not come through PixlStash with this token: nothing
         # bound it, so it is not ComfyUI's.
@@ -534,7 +595,7 @@ def _link(server, request: Request, saved_url: Optional[str]) -> dict:
         )
         problem = "ComfyUI answered the check without using its new key."
     if problem:
-        # ComfyUI holds a full-access token that does not work from there.
+        # ComfyUI holds a token that does not work from there.
         # Undo the link entirely, so no live token is left that the link
         # record says nothing useful about, and the status agrees with the
         # reply.
@@ -595,6 +656,50 @@ def _clear_comfyui_key(pinned: str, comfyui_url: str) -> None:
             "revoked here, so it no longer works): %s",
             comfyui_url,
             exc,
+        )
+
+
+def narrow_recorded_key(server) -> None:
+    """Hold the recorded link's key to the ComfyUI scope (#1811).
+
+    A link made before the scope has an ``ALL`` key. The hub narrows the ones
+    bound to an address when it opens; this narrows the recorded one whatever
+    its binding, which is the only way to tell a key from before #1810 (no
+    ``bound_address``) from the owner's own tokens. Run once at start-up.
+    """
+    public_id = (server._server_config.get(LINK_CONFIG_KEY) or {}).get(
+        "token_public_id"
+    )
+    if not public_id:
+        return
+
+    def narrow(session) -> bool:
+        token = session.exec(
+            select(UserToken).where(UserToken.public_id == public_id)
+        ).first()
+        if token is None or token.scope != "ALL":
+            return False
+        token.scope = COMFYUI_SCOPE
+        session.add(token)
+        session.commit()
+        return True
+
+    try:
+        narrowed = server.auth._db.run_task(narrow, priority=DBPriority.IMMEDIATE)
+    except Exception:
+        # Start-up goes on, but the key in ComfyUI is still full access.
+        logger.exception(
+            "Could not narrow ComfyUI link token %s to the ComfyUI scope; it "
+            "still has FULL ACCESS. Link ComfyUI again from Settings.",
+            public_id,
+        )
+        return
+    if narrowed:
+        server.auth._flush_token_cache()
+        logger.info(
+            "ComfyUI link token %s had full access; it now reaches only what "
+            "the PixlStash nodes call.",
+            public_id,
         )
 
 

@@ -142,11 +142,12 @@ from pixlstash.services.comfyui_service import (
     FILE_SAVE_NODE_CLASSES,
     PIXLSTASH_PICTURE_LOADER,
     _extract_output_node_ids,
+    RUN_CLIENT_ID,
     _process_comfyui_outputs,
     _submit_comfyui_prompt,
     _upload_image_to_comfyui,
     library_ids_named,
-    record_run_outcome,
+    follow_run,
     run_outcome,
     swap_pixlstash_savers,
     unfed_picture_loaders,
@@ -1495,7 +1496,11 @@ class RunRequest(BaseModel):
     # required the literal JSON `true` (`payload.get(...) is True`); this is the
     # same rule, declared instead of hand-written.
     allow_unchecked: StrictBool = False
-    client_id: str | None = Field(None, max_length=MAX_LABEL_LENGTH)
+    # What the Tasks tab calls these runs while they are in flight. A caller
+    # that changed nothing has no need to say: left out, a run that keeps the
+    # seed of the picture its graph was read from is "Clone picture", and any
+    # other is named after its workflow.
+    label: str | None = Field(None, max_length=MAX_LABEL_LENGTH)
 
 
 class WorkflowChanges(BaseModel):
@@ -6906,6 +6911,15 @@ def create_router(server) -> APIRouter:
         for card, graph, swapped in plan.loader_swaps:
             _record_loader_swaps(card, graph, swapped)
         saved_over = workflow_versions.saved_over_ids(_hub())
+        # What a run nobody named is called: its workflow, as the grid shows it
+        # (a generated name needs the models, `Krea 2: Text to Image`).
+        names = (
+            {}
+            if body.label
+            else _display_names(
+                read_grid(_hub(), server.vault, manual_models=_manual_models).figures
+            )
+        )
         for graph, group, feeds in plan.submittable:
             output_node_ids = _extract_output_node_ids(graph, {})
             # The same finder `replace_missing_seed_nodes` checked its literals
@@ -6930,6 +6944,15 @@ def create_router(server) -> APIRouter:
             # source, as a run of a card has always stacked.
             per_picture = any(feed.picture_id is None for feed in feeds)
             passes = group.picture_ids if per_picture else group.picture_ids[:1]
+            label = body.label or (
+                # One graph, read from one of the pictures it is run for and
+                # not fed them, with that picture's seed: the picture again.
+                "Clone picture"
+                if body.seed_mode == "keep"
+                and not per_picture
+                and group.source_picture_id in group.picture_ids
+                else names.get(group.workflow_id)
+            )
             for selected in passes or [None]:
                 # Hoisted out of the loop below: it is a WRITE task, idempotent,
                 # and `count` runs of one pass all land in the one stack.
@@ -6960,8 +6983,10 @@ def create_router(server) -> APIRouter:
                         apply_seeds(instance, seed_targets, body.seed)
                     elif body.seed_mode == "new":
                         apply_seeds(instance, seed_targets, None)
+                    # Under the backend's own client, so ComfyUI tells the
+                    # one listener how far the run is (`follow_run`).
                     submitted = _submit_comfyui_prompt(
-                        comfyui_url, instance, body.client_id
+                        comfyui_url, instance, RUN_CLIENT_ID
                     )
                     prompt_id = submitted.get("prompt_id") or submitted.get("id")
                     # ComfyUI accepts a prompt when ANY output validates and
@@ -6979,8 +7004,12 @@ def create_router(server) -> APIRouter:
                         lease = request.state.library_lease
                         # Before the thread, so a read straight after this
                         # answer never finds the run unknown.
-                        record_run_outcome(
-                            str(prompt_id), "running", library_uuid=lease.library_uuid
+                        follow_run(
+                            str(prompt_id),
+                            comfyui_url,
+                            label=label,
+                            workflow_id=group.workflow_id,
+                            library_uuid=lease.library_uuid,
                         )
                         threading.Thread(
                             target=_process_comfyui_outputs,

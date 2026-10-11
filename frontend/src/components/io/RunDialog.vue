@@ -887,7 +887,7 @@ import { editLorasRoute, loraBase, loraStem } from "../../utils/loraChain";
 import { fitPeople, fitWorkflows } from "../../utils/loraWorkflows";
 import { namesWord, triggerWord } from "../../utils/triggerWords";
 import { wouldDuplicate } from "../../utils/recipeKey";
-import { labelPrompts, runTaskLabel } from "../../utils/runTaskLabel";
+import { runTaskLabel } from "../../utils/runTaskLabel";
 import { UNMATCHED_REPLACEMENTS_TEXT } from "../../utils/workflowCard";
 import {
   choicesFor,
@@ -924,7 +924,7 @@ const props = defineProps({
    * mounts fresh by keying it on `runOpened`.
    */
   source: { type: Object, default: null },
-  /** `{client_id, set_id, project_id, character_id}` from the grid. */
+  /** `{set_id, project_id, character_id}` from the grid. */
   context: { type: Object, default: () => ({}) },
 });
 
@@ -1325,26 +1325,26 @@ const title = computed(() => {
 });
 const subtitle = computed(() => card.value?.name || "");
 /**
- * What a run's row in the Tasks tab is called (`runTaskLabel`), given the
- * run's own *answer*.
+ * What the run's row in the Tasks tab is called (`runTaskLabel`), sent with
+ * the run, or null to leave the naming to the server.
  *
  * A clone is one picture's recipe on its own workflow, nothing on the form
- * changed, run with THAT picture's seed: its seed typed as the fixed one, or
- * "Keep the original's" when the answer says the graph that ran was read from
- * this picture (`source_picture_id`). Kept on another picture's graph, the
- * seed is that picture's, and the run is not this one again.
+ * changed, run with THAT picture's seed. Typed as the fixed one, this form
+ * knows. With "Keep the original's" only the server does: it is a clone when
+ * the graph that runs was read from this picture, and kept on another
+ * picture's graph the seed is that picture's. So that one is left to it.
  */
-function taskLabelFor(answer) {
-  const sameSeed =
-    seedMode.value === "fixed"
-      ? Boolean(seedText.value) && String(seed.value).trim() === seedText.value
-      : seedMode.value === "keep" &&
-        Number(answer?.groups?.[0]?.source_picture_id) ===
-          Number(pictureIds.value[0]);
+function taskLabel() {
+  // `runsOwnWorkflow` is only ever true of ONE picture: no recipe is read
+  // for several.
+  const untouched = runsOwnWorkflow.value && !dirty.value;
+  if (untouched && seedMode.value === "keep") return null;
   return runTaskLabel({
-    // `runsOwnWorkflow` is only ever true of ONE picture: no recipe is read
-    // for several.
-    clone: runsOwnWorkflow.value && !dirty.value && sameSeed,
+    clone:
+      untouched &&
+      seedMode.value === "fixed" &&
+      Boolean(seedText.value) &&
+      String(seed.value).trim() === seedText.value,
     recipe: savedRecipe.value?.name,
     workflow: card.value?.name,
   });
@@ -2694,10 +2694,7 @@ function runBody() {
     // The digits as they were typed. A Number here would round a 64-bit
     // seed into a different one on the way out.
     seed: seedMode.value === "fixed" ? String(seed.value).trim() : null,
-    // Only when something is listening: a `client_id` naming a socket nobody
-    // reads makes the run look followable when it is not. Only the grid puts
-    // one in `context`; the Workflows view's runner follows without one.
-    client_id: runDialog.hasRunner ? props.context?.client_id || null : null,
+    label: taskLabel(),
   };
   // Exactly one source, which the route checks before it reads anything: a
   // saved recipe names its own card, with pictures the card is `target`, and
@@ -3391,9 +3388,8 @@ async function submit() {
         beforeIds,
       };
     }
-    const label = taskLabelFor(answer);
     emit("run", {
-      prompts: labelPrompts(prompts, () => label),
+      prompts,
       pictureIds: pictureIds.value,
       // Only on a `partial` answer: why the rest of the batch was not queued.
       ...(answer?.error ? { error: answer.error } : {}),

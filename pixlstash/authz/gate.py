@@ -56,6 +56,9 @@ from starlette.concurrency import run_in_threadpool
 from starlette.requests import HTTPConnection
 
 from pixlstash.auth import (
+    COMFYUI_SCOPE,
+    COMFYUI_SCOPE_REFUSAL,
+    COMFYUI_SCOPE_ROUTES,
     is_auth_excluded_path,
     is_local_or_tailscale_ip,
     is_loopback_ip,
@@ -207,6 +210,7 @@ class AuthzGate:
         self._auth = auth
         self._server = server
         self._policy_by_route_id: dict[int, RoutePolicy] = {}
+        self._comfyui_routes: frozenset[tuple[int, str]] = frozenset()
         self._logged_misses: set[int] = set()
         self._resolved = False
 
@@ -246,6 +250,13 @@ class AuthzGate:
             if route_policy is not None:
                 mapping[id(route)] = route_policy
         self._policy_by_route_id = mapping
+        # With the method: one route object can serve two, and the scope may
+        # admit only one of them.
+        self._comfyui_routes = frozenset(
+            (id(route), key[0])
+            for key, route in live.items()
+            if key in COMFYUI_SCOPE_ROUTES
+        )
         self._resolved = True
 
         undeclared = sorted(key for key in live if key not in self._registry)
@@ -470,6 +481,8 @@ class AuthzGate:
         of §16.2). It resolves project ids against the server, so it must run
         *after* the library checks have settled which vault is being read.
         """
+        self._admit_comfyui_scope(request)
+
         # Mid-swap the server's vault is being replaced, so a request served now
         # could read from one library and write to another. Refused before any
         # other check, including the pin, because during the swap there is no
@@ -508,6 +521,36 @@ class AuthzGate:
             return
         # *_SCOPED single / body_ids batch / SCOPED_LIST → Step 4 object scoping.
         await self._enforce_scoped_policy(request, route_policy)
+
+    def _admit_comfyui_scope(self, request: Request) -> None:
+        """Hold a ComfyUI-scope token to the routes its scope admits (#1811).
+
+        The scope is the owner's access on ``auth.COMFYUI_SCOPE_ROUTES`` and
+        nothing anywhere else, so this is the one place the token stops being
+        a scoped one: on an admitted route its ``token_scope`` is cleared, and
+        the route's own policy then treats the request as the owner's
+        (locality and the library pin still apply). On every other route it
+        is refused here, before any policy runs.
+
+        Admission is by the matched route's identity and the method, never
+        by path, so a path with the shape of an admitted template that
+        resolves to another route is refused. Fails closed: nothing but this method clears the
+        scope, so a ComfyUI token that reaches a handler any other way is
+        still a scoped token to every owner check.
+        """
+        token_scope = getattr(request.state, "token_scope", None)
+        if token_scope is None or token_scope.scope != COMFYUI_SCOPE:
+            return
+        matched = (id(request.scope.get("route")), request.method)
+        if matched not in self._comfyui_routes:
+            logger.info(
+                "Refused a ComfyUI-scope token for %s %s: not a route the "
+                "scope admits.",
+                request.method,
+                request.url.path,
+            )
+            raise HTTPException(status_code=403, detail=COMFYUI_SCOPE_REFUSAL)
+        request.state.token_scope = None
 
     async def _enforce_scoped_policy(
         self, request: Request, route_policy: RoutePolicy
@@ -752,15 +795,19 @@ class AuthzGate:
             token_library,
             active_uuid,
         )
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                "This token belongs to a library that is not currently active. "
-                "Switch to that library, use a token created for the active "
+        detail = "This token belongs to a library that is not currently active."
+        # As in the middleware: a key that lives in ComfyUI's settings is not
+        # told how the owner could widen it.
+        if (
+            getattr(matched_token, "bound_address", None) is None
+            and getattr(matched_token, "scope", None) != COMFYUI_SCOPE
+        ):
+            detail += (
+                " Switch to that library, use a token created for the active "
                 "one, or let this one cover every library under API Tokens in "
                 "the settings."
-            ),
-        )
+            )
+        raise HTTPException(status_code=403, detail=detail)
 
     def _enforce_unscoped_owner(self, request: Request) -> None:
         """Require a fully-unscoped owner via the shared AuthService helper.

@@ -56,7 +56,6 @@ describe("a score survives a rebuild from the last fetch", () => {
       rebuildGridImagesFromLastFetch,
       triggerNewImageHighlight: vi.fn(),
       updateVisibleThumbnails: vi.fn(),
-      maybeRefreshOverlayForComfyui: vi.fn(),
       removeImagesById: vi.fn(),
     });
 

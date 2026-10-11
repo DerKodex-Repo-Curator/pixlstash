@@ -94,7 +94,6 @@ const STUBS = {
   CharacterEditor: true,
   StarRatingOverlay: true,
   PluginParametersUI: true,
-  ComfyUiRunner: true,
   ProgressOverlay: true,
   VTooltip: true,
 };

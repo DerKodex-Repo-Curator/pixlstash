@@ -51,7 +51,6 @@ export function useGridScoring({
   rebuildGridImagesFromLastFetch,
   triggerNewImageHighlight,
   updateVisibleThumbnails,
-  maybeRefreshOverlayForComfyui,
   removeImagesById,
 }) {
   const sortStore = useSortStore();
@@ -527,12 +526,6 @@ export function useGridScoring({
     lastFetchedGridImages.value = base;
     rebuildGridImagesFromLastFetch();
     if (highlight) triggerNewImageHighlight(inserted);
-
-    // An in-app ComfyUI result lands here (origin-aware WS picture_imported insert).
-    // If the overlay is open with a pending comfyui refresh, reconcile it now that
-    // the new stacked output is present in lastFetchedGridImages - this is the i2i/
-    // upscale lightbox case that previously relied on the full-grid refetch.
-    void maybeRefreshOverlayForComfyui();
   }
 
   async function refreshSmartScoreForImage(imageId) {

@@ -1273,6 +1273,8 @@ class Server(
         # get_worker_progress, which the in-app upgrade bar consumes.
         self.vault.start()
         self._maybe_send_telemetry_ping()
+        # A link from before the ComfyUI scope (#1811) is held to it.
+        comfyui_link_service.narrow_recorded_key(self)
         # A linked ComfyUI on this computer is told if the loopback port moved.
         threading.Thread(
             target=comfyui_link_service.reannounce,

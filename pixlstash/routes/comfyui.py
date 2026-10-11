@@ -1,26 +1,19 @@
-import asyncio
 import functools
 import hashlib
 import json
 import math
 import os
 import time
-import uuid
 from collections import Counter
-from urllib.parse import quote
 
-import websockets
-from fastapi import APIRouter, Body, HTTPException, Query, Request, WebSocket
-from fastapi.websockets import WebSocketDisconnect
+from fastapi import APIRouter, Body, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict
 from send2trash import TrashPermissionError, send2trash
 
 from typing import Optional
 
-from pixlstash.database import DBPriority
 from pixlstash.db_models import (
     Picture,
-    User,
 )
 from pixlstash.hub import workflow_cards, workflow_origin, workflow_versions
 from pixlstash.hub.workflow_card_reads import (
@@ -1535,6 +1528,10 @@ class ComfyUILinkStatus(BaseModel):
     refused_from: Optional[str] = None
     # "other_computer", "listening" or None: see comfyui_link_service.exposure.
     exposure: Optional[str] = None
+    # The key's row in the token list, and whether it works in every library
+    # or only one: `PUT /users/me/token/{token_id}/libraries` changes that.
+    token_id: Optional[int] = None
+    all_libraries: bool = False
 
 
 class ComfyUILinkStep(BaseModel):
@@ -1824,146 +1821,6 @@ def _recipe_extras(server, request, pic_id: int, graph: Optional[dict]) -> dict:
 def create_router(server) -> APIRouter:
     router = APIRouter()
 
-    @router.websocket("/ws/comfyui")
-    async def comfyui_progress_proxy(websocket: WebSocket):
-        lease = server.library_coordinator.acquire_read()
-        if lease is None:
-            await websocket.close(code=1013, reason="Library unavailable")
-            return
-        ws_client = None
-        ws_auth = None
-        admission_lease = None
-        try:
-            # The HTTP auth middleware does not cover WebSockets. Require an
-            # authenticated OWNER before accepting - running ComfyUI is an owner
-            # operation. Without this, an unauthenticated (or merely resource-
-            # scoped) client would get a WebSocket proxy to the internal ComfyUI
-            # service via the DEFAULT_COMFYUI_URL fallback. Also reject cross-site
-            # handshakes (CSWSH).
-            if not server.auth.is_websocket_origin_allowed(
-                websocket, server.allow_origins, server.allow_origin_regex
-            ):
-                await websocket.close(code=1008)
-                return
-            ws_auth = server.auth.authenticate_websocket(websocket)
-            if ws_auth is None or not ws_auth.is_owner:
-                await websocket.close(code=1008)
-                return
-            admission_lease = server.auth.register_authenticated_websocket(websocket)
-            if admission_lease is None:
-                await websocket.close(code=1012)
-                return
-            await websocket.accept()
-            # The proxy is library-bound even though its upstream URL is a machine
-            # setting: an in-flight workflow and its eventual picture ids belong to
-            # the old vault. Register it in the same lifecycle set as /ws/updates so
-            # a switch terminates both sides instead of leaving a stale proxy alive.
-            candidate = {
-                "ws": websocket,
-                "loop": asyncio.get_running_loop(),
-                "owner": True,
-                "broadcast": False,
-            }
-            with server._ws_clients_lock:
-                server._ws_clients.append(candidate)
-            ws_client = candidate
-        finally:
-            server.library_coordinator.release_read(lease)
-        if ws_client is None or ws_auth is None:
-            # Admission can be granted before a later step in the leased block
-            # fails. The proxy's ``finally`` never runs on this path, so release
-            # the admission lease here instead.
-            if admission_lease is not None:
-                server.auth.unregister_authenticated_websocket(admission_lease)
-            return
-        try:
-            # comfyui_url is a machine setting, so it lives in the hub.
-            user = server.hub_engine.run_task(
-                lambda session: session.get(User, ws_auth.user_id),
-                priority=DBPriority.IMMEDIATE,
-            )
-
-            comfyui_url = _comfyui_url(user)
-            client_id = (
-                websocket.query_params.get("clientId")
-                or websocket.query_params.get("client_id")
-                or f"pixlstash-{uuid.uuid4().hex[:8]}"
-            )
-            ws_base = (
-                comfyui_url.replace("https://", "wss://")
-                if comfyui_url.startswith("https://")
-                else comfyui_url.replace("http://", "ws://")
-            )
-            ws_url = f"{ws_base}/ws?clientId={quote(client_id)}"
-
-            async def forward_upstream(upstream):
-                try:
-                    async for message in upstream:
-                        if isinstance(message, (bytes, bytearray)):
-                            await websocket.send_bytes(bytes(message))
-                        else:
-                            await websocket.send_text(message)
-                except asyncio.CancelledError:
-                    raise
-                except WebSocketDisconnect:
-                    logger.debug(
-                        "ComfyUI WebSocket client disconnected while forwarding upstream."
-                    )
-                except Exception as exc:
-                    logger.debug("ComfyUI WebSocket upstream forward failed: %s", exc)
-
-            async def forward_downstream(upstream):
-                try:
-                    while True:
-                        message = await websocket.receive_text()
-                        if message:
-                            await upstream.send(message)
-                except asyncio.CancelledError:
-                    raise
-                except WebSocketDisconnect:
-                    logger.debug("ComfyUI WebSocket client disconnected normally.")
-                except Exception as exc:
-                    logger.debug("ComfyUI WebSocket downstream receive failed: %s", exc)
-
-            try:
-                async with websockets.connect(
-                    ws_url, ping_interval=None, close_timeout=2
-                ) as upstream:
-                    upstream_task = asyncio.create_task(forward_upstream(upstream))
-                    downstream_task = asyncio.create_task(forward_downstream(upstream))
-                    proxy_tasks = {upstream_task, downstream_task}
-                    try:
-                        done, _pending = await asyncio.wait(
-                            proxy_tasks,
-                            return_when=asyncio.FIRST_COMPLETED,
-                        )
-                        for task in done:
-                            exc = task.exception()
-                            if exc:
-                                raise exc
-                    finally:
-                        # The restore barrier cancels this owning handler after
-                        # closing the client socket. Always tear down both proxy
-                        # directions as part of that cancellation; otherwise an
-                        # orphaned upstream iterator could outlive cutover.
-                        for task in proxy_tasks:
-                            if not task.done():
-                                task.cancel()
-                        await asyncio.gather(*proxy_tasks, return_exceptions=True)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.warning("ComfyUI progress proxy failed: %s", exc)
-        finally:
-            with server._ws_clients_lock:
-                if ws_client is not None and ws_client in server._ws_clients:
-                    server._ws_clients.remove(ws_client)
-            try:
-                await websocket.close()
-            except Exception as exc:
-                logger.debug("Failed to close WebSocket cleanly: %s", exc)
-            server.auth.unregister_authenticated_websocket(admission_lease)
-
     @router.get(
         "/comfyui/workflows",
         summary="List ComfyUI workflows",
@@ -2063,18 +1920,20 @@ def create_router(server) -> APIRouter:
 
     @router.post(
         "/comfyui/link",
-        summary="Link the saved ComfyUI with a full-access token",
+        summary="Link the saved ComfyUI with a ComfyUI-only token",
         description=(
             "For a ComfyUI on this computer or the local network, from a local "
-            "owner: mints a full-access token that works only from ComfyUI's "
-            "address (bound by the check) and writes it, with the PixlStash URL "
+            "owner: mints a token that reaches only the routes the "
+            "ComfyUI-PixlStash nodes call and works only from ComfyUI's "
+            "address (bound by the check), and writes it, with the PixlStash URL "
             "ComfyUI should call (and PixlStash's certificate over HTTPS), into "
             "ComfyUI's settings for the ComfyUI-PixlStash nodes. Then checks "
             "that ComfyUI reaches PixlStash with it. Always 200: `steps` says "
             "how far it got (`reach`, `nodes`, `link`, `check`), and `reason` "
             "why a step needs the person. A ComfyUI on the local network needs "
             "remote access on with HTTPS. `exposure` says whether other "
-            "computers can reach that ComfyUI."
+            "computers can reach that ComfyUI. The token covers the open "
+            "library; `PUT /users/me/token/{token_id}/libraries` widens it."
         ),
         response_model=ComfyUILinkResponse,
     )

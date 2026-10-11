@@ -62,7 +62,10 @@ pytestmark = pytest.mark.usefixtures("no_spa_fallback")
 
 
 class _Scope:
-    """Minimal ``token_scope`` stand-in (the fields the membership ladder reads)."""
+    """Minimal ``token_scope`` stand-in (the fields the gate and the membership
+    ladder read): a READ share token."""
+
+    scope = "READ"
 
     def __init__(self, resource_type, resource_id):
         self.resource_type = resource_type
