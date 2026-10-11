@@ -3913,6 +3913,38 @@ describe("Save what you ran", () => {
       expect(useRunDialogStore().saved).toMatchObject({ workflowId: KEY, savedAs: "" });
     });
 
+    it("builds the LoRA rows anew, so a saved removal or strength is not counted again", async () => {
+      const wrapper = await mountRun(fromCard);
+      wrapper.vm.loras[0].strength = 0.9;
+      await wrapper.vm.skipGraphLora(wrapper.vm.loras[1]);
+      await flushPromises();
+      expect(wrapper.vm.formChanges.loras).toHaveLength(1);
+      expect(wrapper.vm.formChanges.skip_loras).toHaveLength(1);
+
+      // What the workflow holds once the save has landed: loader 7 at 0.9 in
+      // the graph and the default recipe, loader 8 gone from both.
+      getWorkflowCard.mockImplementation(async (key) => {
+        const own = ownCard({ id: key });
+        own.default_recipe.loras = [
+          { filename: "mira_v2.safetensors", sha256: MIRA_SHA, strength: 0.9 },
+        ];
+        return { card: own };
+      });
+      getLoraChain.mockResolvedValue({
+        loaders: [loader("7", "mira_v2.safetensors", MIRA_SHA, 0.9)],
+        lanes: [],
+      });
+      await button(wrapper, "Save").trigger("click");
+      await flushPromises();
+
+      expect(wrapper.vm.loras.map((row) => [row.node_id, row.strength, row.skipped])).toEqual([
+        ["7", 0.9, false],
+      ]);
+      expect(wrapper.vm.formChanges.loras).toEqual([]);
+      expect(wrapper.vm.formChanges.skip_loras).toEqual([]);
+      expect(band(wrapper).exists()).toBe(false);
+    });
+
     it("leaves nothing for the close guard to protect", async () => {
       const wrapper = await mountRun(fromCard);
       wrapper.vm.setValue(field(wrapper, "steps"), 32);
@@ -4340,9 +4372,23 @@ describe("Save what you ran", () => {
         models: [{ address: CKPT, filename: "realvisXL_v5.safetensors" }],
         // Each loader set with its own LoRA and strength, instead of changed
         // or removed.
+        // The clip strength with it, by the rule a changed row follows: the
+        // graph has loader 7 at 0.8 for both, so both are saved at 0.6.
         loras: [
-          { node_id: "7", field: "lora_name", sha256: MIRA_SHA, strength_model: 0.6 },
-          { node_id: "8", field: "lora_name", sha256: GRAIN_SHA, strength_model: 0.4 },
+          {
+            node_id: "7",
+            field: "lora_name",
+            sha256: MIRA_SHA,
+            strength_model: 0.6,
+            strength_clip: 0.6,
+          },
+          {
+            node_id: "8",
+            field: "lora_name",
+            sha256: GRAIN_SHA,
+            strength_model: 0.4,
+            strength_clip: 0.4,
+          },
         ],
         skip_loras: [],
         // The stage's boolean.

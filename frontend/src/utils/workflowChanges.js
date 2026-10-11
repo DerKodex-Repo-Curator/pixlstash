@@ -62,7 +62,7 @@ export function over(base, top) {
  *
  * @typedef {Object} FormAnswers
  * @property {(address: string) => (string|undefined)} model - the file at a loader address.
- * @property {(nodeId: string, field: string) => ({sha256: string, strength_model: ?number}|null|undefined)} lora
+ * @property {(nodeId: string, field: string) => ({sha256: string, strength_model: ?number, strength_clip?: number}|null|undefined)} lora
  *   - the loader's LoRA; `null` when the form has the loader removed.
  * @property {(name: string) => (boolean|undefined)} stage
  * @property {(slotLabel: string, inputName: string) => *} value

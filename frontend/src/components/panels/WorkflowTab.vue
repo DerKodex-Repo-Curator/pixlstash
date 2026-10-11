@@ -2841,7 +2841,11 @@ const saveAsNewButton = ref(null);
 function saveAsNew() {
   const key = selectedKey.value;
   const name = newName.value.trim();
-  if (!key || !name || !saveAsNewOpen.value) return undefined;
+  // Enter in the name field comes here past the disabled button: a second
+  // one while the save is out would queue the same new workflow again.
+  if (!key || !name || !saveAsNewOpen.value || busy.value === "save-as-new") {
+    return undefined;
+  }
   draftError.value = "";
   const unmoved = selectionMark();
   return queueWrite("save-as-new", async () => {

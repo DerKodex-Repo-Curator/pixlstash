@@ -118,7 +118,8 @@ export function withLoraRemoved(changes, slot, removed) {
  * `saved` is `{strength, strength_clip}` as the row reads them. The clip
  * strength follows the model strength where the two were one number (or the
  * loader has no clip strength of its own), and is left alone where the graph
- * set them apart.
+ * set them apart. A loader that waited to be removed is put back by a strength
+ * of its own: a slot is set or removed, never both.
  *
  * @param {Object} changes
  * @param {{node_id: string, field: string, sha256: string}} slot - the
@@ -133,6 +134,7 @@ export function withLoraStrength(changes, slot, strength, saved = {}) {
   if (strength === saved.strength) return set;
   const tied =
     saved.strength_clip == null || saved.strength_clip === saved.strength;
+  set.skip_loras = set.skip_loras.filter((entry) => !sameSlot(entry, slot));
   set.loras.push({
     ...slotOf(slot),
     sha256: slot.sha256,

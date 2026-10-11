@@ -2911,6 +2911,9 @@ const formAnswers = {
     return {
       sha256: row.sha256,
       strength_model: Number.isFinite(row.strength) ? row.strength : null,
+      // As a changed row states it: left unsaid, the save would write the
+      // model strength and leave the graph's clip strength beside it.
+      ...clipStrength(row),
     };
   },
   stage(name) {
@@ -3041,7 +3044,11 @@ function leaveBand() {
   naming.value = false;
 }
 
-/** Every edit the band counts, taken off the form. The run's own stay. */
+/**
+ * Every edit the band counts, taken off the form. The run's own stay. The
+ * LoRA rows are not put back here: every caller reads the workflow again, and
+ * `layOwn` builds them anew from the chain the save left.
+ */
 function clearChanges() {
   for (const key of Object.keys(edits)) delete edits[key];
   for (const key of Object.keys(editedLabels)) delete editedLabels[key];

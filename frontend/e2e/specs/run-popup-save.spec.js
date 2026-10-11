@@ -837,7 +837,16 @@ test("opens on what waits in the Workflow tab, and a change put back is restated
     {
       changes: {
         models: waiting.models,
-        loras: [{ node_id: "8", field: "lora_name", sha256: GRAIN_SHA, strength_model: 0.4 }],
+        // With its clip strength, which the graph has as the same number.
+        loras: [
+          {
+            node_id: "8",
+            field: "lora_name",
+            sha256: GRAIN_SHA,
+            strength_model: 0.4,
+            strength_clip: 0.4,
+          },
+        ],
         skip_loras: [],
         stages: {},
         values: waiting.values,

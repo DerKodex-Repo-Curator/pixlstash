@@ -127,6 +127,10 @@ describe("a LoRA loader", () => {
     expect(loraRemoved(back, SLOT)).toBe(false);
     // Removing twice is still one entry.
     expect(withLoraRemoved(removed, SLOT, true).skip_loras).toHaveLength(1);
+    // A strength set on a removed loader puts it back.
+    const set = withLoraStrength(removed, SLOT, 0.5, { strength: 0.85 });
+    expect(set.skip_loras).toEqual([]);
+    expect(set.loras).toHaveLength(1);
   });
 
   it("tells two slots of one stacker node apart", () => {

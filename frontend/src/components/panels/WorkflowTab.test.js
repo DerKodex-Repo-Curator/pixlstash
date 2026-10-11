@@ -4196,8 +4196,14 @@ describe("the tab as the editor (#1850)", () => {
 
       await saveAsNew(wrapper).trigger("click");
       await name().setValue("Softer");
+      // Held, so the second Enter lands while the save is still out.
+      const answer = held();
+      saveWorkflowAsNew.mockImplementation(() => answer.promise);
       await name().trigger("keydown", { key: "Enter" });
+      await name().trigger("keydown", { key: "Enter" });
+      answer.release({ workflow_id: OTHER, name: "Softer", new_workflow: true, left_out: [] });
       await flush(wrapper);
+      expect(saveWorkflowAsNew).toHaveBeenCalledTimes(1);
       expect(saveWorkflowAsNew).toHaveBeenCalledWith(KEY, { name: "Softer" });
     });
 
