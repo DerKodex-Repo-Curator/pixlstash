@@ -969,7 +969,7 @@ A token with scope `COMFYUI` (the ComfyUI link key) is the owner on the 28 route
 
 The list is `auth.COMFYUI_SCOPE_ROUTES`. It is every route the ComfyUI-PixlStash pack calls and nothing else: `tests/test_architecture_guardrails.py::test_the_comfyui_scope_admits_every_route_the_pack_calls` reads the pack's source and fails in both directions, and `test_the_comfyui_scope_section_of_the_matrix_matches_the_code` holds this table to the list. `GET /version` is public and needs no entry.
 
-The middleware checks the same list first, by the path's shape (`auth.comfyui_scope_admits`). That check is looser than the gate's and is the one that survives `AUTHZ_GATE_ENFORCING = False`. A `COMFYUI` token is never a login, a WebSocket or a `?token=` credential, names no resource, and is held to `require_local_for_write` like an `ALL` token.
+The middleware checks the same list first, by the path's shape (`auth.comfyui_scope_admits`). That check is looser than the gate's and is the one that survives `AUTHZ_GATE_ENFORCING = False`. A `COMFYUI` token cannot sign in for a session, is refused on WebSockets, is not accepted in the query string, names no resource, and is held to `require_local_for_write` like an `ALL` token.
 
 | Method | Path | Policy | What the pack does with it |
 |---|---|---|---|

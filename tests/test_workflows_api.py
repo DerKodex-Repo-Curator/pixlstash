@@ -2479,7 +2479,7 @@ def test_a_comfyui_token_made_by_hand_is_held_to_the_same_scope(
     workflow_env, forwarded_for
 ):
     """An owner can mint the scope for a ComfyUI set up by hand. It is never a
-    login, a WebSocket or a ``?token=`` credential, names no resource, and
+    login, a WebSocket or a query-string credential, names no resource, and
     writes, so the local-network rule for writing tokens covers it."""
     server = workflow_env.server
     r = workflow_env.owner.post(
