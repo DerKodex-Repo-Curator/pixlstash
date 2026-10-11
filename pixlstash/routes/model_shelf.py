@@ -136,9 +136,11 @@ from pixlstash.services.model_workflow_sets import (
     attach_hand_made,
     create_set,
     delete_set,
+    hidden_set_keys,
     remove_members,
     rename_set,
     set_declines,
+    set_sets_hidden,
 )
 from pixlstash.services.workflow_set_verdicts import (
     VerdictTargetError,
@@ -1152,6 +1154,33 @@ class WorkflowSetDeclinesResponse(BaseModel):
     previous: list[str] = Field(description="The list before; putting it undoes.")
 
 
+# A workflow set's key as the grid draws it: a combination's sorted member
+# model ids comma-joined, or `hand:<id>` for a hand-made set.
+SetKey = Annotated[str, StringConstraints(min_length=1, max_length=1000)]
+
+
+class WorkflowSetHiddenRequest(BaseModel):
+    """Body of ``PUT /models/workflow-sets/hidden``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    keys: list[SetKey] = Field(
+        max_length=5000,
+        description="The sets to hide or show, each by the key the grid draws it under.",
+    )
+    hidden: bool = Field(
+        description="True hides them in this library, false shows them again."
+    )
+
+
+class WorkflowSetHiddenResponse(BaseModel):
+    """Body of ``PUT /models/workflow-sets/hidden``: what is hidden now."""
+
+    hidden_sets: list[str] = Field(
+        description="Every set hidden in the active library, after the call."
+    )
+
+
 class SetVerdictRequest(BaseModel):
     """Body of ``PUT /models/workflow-sets/verdicts/{combo_key}``."""
 
@@ -1346,6 +1375,16 @@ class WorkflowSetsResponse(BaseModel):
             "draws: one per evidence card (the union of the members of the "
             "uncovered combinations sharing a head) and one per hand-made set "
             "(its on-shelf members), deduplicated by `combo_key`."
+        ),
+    )
+    hidden_sets: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Set keys the active library hides, so the grid can leave them "
+            "out. A key is the shelf's own - a combination's sorted member "
+            "ids, or `hand:<id>` for a hand-made set - and the answer is the "
+            "library's, not the machine's: the same set is shown in another "
+            "library that has not hidden it."
         ),
     )
 
@@ -2228,6 +2267,7 @@ def create_router(server) -> APIRouter:
             no_set=found["no_set"],
             hand_made=[_hand_made_set(entry) for entry in found["hand_made"]],
             set_checks=[WorkflowSetCheck(**check) for check in checks],
+            hidden_sets=hidden_set_keys(server.hub, server.vault.library_uuid),
         )
 
     def _workflow_sets() -> dict:
@@ -2242,6 +2282,35 @@ def create_router(server) -> APIRouter:
             if entry["id"] == set_id:
                 return _hand_made_set(entry)
         raise HTTPException(status_code=404, detail=f"No workflow set {set_id}.")
+
+    @router.put(
+        "/models/workflow-sets/hidden",
+        summary="Hide or show workflow sets in this library",
+        description=(
+            "Which sets the ACTIVE library leaves out of the grid. The key is "
+            "the set's own - `model:<head id>` for a set from pictures (or "
+            "`missing:<filename>` when its head is off the shelf), `hand:<id>` "
+            "for a hand-made set - so a derived set and a hand-made one are "
+            "hidden the same way. Per library: a set hidden "
+            "here is still shown in another library, and hiding one thing "
+            "never touches a member or a file. Returns every set the library "
+            "now hides, so the client can draw the grid from one answer."
+        ),
+        tags=["model_shelf"],
+        response_model=WorkflowSetHiddenResponse,
+    )
+    def put_workflow_sets_hidden(
+        request: Request, payload: WorkflowSetHiddenRequest = Body(...)
+    ):
+        server.auth.ensure_secure_when_required(request)
+        return WorkflowSetHiddenResponse(
+            hidden_sets=set_sets_hidden(
+                server.hub,
+                server.vault.library_uuid,
+                payload.keys,
+                payload.hidden,
+            )
+        )
 
     @router.post(
         "/models/workflow-sets",

@@ -3020,7 +3020,12 @@ async function loadLoraSource() {
     }),
   ]);
   attachedLoras.value = kinds.flat().filter((row) => row?.sha256);
-  handMadeSets.value = sets?.hand_made || [];
+  // A set hidden in this library does not rank the picker (#1869). No "Show
+  // them" here, so the payload's own list decides.
+  const hidden = new Set(sets?.hidden_sets || []);
+  handMadeSets.value = (sets?.hand_made || []).filter(
+    (set) => !hidden.has(`hand:${set.id}`),
+  );
   const first = attachedLoras.value[0];
   addedLoras.value = first
     ? [addedRow(first.sha256, 1, source.entityType === "character")]

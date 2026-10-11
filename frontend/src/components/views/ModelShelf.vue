@@ -1508,6 +1508,8 @@
       <WorkflowSetSelectionBar
         v-if="isSetGrid"
         ref="setBarRef"
+        :sets="hideableSets"
+        @hide-sets="store.toggleHiddenSets(hideableSets)"
         @rename="startRenameSet"
         @duplicate="store.duplicateHandMadeSet(store.selectedSets[0])"
         @delete="store.deleteHandMadeSets(store.selectedSets)"
@@ -2632,13 +2634,18 @@ const setGridRef = ref(null);
  * whichever pill it is counted on, so the two pills' menus offer one row with
  * one count and Ctrl+A then Hide leaves none of them behind. The model cards
  * are the grid's answer rather than the store's, because only it knows a head
- * picked in its open tray from one picked as its card.
+ * picked in its open tray from one picked as its card. The selected hand-made
+ * sets come from the store's groups, the shape Hide reads (`hideSetsVerb`,
+ * `toggleHiddenSets`), so the set pill's row covers them as well.
  */
 const hideableSets = computed(() =>
   isSetGrid.value
     ? [
         ...(setGridRef.value?.selectedCardGroups ?? []),
         ...store.selectedMissingGroups,
+        ...store.handMadeGroups.filter((group) =>
+          store.selectedSetIds.has(group.set.id),
+        ),
       ]
     : [],
 );

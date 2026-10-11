@@ -34,6 +34,7 @@ const fetchWorkflowSets = vi.fn();
 const createWorkflowSet = vi.fn();
 const deleteWorkflowSet = vi.fn();
 const setWorkflowSetDeclines = vi.fn();
+const setWorkflowSetsHidden = vi.fn();
 const addWorkflowSetMembers = vi.fn();
 const setModelIcon = vi.fn();
 const clearModelIcons = vi.fn();
@@ -58,6 +59,7 @@ vi.mock("../api/modelShelf", () => ({
   createWorkflowSet: (...args) => createWorkflowSet(...args),
   deleteWorkflowSet: (...args) => deleteWorkflowSet(...args),
   setWorkflowSetDeclines: (...args) => setWorkflowSetDeclines(...args),
+  setWorkflowSetsHidden: (...args) => setWorkflowSetsHidden(...args),
   addWorkflowSetMembers: (...args) => addWorkflowSetMembers(...args),
 }));
 
@@ -116,9 +118,23 @@ function onTheRowList() {
   useModelShelfStore().setView({ groupBy: "none" });
 }
 
+/** The set keys the active library hides, as the doubles' server holds them. */
+let hiddenOnServer = new Set();
+
 beforeEach(() => {
   setActivePinia(createPinia());
   window.localStorage.clear();
+  // What the server holds as this library's hidden set keys (#1869). The store
+  // reads it from the set payload and writes it through `setWorkflowSetsHidden`,
+  // so this stands in for the hub row rather than any browser storage.
+  hiddenOnServer = new Set();
+  setWorkflowSetsHidden.mockReset().mockImplementation(async (keys, hidden) => {
+    for (const key of keys) {
+      if (hidden) hiddenOnServer.add(key);
+      else hiddenOnServer.delete(key);
+    }
+    return [...hiddenOnServer];
+  });
   listAdapters.mockReset().mockResolvedValue([]);
   listCheckpoints.mockReset().mockResolvedValue([]);
   listEngines.mockReset().mockResolvedValue([]);
@@ -3140,7 +3156,9 @@ describe("sets from pictures are hidden, never deleted", () => {
       adapter({ id: 1, sha256: "a".repeat(64), filename: "base.st" }),
       adapter({ id: 2, sha256: "b".repeat(64), filename: "style.st" }),
     ]);
-    fetchWorkflowSets.mockResolvedValue({
+    // Answered when asked, as the hub is: a read after a hide or an undo sees
+    // what the server holds then, not what it held when the shelf was built.
+    fetchWorkflowSets.mockImplementation(async () => ({
       combinations: [
         {
           key: "1+2",
@@ -3154,13 +3172,41 @@ describe("sets from pictures are hidden, never deleted", () => {
       ],
       no_set: [],
       hand_made: handMade,
-    });
+      hidden_sets: [...hiddenOnServer],
+    }));
     return useModelShelfStore();
   }
 
   function member(model, sha) {
     return { ...model, sha256: sha, slot: "checkpoint", on_shelf: true };
   }
+
+  it("takes only the hand-made sets the grid draws on Select all", async () => {
+    // A hidden hand-made set leaves the grid (#1869), so Select all must not
+    // take it: Delete would otherwise delete a set the reader cannot see.
+    hiddenOnServer.add("hand:7");
+    const store = shelfWithASet([
+      {
+        id: 7,
+        name: "seven",
+        declined: [],
+        members: [member(checkpoint, "a".repeat(64))],
+      },
+      {
+        id: 8,
+        name: "eight",
+        declined: [],
+        members: [member(lora, "b".repeat(64))],
+      },
+    ]);
+    store.setView({ groupBy: "workflow_set" });
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    expect(store.handMadeGroups.map((group) => group.set.id)).toEqual([8]);
+
+    store.selectVisible();
+    expect([...store.selectedSetIds]).toEqual([8]);
+  });
 
   it("hides a set, remembers it, and draws it again on request", async () => {
     const store = shelfWithASet();
@@ -3170,11 +3216,11 @@ describe("sets from pictures are hidden, never deleted", () => {
     expect(group.key).toBe("model:1");
 
     store.hideSets([group]);
+    await flush();
     expect(store.setGroups).toHaveLength(0);
     expect(store.hiddenSetCount).toBe(1);
-    expect(
-      JSON.parse(window.localStorage.getItem("pixlstash:modelShelfHiddenSets")),
-    ).toEqual({ keys: ["model:1"] });
+    expect(setWorkflowSetsHidden).toHaveBeenCalledWith(["model:1"], true);
+    expect([...hiddenOnServer]).toEqual(["model:1"]);
 
     store.showHiddenSets = true;
     expect(store.setGroups.map((g) => [g.key, g.card.hidden])).toEqual([
@@ -3182,9 +3228,30 @@ describe("sets from pictures are hidden, never deleted", () => {
     ]);
 
     store.unhideSets([store.setGroups[0]]);
+    await flush();
     store.showHiddenSets = false;
     expect(store.setGroups.map((g) => g.key)).toEqual(["model:1"]);
     expect(store.hiddenSetCount).toBe(0);
+    expect([...hiddenOnServer]).toEqual([]);
+  });
+
+  it("hides a hand-made set the same way, under its own key", async () => {
+    const store = shelfWithASet([handSet(7)]);
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    expect(store.handMadeGroups.map((g) => g.key)).toEqual(["hand:7"]);
+
+    store.hideSets([store.handMadeGroups[0]]);
+    await flush();
+    expect(store.handMadeGroups).toHaveLength(0);
+    expect(store.hiddenSetCount).toBe(1);
+    expect(setWorkflowSetsHidden).toHaveBeenCalledWith(["hand:7"], true);
+
+    // Shown again: drawn, dimmed, and the eye reverts.
+    store.showHiddenSets = true;
+    expect(store.handMadeGroups.map((g) => [g.key, g.card.hidden])).toEqual([
+      ["hand:7", true],
+    ]);
   });
 
   it("toggles a selection: hides what is shown, shows again once all are hidden", async () => {
@@ -3194,10 +3261,29 @@ describe("sets from pictures are hidden, never deleted", () => {
     store.showHiddenSets = true;
 
     store.toggleHiddenSets(store.setGroups);
+    await flush();
     expect(store.setGroups.map((g) => g.hidden)).toEqual([true]);
 
     store.toggleHiddenSets(store.setGroups);
+    await flush();
     expect(store.setGroups.map((g) => g.hidden)).toEqual([false]);
+  });
+
+  it("raises no hide receipt when the write did not land", async () => {
+    // The receipt claims the hide happened and arms an Undo, so it must wait
+    // for the PUT: over a refused write it would offer to undo nothing.
+    useOperationStore().setLocalReceiptHost(true);
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    setWorkflowSetsHidden.mockRejectedValueOnce(new Error("put refused"));
+
+    store.toggleHiddenSets(store.setGroups);
+    await flush();
+    expect(store.setGroups.map((g) => g.key)).toEqual(["model:1"]);
+    expect(store.hiddenSetCount).toBe(0);
+    expect(useNoticeStore().notices.at(-1)).toMatchObject({ level: "error" });
+    expect(useOperationStore().receipt).toBe(null);
   });
 
   it("drops a hidden card's head from the selection, so Undo re-arms nothing", async () => {
@@ -3210,6 +3296,7 @@ describe("sets from pictures are hidden, never deleted", () => {
     expect(store.selectedRows.map((r) => r.id)).toEqual([1]);
 
     store.toggleHiddenSets(store.setGroups);
+    await flush();
     expect([...store.selectedIds]).toEqual([]);
     await useOperationStore().takeLocalReceiptAction();
     expect(store.setGroups.map((g) => g.key)).toEqual(["model:1"]);
@@ -3220,6 +3307,7 @@ describe("sets from pictures are hidden, never deleted", () => {
     store.toggleSelected(1);
     store.showHiddenSets = true;
     store.toggleHiddenSets(store.setGroups);
+    await flush();
     expect(store.setGroups.map((g) => g.hidden)).toEqual([true]);
     expect([...store.selectedIds]).toEqual([1]);
   });
@@ -3231,9 +3319,167 @@ describe("sets from pictures are hidden, never deleted", () => {
     await store.loadWorkflowSets();
     store.toggleSet("model:1");
     store.hideSets([store.setGroups[0]]);
+    await flush();
     expect(store.openSetKey).toBe("");
     await useOperationStore().takeLocalReceiptAction();
     expect(store.openSetKey).toBe("model:1");
+  });
+
+  /** A promise its test answers by hand, when the answer's place matters. */
+  function deferred() {
+    let resolve;
+    const promise = new Promise((done) => (resolve = done));
+    return { promise, resolve };
+  }
+
+  it("undoes a hide on the server and on screen", async () => {
+    useOperationStore().setLocalReceiptHost(true);
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    store.hideSets([store.setGroups[0]]);
+    await flush();
+    expect([...hiddenOnServer]).toEqual(["model:1"]);
+
+    await useOperationStore().takeLocalReceiptAction();
+    expect([...hiddenOnServer]).toEqual([]);
+    expect(store.setGroups.map((g) => g.key)).toEqual(["model:1"]);
+    expect(store.hiddenSetCount).toBe(0);
+  });
+
+  it("takes a hidden hand-made set out of the set selection", async () => {
+    const store = shelfWithASet([handSet(7)]);
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    store.setView({ groupBy: "workflow_set" });
+    store.selectSet(7);
+    expect([...store.selectedSetIds]).toEqual([7]);
+
+    store.hideSets([store.handMadeGroups[0]]);
+    await flush();
+    expect([...store.selectedSetIds]).toEqual([]);
+  });
+
+  it("hiding an open hand-made tray never deletes that set", async () => {
+    useOperationStore().setLocalReceiptHost(true);
+    const store = await openOn([handSet(7)]);
+    store.hideSets([store.handMadeGroups[0]]);
+    await flush();
+    await flush();
+    expect(store.openSetKey).toBe("");
+    expect(deleteWorkflowSet).not.toHaveBeenCalled();
+    expect(store.handMadeSets.map((set) => set.id)).toEqual([7]);
+    expect([...hiddenOnServer]).toEqual(["hand:7"]);
+  });
+
+  it("turning Show them off over a hidden hand-made tray never deletes it", async () => {
+    const store = await openOn([handSet(7)]);
+    store.showHiddenSets = true;
+    store.hideSets([store.handMadeGroups[0]]);
+    await flush();
+    expect(store.openSetKey).toBe("hand:7");
+
+    // The grid drops the hidden card, which closes its tray on the way out.
+    store.showHiddenSets = false;
+    await flush();
+    await flush();
+    expect(store.openSetKey).toBe("");
+    expect(deleteWorkflowSet).not.toHaveBeenCalled();
+    expect([...hiddenOnServer]).toEqual(["hand:7"]);
+  });
+
+  it("applies the later hide's answer when the earlier one lands last", async () => {
+    // Uncovered, so the set from pictures stays on the grid beside the hand-made one.
+    const store = await openOn([handSet(7)], []);
+    const first = deferred();
+    const second = deferred();
+    setWorkflowSetsHidden
+      .mockReset()
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+
+    store.hideSets([store.setGroups[0]]);
+    store.hideSets([store.handMadeGroups[0]]);
+    second.resolve(["model:1", "hand:7"]);
+    await flush();
+    first.resolve(["model:1"]);
+    await flush();
+    expect(store.hiddenSetCount).toBe(2);
+  });
+
+  it("keeps a hide that lands while a set read is on the wire", async () => {
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    const answer = deferred();
+    // The read is served before the hide, and answers after it.
+    fetchWorkflowSets.mockImplementationOnce(() => answer.promise);
+    const reading = store.loadWorkflowSets({ force: true });
+
+    store.hideSets([store.setGroups[0]]);
+    await flush();
+    expect(store.hiddenSetCount).toBe(1);
+    // The same set, served before the hide: its own list says nothing hidden.
+    answer.resolve({
+      combinations: [
+        { key: "1+2", models: [checkpoint, lora], recipes: 2, covers: [] },
+      ],
+      no_set: [],
+      hidden_sets: [],
+    });
+    await reading;
+    expect(store.hiddenSetCount).toBe(1);
+    expect(store.setsLoading).toBe(false);
+  });
+
+  it("drops a hide answered after the session was reset", async () => {
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    const answer = deferred();
+    setWorkflowSetsHidden
+      .mockReset()
+      .mockImplementationOnce(() => answer.promise);
+
+    store.hideSets([store.setGroups[0]]);
+    store.resetForSession();
+    // The new session reads its own rows and sets, with nothing hidden.
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    answer.resolve(["model:1"]);
+    await flush();
+    expect(store.setGroups.map((g) => g.key)).toEqual(["model:1"]);
+    expect(store.hiddenSetCount).toBe(0);
+  });
+
+  it("removes the retired per-browser hide list when the store starts", async () => {
+    window.localStorage.setItem(
+      "pixlstash:modelShelfHiddenSets",
+      JSON.stringify(["model:1"]),
+    );
+    useModelShelfStore();
+    expect(window.localStorage.getItem("pixlstash:modelShelfHiddenSets")).toBe(
+      null,
+    );
+  });
+
+  it("starts the store when clearing the retired list throws", async () => {
+    const remove = vi
+      .spyOn(Storage.prototype, "removeItem")
+      .mockImplementation(() => {
+        throw new Error("test-storage-denied");
+      });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(() => useModelShelfStore()).not.toThrow();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("could not clear"),
+        expect.any(Error),
+      );
+    } finally {
+      remove.mockRestore();
+      warn.mockRestore();
+    }
   });
 
   it("reports a twin check that throws instead of rejecting unhandled", async () => {
@@ -3253,11 +3499,10 @@ describe("sets from pictures are hidden, never deleted", () => {
     expect(useNoticeStore().notices.at(-1)).toMatchObject({ level: "error" });
   });
 
-  it("keeps a hidden set hidden in a new session", async () => {
-    window.localStorage.setItem(
-      "pixlstash:modelShelfHiddenSets",
-      JSON.stringify({ keys: ["model:1"] }),
-    );
+  it("keeps a hidden set hidden in a new session, from the server's answer", async () => {
+    // The key lives on the server (#1869), not in this browser: a fresh store
+    // reads it back off the set payload.
+    hiddenOnServer.add("model:1");
     const store = shelfWithASet();
     await store.fetchRows();
     await store.loadWorkflowSets();
@@ -3363,6 +3608,9 @@ describe("sets from pictures are hidden, never deleted", () => {
         ],
         no_set: [],
         hand_made: sets.filter((set) => set.id !== id),
+        // The refetch an undo runs reads the hidden list back off the server,
+        // so the double answers with what the hub now holds (#1869).
+        hidden_sets: [...hiddenOnServer],
       });
       return { deleted: sets.find((set) => set.id === id) };
     });
@@ -3372,10 +3620,7 @@ describe("sets from pictures are hidden, never deleted", () => {
   const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
   it("swaps a hand-made re-creation for the set from pictures when its tray closes", async () => {
-    window.localStorage.setItem(
-      "pixlstash:modelShelfHiddenSets",
-      JSON.stringify({ keys: ["model:1"] }),
-    );
+    hiddenOnServer.add("model:1");
     useOperationStore().setLocalReceiptHost(true);
     const store = await openOn([handSet(7, [], { declined: ["c".repeat(64)] })]);
     // Open, it is being built: nothing gives way yet.
@@ -3427,11 +3672,9 @@ describe("sets from pictures are hidden, never deleted", () => {
     expect(deleteWorkflowSet).not.toHaveBeenCalled();
   });
 
-  it("survives a remembered list that is not a list", async () => {
-    window.localStorage.setItem(
-      "pixlstash:modelShelfHiddenSets",
-      JSON.stringify({ keys: "model:1" }),
-    );
+  it("hides nothing when the payload carries no hidden sets at all", async () => {
+    // An older payload, or a library that hides nothing: the store draws every
+    // set rather than treating a missing field as "hide everything".
     const store = shelfWithASet();
     await store.fetchRows();
     await store.loadWorkflowSets();
@@ -3514,10 +3757,7 @@ describe("sets from pictures are hidden, never deleted", () => {
   });
 
   it("redoes the swap: unhidden and opened again", async () => {
-    window.localStorage.setItem(
-      "pixlstash:modelShelfHiddenSets",
-      JSON.stringify({ keys: ["model:1"] }),
-    );
+    hiddenOnServer.add("model:1");
     useOperationStore().setLocalReceiptHost(true);
     const store = await openOn([handSet(7)]);
     store.toggleSet("hand:7");
@@ -3525,7 +3765,10 @@ describe("sets from pictures are hidden, never deleted", () => {
     await flush();
     const restored = handSet(9);
     createWorkflowSet.mockReset().mockImplementation(async () => {
-      fetchWorkflowSets.mockResolvedValue({
+      // An IMPLEMENTATION, not a resolved value: the undo hides the twin AFTER
+      // this answers, and the refetch that follows the undo must read the list
+      // back off the double's server as it stands then, not as it stood here.
+      fetchWorkflowSets.mockImplementation(async () => ({
         combinations: [
           {
             key: "1+2",
@@ -3537,15 +3780,14 @@ describe("sets from pictures are hidden, never deleted", () => {
         ],
         no_set: [],
         hand_made: [restored],
-      });
+        hidden_sets: [...hiddenOnServer],
+      }));
       return restored;
     });
     const operations = useOperationStore();
     await operations.takeLocalReceiptAction();
     // Undone: hidden again, as it was before the swap.
-    expect(
-      JSON.parse(window.localStorage.getItem("pixlstash:modelShelfHiddenSets")),
-    ).toEqual({ keys: ["model:1"] });
+    expect([...hiddenOnServer]).toEqual(["model:1"]);
 
     await operations.takeLocalReceiptAction();
     await flush();

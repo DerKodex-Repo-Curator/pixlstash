@@ -29,6 +29,10 @@ const deleteModels = vi.fn();
 const fetchModelCompanions = vi.fn();
 const deleteWorkflowSet = vi.fn();
 const fetchWorkflowSets = vi.fn();
+const setWorkflowSetsHidden = vi.fn();
+
+/** The set keys the active library hides, as the double's server holds them. */
+let hiddenOnServer = new Set();
 
 vi.mock("../../api/modelShelf", () => ({
   BASE_MODEL_UNASSIGNED: "UNASSIGNED",
@@ -50,6 +54,7 @@ vi.mock("../../api/modelShelf", () => ({
   fetchModelCompanions: (...args) => fetchModelCompanions(...args),
   deleteWorkflowSet: (...args) => deleteWorkflowSet(...args),
   fetchWorkflowSets: (...args) => fetchWorkflowSets(...args),
+  setWorkflowSetsHidden: (...args) => setWorkflowSetsHidden(...args),
   // The base-model field asks for its completion list as it opens. Answered
   // with nothing here: the list is the widget's own suite's business, and left
   // unmocked this is a network call on a double-click.
@@ -326,6 +331,14 @@ beforeEach(() => {
   fetchWorkflowSets
     .mockReset()
     .mockResolvedValue({ combinations: [], no_set: [], hand_made: [] });
+  hiddenOnServer = new Set();
+  setWorkflowSetsHidden.mockReset().mockImplementation(async (keys, hidden) => {
+    for (const key of keys) {
+      if (hidden) hiddenOnServer.add(key);
+      else hiddenOnServer.delete(key);
+    }
+    return [...hiddenOnServer];
+  });
   listModelFolderDevices.mockReset();
   listModelFolderDevices.mockResolvedValue([]);
   // The thumbnail verb's two halves. Reset here rather than per-test: a
@@ -5771,6 +5784,8 @@ describe("the set grid is what the shelf opens on", () => {
     await lightCards("model:1");
     expect(hide().text()).toBe("Hide workflow set");
     await hide().trigger("click");
+    // The hide is a server call (#1869), so the grid redraws a turn later.
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(store.setGroups.map((g) => g.key).sort()).toEqual([
       "missing:gone.sft",
@@ -5798,6 +5813,7 @@ describe("the set grid is what the shelf opens on", () => {
     );
 
     await missingBar.find('.selbar [data-verb="hide-sets"]').trigger("click");
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     // Model 2's card was never selected.
     expect(store.setGroups.map((g) => g.key)).toEqual(["model:2"]);
@@ -5805,6 +5821,48 @@ describe("the set grid is what the shelf opens on", () => {
     // Both left the screen, so neither is still held for a later Undo to arm.
     expect([...store.selectedIds]).toEqual([]);
     expect([...store.selectedMissingKeys]).toEqual([]);
+  });
+
+  it("hides a selected hand-made set from the set pill, by its store group", async () => {
+    const { wrapper, store } = await gridWithThreeCards();
+    store.workflowSets = {
+      ...store.workflowSets,
+      handMade: [{ id: 10, name: "Kit", members: [] }],
+    };
+    await wrapper.vm.$nextTick();
+    const spy = vi.fn();
+    store.toggleHiddenSets = spy;
+    store.selectSet(10);
+    await wrapper.vm.$nextTick();
+
+    const setBar = wrapper.findComponent({ name: "WorkflowSetSelectionBar" });
+    await setBar.find('.selbar [data-verb="hide-sets"]').trigger("click");
+
+    // The store's group, by key: the set's card is what Hide reads.
+    expect(spy.mock.calls.map(([groups]) => groups.map((g) => g.key))).toEqual([
+      ["hand:10"],
+    ]);
+  });
+
+  it("passes the lit model cards and the selected hand-made set together", async () => {
+    const { wrapper, store, lightCards } = await gridWithThreeCards();
+    store.workflowSets = {
+      ...store.workflowSets,
+      handMade: [{ id: 10, name: "Kit", members: [] }],
+    };
+    await wrapper.vm.$nextTick();
+    const spy = vi.fn();
+    store.toggleHiddenSets = spy;
+    store.selectSet(10);
+    store.selectFromClick(1, { ctrl: true });
+    await lightCards("model:1");
+
+    // Either pill's row acts on the whole mixed selection, one list.
+    const setBar = wrapper.findComponent({ name: "WorkflowSetSelectionBar" });
+    await setBar.find('.selbar [data-verb="hide-sets"]').trigger("click");
+    expect(spy.mock.calls.map(([groups]) => groups.map((g) => g.key))).toEqual([
+      ["model:1", "hand:10"],
+    ]);
   });
 
   it("takes Ctrl+A to mean the models the GRID draws", async () => {

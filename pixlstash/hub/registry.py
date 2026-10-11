@@ -1023,6 +1023,16 @@ class LibraryRegistry:
                 "DELETE FROM workflow_picture_input WHERE library_uuid = ?",
                 (library.uuid,),
             )
+            # And its hidden overrides, workflows and sets alike: they name
+            # nothing this library can reach once its registration is gone.
+            conn.execute(
+                "DELETE FROM workflow_group_hidden WHERE library_uuid = ?",
+                (library.uuid,),
+            )
+            conn.execute(
+                "DELETE FROM workflow_set_hidden WHERE library_uuid = ?",
+                (library.uuid,),
+            )
             conn.execute("DELETE FROM library WHERE id = ?", (library.id,))
         logger.info("Forgot the registration for %s at %s", library.name, library.path)
 

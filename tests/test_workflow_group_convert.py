@@ -815,6 +815,7 @@ STEP_8_TABLES = (
     "workflow_group_default",
     "workflow_group_pins",
     "workflow_group_picture_input",
+    "workflow_group_hidden",
     "workflow_key_successor",
     "workflow_id_successor",
     "workflow_document",
@@ -1363,6 +1364,13 @@ def step_10(tmp_path):
                 (w.v2_id[w.aura], f"core:{w.v2_labels[w.aura]['90']}/shift", "5.0"),
             ],
         )
+        # The Seed twin is hidden in one library; the merge must carry that
+        # library's own row onto the heir, not drop it back to the fallback.
+        conn.execute(
+            "INSERT INTO workflow_group_hidden (workflow_id, library_uuid, hidden) "
+            "VALUES (?, ?, 1)",
+            (w.v2_id[w.seed], LIB),
+        )
     assert len({w.v2_id[keys] for keys in filed}) == 4
     w.v3_sampler = core_node_labels(get_document(hub, w.plain.structural_hash))["5"]
     w.aura_slot = topology_node_labels(get_document(hub, w.aura.structural_hash))["90"]
@@ -1407,6 +1415,9 @@ def test_step_10_merges_v2_workflows_and_carries_their_state(step_10):
         (w.v2_id[w.seed], merged),
         (w.v2_id[w.aura], merged),
     }
+    # The Seed twin's per-library hide moves to the heir under the same
+    # library, rather than being left on the retired id (or dropped).
+    assert rows["workflow_group_hidden"] == [(merged, LIB, 1)]
 
     with w.hub.transaction() as conn:
         assert rederive_cores_from(conn, "v2") == 0

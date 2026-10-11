@@ -197,7 +197,7 @@
             Show all
           </button>
         </p>
-        <p v-else-if="!store.handMadeSets.length" class="mrail-foot-hint">
+        <p v-else-if="!store.shownHandMadeSets.length" class="mrail-foot-hint">
           Drag onto New workflow set, or select and choose
           <em>New workflow set with these</em>.
         </p>
@@ -261,7 +261,7 @@
           class="ctx-item"
           type="button"
           role="menuitem"
-          :disabled="!store.handMadeSets.length"
+          :disabled="!store.shownHandMadeSets.length"
           @click="showSetsView"
         >
           <v-icon class="ctx-icon">mdi-folder-plus-outline</v-icon>
@@ -426,10 +426,13 @@ const tabs = computed(() => [
 
 // ── Where things are ──────────────────────────────────────────────────────
 
-/** `sha256` → the names of the hand-made sets holding it. */
+/**
+ * `sha256` → the names of the hand-made sets holding it. Only the shown sets:
+ * a set hidden in this library is not named here (#1869).
+ */
 const setsBySha = computed(() => {
   const map = new Map();
-  for (const set of store.handMadeSets) {
+  for (const set of store.shownHandMadeSets) {
     const name = handMadeName(set);
     for (const member of set.members ?? []) {
       if (!member.sha256) continue;
@@ -473,7 +476,8 @@ const looseOnly = ref(false);
 /** The set the Fits filter is on, while it still exists. */
 const fitsSet = computed(
   () =>
-    store.handMadeSets.find((set) => set.id === store.railFitsSetId) ?? null,
+    store.shownHandMadeSets.find((set) => set.id === store.railFitsSetId) ??
+    null,
 );
 
 /** The set the Fits chip would name: the one it is on, else the open one. */
@@ -504,10 +508,16 @@ watch(fitsSet, (set) => {
     footNote.value = "";
     return;
   }
-  // The id still points at something the sets no longer hold: it was deleted.
+  // The id still points at something the sets no longer hold: it was deleted,
+  // or hidden in this library (still held, just not shown here, #1869).
   if (store.railFitsSetId != null && store.setsLoaded) {
+    const hidden = store.handMadeSets.some(
+      (candidate) => candidate.id === store.railFitsSetId,
+    );
     store.railFitsSetId = null;
-    footNote.value = `${fitsName || "That set"} was deleted, so the filter was cleared.`;
+    footNote.value = hidden
+      ? `${fitsName || "That set"} is hidden in this library, so the filter was cleared.`
+      : `${fitsName || "That set"} was deleted, so the filter was cleared.`;
   }
 });
 
@@ -1091,7 +1101,7 @@ const addSetsHeading = computed(() => {
  */
 const setChoices = computed(() => {
   const rows = hashedActionRows.value;
-  return store.handMadeSets.map((set) => {
+  return store.shownHandMadeSets.map((set) => {
     const held = new Set((set.members ?? []).map((member) => member.sha256));
     const already = rows.filter((row) => held.has(row.sha256)).length;
     const refused = store.railDropRefusal(set, rows);

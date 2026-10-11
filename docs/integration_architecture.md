@@ -600,7 +600,13 @@ Rules neither side may drift from:
    the undo. `picture_count` counts this library; `recipes` counts every one.
    The offer reads recipe combinations only: one only ComfyUI ran is covered
    by a set like any other but never offered, since the offer is worded in
-   pictures and recipes.
+   pictures and recipes. **Hidden sets are the ACTIVE library's own (#1869)**:
+   the payload carries `hidden_sets` (the set keys this library leaves off the
+   grid) and `PUT /models/workflow-sets/hidden` (`{keys: [...], hidden}`) sets
+   them, answering `{hidden_sets}` - the whole new list, so a hide needs no
+   re-read. A key is the client's own (`model:<head id>`, or `missing:<filename>`
+   when the head is off the shelf, `hand:<id>` for a hand-made set), opaque to
+   the server; the route is owner-only and writes hub rows only.
 9. **PixlStash's check and the owner's verdicts ride on it too, keyed by
    `combo_key`** (`docs/ideas/workflow-set-verdicts.md`; backend §25,
    "Workflow sets: PixlStash's check and the owner's verdict"). `set_checks`

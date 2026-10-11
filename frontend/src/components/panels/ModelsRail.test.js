@@ -123,6 +123,7 @@ const ROWS = [
 
 async function mountRail({
   handMade = [],
+  hidden = [],
   rows = ROWS,
   open = "",
   attach = false,
@@ -132,6 +133,7 @@ async function mountRail({
     combinations: [],
     no_set: [],
     hand_made: handMade,
+    hidden_sets: hidden,
   });
   const store = useModelShelfStore();
   store.setView({ groupBy: "workflow_set" });
@@ -228,6 +230,56 @@ describe("what the rail lists", () => {
     });
     expect(option(wrapper, "FilmGrain").text()).toContain("In Night city");
     expect(option(wrapper, "Soft").text()).toContain("In no set yet");
+  });
+
+  it("names only the sets shown here, so a set hidden in this library is not named", async () => {
+    const { wrapper } = await mountRail({
+      handMade: [
+        handSet(10, [member(3, "FilmGrain_XL", "lora")], { name: "Night city" }),
+      ],
+      hidden: ["hand:10"],
+    });
+    expect(option(wrapper, "FilmGrain").text()).toContain("In no set yet");
+    expect(option(wrapper, "FilmGrain").text()).not.toContain("Night city");
+  });
+
+  it("offers only the shown sets when a model is added to one", async () => {
+    const { wrapper } = await mountRail({
+      handMade: [
+        handSet(10, [member(1, "RealVisXL_v5", "checkpoint")], { name: "Night city" }),
+        handSet(11, [member(1, "RealVisXL_v5", "checkpoint")], { name: "Day shift" }),
+      ],
+      hidden: ["hand:10"],
+    });
+    await option(wrapper, "Soft").trigger("contextmenu");
+    await wrapper
+      .findAll(".mrail-menu .ctx-item")
+      .find((b) => b.text().includes("Add to set"))
+      .trigger("click");
+    const menu = wrapper.findAll(".mrail-menu .ctx-item").map((b) => b.text());
+    expect(menu.join()).toContain("Day shift");
+    expect(menu.join()).not.toContain("Night city");
+  });
+
+  it("turns Fits off when its set is hidden here, and says why", async () => {
+    const night = handSet(10, [member(1, "RealVisXL_v5", "checkpoint")], {
+      name: "Night city",
+    });
+    const { wrapper, store } = await mountRail({ handMade: [night] });
+    store.railFitsSetId = 10;
+    await wrapper.vm.$nextTick();
+    fetchWorkflowSets.mockResolvedValue({
+      combinations: [],
+      no_set: [],
+      hand_made: [night],
+      hidden_sets: ["hand:10"],
+    });
+    await store.loadWorkflowSets({ force: true });
+    await wrapper.vm.$nextTick();
+    expect(store.railFitsSetId).toBe(null);
+    expect(wrapper.find('[role="status"]').text()).toContain(
+      "Night city is hidden in this library",
+    );
   });
 
   it("narrows to the models in no set when asked, and only then", async () => {

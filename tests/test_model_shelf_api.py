@@ -62,7 +62,7 @@ from pixlstash.routes.model_imports import (
 from pixlstash.routes.model_shelf import MAX_ATTACHMENTS_PER_MODEL
 from pixlstash.server import Server
 from pixlstash.services import builtin_models, comfyui_service
-from pixlstash.services import model_shelf_service
+from pixlstash.services import model_shelf_service, model_workflow_sets
 from pixlstash.services.model_folder_scanner import ModelFolderScanner
 from pixlstash.utils.image_processing.image_utils import ImageUtils
 from pixlstash.services.model_mover import SHELF_IO_LOCK
@@ -90,6 +90,7 @@ _SHELF_ROUTES = (
     ("POST", "/api/v1/models/workflow-sets/{set_id}/members"),
     ("POST", "/api/v1/models/workflow-sets/{set_id}/members/remove"),
     ("PUT", "/api/v1/models/workflow-sets/{set_id}/declines"),
+    ("PUT", "/api/v1/models/workflow-sets/hidden"),
     ("PUT", "/api/v1/models/workflow-sets/verdicts/{combo_key}"),
     ("DELETE", "/api/v1/models/workflow-sets/verdicts/{combo_key}"),
     ("PUT", "/api/v1/models/workflow-sets/verdicts/{combo_key}/members/{model_id}"),
@@ -217,6 +218,13 @@ _SEED_MODELS = (
 def _seed_hub(server) -> dict[str, int]:
     """Write the shelf tables from scratch. Returns filename -> model.id."""
     with server.hub.transaction() as conn:
+        # Sets first: their members reference `model`, so a set left by one
+        # test would block the model wipe (or hide a row from the next test,
+        # the hide keyed by a key that is stable across tests).
+        conn.execute("DELETE FROM model_workflow_set_member")
+        conn.execute("DELETE FROM model_workflow_set_decline")
+        conn.execute("DELETE FROM model_workflow_set")
+        conn.execute("DELETE FROM workflow_set_hidden")
         # Both children of `model` before the parent: foreign keys are on for
         # the hub, so a leftover row aborts the wipe rather than lingering.
         conn.execute("DELETE FROM model_file")
@@ -1217,6 +1225,7 @@ def _wipe_sets(server) -> None:
         conn.execute("DELETE FROM model_workflow_set_member")
         conn.execute("DELETE FROM model_workflow_set_decline")
         conn.execute("DELETE FROM model_workflow_set")
+        conn.execute("DELETE FROM workflow_set_hidden")
 
 
 def _new_set(shelf_env, **body) -> dict:
@@ -1255,6 +1264,12 @@ def test_hand_made_set_routes_answer_the_owner_and_refuse_tokens(shelf_env):
         set_id = made["id"]
         routes = (
             ("POST", "/api/v1/models/workflow-sets", None, {"json": {}}),
+            (
+                "PUT",
+                "/api/v1/models/workflow-sets/hidden",
+                None,
+                {"json": {"keys": ["hand:1"], "hidden": True}},
+            ),
             (
                 "PATCH",
                 f"/api/v1/models/workflow-sets/{set_id}",
@@ -1314,6 +1329,93 @@ def test_hand_made_set_routes_answer_the_owner_and_refuse_tokens(shelf_env):
         assert set_id not in _hand_made(shelf_env)
     finally:
         _wipe_sets(shelf_env.server)
+
+
+def test_hiding_a_workflow_set_is_the_librarys_own_answer(shelf_env, monkeypatch):
+    """A hidden set is per-library (#1869): the same hub, another library, and
+    the set is still on the grid - and the key the grid hides it under is the
+    set's own, whether it was computed or hand-made."""
+    server = shelf_env.server
+    here = server.vault.library_uuid
+    assert here
+
+    made = _new_set(shelf_env, name="Hidden here")
+    hand_key = f"hand:{made['id']}"
+    other_key = _key(*shelf_env.model_ids.values())
+
+    r = shelf_env.owner.put(
+        f"{API}/models/workflow-sets/hidden",
+        json={"keys": [hand_key, other_key], "hidden": True},
+    )
+    assert r.status_code == 200, r.text
+    assert set(r.json()["hidden_sets"]) == {hand_key, other_key}
+    # The list route carries it, so the grid draws the hide without a second read.
+    assert set(
+        shelf_env.owner.get(f"{API}/models/workflow-sets").json()["hidden_sets"]
+    ) == {hand_key, other_key}
+
+    # Showing one leaves the other alone, and the answer is this library's alone.
+    r = shelf_env.owner.put(
+        f"{API}/models/workflow-sets/hidden",
+        json={"keys": [hand_key], "hidden": False},
+    )
+    assert r.json()["hidden_sets"] == [other_key]
+    monkeypatch.setattr(server.vault, "_library_uuid", _h("another-library"))
+    assert (
+        shelf_env.owner.get(f"{API}/models/workflow-sets").json()["hidden_sets"] == []
+    )
+
+
+def test_a_set_hide_with_no_library_or_no_keys_writes_nothing(shelf_env):
+    """No library hides nothing, and no keys is a question: both answer the
+    library's current list and leave every row where it was."""
+    hub = shelf_env.server.hub
+    here = shelf_env.server.vault.library_uuid
+    held = "hand:held-set"
+    assert model_workflow_sets.set_sets_hidden(hub, here, [held], True) == [held]
+    rows_before = [
+        tuple(row)
+        for row in hub.fetchall("SELECT library_uuid, set_key FROM workflow_set_hidden")
+    ]
+
+    assert model_workflow_sets.set_sets_hidden(hub, None, [held], True) == []
+    assert model_workflow_sets.set_sets_hidden(hub, None, [held], False) == []
+    assert model_workflow_sets.set_sets_hidden(hub, here, [], False) == [held]
+    assert model_workflow_sets.set_sets_hidden(hub, here, [], True) == [held]
+
+    rows_after = [
+        tuple(row)
+        for row in hub.fetchall("SELECT library_uuid, set_key FROM workflow_set_hidden")
+    ]
+    assert rows_after == rows_before == [(here, held)]
+
+
+def test_deleting_a_hand_made_set_forgets_its_hide(shelf_env):
+    """A set's id is AUTOINCREMENT, never reused, so a stale hide row is dead
+    state - and it goes with the set rather than naming nothing."""
+    server = shelf_env.server
+    made = _new_set(shelf_env, name="Soon gone")
+    key = f"hand:{made['id']}"
+    r = shelf_env.owner.put(
+        f"{API}/models/workflow-sets/hidden", json={"keys": [key], "hidden": True}
+    )
+    assert r.status_code == 200, r.text
+    # The row the delete is meant to forget is really there first, or the
+    # `is None` below would pass on a hide that never landed.
+    assert server.hub.fetchone(
+        "SELECT 1 FROM workflow_set_hidden WHERE set_key = ?", (key,)
+    )
+
+    assert (
+        shelf_env.owner.delete(f"{API}/models/workflow-sets/{made['id']}").status_code
+        == 200
+    )
+    assert (
+        server.hub.fetchone(
+            "SELECT 1 FROM workflow_set_hidden WHERE set_key = ?", (key,)
+        )
+        is None
+    )
 
 
 def test_an_empty_unnamed_set_is_a_set(shelf_env):
