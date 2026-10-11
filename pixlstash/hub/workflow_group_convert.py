@@ -1040,11 +1040,11 @@ def rederive_cores_from(conn: sqlite3.Connection, rule: str) -> int:
     for old_id, heirs in heirs_of.items():
         for heir in heirs:
             merged_into.setdefault(heir, {heir} & existed).add(old_id)
-        # ponytail: only the machine-wide ``hidden`` is read here, so a per-library
-    # hide (#1869) on a merged-away id is not carried onto its heir. No hub can
-    # hold such a row when this runs today (a core-rule bump happens once per
-    # hub, and per-library rows postdate the last bump); a future bump must
-    # fold ``workflow_group_hidden`` into this rule too.
+    # Only the machine-wide ``hidden`` is read here, so a per-library hide
+    # (#1869) on a merged-away id is not carried onto its heir. No hub can hold
+    # such a row when this runs today (a core-rule bump happens once per hub,
+    # and per-library rows postdate the last bump); a future bump must fold
+    # ``workflow_group_hidden`` into this rule too.
     for heir, sources in sorted(merged_into.items()):
         if sources & hidden and not sources <= hidden:
             conn.execute(
