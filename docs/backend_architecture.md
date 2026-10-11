@@ -2649,7 +2649,7 @@ deletable by its old routes, and read once by data step 7.
 
 | Table | Holds |
 |---|---|
-| `workflow_version` (`hub/workflow_versions.py`) | Every version of a manual workflow's document, PK `(workflow_id, version)`, version 1 first: `document`, `api_document` (a conversion is of one version), `content_hash` (`workflow_inbox.content_hash`), `topology_hash` (NULL where not computed), `remote_modified`, `source` (the workflow's origin for version 1, or `pictures` for an automatic workflow's; after it what the save changed, which the version menu's words are made from: `models`, `loras`, `run`, `comfyui`, `mcp`, `revert:<n>`, and `chain` for a LoRA chain edit; "Saving over a workflow", below), `created_at`. `source` `pull` and a `remote_modified` (ComfyUI's ms clock) are on versions the removed pull of ComfyUI's saved workflows made; nothing writes them since #1854. **At most `MAX_VERSIONS` (50) per workflow: version 1 and the newest 49**, the rest deleted in the transaction that appends (revert, later, needs only what is kept). Written with the `workflow_document` row (version 1, `create_manual_workflow`), by every save over the workflow (`append_version`, whose `source` is a required keyword), and by hub data step 12 (`backfill_first_versions`) for every workflow present then. **`workflow_document.document` and `api_document` are a copy of the highest version, written in the same transaction**, so every reader of a manual workflow's graph (`manual_document`, the card facts, the model widgets, #1530's stored conversion) reads the current version from the row it always read, and an older build sharing the hub does too. A workflow an older build made has no version rows; its next version writes version 1 from its document first. The caches per manual workflow (`workflow_card_reads._MANUAL_FACTS`, one entry per live workflow keyed on its current version; the `lru_cache` on `routes/workflows._model_widgets_at`, 512 entries keyed on workflow id, version and when that version was stored) hold what was read, never the document, so a new version is read afresh and no document is held in memory. A conversion (`set_manual_api_document`) is stored only on a workflow whose current document is still the one converted, checked inside the write transaction, so a save that made a version between the match and the write does not receive the old version's API graph; the server's own conversion (`keep_stored=True`) also only where none is stored, so ComfyUI's always wins. Deleted with the workflow. Which version made a picture is `picture.run_workflow_version` (vault migration 0127; see "Which version made it" below) |
+| `workflow_version` (`hub/workflow_versions.py`) | Every version of a manual workflow's document, PK `(workflow_id, version)`, version 1 first: `document`, `api_document` (a conversion is of one version), `content_hash` (`workflow_inbox.content_hash`), `topology_hash` (NULL where not computed), `remote_modified`, `source` (the workflow's origin for version 1, or `pictures` for an automatic workflow's; after it what the save changed, which the version menu's words are made from: `models`, `loras`, `run`, `comfyui`, `mcp`, `revert:<n>`, and `chain` for a LoRA chain edit; "Saving over a workflow", below), `created_at`. `source` `pull` and a `remote_modified` (ComfyUI's ms clock) are on versions the removed pull of ComfyUI's saved workflows made; nothing writes them since #1854. **At most `MAX_VERSIONS` (50) per workflow: version 1 and the newest 49**, the rest deleted in the transaction that appends (revert, later, needs only what is kept); versions whose `source` is `comfyui` are counted apart, the newest `MAX_COMFYUI_VERSIONS` (49), prune only each other, and carry the `opening` they were saved from, whose next save supersedes them where nothing was made on them ("Saving over a workflow", below). Written with the `workflow_document` row (version 1, `create_manual_workflow`), by every save over the workflow (`append_version`, whose `source` is a required keyword), and by hub data step 12 (`backfill_first_versions`) for every workflow present then. **`workflow_document.document` and `api_document` are a copy of the highest version, written in the same transaction**, so every reader of a manual workflow's graph (`manual_document`, the card facts, the model widgets, #1530's stored conversion) reads the current version from the row it always read, and an older build sharing the hub does too. A workflow an older build made has no version rows; its next version writes version 1 from its document first. The caches per manual workflow (`workflow_card_reads._MANUAL_FACTS`, one entry per live workflow keyed on its current version; the `lru_cache` on `routes/workflows._model_widgets_at`, 512 entries keyed on workflow id, version and when that version was stored) hold what was read, never the document, so a new version is read afresh and no document is held in memory. A conversion (`set_manual_api_document`) is stored only on a workflow whose current document is still the one converted, checked inside the write transaction, so a save that made a version between the match and the write does not receive the old version's API graph; the server's own conversion (`keep_stored=True`) also only where none is stored, so ComfyUI's always wins. Deleted with the workflow. Which version made a picture is `picture.run_workflow_version` (vault migration 0127; see "Which version made it" below) |
 | `workflow_document` | `workflow_id` PK, `document` (the current version's, see `workflow_version`: as imported, editor or API format, placeholders migrated, `pixlstash_bindings` kept), `api_document` (the API graph an editor document converts into, on its current version row too: ComfyUI's, which `POST /comfyui/workflows/convert` stores on every row holding that document, or the server's own, which `workflow_card_service.converted_manual_document` stores on the first read that needs the graph and never over one already there), `origin` (`import`, `inbox`, `builtin`, `duplicate`, `fixed`, `clone`, `chain`, `recipe`, and `pull`; a CHECK. `pull` is a workflow the removed pull of ComfyUI's saved workflows made: since #1854 no new workflow gets it, bar a file that pull wrote which data step 7 adopts, and `WorkflowCard.origin_category` answers `comfyui` for it, which is how the Workflows view's Origin filter lists the ones left behind for the owner to select and delete), `from_workflow_id` and `from_name` (what a copy or an extract was made from, as it was called then), `created_at`. Name, notes, hidden, defaults, pins and picture inputs are the `workflow_group_*` rows keyed by the same id; there is no `workflow_group` row |
 
 **Its own record, never grouped.** `card_index` appends one `Card` per row
@@ -2857,6 +2857,7 @@ the saved graph.
 | Table | Holds |
 |---|---|
 | `workflow_change` | Per `(workflow_id, kind)`, one `WorkflowChanges` document: `waiting` is what the Workflow tab holds unsaved, `run` is what the last run of the workflow changed. `base_version` is the workflow's version the set was made against (NULL for an automatic workflow never saved over); a `waiting` set that is replaced keeps it, so editing a stale set does not make it current. Deleted with a manual workflow. Hub rows, so the changes survive a restart |
+| `workflow_layout` | `workflow_id` PK, `document`, `structure`, `saved_at`: the editor document a workflow was last saved from ComfyUI with (#1852), scrubbed of people's picks and of the graph's credentials, and the wiring of the graph it arrived with. One row per workflow of either kind, replaced by the next save from ComfyUI, deleted with the workflow and with a retired `auto:` id. Never a version. `GET …/graph` hands it out only while what opens is still wired as `structure` says, and the node uses it only when it converts to that graph ("Saving over a workflow", below). |
 | `workflow_group_default` rows `stage:<name>` | `on` or `off`: the owner's own answer to "does this workflow run its upscale", over the vote of its pictures. Not a parameter (`is_parameter_address`), so `PUT …/defaults` never clears one |
 
 **The routes** (all `OWNER_ONLY`):
@@ -2951,6 +2952,38 @@ workflow keeps, the oldest after version 1 are pruned as for any save), and
 it is not a checkpoint change under rule 2 since every version was already saved on this
 workflow.
 
+**Versions saved from ComfyUI are counted apart** (#1852). Ctrl+S there is
+pressed often, and is sent by whoever can reach ComfyUI with its key, so
+`append_version` prunes by kind: a `comfyui` version takes out only the oldest
+`comfyui` version past `MAX_COMFYUI_VERSIONS` (49, as many as the rest keep),
+and every other source only the others past theirs. Saves from ComfyUI
+therefore never push a version the owner saved in PixlStash out of the
+workflow, and a workflow keeps at most version 1 and 49 of each kind. **Who
+saved a version is the key's to say, not the caller's**: a request made with
+a key bound to an address (`UserToken.bound_address`, the ComfyUI link key,
+#1810), or any `COMFYUI`-scope key even when minted without a binding, is
+stored as `comfyui` whatever `source` it sends, so that key cannot
+count its saves among the owner's or pass the Workflow tab's line by.
+
+**The saves of one opening are one version** (`opening` on the request and on
+`workflow_version`). ComfyUI-PixlStash makes an id when it opens a workflow
+and sends it with every save of that opening. A save whose predecessor, the
+workflow's current version, was saved from the same opening takes that
+version away in the transaction that appends its own
+(`_superseded_by_the_same_opening`), so an afternoon of Ctrl+S, or of
+ComfyUI's autosave, is one version and the one from before the opening is one
+step back. **Only where nothing was made on it**
+(`saved_recipe_service.made_on_version`): a picture that ran the version, or
+a recipe saved while it was current, keeps it, since a saved recipe runs on
+the version that was current when it was saved (rule 8); a read that fails
+keeps it too. **A version is never rewritten in place**: its number is what
+every "changed since" check compares (the waiting changes' `base_version`,
+`read_version`, a picture's `run_workflow_version`), so the superseding save
+is a new number and the superseded one is gone, as after pruning. Without an
+`opening` (the MCP server, a canvas after a reload) every changed save is a
+version. And a save storing the graph PixlStash already holds is none at all
+(`unchanged`): moved nodes, people picked, a re-rolled seed.
+
 **A whole graph saved over a workflow** (`PUT /workflows/{id}/graph`). One
 write that takes a complete API-format graph, with two callers: the MCP
 server's `import_workflow_graph` given a `workflow_id`, and ComfyUI saving a
@@ -3024,15 +3057,94 @@ slot of its own, with that row's strengths (`_lora_strengths` takes the suffix
 off whichever field names the slot), and the class is allowed on replay
 (`PIXLSTASH_ALLOWED_NODES`: addressed by digest, like the adapter loader).
 
+**The loader for people comes off again.** ComfyUI-PixlStash puts a
+`PixlStashMultiAdapterLoader` on the canvas of a workflow opened from
+PixlStash, with nobody picked, so it arrives in every graph saved back. No
+person's row is in it to take out, so `_left_out_people` would leave it:
+`workflow_run_service.take_out_empty_adapter_loaders` runs after it and takes
+out every such loader with no adapter left, wiring its readers to what it read
+(MODEL and CLIP through, `trigger_words` the empty string) by the node's own
+contract, without asking ComfyUI. One pass over the graph, chains of empty
+loaders followed once each: the body comes from ComfyUI's port, and is held
+to the stored-workflow size before anything walks it. A workflow opened and
+saved untouched is therefore `unchanged`. `POST /comfyui/workflows/convert`
+(*Export to PixlStash*) holds rule 4 the same way for the graph it stores: a
+person's LoRA is taken out row by row (`take_out_person_loras`, best effort
+there: a loader that cannot be rewired because ComfyUI does not answer is
+stored as sent and left out by every read), the loader comes off, the editor
+document it stores goes without the picks (`without_peoples_picks`), and
+`left_out` names each LoRA and whose it is from the same read
+(`routes/comfyui.people_loras_in`). An editor widget naming a person's LoRA
+by file refuses the export (409), including a bypassed or muted node absent
+from the runnable graph; there is no empty filename the loader can use.
+
+**Where the loader goes** is `GET …/graph`'s `people_loader`
+(`_people_loader_place`): the splice a run makes for a person
+(`plan_lora_insertion` over the graph being opened: the MODEL and CLIP source
+and every input that reads them), `null` where the Run popup would show no
+Person field (`people_who_fit` offers nobody and counts nobody), and a
+`reason` in the planner's own words where the graph cannot be spliced.
+ComfyUI-PixlStash carries it out on the canvas; PixlStash never stores the
+node or what is picked in it.
+
+**The layout is kept beside the versions, and is never one**
+(`workflow_layout`, `workflow_versions.write_layout` / `layout_for`). A save
+from ComfyUI sends the editor document its graph was converted from (`editor`
+on `PUT …/graph`); one is kept per workflow, of either kind, replaced by the
+next, and a graph that only moved nodes is `unchanged` and still replaces it.
+
+- **Two checks stand between a layout and a canvas, and the second is the one
+  that binds.** `_keep_layout` stores `workflow_run_service.graph_structure`
+  (node ids, classes and connections, no values) of the graph the layout
+  arrived with, as stored, and `GET …/graph` hands the layout out as `editor`
+  only while the graph it answers is wired the same: not after a rewiring (a
+  LoRA loader removed, a stage switched, a person's LoRA attached since), and
+  not while changes that rewire it wait unsaved. That is cheap and keeps a
+  stale layout off the wire, but **the two documents arrive side by side on
+  the caller's word**, and the caller is whoever holds ComfyUI's key: nothing
+  on the server proves `editor` is of `workflow`. So ComfyUI-PixlStash loads
+  the layout, writes `workflow`'s values over it, converts the canvas
+  (`graphToPrompt`) and uses the layout only when that comes out as the graph
+  PixlStash sent, node for node, link for link and value for value
+  (`open_workflow.js::differsFrom`); otherwise it opens `workflow`,
+  auto-arranged. A value changed in PixlStash therefore keeps the layout, a
+  value the node could not write costs the layout and never the value, and a
+  layout of another graph is never used.
+- **Nothing a workflow may not hold stays in it** (`_layout_to_keep`), by
+  value, since an editor document names its widgets by position. A person's
+  LoRA by digest is blanked wherever the document holds it, every person's
+  and not only those the graph loads (a bypassed node is in the document and
+  in no graph), and the entry a PixlStash loader records beside a pick
+  (`properties.pixlstash_models`: digest, file and display name) goes whole
+  (`without_peoples_picks`); the loader itself stays, empty, which is how its
+  place is remembered between opens. A person's LoRA named by file has no
+  empty value, so a document naming one in any node, or whose graph loaded
+  one in an ordinary loader, is not kept at all. A credential the graph holds
+  is blanked on the node that holds it; one on a node the graph does not run
+  is not in the graph to be found and stays, as it does in a stored graph.
+- **Never an error.** `editor` is refused with the save where it is not an
+  editor document, is past the stored-workflow size, or nests past
+  `MAX_LAYOUT_DEPTH` (it is handed back in a response). Past that the graph
+  is stored first, and a layout that then cannot be kept is dropped and
+  logged: the workflow opens auto-arranged. The read is held to the same
+  (`_layout_for`): `GET …/graph` answered before there were layouts, so a
+  graph or a row that will not compare opens without one, logged, never a
+  500. A save with no `editor` (the MCP server's) leaves the layout there is.
+- **It has no history.** One layout per workflow: going back a version opens
+  with the layout only if that version is wired as the layout's graph was.
+
 **Who fits a workflow is answered in one place.**
 `model_shelf_service.people_who_fit`, served by `GET /workflows/{id}/people`:
 a person is offered when a LoRA attached to them is for the base model of the
 workflow's checkpoint (`base_model_family` on both sides, the first named base
 model of the card; a card that names none answers everybody as `unknown`).
 `unknown` counts the people nothing vouches for and `clash` those whose every
-LoRA is for another base model. It is the read the Run popup's Person field
-(#1850, which still works the rule out in the client) and the people loader
-in ComfyUI (#1852) are to share.
+LoRA is for another base model, and `note` says why nobody is offered, in the
+Run popup's words (`_nobody_fits_note`; `personNote` in `RunDialog.vue` holds
+the same sentences, change both together). It is the read the people loader in
+ComfyUI asks on a canvas opened from PixlStash (#1852), and the one the Run
+popup's Person field is to share (#1850, which still works the rule out in
+the client).
 
 **A saved recipe still runs on the graph it was saved from (rule 8).** A
 recipe states only what it changes against its workflow, so a save over the

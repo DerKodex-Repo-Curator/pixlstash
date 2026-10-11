@@ -131,8 +131,10 @@ COMFYUI_SCOPE_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/v1/checkpoints"),
         ("GET", "/api/v1/models/workflow-sets"),
         ("GET", "/api/v1/model-icons/{sha256}"),
-        # Open in ComfyUI, and Convert for PixlStash.
+        # Open and save in ComfyUI, its people picker, and Convert for PixlStash.
         ("GET", "/api/v1/workflows/{workflow_id}/graph"),
+        ("PUT", "/api/v1/workflows/{workflow_id}/graph"),
+        ("GET", "/api/v1/workflows/{workflow_id}/people"),
         ("POST", "/api/v1/comfyui/workflows/convert"),
         # The loader and search nodes.
         ("GET", "/api/v1/pictures/search"),

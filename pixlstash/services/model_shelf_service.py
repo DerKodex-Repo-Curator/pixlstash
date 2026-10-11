@@ -1908,8 +1908,9 @@ def people_who_fit(hub, vault, family: Optional[str]) -> dict:
 
     Returns:
         ``{"family", "people": [{"id", "name", "loras": [{"sha256",
-        "filename", "name", "trigger_words"}]}], "clash", "unknown"}``:
-        people by name, each one's matching LoRAs in the shelf's order.
+        "filename", "name", "trigger_words"}]}], "clash", "unknown", "note"}``:
+        people by name, each one's matching LoRAs in the shelf's order, and
+        ``note`` saying why there are none, when there are none.
     """
     owners = lora_owners(vault)
     names = fetch_character_names(vault)
@@ -1956,7 +1957,36 @@ def people_who_fit(hub, vault, family: Optional[str]) -> dict:
             unknown += 1
         else:
             clash += 1
-    return {"family": family, "people": people, "clash": clash, "unknown": unknown}
+    return {
+        "family": family,
+        "people": people,
+        "clash": clash,
+        "unknown": unknown,
+        "note": _nobody_fits_note(family, clash, unknown) if not people else None,
+    }
+
+
+def _nobody_fits_note(family: Optional[str], clash: int, unknown: int) -> str:
+    """Why a workflow offers nobody, as the Run popup says it.
+
+    The words of ``personNote`` in ``frontend/src/components/io/RunDialog.vue``,
+    which the people loader in ComfyUI shows too: change both together.
+    """
+    if not family:
+        return (
+            "This workflow's base model is not known, so no person's LoRA can "
+            "be matched to it."
+        )
+    parts = []
+    if clash:
+        parts.append(f"{clash} whose LoRA is for another base model")
+    if unknown:
+        parts.append(f"{unknown} whose LoRA has no base model recorded")
+    left = f" Not listed: {', '.join(parts)}." if parts else ""
+    return (
+        "No person has a LoRA for this workflow's base model, so it runs with "
+        f"no one's.{left}"
+    )
 
 
 def replace_attachments(

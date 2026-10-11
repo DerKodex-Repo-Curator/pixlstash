@@ -26,8 +26,12 @@ const getWorkflowFormInputs = vi.fn();
 const readModelSwap = vi.fn();
 const setWorkflowModelFix = vi.fn();
 const setWorkflowDefaultLora = vi.fn();
+const getWorkflowVersions = vi.fn();
+const restoreWorkflowVersion = vi.fn();
 
 vi.mock("../../api/workflows", () => ({
+  getWorkflowVersions: (...args) => getWorkflowVersions(...args),
+  restoreWorkflowVersion: (...args) => restoreWorkflowVersion(...args),
   getWorkflowCard: (...args) => getWorkflowCard(...args),
   listWorkflowCards: (...args) => listWorkflowCards(...args),
   patchWorkflowCard: (...args) => patchWorkflowCard(...args),
@@ -335,9 +339,92 @@ beforeEach(() => {
   getLoraSummary.mockReset().mockResolvedValue(loraSummary());
   getLoraChain.mockReset().mockResolvedValue(loraChain());
   getWorkflowFormInputs.mockReset().mockResolvedValue({ nodes: [] });
+  getWorkflowVersions.mockReset().mockResolvedValue({ versions: [] });
+  restoreWorkflowVersion.mockReset().mockResolvedValue({ versions: [] });
   replace.mockReset();
   preflightWorkflowRun.mockReset().mockResolvedValue({ groups: [] });
   vi.spyOn(console, "warn").mockImplementation(() => {});
+});
+
+describe("a version saved from ComfyUI (#1852)", () => {
+  const line = (wrapper) =>
+    wrapper.find('[data-testid="wftab-from-comfyui"]');
+  const versioned = () =>
+    card({ versions: 3, version: 4, version_at: "2026-10-06T09:30:00Z" });
+  const kept = (source, reason = "from ComfyUI") => ({
+    versions: [
+      {
+        version: 4,
+        created_at: new Date().toISOString(),
+        source,
+        reason,
+        current: true,
+      },
+      { version: 3, created_at: "2026-10-05T09:30:00Z", reason: "LoRAs edited" },
+      { version: 1, created_at: "2026-10-01T09:30:00Z", reason: null },
+    ],
+  });
+
+  it("is said in one line, with the way back beside it", async () => {
+    getWorkflowVersions.mockResolvedValue(kept("comfyui"));
+    const { wrapper, store } = await mountWith([KEY], [versioned()]);
+    expect(getWorkflowVersions).toHaveBeenCalledWith(KEY);
+    expect(line(wrapper).text()).toMatch(
+      /^Saved from ComfyUI just now ·\s+Go back$/,
+    );
+
+    // Go back makes the version BEFORE it current, and the grid's card (which
+    // carries the head line's number) is read again.
+    const invalidate = vi.spyOn(store, "invalidate").mockImplementation(() => {});
+    restoreWorkflowVersion.mockResolvedValue(
+      kept("revert:3", "went back to version 3"),
+    );
+    const back = wrapper.find('[data-testid="wftab-go-back"]');
+    expect(back.attributes("aria-label")).toBe("Go back to version 3");
+    await back.trigger("click");
+    await flush(wrapper);
+    expect(restoreWorkflowVersion).toHaveBeenCalledWith(KEY, 3);
+    expect(invalidate).toHaveBeenCalled();
+    expect(line(wrapper).exists()).toBe(false);
+  });
+
+  it("is not said of a version saved in PixlStash", async () => {
+    getWorkflowVersions.mockResolvedValue(kept("loras", "LoRAs edited"));
+    const { wrapper } = await mountWith([KEY], [versioned()]);
+    expect(line(wrapper).exists()).toBe(false);
+  });
+
+  it("is not said of a file the old pull read, worded the same", async () => {
+    getWorkflowVersions.mockResolvedValue(kept("pull", "from ComfyUI"));
+    const { wrapper } = await mountWith([KEY], [versioned()]);
+    expect(line(wrapper).exists()).toBe(false);
+  });
+
+  it("does not read again, or blink, when the card is re-read unchanged", async () => {
+    getWorkflowVersions.mockResolvedValue(kept("comfyui"));
+    const { wrapper, store } = await mountWith([KEY], [versioned()]);
+    store.cards = [versioned()];
+    await wrapper.vm.$nextTick();
+    expect(line(wrapper).exists()).toBe(true);
+    await flush(wrapper);
+    expect(getWorkflowVersions).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks for no versions of a workflow that has only one", async () => {
+    const { wrapper } = await mountWith([KEY], [card()]);
+    expect(getWorkflowVersions).not.toHaveBeenCalled();
+    expect(line(wrapper).exists()).toBe(false);
+  });
+
+  it("says why when going back fails, and keeps the line", async () => {
+    getWorkflowVersions.mockResolvedValue(kept("comfyui"));
+    restoreWorkflowVersion.mockRejectedValue(new Error("offline"));
+    const { wrapper } = await mountWith([KEY], [versioned()]);
+    await wrapper.find('[data-testid="wftab-go-back"]').trigger("click");
+    await flush(wrapper);
+    expect(useNoticeStore().notices.at(-1).level).toBe("error");
+    expect(line(wrapper).exists()).toBe(true);
+  });
 });
 
 describe("the version line", () => {
@@ -2412,6 +2499,19 @@ describe("Open in ComfyUI", () => {
   it("is named for a screen reader, since it is only the ComfyUI mark", async () => {
     configure();
     const { wrapper } = await mountWith([ID], [card({ id: ID })]);
+    expect(openButton(wrapper).attributes("aria-label")).toBe(
+      "Open in ComfyUI",
+    );
+  });
+
+  it("says it opens a copy when ComfyUI's nodes are from before saving back", async () => {
+    configure();
+    getPixlstashNode.mockResolvedValue({
+      can_open_workflows: true,
+      saves_back: false,
+    });
+    const { wrapper } = await mountWith([ID], [card({ id: ID })]);
+    await flush(wrapper);
     expect(openButton(wrapper).attributes("aria-label")).toBe(
       "Open a copy in ComfyUI",
     );
