@@ -14,8 +14,8 @@
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { mount } from "@vue/test-utils";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { enableAutoUnmount, mount } from "@vue/test-utils";
 import { generatedMark } from "../../utils/modelShelf";
 import { createPinia, setActivePinia } from "pinia";
 
@@ -133,6 +133,8 @@ beforeEach(() => {
   setActivePinia(createPinia());
   push.mockClear();
 });
+
+enableAutoUnmount(afterEach);
 
 function mountCard(card, props = {}) {
   return mount(WorkflowCard, {
@@ -569,18 +571,22 @@ describe("WorkflowCard", () => {
     );
   });
 
-  it("flags a cover made with the model the workflow has since replaced", () => {
-    const cells = mountCard({
+  // The server still applies a replacement made before #1850 and still marks
+  // the covers made ahead of it; the card shows the model the workflow loads
+  // now and says nothing about either (#1846, rule 9).
+  it("puts no mark on a cover made before a model was replaced", () => {
+    const wrapper = mountCard({
       ...BARE,
+      model_fixes: [{ address: "4.ckpt_name", filename: "new.safetensors" }],
       covers: [cover("/new.webp"), { ...cover("/old.webp"), superseded: true }],
-    }).findAll(".wf-card__pic");
+    });
 
-    expect(cells[0].find('[data-testid="wf-card-superseded"]').exists()).toBe(
-      false,
-    );
-    expect(cells[1].find('[data-testid="wf-card-superseded"]').text()).toContain(
-      "Made with the model this workflow has since replaced",
-    );
+    // A cell holds its picture and nothing over it.
+    for (const cell of wrapper.findAll(".wf-card__pic")) {
+      expect(cell.element.children).toHaveLength(1);
+    }
+    expect(wrapper.find(".wf-card__cover").text()).not.toMatch(/replaced/i);
+    expect(wrapper.attributes("aria-label")).not.toMatch(/replaced/i);
   });
 
   it("shows no rating for an unrated workflow", () => {
@@ -1128,9 +1134,9 @@ describe("the selection mark", () => {
     expect(mark.position).toBe("absolute");
     expect(mark.inset).toBe("0");
     expect(mark["z-index"]).toBe("var(--z-raised)");
-    // Above the per-picture flag, which shares the rung: the mark is the
+    // Above the top-start badges, which share the rung: the mark is the
     // card's ::after, the last thing in it, so it wins on DOM order.
-    expect(rule(".wf-card__pic-flag")["z-index"]).toBe("var(--z-raised)");
+    expect(rule(".wf-card__start")["z-index"]).toBe("var(--z-raised)");
     // And it must not eat the clicks meant for the controls underneath.
     expect(mark["pointer-events"]).toBe("none");
   });
@@ -1170,8 +1176,79 @@ describe("the ComfyUI badge", () => {
   );
 
   it("sits top-start, the corner the cover's badges leave free", () => {
-    const css = styleBlock();
-    expect(css).toMatch(/\.wf-card__badge--origin\s*{[^}]*left:\s*var\(--space-3\)/);
+    const wrapper = mountCard({ ...base, origin_category: "comfyui" });
+    expect(badge(wrapper).element.parentElement.className).toBe(
+      "wf-card__start",
+    );
+    const start = rule(".wf-card__start");
+    expect(start.position).toBe("absolute");
+    expect(start.top).toBe("var(--space-3)");
+    expect(start.left).toBe("var(--space-3)");
+  });
+});
+
+// #1850: changes wait on a workflow until they are saved or discarded, and
+// the card says so. Drawn from the card the grid already holds
+// (`unsaved_changes`, a count), so it comes and goes with the grid's re-read.
+describe("the Unsaved badge", () => {
+  const base = { id: "w", name: "Flux", picture_count: 2, covers: [] };
+  const badges = (w) => w.findAll('[data-testid="wf-card-unsaved"]');
+
+  it.each([
+    ["nothing waits", { unsaved_changes: 0 }],
+    ["the payload predates the field", {}],
+    ["the field is null", { unsaved_changes: null }],
+  ])("is not drawn when %s", (_, fields) => {
+    const wrapper = mountCard({ ...base, ...fields });
+    expect(badges(wrapper)).toHaveLength(0);
+    expect(wrapper.find("article").attributes("aria-label")).not.toContain(
+      "unsaved",
+    );
+  });
+
+  it.each([1, 3])("is one badge reading Unsaved when %i wait", (count) => {
+    const wrapper = mountCard({ ...base, unsaved_changes: count });
+    expect(badges(wrapper)).toHaveLength(1);
+    const [badge] = badges(wrapper);
+    expect(badge.text()).toBe("Unsaved");
+    // The shipped cover badge, not a style of its own.
+    expect(badge.classes()).toEqual(["wf-card__badge"]);
+    // Words a screen reader reaches, unlike the count and the rating.
+    expect(badge.attributes("aria-hidden")).toBeUndefined();
+  });
+
+  it("is spoken in the card's name, straight after the workflow's", () => {
+    const label = mountCard({ ...base, unsaved_changes: 3 })
+      .find("article")
+      .attributes("aria-label");
+    expect(label).toMatch(/^Flux, unsaved changes, /);
+  });
+
+  it("is worn by a card with no pictures, too", () => {
+    const wrapper = mountCard({ ...base, picture_count: 0, unsaved_changes: 1 });
+    expect(wrapper.find(".wf-card__cover--empty").exists()).toBe(true);
+    expect(badges(wrapper)).toHaveLength(1);
+  });
+
+  it("follows the ComfyUI mark, so that one never moves", () => {
+    const start = mountCard({
+      ...base,
+      origin_category: "comfyui",
+      unsaved_changes: 2,
+    }).find(".wf-card__start");
+    expect(
+      [...start.element.children].map((el) => el.dataset.testid),
+    ).toEqual(["wf-card-comfyui", "wf-card-unsaved"]);
+  });
+
+  it("lays the top-start badges in a row rather than on one spot", () => {
+    // The shared badge rule is `position: absolute`, so two of them in one
+    // corner would be drawn on top of each other.
+    expect(rule(".wf-card__start").display).toBe("flex");
+    expect(rule(".wf-card__start").gap).toBe("var(--space-2)");
+    expect(rule(".wf-card__start > .wf-card__badge").position).toBe("static");
+    // A right-click on the badge still reaches the picture under it.
+    expect(rule(".wf-card__start")["pointer-events"]).toBe("none");
   });
 });
 

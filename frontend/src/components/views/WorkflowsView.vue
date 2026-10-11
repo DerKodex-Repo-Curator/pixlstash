@@ -310,7 +310,7 @@
         @hide="hideSelected"
         @export="exportSelected"
         @duplicate="duplicateSelected"
-        @clone-onto-set="startCloneOntoSet"
+        @use-set="useSetOnSelected"
         @delete="confirmDelete"
       />
     </div>
@@ -347,24 +347,6 @@
         >
       </template>
     </AppDialog>
-
-    <CloneOntoSetDialog
-      :open="Boolean(ontoSetKey)"
-      :workflow-id="ontoSetKey"
-      :card-name="ontoSetName"
-      :card-type-label="ontoSetCard?.type_label || ''"
-      @close="closeCloneOntoSet"
-      @cloned="clonedWithModels"
-      @pick-files="pickFilesMyself"
-    />
-
-    <CloneWithModelsDialog
-      :open="cloneOpen"
-      :workflow-id="cloneKey"
-      :card-name="cloneName"
-      @close="closeClone"
-      @cloned="clonedWithModels"
-    />
 
     <!-- The grid is unmounted here, and with it the grid's runner, so a run
          started from the Workflow tab needs one of its own to show up in the
@@ -422,8 +404,6 @@ import TbGlobalActions from "../panels/TbGlobalActions.vue";
 import WorkflowFilterMenu from "../panels/WorkflowFilterMenu.vue";
 import WorkflowRecipesTab from "../panels/WorkflowRecipesTab.vue";
 import WorkflowSelectionBar from "../panels/WorkflowSelectionBar.vue";
-import CloneOntoSetDialog from "../io/CloneOntoSetDialog.vue";
-import CloneWithModelsDialog from "../io/CloneWithModelsDialog.vue";
 import ComfyUiRunner from "../io/ComfyUiRunner.vue";
 import AppBarButton from "../widgets/AppBarButton.vue";
 import AppButton from "../widgets/AppButton.vue";
@@ -1301,12 +1281,12 @@ async function duplicateSelected() {
   if (!card) return;
   const body = await store.duplicateCard(card.id);
   if (!body) return;
-  notices.push({ level: "success", text: `Copied to ${body.name}.` });
+  notices.push({ level: "success", text: `Duplicated as ${body.name}.` });
   landOn(body.workflow_id);
 }
 
 /**
- * Select a workflow this view just made (a copy, a clone, an import) and put
+ * Select a workflow this view just made (a duplicate, an import) and put
  * the cursor on its card, so the reader's next look is at what they made.
  * The grid has been re-read by then; a card a filter hides is still selected,
  * and the inspector shows it.
@@ -1318,77 +1298,17 @@ function landOn(workflowId) {
   if (at >= 0) moveCursor(at);
 }
 
-// Clone onto a workflow set: one dialog, one new card, asked for through the
-// store so the Workflow tab's button and the menu's row open the same one.
-// Held by id rather than by the selection, so the dialog keeps its card if the
-// selection moves under it.
-const ontoSetKey = computed(() => store.cloneOntoSetKey);
-const ontoSetCard = computed(
-  () => store.cards.find((card) => card.id === ontoSetKey.value) ?? null,
-);
-const ontoSetName = computed(() => ontoSetCard.value?.name || "");
-
-function startCloneOntoSet() {
+/**
+ * *Use a set…* from the grid's menu. The menu itself is the Workflow tab's, in
+ * the rail: it is asked for through the store, and the rail is opened (not
+ * persisted, as a deep link's "show me" is) so there is somewhere for it to
+ * open.
+ */
+function useSetOnSelected() {
   const card = onlyCard.value;
-  if (card) store.requestCloneOntoSet(card.id);
-}
-
-function closeCloneOntoSet() {
-  store.requestCloneOntoSet("");
-  focusCursorRow();
-}
-
-// Clone with new models, the per-file dialog: behind the set chooser's
-// "Pick files myself" card, on the same workflow.
-const cloneOpen = ref(false);
-const cloneKey = ref("");
-const cloneName = ref("");
-
-function pickFilesMyself() {
-  cloneKey.value = ontoSetKey.value;
-  cloneName.value = ontoSetName.value;
-  store.requestCloneOntoSet("");
-  cloneOpen.value = true;
-}
-
-function closeClone() {
-  cloneOpen.value = false;
-  focusCursorRow();
-}
-
-/** Name the file written, say when ComfyUI could not check it, select the card. */
-function clonedWithModels(body) {
-  // A loader whose node pack ComfyUI lacks: the clone is written, and the
-  // first run would fail on the missing node, so that is the news.
-  const packs = (installed) => [
-    ...new Set(
-      (body.loaders ?? [])
-        .filter((row) => row.pack && row.installed === installed)
-        .map((row) => row.pack),
-    ),
-  ];
-  const missing = packs(false);
-  // null: ComfyUI did not answer, so nobody could ask whether it has the pack.
-  const unasked = [...packs(null), ...packs(undefined)];
-  // Each fact its own sentence in one notice: a missing pack does not make
-  // the unchecked names any less worth saying.
-  const warnings = [
-    missing.length
-      ? `It needs ${missing.join(", ")}, which your ComfyUI does not have yet.`
-      : "",
-    unasked.length
-      ? `It needs ${unasked.join(", ")}, and PixlStash could not ask ComfyUI whether it has ${unasked.length === 1 ? "it" : "them"}.`
-      : "",
-    body.verified
-      ? ""
-      : "ComfyUI did not confirm every new model name, so run it once to check.",
-  ].filter(Boolean);
-  notices.push(
-    warnings.length
-      ? { level: "warning", text: `Cloned to ${body.name}. ${warnings.join(" ")}` }
-      : { level: "success", text: `Cloned to ${body.name}.` },
-  );
-  landOn(body.workflow_id);
+  if (!card) return;
+  sidebarStore.openWorkflowInspector();
+  store.requestUseSet(card.id);
 }
 
 /**

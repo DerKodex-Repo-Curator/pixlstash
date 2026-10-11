@@ -430,3 +430,18 @@ describe("onWorkflowsChanged across a burst", () => {
     expect(store.selectedKeys).toEqual(["auto:c"]);
   });
 });
+
+describe("requestUseSet", () => {
+  it("names the workflow the Workflow tab's Use a set… is asked for, and takes it back", () => {
+    const store = useWorkflowsStore();
+    expect(store.useSetKey).toBe("");
+    store.requestUseSet("workhorse");
+    expect(store.useSetKey).toBe("workhorse");
+    // What the tab does once its menu is open, so the same card can be asked
+    // for again.
+    store.requestUseSet("");
+    expect(store.useSetKey).toBe("");
+    store.requestUseSet(null);
+    expect(store.useSetKey).toBe("");
+  });
+});

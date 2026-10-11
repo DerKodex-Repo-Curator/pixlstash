@@ -166,16 +166,16 @@
           <span class="section-label" role="heading" aria-level="3"
             >Models</span
           >
-          <AppButton
-            size="sm"
-            variant="ghost"
-            data-testid="wftab-clone-onto-set"
-            :disabled="chainNoGraph"
-            :aria-describedby="chainNoGraph ? 'wftab-chain-reason' : undefined"
-            @click="store.requestCloneOntoSet(selectedKey)"
-          >
-            Clone onto a set…
-          </AppButton>
+          <!-- Fills the rows below from one of the owner's model sets, as
+               unsaved changes: nothing is written and no workflow is made. -->
+          <WorkflowUseSetMenu
+            ref="useSetMenu"
+            :workflow-id="selectedKey || ''"
+            :models="settableModels"
+            :disabled="chainNoGraph || !settableModels.length"
+            :disabled-reason="chainNoGraph ? 'wftab-chain-reason' : undefined"
+            @use="useSet"
+          />
         </div>
         <!-- The list card's `default_recipe` is null, so until the detail
              lands there is no default to show: its base-card slots are not
@@ -199,324 +199,265 @@
           </AppButton>
         </p>
         <template v-if="detail">
-        <div class="wftab-field wftab-field--top" data-testid="wftab-row-checkpoint">
+        <!-- One row per loader the default recipe names, and every one a
+             picker (#1850): a pick joins the unsaved changes, it is not
+             written. A missing file is a row that needs a pick, with the
+             warning kept above its field. -->
+        <div
+          v-for="row in modelRows"
+          :key="row.address"
+          class="wftab-field wftab-field--top"
+          :data-testid="`wftab-row-${row.kind}`"
+          :data-address="row.address"
+        >
           <span class="wftab-labelcol">
-            <span class="wftab-label">{{
-              checkpointCount > 1 ? "Checkpoints" : "Checkpoint"
-            }}</span>
-            <span v-if="checkpointEdited" class="wftab-yours"
-              >Yours</span
+            <span v-if="row.first" class="wftab-label">{{ row.heading }}</span>
+            <span v-if="row.edited" class="wftab-yours" data-testid="wftab-edited"
+              >Edited</span
             >
+            <span v-else-if="row.yours" class="wftab-yours">Yours</span>
           </span>
-          <div class="wftab-col">
-          <!-- Missing: ComfyUI does not have the file (the run pre-flight's
-               answer), or - when ComfyUI cannot be asked - the card has no
-               name for it. Always with the FILE it is missing, as its name
-               without folders; the whole recorded value is the tooltip. -->
-          <div v-if="detail && checkpointIsMissing" class="wftab-missing">
-            <p class="wftab-warn">
-              <v-icon size="16">mdi-alert-outline</v-icon>
-              Checkpoint missing
-            </p>
-            <p
-              v-if="missingCheckpointFile"
-              class="wftab-note wftab-quiet"
-              data-testid="wftab-missing-file"
-            >
-              <span class="wftab-file"
-                ><Tooltip :text="missingCheckpointFile" activator="parent" />{{
-                  fileName(missingCheckpointFile)
-                }}</span
-              >{{ preflightAnswered ? " is not installed in ComfyUI." : "" }}
-            </p>
-            <p v-else class="wftab-note wftab-quiet">
-              No file name was kept for it anywhere.
-            </p>
-            <!-- The pick is saved on the workflow, so an offer that is not
-                 of the missing one's base model says so before it. -->
-            <p
-              v-if="checkpointUnmatched"
-              class="wftab-note wftab-quiet"
-              data-testid="wftab-replace-unmatched"
-            >
-              {{ UNMATCHED_REPLACEMENTS_TEXT }}
-            </p>
-            <!-- The fix: another shelf model in its place. The card keeps its
-                 pictures, and what the replacement makes is filed on it. -->
+          <div class="wftab-col wftab-model">
+            <template v-if="row.missing && !row.edited">
+              <p class="wftab-warn">
+                <v-icon size="16">mdi-alert-outline</v-icon>
+                {{ row.missingText }}
+              </p>
+              <p class="wftab-note wftab-quiet" data-testid="wftab-missing-file">
+                <span class="wftab-file"
+                  ><Tooltip :text="row.missing" activator="parent" />{{
+                    modelLabel(fileName(row.missing))
+                  }}</span
+                >{{ preflightAnswered ? " is not installed in ComfyUI." : "" }}
+              </p>
+              <!-- A pick is saved on the workflow, so an offer that is not of
+                   the missing one's base model says so before it. -->
+              <p
+                v-if="row.unmatched"
+                class="wftab-note wftab-quiet"
+                data-testid="wftab-replace-unmatched"
+              >
+                {{ UNMATCHED_REPLACEMENTS_TEXT }}
+              </p>
+            </template>
             <AppSelect
-              v-if="replaceOptions.length"
-              model-value=""
-              label="Replace with a model from your shelf"
+              v-if="row.options.length"
+              :model-value="row.pick ?? ''"
+              :label="row.name"
               hide-label
-              :options="replaceOptions"
-              :disabled="busy === 'model-fix'"
-              data-testid="wftab-replace-model"
-              @update:model-value="replaceCheckpoint"
+              :options="row.options"
+              :data-testid="`wftab-pick-${row.kind}`"
+              @update:model-value="(file) => pickModel(row, file)"
             />
-            <p
-              v-else-if="checkpointNoReplacement"
-              class="wftab-note wftab-quiet"
-              data-testid="wftab-no-replacement-checkpoint"
+            <span v-else class="wftab-value"
+              ><Tooltip v-if="row.file" :text="row.file" activator="parent" />{{
+                row.savedLabel
+              }}</span
             >
-              {{ checkpointNoReplacement }}
+            <p
+              v-if="row.missing && !row.options.length && row.noOptions"
+              class="wftab-note wftab-quiet"
+              :data-testid="`wftab-no-replacement-${row.kind}`"
+            >
+              {{ row.noOptions }}
             </p>
-            <!-- The replacement has gone missing too: say what it was, and
-                 keep the way back reachable. Choosing another above replaces
-                 the original, never the replacement. -->
-            <p
-              v-if="replacementMissing"
-              class="wftab-note wftab-quiet"
-              data-testid="wftab-fix-missing"
-            >
-              Replaced by {{ fileName(checkpointFix.now) }}, which is missing
-              too.
+            <!-- The saved value stays readable under a changed field, with
+                 the way back beside it. -->
+            <div v-if="row.edited" class="wftab-meta" data-testid="wftab-saved">
+              <span class="wftab-coverage wftab-quiet"
+                ><Tooltip :text="row.file" activator="parent" />Saved:
+                {{ row.savedLabel }}</span
+              >
               <AppButton
                 variant="ghost"
                 size="sm"
                 icon-only
                 icon-left="undo"
-                :tooltip="`Undo: load ${fileName(checkpointFix.was)} again`"
-                :disabled="busy === 'model-fix'"
-                @click="replaceCheckpoint(null)"
+                data-testid="wftab-reset-model"
+                :tooltip="`Put ${row.name} back to ${row.savedLabel}`"
+                @click="pickModel(row, '')"
               />
-            </p>
-          </div>
-          <!-- Replaced by the owner: what it loads now, flagged, and the
-               original a hover away, because this is not the workflow as its
-               pictures were made. -->
-          <div
-            v-else-if="checkpointFix"
-            class="wftab-fixed"
-            data-testid="wftab-fixed-model"
-          >
-            <span class="wftab-value">
-              <v-icon size="16" class="wftab-fixed-flag" aria-hidden="true"
-                >mdi-alert-outline</v-icon
+            </div>
+            <template v-if="row.kind === 'checkpoint' && row.first">
+              <!-- Show N (§1.5): only below the workflow's own count, which
+                   the head's link already shows. -->
+              <div
+                v-for="shown in checkpointShows"
+                :key="shown.name"
+                class="wftab-meta"
               >
-              <Tooltip
-                :text="`Replaced. This workflow originally used ${fileName(checkpointFix.was)}`"
-                activator="parent"
-              />
-              {{ fileName(checkpointFix.now) }}
-              <span class="visually-hidden"
-                >, replaced. This workflow originally used
-                {{ fileName(checkpointFix.was) }}</span
+                <span class="wftab-coverage wftab-quiet">{{
+                  checkpointShows.length > 1 ? shown.label : ""
+                }}</span>
+                <AppButton
+                  size="sm"
+                  variant="ghost"
+                  data-testid="wftab-show-checkpoint"
+                  :aria-label="showLabel(shown.pictures, shown.label)"
+                  @click="showValue('model', shown.name, shown.label)"
+                >
+                  Show {{ shown.pictures }}
+                </AppButton>
+              </div>
+              <!-- The other checkpoints its pictures used: a disclosure, not
+                   a menu, because each is a row with its own Show N. -->
+              <button
+                v-if="otherCheckpoints.length"
+                type="button"
+                class="wftab-others"
+                data-testid="wftab-other-checkpoints"
+                aria-controls="wftab-other-checkpoints"
+                :aria-expanded="othersOpen ? 'true' : 'false'"
+                @click="othersOpen = !othersOpen"
               >
-            </span>
-            <AppButton
-              variant="ghost"
-              size="sm"
-              icon-only
-              icon-left="undo"
-              data-testid="wftab-undo-fix"
-              :tooltip="`Undo: load ${fileName(checkpointFix.was)} again`"
-              :disabled="busy === 'model-fix'"
-              @click="replaceCheckpoint(null)"
-            />
-          </div>
-          <span v-else-if="checkpointLabel" class="wftab-value">{{
-            checkpointLabel
-          }}</span>
-          <!-- The card has no name for it, but the graph a run submits does:
-               that is the file, installed as far as anybody knows. -->
-          <span v-else-if="graphBaseModel" class="wftab-value"
-            ><Tooltip :text="graphBaseModels" activator="parent" />{{
-              detail.graph_base_models.map(fileName).join(" + ")
-            }}</span
-          >
-          <!-- The graph a run would submit was read and loads no base model:
-               an upscaler, say. A fact, so it is said as one. -->
-          <span v-else-if="graphLoadsNone" class="wftab-value wftab-quiet">
-            None in this workflow
-          </span>
-          <!-- A recipe-less card's rows are what its file gave up, so an
-               empty one is "not read", never a claim that it has none. -->
-          <span v-else-if="checkpointIsUnread" class="wftab-value wftab-quiet">
-            Not read from its file
-          </span>
-          <!-- Only when nothing anywhere names a base model: not the card, not
-               the graph a run would submit, not the pre-flight. -->
-          <span v-else class="wftab-value wftab-quiet">Not recorded</span>
-          <!-- Show N (§1.5): only below the workflow's own count, which the
-               head's link already shows. -->
-          <div
-            v-for="shown in checkpointShows"
-            :key="shown.name"
-            class="wftab-meta"
-          >
-            <span class="wftab-coverage wftab-quiet">{{
-              checkpointShows.length > 1 ? shown.label : ""
-            }}</span>
-            <AppButton
-              size="sm"
-              variant="ghost"
-              data-testid="wftab-show-checkpoint"
-              :aria-label="showLabel(shown.pictures, shown.label)"
-              @click="showValue('model', shown.name, shown.label)"
-            >
-              Show {{ shown.pictures }}
-            </AppButton>
-          </div>
-          <!-- The other checkpoints its pictures used: a disclosure, not a
-               menu, because each is a row with its own Show N. -->
-          <button
-            v-if="otherCheckpoints.length"
-            type="button"
-            class="wftab-others"
-            data-testid="wftab-other-checkpoints"
-            aria-controls="wftab-other-checkpoints"
-            :aria-expanded="othersOpen ? 'true' : 'false'"
-            @click="othersOpen = !othersOpen"
-          >
-            <v-icon size="16" aria-hidden="true">{{
-              othersOpen ? "mdi-chevron-down" : "mdi-chevron-right"
-            }}</v-icon>
-            +{{ otherCheckpoints.length }}
-            {{ otherCheckpoints.length === 1 ? "other" : "others" }}
-          </button>
-          <ul
-            v-if="othersOpen && otherCheckpoints.length"
-            id="wftab-other-checkpoints"
-            class="wftab-others-list"
-          >
-            <li v-for="other in otherCheckpoints" :key="other.name">
-              <span class="wftab-others-name"
-                ><Tooltip :text="other.name" activator="parent" />{{
-                  other.label
-                }}</span
+                <v-icon size="16" aria-hidden="true">{{
+                  othersOpen ? "mdi-chevron-down" : "mdi-chevron-right"
+                }}</v-icon>
+                +{{ otherCheckpoints.length }}
+                {{ otherCheckpoints.length === 1 ? "other" : "others" }}
+              </button>
+              <ul
+                v-if="othersOpen && otherCheckpoints.length"
+                id="wftab-other-checkpoints"
+                class="wftab-others-list"
               >
-              <AppButton
-                size="sm"
-                variant="ghost"
-                :aria-label="showLabel(other.pictures, other.label)"
-                @click="showValue('model', other.name, other.label)"
-              >
-                Show {{ other.pictures }}
-              </AppButton>
-            </li>
-          </ul>
-          </div>
-        </div>
-        <!-- The VAE and the text encoders (#1596): missing and replaced the
-             way the Checkpoint row is, one entry per file. -->
-        <div
-          v-for="row in supportRows"
-          :key="row.kind"
-          class="wftab-field"
-          :data-testid="`wftab-row-${row.kind}`"
-        >
-          <span class="wftab-label">{{ row.label }}</span>
-          <div class="wftab-entries">
-            <template v-for="entry in row.entries" :key="entry.id">
-              <div v-if="entry.file" class="wftab-missing">
-                <p class="wftab-warn">
-                  <v-icon size="16">mdi-alert-outline</v-icon>
-                  {{ row.missingText }}
-                </p>
-                <p class="wftab-note wftab-quiet">
-                  <span class="wftab-file"
-                    ><Tooltip :text="entry.file" activator="parent" />{{
-                      fileName(entry.file)
+                <li v-for="other in otherCheckpoints" :key="other.name">
+                  <span class="wftab-others-name"
+                    ><Tooltip :text="other.name" activator="parent" />{{
+                      other.label
                     }}</span
                   >
-                  is not installed in ComfyUI.
-                </p>
-                <AppSelect
-                  v-if="entry.options.length"
-                  model-value=""
-                  :label="`Replace with a ${row.noun} from your shelf`"
-                  hide-label
-                  :options="entry.options"
-                  :disabled="busy === 'model-fix'"
-                  :data-testid="`wftab-replace-${row.kind}`"
-                  @update:model-value="
-                    (now) => replaceModel(row.kind, entry.file, now)
-                  "
-                />
-                <p
-                  v-else-if="entry.noReplacement"
-                  class="wftab-note wftab-quiet"
-                  :data-testid="`wftab-no-replacement-${row.kind}`"
-                >
-                  {{ entry.noReplacement }}
-                </p>
-                <p
-                  v-if="entry.fix"
-                  class="wftab-note wftab-quiet"
-                  :data-testid="`wftab-fix-missing-${row.kind}`"
-                >
-                  Replaced by {{ fileName(entry.fix.now) }}, which is missing
-                  too.
                   <AppButton
-                    variant="ghost"
                     size="sm"
-                    icon-only
-                    icon-left="undo"
-                    :tooltip="`Undo: load ${entry.originals} again`"
-                    :disabled="busy === 'model-fix'"
-                    :data-testid="`wftab-undo-missing-${row.kind}`"
-                    @click="replaceModel(row.kind, entry.file, null)"
-                  />
-                </p>
-              </div>
-              <div
-                v-else-if="entry.fix"
-                class="wftab-fixed"
-                :data-testid="`wftab-fixed-${row.kind}`"
-              >
-                <span class="wftab-value">
-                  <v-icon size="16" class="wftab-fixed-flag" aria-hidden="true"
-                    >mdi-alert-outline</v-icon
+                    variant="ghost"
+                    :aria-label="showLabel(other.pictures, other.label)"
+                    @click="showValue('model', other.name, other.label)"
                   >
-                  <Tooltip
-                    :text="`Replaced. This workflow originally used ${fileName(entry.fix.was)}`"
-                    activator="parent"
-                  />
-                  {{ fileName(entry.fix.now) }}
-                  <span class="visually-hidden"
-                    >, replaced. This workflow originally used
-                    {{ fileName(entry.fix.was) }}</span
-                  >
-                </span>
-                <AppButton
-                  variant="ghost"
-                  size="sm"
-                  icon-only
-                  icon-left="undo"
-                  :data-testid="`wftab-undo-${row.kind}`"
-                  :tooltip="`Undo: load ${fileName(entry.fix.was)} again`"
-                  :disabled="busy === 'model-fix'"
-                  @click="replaceModel(row.kind, entry.fix.was, null)"
-                />
-              </div>
-              <span v-else class="wftab-value">{{ entry.text }}</span>
+                    Show {{ other.pictures }}
+                  </AppButton>
+                </li>
+              </ul>
             </template>
           </div>
         </div>
+        <!-- No loader of the default recipe names a base model: what the
+             card and the graph a run submits say instead. Text, because there
+             is no loader address to write a pick to. -->
+        <div
+          v-if="!modelRows.some((row) => row.kind === 'checkpoint')"
+          class="wftab-field wftab-field--top"
+          data-testid="wftab-row-checkpoint"
+        >
+          <span class="wftab-labelcol">
+            <span class="wftab-label">{{
+              checkpointCount > 1 ? "Checkpoints" : "Checkpoint"
+            }}</span>
+          </span>
+          <div class="wftab-col wftab-model">
+            <!-- Missing: ComfyUI does not have the file (the run pre-flight's
+                 answer), or - when ComfyUI cannot be asked - the card has no
+                 name for it. Always with the FILE it is missing; the whole
+                 recorded value is the tooltip. -->
+            <template v-if="checkpointIsMissing">
+              <p class="wftab-warn">
+                <v-icon size="16">mdi-alert-outline</v-icon>
+                Checkpoint missing
+              </p>
+              <p
+                v-if="missingCheckpointFile"
+                class="wftab-note wftab-quiet"
+                data-testid="wftab-missing-file"
+              >
+                <span class="wftab-file"
+                  ><Tooltip :text="missingCheckpointFile" activator="parent" />{{
+                    modelLabel(fileName(missingCheckpointFile))
+                  }}</span
+                >{{ preflightAnswered ? " is not installed in ComfyUI." : "" }}
+              </p>
+              <p v-else class="wftab-note wftab-quiet">
+                No file name was kept for it anywhere.
+              </p>
+            </template>
+            <span v-else-if="checkpointLabel" class="wftab-value">{{
+              checkpointLabel
+            }}</span>
+            <!-- The card has no name for it, but the graph a run submits
+                 does: that is the file, installed as far as anybody knows. -->
+            <span v-else-if="graphBaseModel" class="wftab-value"
+              ><Tooltip :text="graphBaseModels" activator="parent" />{{
+                detail.graph_base_models
+                  .map((file) => modelLabel(fileName(file)))
+                  .join(" + ")
+              }}</span
+            >
+            <!-- The graph a run would submit was read and loads no base
+                 model: an upscaler, say. A fact, so it is said as one. -->
+            <span v-else-if="graphLoadsNone" class="wftab-value wftab-quiet">
+              None in this workflow
+            </span>
+            <!-- A recipe-less card's rows are what its file gave up, so an
+                 empty one is "not read", never a claim that it has none. -->
+            <span v-else-if="checkpointIsUnread" class="wftab-value wftab-quiet">
+              Not read from its file
+            </span>
+            <!-- Only when nothing anywhere names a base model: not the card,
+                 not the graph a run would submit, not the pre-flight. -->
+            <span v-else class="wftab-value wftab-quiet">Not recorded</span>
+          </div>
+        </div>
+        <div
+          v-if="!modelRows.some((row) => row.kind === 'vae')"
+          class="wftab-field"
+          data-testid="wftab-row-vae"
+        >
+          <span class="wftab-label">VAE</span>
+          <span class="wftab-value">From the checkpoint</span>
+        </div>
 
-        <!-- Read-only until the default can be written (F-3); the Run form
-             skips a stage per run. Absent when the base graph has none. -->
+        <!-- Each optional stage of the base graph, and whether the workflow
+             runs it. A toggle joins the unsaved changes. Absent when the
+             graph has none. -->
         <div
           v-if="stageRows.length"
-          class="wftab-field"
+          class="wftab-field wftab-field--top"
+          role="group"
+          aria-label="Stages"
           data-testid="wftab-stages"
         >
-          <span class="wftab-label">Stages</span>
-          <span class="wftab-value"
-            ><template v-for="(stage, index) in stageRows" :key="stage.key"
-              ><span v-if="index" class="wftab-quiet"> · </span
-              ><span v-if="stage.detail" :data-testid="`wftab-stage-${stage.key}`"
-                ><Tooltip :text="stage.detail" activator="parent" />{{
-                  stage.label
-                }}</span
-              ><template v-else>{{ stage.label }}</template
-              >{{ stage.on ? "" : " off" }}</template
-            ></span
-          >
+          <span class="wftab-labelcol">
+            <span class="wftab-label">Stages</span>
+            <span
+              v-if="stageRows.some((stage) => stage.edited)"
+              class="wftab-yours"
+              data-testid="wftab-stages-edited"
+              >Edited</span
+            >
+          </span>
+          <div class="wftab-checks">
+            <label
+              v-for="stage in stageRows"
+              :key="stage.key"
+              class="wftab-check"
+            >
+              <Tooltip
+                v-if="stage.detail"
+                :text="stage.detail"
+                activator="parent"
+              />
+              <input
+                type="checkbox"
+                :checked="stage.on"
+                :data-testid="`wftab-stage-${stage.key}`"
+                @change="toggleStage(stage, $event.target.checked)"
+              />
+              {{ stage.label }}
+            </label>
+          </div>
         </div>
         <p
-          v-if="stageRows.some((stage) => !stage.on)"
+          v-if="stageVoteNote"
           class="wftab-note wftab-quiet"
+          data-testid="wftab-stage-note"
         >
           Off: most of its pictures ran without it.
         </p>
@@ -528,7 +469,7 @@
            head, beside what it edits, and is here even with no loader at all:
            an entry point that only exists for workflows that already have
            LoRAs is how adding the first one stays unreachable (#1478). -->
-      <section class="wftab-panel" data-testid="wftab-loras">
+      <section ref="loraPanel" class="wftab-panel" data-testid="wftab-loras">
         <div class="wftab-sec-head">
           <span
             ref="defaultHeading"
@@ -555,17 +496,48 @@
              every picture says nothing, and that silence means "all". A
              LoRA is here or in Also used, never both. -->
         <div
-          v-for="lora in loraRows"
+          v-for="(lora, index) in loraRows"
           :key="lora.id"
           class="wftab-field wftab-field--top"
           data-testid="wftab-default-lora"
+          :data-slot="lora.slotKey || undefined"
         >
           <span class="wftab-labelcol">
-            <span class="wftab-label">Default</span>
-            <span v-if="lora.edited" class="wftab-yours">Yours</span>
+            <span v-if="!index" class="wftab-label">Default</span>
+            <span v-if="lora.removed" class="wftab-yours" data-testid="wftab-lora-removed"
+              >Removed</span
+            >
+            <span
+              v-else-if="lora.strengthEdited"
+              class="wftab-yours"
+              data-testid="wftab-lora-edited"
+              >Edited</span
+            >
+            <span v-else-if="lora.edited" class="wftab-yours">Yours</span>
           </span>
           <div class="wftab-col">
-            <span class="wftab-value wftab-lora-value">
+            <!-- Removed, until the save: the row stays, struck through, with
+                 the way back where the × was. -->
+            <span
+              v-if="lora.removed"
+              class="wftab-value wftab-lora-value wftab-lora-gone"
+            >
+              <s class="wftab-chain-name"
+                ><Tooltip v-if="lora.file" :text="lora.file" activator="parent" />{{
+                  lora.label
+                }}</s
+              >
+              <AppButton
+                size="sm"
+                variant="ghost"
+                data-testid="wftab-lora-put-back"
+                :aria-label="`Put ${lora.label} back`"
+                @click="setLoraRemoved(lora, false)"
+              >
+                Put back
+              </AppButton>
+            </span>
+            <span v-else class="wftab-value wftab-lora-value">
               <v-icon
                 v-if="!lora.on_shelf"
                 size="16"
@@ -581,11 +553,57 @@
               <span v-if="!lora.on_shelf" class="visually-hidden"
                 >, not on your model shelf</span
               >
-              <span v-if="lora.strengthText" class="wftab-chain-strength">{{
+              <!-- The strength is edited where it is read. Only a loader the
+                   graph has, holding a LoRA the shelf knows, can be named in
+                   a change; any other keeps its strength as text. -->
+              <input
+                v-if="lora.canStrength"
+                class="wftab-strength"
+                type="number"
+                step="0.05"
+                min="-10"
+                max="10"
+                :value="lora.strengthValue"
+                :aria-label="`Strength of ${lora.label}`"
+                data-testid="wftab-lora-strength"
+                @change="setLoraStrength(lora, $event.target.value, $event.target)"
+              />
+              <span v-else-if="lora.strengthText" class="wftab-chain-strength">{{
                 lora.strengthText
               }}</span>
+              <AppButton
+                v-if="lora.slot"
+                variant="ghost"
+                size="sm"
+                icon-only
+                icon-left="close"
+                data-testid="wftab-lora-remove"
+                :tooltip="`Remove ${lora.label}`"
+                @click="setLoraRemoved(lora, true)"
+              />
             </span>
-            <div v-if="lora.coverage || lora.show" class="wftab-meta">
+            <div
+              v-if="lora.strengthEdited && !lora.removed"
+              class="wftab-meta"
+              data-testid="wftab-lora-saved"
+            >
+              <span class="wftab-coverage wftab-quiet"
+                >Saved: {{ lora.savedStrengthText }}</span
+              >
+              <AppButton
+                variant="ghost"
+                size="sm"
+                icon-only
+                icon-left="undo"
+                data-testid="wftab-reset-strength"
+                :tooltip="`Put the strength of ${lora.label} back to ${lora.savedStrengthText}`"
+                @click="setLoraStrength(lora, lora.savedStrength)"
+              />
+            </div>
+            <div
+              v-if="!lora.removed && (lora.coverage || lora.show)"
+              class="wftab-meta"
+            >
               <span class="wftab-coverage wftab-quiet">{{ lora.coverage }}</span>
               <AppButton
                 v-if="lora.show"
@@ -609,7 +627,7 @@
           class="wftab-note wftab-quiet"
         >
           PixlStash has no graph for this workflow, so its LoRAs cannot be read
-          or edited.
+          or changed.
         </p>
         <p v-else-if="usingChain && chainFailed" class="wftab-note wftab-quiet">
           Could not read its LoRAs just now.
@@ -806,6 +824,116 @@
     <!-- The Workflow tab's, and only its: Recipes runs a recipe from its own
          row and Tasks is the app's business, so neither wants this footer. -->
     <template #footer>
+      <!-- The unsaved changes of the graph, and the two verbs that keep them
+           (#1850). Above Run…, and only while something waits. A count, never
+           a list: the rows above show which. Which verbs are offered, and the
+           sentence saying why one is not, are the server's, so this bar, the
+           Run popup and the Tasks tab cannot disagree. -->
+      <div
+        v-if="tab === 'workflow' && card && !multiple && changeCount"
+        class="wftab-draft"
+        role="group"
+        aria-label="Unsaved changes"
+        data-testid="wftab-draft"
+      >
+        <div class="wftab-draft__line">
+          <span class="wftab-draft__count" data-testid="wftab-draft-count"
+            >{{ changeCount }} unsaved
+            {{ changeCount === 1 ? "change" : "changes" }}</span
+          >
+          <AppButton
+            size="sm"
+            variant="ghost"
+            :disabled="draftBusy"
+            data-testid="wftab-discard"
+            @click="discardChanges"
+          >
+            Discard
+          </AppButton>
+        </div>
+        <!-- Save as new… turns the bar into its one question, the name. -->
+        <form
+          v-if="naming && saveAsNewOpen"
+          class="wftab-draft__name"
+          @submit.prevent
+        >
+          <input
+            ref="nameField"
+            v-model="newName"
+            class="wftab-draft__input"
+            type="text"
+            placeholder="Name of the new workflow"
+            aria-label="Name of the new workflow"
+            data-testid="wftab-new-name"
+            @keydown.enter.prevent="saveAsNew"
+            @keydown.esc.stop.prevent="stopNaming"
+          />
+          <div class="wftab-draft__verbs">
+            <AppButton
+              size="sm"
+              variant="ghost"
+              data-testid="wftab-new-name-back"
+              @click="stopNaming"
+            >
+              Back
+            </AppButton>
+            <AppButton
+              size="sm"
+              :disabled="!newName.trim() || draftBusy"
+              :loading="busy === 'save-as-new'"
+              data-testid="wftab-save-as-new-confirm"
+              @click="saveAsNew"
+            >
+              Save as new
+            </AppButton>
+          </div>
+        </form>
+        <div
+          v-else-if="saveOpen || saveAsNewOpen"
+          class="wftab-draft__verbs"
+        >
+          <AppButton
+            v-if="saveAsNewOpen"
+            ref="saveAsNewButton"
+            size="sm"
+            :disabled="draftBusy"
+            data-testid="wftab-save-as-new"
+            @click="startNaming"
+          >
+            Save as new…
+          </AppButton>
+          <!-- Neutral, at the small size: Run… stays the one amber button. -->
+          <AppButton
+            v-if="saveOpen"
+            size="sm"
+            icon-left="content-save-outline"
+            :disabled="draftBusy"
+            :loading="busy === 'save'"
+            data-testid="wftab-save"
+            @click="saveChanges"
+          >
+            Save
+          </AppButton>
+        </div>
+        <!-- A verb that is not offered is not drawn greyed out: its reason
+             is said instead, exactly as the server sent it. -->
+        <p
+          v-for="reason in closedReasons"
+          :key="reason"
+          class="wftab-note"
+          data-testid="wftab-draft-reason"
+        >
+          {{ reason }}
+        </p>
+        <p
+          v-if="draftError"
+          class="wftab-note"
+          role="alert"
+          data-testid="wftab-draft-error"
+        >
+          {{ draftError }}
+        </p>
+      </div>
       <div
         v-if="tab === 'workflow' && (card || multiple)"
         class="wftab-foot"
@@ -819,21 +947,20 @@
           :aria-describedby="runDescribedBy"
           @click="run"
         >
-          Run…
+          {{ changeCount && !multiple ? "Run with changes…" : "Run…" }}
         </AppButton>
         <!-- Beside Run…, as the ComfyUI mark: the ComfyUI-PixlStash node reads
              `?pixlstash_workflow=` and loads the graph, so without the node
              ComfyUI opens on whatever it had last. It opens what Run… runs
              (`runTarget`), and is refused rather than hidden otherwise, for
              Run…'s reason or a ComfyUI without the node. The tooltip is its
-             accessible name. "A copy", because that is what it is: nothing
-             ComfyUI saves comes back by itself, it reaches PixlStash only
-             when exported from ComfyUI or imported, and this one keeps its
-             graph. -->
+             accessible name. What opens is the SAVED graph: the node does not
+             ask for the unsaved one yet, and while changes wait the line
+             below says so rather than let the button imply otherwise. -->
         <AppButton
           v-if="canOpenComfyui"
           icon-only
-          tooltip="Open a copy in ComfyUI"
+          tooltip="Open in ComfyUI"
           data-testid="wftab-open-comfyui"
           :aria-disabled="runTarget && !comfyuiLacksNode ? undefined : 'true'"
           :aria-describedby="openDescribedBy"
@@ -891,6 +1018,15 @@
           >
           node in ComfyUI. Install or update it, then restart ComfyUI.
         </p>
+        <p
+          v-else-if="canOpenComfyui && changeCount"
+          id="wftab-open-unsaved"
+          class="wftab-note wftab-quiet"
+          data-testid="wftab-open-unsaved"
+        >
+          Open in ComfyUI opens the saved workflow. The unsaved changes are
+          not in it until they are saved.
+        </p>
         <p v-if="multiple" id="wftab-run-reason" class="wftab-note wftab-quiet">
           Run one workflow at a time
         </p>
@@ -908,6 +1044,7 @@
       :picture-count="editPictures"
       :drop-lora="editDrop"
       @close="closeEditLoras"
+      @apply="applyLoraEdit"
       @overwritten="onOverwritten"
     />
     <ExposeParameterDialog
@@ -938,18 +1075,22 @@ import { useRoute, useRouter } from "vue-router";
 import { VIcon, VMenu } from "vuetify/components";
 
 import {
+  discardWorkflowChanges,
   getLoraChain,
   getLoraSummary,
   getWorkflowCard,
+  getWorkflowChanges,
   getWorkflowFormInputs,
   getWorkflowVersions,
   patchWorkflowCard,
   preflightWorkflowRun,
   readModelSwap,
   restoreWorkflowVersion,
+  saveWorkflow,
+  saveWorkflowAsNew,
+  setWorkflowChanges,
   setWorkflowDefaultLora,
   setWorkflowDefaults,
-  setWorkflowModelFix,
   setWorkflowPins,
   workflowCoverUrl,
 } from "../../api/workflows";
@@ -978,7 +1119,7 @@ import {
   modelDisplayName,
   NO_REPLACEMENT_TEXT,
   outputCount,
-  replacementOptions,
+  replacementLabel,
   UNMATCHED_REPLACEMENTS_TEXT,
 } from "../../utils/workflowCard";
 import {
@@ -989,6 +1130,20 @@ import {
   setEachRun,
 } from "../../utils/workflowPins";
 import { pictureCount } from "../../utils/workflowSets";
+import {
+  changesOf,
+  countChanges,
+  loraRemoved,
+  loraStrength,
+  modelPick,
+  stageOn,
+  withFragment,
+  withLoraRemoved,
+  withLoraStrength,
+  withModel,
+  withoutGoneLoaders,
+  withStage,
+} from "../../utils/workflowEdits";
 import AppButton from "../widgets/AppButton.vue";
 import AppInspector from "../widgets/AppInspector.vue";
 import AppSelect from "../widgets/AppSelect.vue";
@@ -1002,6 +1157,7 @@ import WorkflowDefaultRow from "./WorkflowDefaultRow.vue";
 import WorkflowStarChart from "./WorkflowStarChart.vue";
 import WorkflowLoraPile from "./WorkflowLoraPile.vue";
 import WorkflowRecipesTab from "./WorkflowRecipesTab.vue";
+import WorkflowUseSetMenu from "./WorkflowUseSetMenu.vue";
 import WorkflowVersionMenu from "./WorkflowVersionMenu.vue";
 
 /** Past this many, the Fixed group folds away behind "Fixed · N". */
@@ -1284,7 +1440,7 @@ function recipeModelLabel(model) {
       sameFile(entry.filename, model.filename),
   );
   if (slot) return withQuant(modelDisplayName(slot), slot);
-  return file ? fileName(file) : "Unnamed shelf model";
+  return file ? modelLabel(fileName(file)) : "Unnamed shelf model";
 }
 
 // The base models, as the card's own row picks them: a Flux or SD3 graph has
@@ -1305,9 +1461,9 @@ const checkpointLabels = computed(() => {
 });
 const checkpointLabel = computed(() => checkpointLabels.value.join(" + "));
 /**
- * How many base models the row prints, whichever source it prints from. The
- * graph's list is one entry per loaded file already, and two shelf ids the
- * shelf no longer holds are two entries reading alike.
+ * How many base models the row prints where no loader of the default recipe
+ * names one. The graph's list is one entry per loaded file already, and two
+ * shelf ids the shelf no longer holds are two entries reading alike.
  */
 const checkpointCount = computed(
   () =>
@@ -1323,28 +1479,24 @@ const checkpointIsUnread = computed(() =>
 const BASE_MODEL_FOLDERS = new Set(["checkpoints", "diffusion_models"]);
 
 /**
- * The support rows a missing file can be replaced in (#1596): the model-fix
- * `slot_kind` and the pre-flight's folder for it. `clip_vision` is not `text_encoders`, so a vision
- * encoder is never offered a text encoder.
+ * The kinds of model a row is drawn for, by the default recipe's `kind` (the
+ * model-fix `slot_kind`), each with the pre-flight's folders for it.
+ * `clip_vision` is not `text_encoders`, so a vision encoder is never offered a
+ * text encoder.
  */
-const SUPPORT_KINDS = [
-  {
-    kind: "vae",
-    label: "VAE",
-    cardKind: "vae",
-    folder: "vae",
-    noun: "VAE",
-    missingText: "VAE missing",
+const MODEL_ROWS = {
+  checkpoint: {
+    heading: "Checkpoint",
+    missingText: "Checkpoint missing",
+    folders: BASE_MODEL_FOLDERS,
   },
-  {
-    kind: "text_encoder",
-    label: "CLIP",
-    cardKind: "clip",
-    folder: "text_encoders",
-    noun: "text encoder",
+  vae: { heading: "VAE", missingText: "VAE missing", folders: new Set(["vae"]) },
+  text_encoder: {
+    heading: "CLIP",
     missingText: "Text encoder missing",
+    folders: new Set(["text_encoders"]),
   },
-];
+};
 
 /** What the pre-flight reports for a name the hub forgot: names no file. */
 const FORGOTTEN_MODEL = "(forgotten model)";
@@ -1360,9 +1512,8 @@ const PREFLIGHT_SETTLE_MS = 250;
  * asks the same question Run… asks, once per card. `preflightAnswered` says
  * whether it has: an unreachable ComfyUI leaves the card's own answer.
  */
-const missingBaseFiles = ref([]);
-/** The same for each support kind (`SUPPORT_KINDS`), by `slot_kind`. */
-const missingFiles = ref({});
+const missingByKind = ref({});
+const missingBaseFiles = computed(() => missingByKind.value.checkpoint ?? []);
 const preflightAnswered = ref(false);
 let installedCheck = 0;
 // A rail that has closed asks nothing: an ask still settling is superseded.
@@ -1403,7 +1554,7 @@ const checkpointIsMissing = computed(() =>
     : Boolean(card.value && checkpointMissing(card.value)),
 );
 
-/** The file that is missing, as recorded (folders included), or "". */
+/** The file that is missing, for a card with no model row to say it on. */
 const missingCheckpointFile = computed(
   () =>
     missingBaseFiles.value.find((file) => file !== FORGOTTEN_MODEL) ||
@@ -1411,73 +1562,13 @@ const missingCheckpointFile = computed(
     checkpointLabel.value,
 );
 
-/** The owner's replacement for this card's base model, or null. */
-const checkpointFix = computed(
-  () =>
-    (detail.value?.model_fixes ?? []).find(
-      (fix) => fix.slot_kind === "checkpoint",
-    ) ?? null,
-);
-
 /**
- * Whether the pre-flight says the replacement itself is missing, rather than
- * some other base model of the graph.
- */
-const replacementMissing = computed(
-  () =>
-    Boolean(checkpointFix.value) &&
-    missingBaseFiles.value.some((file) =>
-      sameFile(file, checkpointFix.value.now),
-    ),
-);
-
-/**
- * `GET …/model-swap?replacing=` per missing file, keyed `kind:file`: the
- * shelf models that go with the workflow's checkpoint and that the file's
- * loader can load (`replacements`), and why there are none
- * (`replacements_reason`). Read only when the pre-flight says a file is
- * missing.
+ * `GET …/model-swap?replacing=` per model row, keyed `kind:file`: the shelf
+ * models that go with the workflow's checkpoint and that the file's loader
+ * can load (`replacements`), and why there are none (`replacements_reason`).
+ * Read for every row, missing or not: each is a picker (#1850).
  */
 const replacementsByFile = ref({});
-
-/** Why a missing file has no "Replace with…", as the row says it. */
-/** A "Replace with…" picker's options for one missing file, or `[]`. */
-function replaceOptionsFor(kind, file) {
-  return replacementOptions(
-    replacementsByFile.value[`${kind}:${file}`]?.replacements,
-  );
-}
-
-const replaceOptions = computed(() =>
-  missingCheckpointFile.value
-    ? replaceOptionsFor("checkpoint", missingCheckpointFile.value)
-    : [],
-);
-
-/** Whether the picker lists every loadable checkpoint, none known to match. */
-const checkpointUnmatched = computed(
-  () =>
-    replaceOptions.value.length > 0 &&
-    replacementsByFile.value[`checkpoint:${missingCheckpointFile.value}`]
-      ?.replacements_narrowed === false,
-);
-
-/**
- * Why the missing checkpoint has no "Replace with…", or "" while it has one or
- * has not been asked. Every answer without one says so: a missing checkpoint
- * with no picker and no word on why reads as nothing to be done.
- */
-const checkpointNoReplacement = computed(() => {
-  const answer =
-    replacementsByFile.value[`checkpoint:${missingCheckpointFile.value}`];
-  if (!answer || answer.replacements?.length) return "";
-  const reason = answer.replacements_reason;
-  if (reason === "none_loadable")
-    return "No checkpoint on your shelf that could replace it is one this loader can load.";
-  return ["none_go_with_it", "unread"].includes(reason)
-    ? NO_REPLACEMENT_TEXT[reason]
-    : "Nothing on your shelf can replace it.";
-});
 
 /** Whether two recorded values name one file, whatever their folders. */
 function sameFile(a, b) {
@@ -1485,102 +1576,185 @@ function sameFile(a, b) {
 }
 
 /**
- * The VAE row, and a CLIP row where the workflow names any, each as entries:
- * a missing file (with its replacement when that is what is missing), a
- * replaced one, or the plain value. The plain values stand only where neither
- * of the others does, as the Checkpoint row's do: the card's names are what
- * the recipes recorded, which after a fix is the original.
+ * The file a default-recipe model's loader loads today: the owner's earlier
+ * replacement where one was made (`model_fixes`, which the server still
+ * applies), else the recorded one.
  */
-const supportRows = computed(() =>
-  SUPPORT_KINDS.map((spec) => {
-    const fixes = (detail.value?.model_fixes ?? []).filter(
-      (fix) => fix.slot_kind === spec.kind,
-    );
-    const missing = missingFiles.value[spec.kind] ?? [];
-    let entries = [
-      ...missing.map((file) => ({
-        id: `missing:${file}`,
-        file,
-        fix: fixes.find((fix) => sameFile(fix.now, file)) ?? null,
-        // Every original this file replaced: two slots may share one
-        // replacement, and the pre-flight names the file, not the slot. The
-        // undo is sent by the replacement's name, which the server resolves
-        // to all of them.
-        originals: fixes
-          .filter((fix) => sameFile(fix.now, file))
-          .map((fix) => fileName(fix.was))
-          .join(" and "),
-        options: replaceOptionsFor(spec.kind, file),
-        noReplacement:
-          NO_REPLACEMENT_TEXT[
-            replacementsByFile.value[`${spec.kind}:${file}`]?.replacements_reason
-          ] ?? "",
-      })),
-      ...fixes
-        .filter((fix) => !missing.some((file) => sameFile(fix.now, file)))
-        .map((fix) => ({ id: `fix:${fix.slot_label}`, fix })),
-    ];
-    if (!entries.length && recipeModels.value) {
-      entries = recipeModels.value
-        .filter((model) => model.kind === spec.kind && model.filename)
-        .map((model) => ({
-          id: `model:${model.address}`,
-          text: recipeModelLabel(model),
-        }));
-    } else if (!entries.length) {
-      const models = (card.value?.models ?? []).filter(
-        (model) => model.kind === spec.cardKind && modelDisplayName(model),
-      );
-      entries = models.map((model, index) => ({
-        id: `model:${model.slot_label || index}`,
-        text: withQuant(modelDisplayName(model), model),
-      }));
-    }
-    if (!entries.length && spec.kind === "vae") {
-      entries = [{ id: "vae", text: "From the checkpoint" }];
-    }
-    return { ...spec, entries };
-  }).filter((row) => row.entries.length),
-);
-
-/** Replace the missing base model with `now`, or undo that (`null`). */
-function replaceCheckpoint(now) {
-  const was = now === null ? checkpointFix.value?.was : missingCheckpointFile.value;
-  return replaceModel("checkpoint", was, now);
+function loadedFile(model) {
+  const fix = (detail.value?.model_fixes ?? []).find(
+    (entry) =>
+      entry.slot_kind === model.kind && sameFile(entry.was, model.filename),
+  );
+  return fix ? fix.now : model.filename;
 }
 
 /**
- * Replace the missing file `was` in slots of `kind` with the shelf model
- * `now`, or undo the replacement of `was` (`now: null`).
- *
- * The grid is re-read because pictures already made with the replacement
- * join this workflow. The pre-flight is asked again: it is what says
- * whether the model now loads.
+ * Whether a model row can take a pick. A shelf loader's value is a shelf row
+ * id, not a file, and the model-swap read does not answer for it.
  */
-function replaceModel(kind, was, now) {
-  const key = selectedKey.value;
-  if (!key || !was || now === "") return;
-  const unmoved = selectionMark();
-  return queueWrite("model-fix", async () => {
-    try {
-      const body = await setWorkflowModelFix(key, {
-        was,
-        now,
-        slot_kind: kind,
-      });
-      await store.refetch();
-      if (!unmoved()) return;
-      detail.value = body;
-      void checkInstalled(key);
-    } catch (err) {
-      fail(
-        err,
-        now === null
-          ? "Could not undo that replacement."
-          : "Could not replace that model.",
-      );
-    }
+function settable(model) {
+  return !String(model.address ?? "").endsWith("/checkpoint_id");
+}
+
+/** A candidate as a picker option names it: never a bare filename. */
+function candidateLabel(model) {
+  return replacementLabel({
+    ...model,
+    filename: modelLabel(fileName(model.filename)),
   });
+}
+
+/** Why a missing file's row has nothing to pick, or "". */
+function noReplacementText(kind, answer) {
+  if (!answer || answer.replacements?.length) return "";
+  const reason = answer.replacements_reason;
+  if (kind !== "checkpoint") return NO_REPLACEMENT_TEXT[reason] ?? "";
+  if (reason === "none_loadable")
+    return "No checkpoint on your shelf that could replace it is one this loader can load.";
+  return ["none_go_with_it", "unread"].includes(reason)
+    ? NO_REPLACEMENT_TEXT[reason]
+    : "Nothing on your shelf can replace it.";
+}
+
+/**
+ * The model rows: one per loader the default recipe names, each a picker
+ * where the shelf has something its loader can take.
+ *
+ * `pick` is the file waiting, unsaved, at that loader's address; the saved
+ * file is the picker's first option, so choosing it takes the change back out
+ * of the set. A pick the candidates do not list (one a model set filled in) is
+ * listed too, or the field would read as saved while the row says Edited.
+ */
+const rowModels = computed(() =>
+  (recipeModels.value ?? []).filter(
+    (model) => MODEL_ROWS[model.kind] && model.filename,
+  ),
+);
+
+/**
+ * Which row each missing file is, by loader address.
+ *
+ * The pre-flight names a file as the graph spells it, and the recipe may
+ * spell the same loader's file another way (a quant build, a renamed file).
+ * So a missing file goes to the row naming it, and one no row names goes to
+ * the first row of its kind that has none: a missing checkpoint is the
+ * Checkpoint row's, whatever the two call it.
+ */
+const missingByAddress = computed(() => {
+  const found = {};
+  for (const kind of Object.keys(MODEL_ROWS)) {
+    const rows = rowModels.value.filter(
+      (model) => model.kind === kind && settable(model),
+    );
+    const unnamed = [];
+    for (const gone of missingByKind.value[kind] ?? []) {
+      if (gone === FORGOTTEN_MODEL) continue;
+      const row = rows.find(
+        (model) => !found[model.address] && sameFile(loadedFile(model), gone),
+      );
+      if (row) found[row.address] = gone;
+      else unnamed.push(gone);
+    }
+    for (const gone of unnamed) {
+      const row = rows.find((model) => !found[model.address]);
+      if (row) found[row.address] = gone;
+    }
+  }
+  return found;
+});
+
+const modelRows = computed(() => {
+  const models = rowModels.value;
+  const seen = {};
+  return models.map((model) => {
+    const spec = MODEL_ROWS[model.kind];
+    const nth = (seen[model.kind] = (seen[model.kind] ?? 0) + 1);
+    const several =
+      models.filter((other) => other.kind === model.kind).length > 1;
+    const canPick = settable(model);
+    // The graph's own spelling where the pre-flight gave it: that is what
+    // the server matches a loader on.
+    const gone = missingByAddress.value[model.address] ?? "";
+    const file = canPick
+      ? gone || loadedFile(model)
+      : model.shelf_filename || "";
+    const answer = canPick
+      ? replacementsByFile.value[`${model.kind}:${file}`]
+      : null;
+    const candidates = (answer?.replacements ?? []).filter(
+      (candidate) => !sameFile(candidate.filename, file),
+    );
+    const pick = canPick ? modelPick(waiting.value, model.address) : null;
+    const savedLabel =
+      canPick && file !== model.filename
+        ? modelLabel(fileName(file))
+        : recipeModelLabel(model);
+    return {
+      address: model.address,
+      kind: model.kind,
+      // "Checkpoints" over a pair (Wan 2.2 high + low): one label for the
+      // rows of a kind, and which loader is which is not claimed.
+      heading:
+        several && model.kind === "checkpoint" ? "Checkpoints" : spec.heading,
+      first: nth === 1,
+      // Said in full where the label column cannot: two of a kind share one
+      // visible label, and a picker's name has to tell them apart.
+      name: several ? `${spec.heading} ${nth}` : spec.heading,
+      settable: canPick,
+      file,
+      savedLabel,
+      pick,
+      edited: Boolean(pick),
+      yours: model.provenance === "edited",
+      missing: gone,
+      missingText: spec.missingText,
+      unmatched:
+        model.kind === "checkpoint" &&
+        candidates.length > 0 &&
+        answer?.replacements_narrowed === false,
+      options:
+        candidates.length || pick
+          ? [
+              { value: "", label: savedLabel },
+              ...candidates.map((candidate) => ({
+                value: candidate.filename,
+                label: candidateLabel(candidate),
+              })),
+              ...(pick &&
+              !candidates.some((candidate) => candidate.filename === pick)
+                ? [{ value: pick, label: modelLabel(fileName(pick)) }]
+                : []),
+            ]
+          : [],
+      noOptions: noReplacementText(model.kind, answer),
+    };
+  });
+});
+
+/** The rows a model set may fill: the loader's address and the file it loads. */
+const settableModels = computed(() =>
+  modelRows.value
+    .filter((row) => row.settable && row.file)
+    .map((row) => ({ address: row.address, filename: row.file })),
+);
+
+/** Pick a file for a model row; the saved one ("") takes the change back. */
+function pickModel(row, file) {
+  return edit((set) => withModel(set, row.address, file, row.file));
+}
+
+/** *Use a set…*: every row the set answers for, as unsaved changes. */
+function useSet({ models } = {}) {
+  return edit((set) =>
+    (models ?? []).reduce((next, model) => {
+      const row = modelRows.value.find(
+        (entry) => entry.address === model.address && entry.settable,
+      );
+      return row
+        ? withModel(next, row.address, model.filename, row.file)
+        : next;
+    }, set),
+  );
 }
 
 /** A recorded model value as a person looks for it: the file, no folders. */
@@ -1625,6 +1799,19 @@ const chainLoaders = computed(() =>
         : String(loader.filename || loader.name || "").split(/[\\/]/).pop(),
       on_shelf: Boolean(loader.on_shelf),
       strengthText: formatStrength(loader.strength) || "—",
+      // What a change names the loader by, with the shelf LoRA it holds: a
+      // strength can only be set where the shelf knows the file.
+      slot: {
+        node_id: String(loader.node_id),
+        field: loader.field || "lora_name",
+        sha256: loader.sha256 ? String(loader.sha256).toLowerCase() : "",
+      },
+      savedStrength: Number.isFinite(loader.strength) ? loader.strength : null,
+      // Null where the clip strength is the model strength's twin.
+      savedClip:
+        loader.strength_clip == null || loader.strength_clip === loader.strength
+          ? null
+          : loader.strength_clip,
     };
   }),
 );
@@ -1649,22 +1836,28 @@ const shelfLine = computed(() => {
  * last would put its failure, or its end of waiting, over the newer one.
  */
 let chainRead = 0;
-async function loadChain(key) {
+async function loadChain(key, { quiet = false } = {}) {
   const read = ++chainRead;
-  chain.value = null;
-  chainFailed.value = false;
-  chainNoGraph.value = false;
+  // `quiet`: the rows stay as they are until the new chain is in.
+  if (!quiet) {
+    chain.value = null;
+    chainFailed.value = false;
+    chainNoGraph.value = false;
+  }
   if (!key) {
     chainPending.value = false;
     return;
   }
-  chainPending.value = true;
+  chainPending.value = !quiet;
   try {
     const body = await getLoraChain(key);
     if (read !== chainRead) return;
     chain.value = body;
+    chainFailed.value = false;
+    chainNoGraph.value = false;
   } catch (err) {
     if (read !== chainRead) return;
+    chain.value = null;
     if (err?.response?.status === 409) {
       chainNoGraph.value = true;
     } else {
@@ -1836,11 +2029,6 @@ const recipeCheckpoints = computed(() =>
   ),
 );
 
-/** Whether the owner set any of them: overrides are per address. */
-const checkpointEdited = computed(() =>
-  recipeCheckpoints.value.some((model) => model.provenance === "edited"),
-);
-
 /** The checkpoint row's *Show N*, one per recipe checkpoint that has one. */
 const checkpointShows = computed(() =>
   recipeCheckpoints.value
@@ -1956,6 +2144,11 @@ const defaultLoras = computed(() => {
         "A LoRA whose name was forgotten",
       on_shelf: found ? Boolean(found.use.on_shelf) : (loader?.on_shelf ?? true),
       strengthText: formatStrength(lora.strength),
+      // Only a default the graph has a loader for can be changed: a change
+      // names a loader, and this one's strength is the default's.
+      slot: loader?.slot ?? null,
+      savedStrength: Number.isFinite(lora.strength) ? lora.strength : null,
+      savedClip: loader?.savedClip ?? null,
       edited,
       coverage,
       show:
@@ -1970,7 +2163,19 @@ const defaultLoras = computed(() => {
 
 /** The LoRA rows on screen: the default recipe's, or the chain's (above). */
 const loraRows = computed(() =>
-  usingChain.value ? chainLoaders.value : defaultLoras.value,
+  (usingChain.value ? chainLoaders.value : defaultLoras.value).map((row) => {
+    const slot = row.slot;
+    const waitingStrength = slot ? loraStrength(waiting.value, slot) : null;
+    return {
+      ...row,
+      slotKey: slot ? `${slot.node_id}:${slot.field}` : "",
+      removed: slot ? loraRemoved(waiting.value, slot) : false,
+      strengthValue: formatStrength(waitingStrength ?? row.savedStrength),
+      strengthEdited: waitingStrength !== null,
+      savedStrengthText: formatStrength(row.savedStrength) || "—",
+      canStrength: Boolean(slot?.sha256) && row.savedStrength !== null,
+    };
+  }),
 );
 
 /** The line under the LoRA rows: the chain's order, or who is off the shelf. */
@@ -1993,12 +2198,20 @@ const loraNote = computed(() => {
 const stageRows = computed(() =>
   Object.entries(defaultRecipe.value?.stages ?? {}).map(([key, on]) => ({
     key,
-    on: Boolean(on),
+    saved: Boolean(on),
+    on: stageOn(waiting.value, key, on),
+    edited: stageOn(waiting.value, key, on) !== Boolean(on),
     detail: defaultRecipe.value?.stage_details?.[key] || "",
     label:
       STAGE_LABELS[key] ??
       key.replace(/_/g, " ").replace(/^./, (first) => first.toUpperCase()),
   })),
+);
+
+/** "Off: most of its pictures ran without it": of a vote, not of the owner's
+ *  own answer, so only for a stage that is off as saved and untouched. */
+const stageVoteNote = computed(() =>
+  stageRows.value.some((stage) => !stage.saved && !stage.edited),
 );
 
 /** ALSO USED: every LoRA the pictures used, less the default's. */
@@ -2097,17 +2310,6 @@ function openEditLoras(key, drop = "") {
   editPictures.value = Number(shown?.picture_count) || 0;
   editDrop.value = drop;
   editKey.value = key;
-}
-
-/**
- * Edit LoRAs… saved over the card itself. The selection did not move, so the
- * watcher below reads nothing: the chain and the detail are asked again here.
- */
-function onOverwritten(key) {
-  if (selectedKey.value !== key) return;
-  void loadDetail(key);
-  void loadChain(key);
-  void loadFormInputs(key);
 }
 
 function closeEditLoras() {
@@ -2249,31 +2451,545 @@ function takeDefaults(workflowId, body) {
 let detailRead = 0;
 
 /** Read one card's detail, and say which of the three states it is in. */
-async function loadDetail(key) {
+async function loadDetail(key, { quiet = false } = {}) {
   const read = ++detailRead;
-  detail.value = null;
-  detailFailed.value = false;
+  // `quiet` (the graph moved under a rail already drawn): nothing is blanked
+  // while the read is out, and a failure leaves what was there.
+  if (!quiet) {
+    detail.value = null;
+    detailFailed.value = false;
+  }
   if (!key) {
     detailPending.value = false;
     return;
   }
-  detailPending.value = true;
+  detailPending.value = !quiet;
   try {
     const body = await getWorkflowCard(key);
     // Another card may have been selected while this was on the wire, or a
     // newer answer (the Recipes tab's write) already landed.
     if (selectedKey.value !== key || read !== detailRead) return;
+    const before = detail.value;
     detail.value = body;
+    detailFailed.value = false;
+    if (quiet && before) {
+      // The notes box may be mid-sentence: only a draft that is still the
+      // text last read is replaced. The parameter rows keep their groups.
+      if (notesDraft.value === (before.notes ?? "")) {
+        notesDraft.value = body.notes ?? "";
+      }
+      return;
+    }
     openedPins.value = body.pins ?? null;
     notesDraft.value = body.notes ?? "";
   } catch (err) {
     console.warn(`[workflows] could not read the card ${key}`, err);
     if (selectedKey.value !== key) return;
-    detailFailed.value = true;
+    if (!quiet) detailFailed.value = true;
   } finally {
     if (selectedKey.value === key) detailPending.value = false;
   }
 }
+
+// ── The unsaved changes (#1850) ────────────────────────────────────────────
+//
+// A change to the graph (a model, a stage, a LoRA loader or its strength) is
+// not written when it is made: it joins ONE set of changes the server keeps
+// for the workflow, and the bar above Run… saves the set. The rail is a view
+// of that set, so it survives another card being selected, the inspector
+// closing and a restart, and nothing here asks "discard changes?".
+
+/**
+ * `GET …/changes` for the shown workflow, with the workflow it is of:
+ * `{ key, state }`. `state` carries what waits, how many, and which of the
+ * two verbs are open and why not (the server's sentences, printed as sent).
+ */
+const changesRead = ref(null);
+let changesAsk = 0;
+
+/**
+ * The set as the last edit left it, drawn until the server answers:
+ * `{ key, changes }`, or null once it has.
+ */
+const intent = ref(null);
+/** Per workflow, the newest set not yet sent: an edit made while one is out. */
+const unsent = new Map();
+/** One write of the set at a time; the newest intent is what the next sends. */
+let changeWrites = Promise.resolve();
+
+/** The server's sentence for a save it refused, or "". */
+const draftError = ref("");
+/** *Save as new…* is asking for its name. */
+const naming = ref(false);
+const newName = ref("");
+const nameField = ref(null);
+
+/** The read, when it is of the workflow on screen: never another's. */
+const shownChanges = computed(() =>
+  changesRead.value?.key === selectedKey.value ? changesRead.value.state : null,
+);
+
+/** What waits on the shown workflow, as every row reads it. */
+const waiting = computed(() =>
+  intent.value?.key === selectedKey.value
+    ? intent.value.changes
+    : changesOf(shownChanges.value?.waiting),
+);
+
+/** How many: the server's count, or the rows' own while an edit is out. */
+const changeCount = computed(() =>
+  intent.value?.key === selectedKey.value
+    ? countChanges(intent.value.changes)
+    : Number(shownChanges.value?.count) || 0,
+);
+
+/** A write of the set, a save or a discard is out. */
+const draftBusy = computed(
+  () =>
+    intent.value?.key === selectedKey.value ||
+    ["save", "save-as-new", "discard"].includes(busy.value),
+);
+
+const saveOpen = computed(() => Boolean(shownChanges.value?.save?.open));
+const saveAsNewOpen = computed(() =>
+  Boolean(shownChanges.value?.save_as_new?.open),
+);
+
+/** Why a verb is not offered: the server's sentences, once each. */
+const closedReasons = computed(() => [
+  ...new Set(
+    [shownChanges.value?.save, shownChanges.value?.save_as_new]
+      .filter((verb) => verb && !verb.open && verb.reason)
+      .map((verb) => verb.reason),
+  ),
+]);
+
+/** Read what waits on one workflow. */
+async function loadChanges(key) {
+  const ask = ++changesAsk;
+  if (!key) {
+    changesRead.value = null;
+    return;
+  }
+  try {
+    const state = await getWorkflowChanges(key);
+    // Another workflow may have been selected while this was on the wire, or
+    // a write's answer, which is newer, already landed.
+    if (ask !== changesAsk || !stillOn(key)) return;
+    changesRead.value = { key, state };
+  } catch (err) {
+    console.warn(`[workflows] could not read the changes of ${key}`, err);
+    if (ask !== changesAsk || !stillOn(key)) return;
+    changesRead.value = null;
+  }
+}
+
+/** A write's answer is the newest state there is: it retires any read out. */
+function takeChanges(key, state) {
+  changesAsk += 1;
+  if (intent.value?.key === key) intent.value = null;
+  if (stillOn(key)) changesRead.value = { key, state };
+}
+
+/**
+ * Make one edit: build the next set from what waits, draw it, and store it.
+ *
+ * Refused while the set has not been read: the next set is built from what
+ * waits, and one built from nothing would replace changes that are there.
+ *
+ * **One write on the wire, the last intent wins.** Each edit queues a link;
+ * a link sends the newest set there is when its turn comes, and an answer is
+ * drawn only when no newer set is waiting behind it, so the first of two
+ * quick edits can never draw over the second.
+ */
+function edit(build) {
+  const key = selectedKey.value;
+  if (!key) return undefined;
+  if (!shownChanges.value) {
+    notices.push({
+      level: "error",
+      text: "That change was not kept: this workflow's unsaved changes could not be read. Try again.",
+    });
+    void loadChanges(key);
+    return undefined;
+  }
+  draftError.value = "";
+  const next = build(waiting.value);
+  intent.value = { key, changes: next };
+  unsent.set(key, next);
+  changeWrites = changeWrites.then(async () => {
+    const set = unsent.get(key);
+    if (!set) return;
+    unsent.delete(key);
+    try {
+      const state = await setWorkflowChanges(key, set);
+      if (unsent.has(key)) return;
+      takeChanges(key, state);
+    } catch (err) {
+      if (unsent.has(key)) return;
+      if (intent.value?.key === key) intent.value = null;
+      fail(err, "Could not keep that change.");
+      if (stillOn(key)) void loadChanges(key);
+      return;
+    }
+    // This tab's own write is not echoed back to it, so the card's Unsaved
+    // badge is asked for here.
+    void store.refetch();
+  });
+  return changeWrites;
+}
+
+/** Switch a stage on or off. */
+function toggleStage(stage, on) {
+  return edit((set) => withStage(set, stage.key, on, stage.saved));
+}
+
+/** The LoRA panel: where a removed row's *Put back* and × are found. */
+const loraPanel = ref(null);
+
+/**
+ * Remove a loader, or put it back. The control pressed leaves with the row's
+ * state, so focus goes to the one that took its place: *Put back* after ×,
+ * × after *Put back*.
+ */
+async function setLoraRemoved(lora, removed) {
+  if (!lora.slot) return;
+  const done = edit((set) => withLoraRemoved(set, lora.slot, removed));
+  await nextTick();
+  const row = [...(loraPanel.value?.querySelectorAll("[data-slot]") ?? [])].find(
+    (entry) => entry.dataset.slot === lora.slotKey,
+  );
+  row
+    ?.querySelector(
+      `[data-testid="${removed ? "wftab-lora-put-back" : "wftab-lora-remove"}"]`,
+    )
+    ?.focus();
+  await done;
+}
+
+/**
+ * A strength typed on a row, on change (blur or Enter), never per keystroke.
+ * Anything that is not a strength the server takes puts the field back.
+ */
+function setLoraStrength(lora, raw, field = null) {
+  const strength = raw === "" ? NaN : Number(raw);
+  if (!lora.slot || !Number.isFinite(strength) || Math.abs(strength) > 10) {
+    if (field) field.value = lora.strengthValue;
+    return undefined;
+  }
+  return edit((set) =>
+    withLoraStrength(set, lora.slot, strength, {
+      strength: lora.savedStrength,
+      strength_clip: lora.savedClip,
+    }),
+  );
+}
+
+/** After the bar has gone, focus goes to Run…, never to the page. */
+async function focusRun() {
+  await nextTick();
+  runButton.value?.focus?.();
+}
+
+/** A finished save's words: the version it made, and what it left out. */
+function savedText(saved, lead) {
+  const left = saved?.left_out?.length ?? 0;
+  return left
+    ? `${lead} ${left} loader${left === 1 ? "" : "s"} holding a person's LoRA ${
+        left === 1 ? "was" : "were"
+      } left out: a person is added to a run, not saved in a workflow.`
+    : lead;
+}
+
+/**
+ * Save: what waits, written over the workflow as its next version. A refusal
+ * (409) is printed in the bar in the server's words, and the verbs are read
+ * again since they are what changed.
+ */
+function saveChanges() {
+  const key = selectedKey.value;
+  if (!key || !saveOpen.value) return undefined;
+  draftError.value = "";
+  return queueWrite("save", async () => {
+    // The last edit's write first: a save ahead of it would leave it behind.
+    await changeWrites;
+    const before = changesRead.value?.key === key ? changesRead.value.state : null;
+    let saved;
+    try {
+      saved = await saveWorkflow(key, { version: before?.version ?? null });
+    } catch (err) {
+      console.warn(`[workflows] could not save the changes of ${key}`, err);
+      if (!stillOn(key)) {
+        fail(err, "Could not save those changes.");
+        return;
+      }
+      draftError.value = errorMessage(err, "Could not save those changes.");
+      void loadChanges(key);
+      return;
+    }
+    void store.refetch();
+    notices.push({
+      level: "success",
+      text: savedText(
+        saved,
+        saved?.version != null && saved.version !== before?.version
+          ? `Saved as version ${saved.version}. The version menu takes it back.`
+          : "Saved.",
+      ),
+    });
+    if (!stillOn(key)) return;
+    graphAt = `${key}:${saved?.version ?? ""}`;
+    await loadChanges(key);
+    void focusRun();
+    await refreshGraph(key);
+  });
+}
+
+function startNaming() {
+  naming.value = true;
+  draftError.value = "";
+  nextTick(() => nameField.value?.focus());
+}
+
+/** *Back* from the name question: the two verbs again, focus on the one left. */
+async function stopNaming() {
+  naming.value = false;
+  await nextTick();
+  saveAsNewButton.value?.focus?.();
+}
+const saveAsNewButton = ref(null);
+
+/**
+ * Save as new…: the same graph stored as a new workflow under the name
+ * given. This one is left as it was, with nothing waiting, and the new one
+ * is selected.
+ */
+function saveAsNew() {
+  const key = selectedKey.value;
+  const name = newName.value.trim();
+  if (!key || !name || !saveAsNewOpen.value) return undefined;
+  draftError.value = "";
+  const unmoved = selectionMark();
+  return queueWrite("save-as-new", async () => {
+    await changeWrites;
+    let saved;
+    try {
+      saved = await saveWorkflowAsNew(key, { name });
+    } catch (err) {
+      console.warn(`[workflows] could not save ${key} as a new workflow`, err);
+      if (!stillOn(key)) {
+        fail(err, "Could not save that as a new workflow.");
+        return;
+      }
+      draftError.value = errorMessage(
+        err,
+        "Could not save that as a new workflow.",
+      );
+      void loadChanges(key);
+      return;
+    }
+    naming.value = false;
+    newName.value = "";
+    notices.push({
+      level: "success",
+      text: savedText(saved, `Saved as a new workflow, ${saved?.name || name}.`),
+    });
+    await store.refetch();
+    if (!unmoved()) return;
+    if (saved?.workflow_id) store.select(saved.workflow_id);
+    else void loadChanges(key);
+    void focusRun();
+  });
+}
+
+/** Discard what waits. Nothing is asked: the saved version is untouched. */
+function discardChanges() {
+  const key = selectedKey.value;
+  if (!key) return undefined;
+  draftError.value = "";
+  naming.value = false;
+  unsent.delete(key);
+  return queueWrite("discard", async () => {
+    await changeWrites;
+    try {
+      takeChanges(key, await discardWorkflowChanges(key));
+    } catch (err) {
+      fail(err, "Could not discard those changes.");
+      if (stillOn(key)) void loadChanges(key);
+      return;
+    }
+    void store.refetch();
+    if (stillOn(key)) void focusRun();
+  });
+}
+
+/**
+ * Which version of which workflow the rows off the graph were last read at,
+ * so the card catching up with this tab's own save reads nothing twice.
+ */
+let graphAt = "";
+
+/**
+ * Read again everything the rail reads off the graph, in place: nothing is
+ * blanked, a notes draft being typed is kept, and the rows keep their groups.
+ */
+async function refreshGraph(key) {
+  await Promise.all([
+    loadDetail(key, { quiet: true }),
+    loadChain(key, { quiet: true }),
+    loadFormInputs(key),
+  ]);
+  if (stillOn(key)) void checkInstalled(key, { quiet: true });
+}
+
+// The shown workflow's graph or its waiting changes moved, whoever moved
+// them: a save from the Run popup or the Tasks tab, ComfyUI, an assistant,
+// another window. The grid's card says so (`version`, `unsaved_changes`), and
+// the rows and the bar follow it without the rail going blank. A selection
+// change is not this: the watcher on the selection reads everything.
+watch(
+  () => [
+    selectedKey.value,
+    card.value?.version,
+    card.value?.unsaved_changes,
+  ],
+  ([key, version, unsaved], [oldKey, oldVersion] = []) => {
+    if (!key || key !== oldKey) return;
+    const moved =
+      version !== oldVersion && version != null && oldVersion != null;
+    if (moved && graphAt !== `${key}:${version}`) {
+      graphAt = `${key}:${version}`;
+      void refreshGraph(key);
+    }
+    // An edit still out answers with the newest state itself.
+    if (intent.value?.key === key) return;
+    const state = shownChanges.value;
+    if (
+      state &&
+      (Number(state.count) || 0) === (Number(unsaved) || 0) &&
+      (!moved || state.version === version)
+    ) {
+      return;
+    }
+    void loadChanges(key);
+  },
+);
+
+// The Run popup or the Tasks tab saved this workflow's changes, in this
+// window. The server does not announce a write to the window that made it, so
+// the card may never say so: the popup does (`runDialog.saved`). Whatever
+// waited here is saved or cleared by now, so it is dropped and read again,
+// with the head and the rows off the graph, in place.
+watch(
+  () => runDialog.saved,
+  (saved) => {
+    const key = selectedKey.value;
+    if (!saved || !key || saved.workflowId !== key) return;
+    unsent.delete(key);
+    if (intent.value?.key === key) intent.value = null;
+    draftError.value = "";
+    naming.value = false;
+    void loadChanges(key);
+    void loadVersions(key);
+    void refreshGraph(key);
+  },
+);
+
+/**
+ * Edit LoRAs… ended in Apply: removals and strengths, which can wait. They
+ * join the set of the workflow the dialog was opened on.
+ */
+async function applyLoraEdit(fragment) {
+  const key = editKey.value;
+  if (!key) return;
+  if (stillOn(key)) {
+    await edit((set) => withFragment(set, fragment));
+    return;
+  }
+  try {
+    const state = await getWorkflowChanges(key);
+    await setWorkflowChanges(key, withFragment(state?.waiting, fragment));
+    void store.refetch();
+  } catch (err) {
+    fail(err, "Could not keep that LoRA edit.");
+  }
+}
+
+/**
+ * Edit LoRAs… ended in Save: a loader moved or added, which cannot wait and
+ * was written as the workflow's next version.
+ *
+ * What was waiting was made against the version before, and the server
+ * refuses to save a set made against another version. It is the same set of
+ * rows, though, and a chain edit keeps its loaders' ids: so it is stored
+ * again against the new version, less any loader the edit took out.
+ */
+async function onOverwritten(key) {
+  void store.refetch();
+  if (!stillOn(key)) return;
+  const before = shownChanges.value;
+  await changeWrites;
+  await refreshGraph(key);
+  if (!stillOn(key)) return;
+  if (!before || !countChanges(before.waiting)) {
+    void loadChanges(key);
+    return;
+  }
+  // Only against a chain that was read: an unread one names no loader, and
+  // every LoRA change would be dropped for it.
+  const kept = chain.value
+    ? withoutGoneLoaders(
+        before.waiting,
+        chainLoaders.value.map((loader) => loader.slot),
+      )
+    : changesOf(before.waiting);
+  try {
+    await discardWorkflowChanges(key);
+    const state = await setWorkflowChanges(key, kept);
+    takeChanges(key, state);
+    if (before.save?.open && countChanges(kept) && !state?.save?.open) {
+      notices.push({
+        level: "error",
+        text:
+          state?.save?.reason ||
+          "The changes that were waiting cannot be saved over the new version.",
+      });
+    }
+  } catch (err) {
+    fail(
+      err,
+      "The LoRA edit was saved, but the changes that were waiting could not be kept.",
+    );
+    void loadChanges(key);
+  }
+}
+
+// *Use a set…* asked for from outside the rail (the selection bar): the
+// workflow is selected, the rail opened on this tab, and the menu opened once
+// the model rows it fills are in.
+let useSetWanted = "";
+watch(
+  () => store.useSetKey,
+  (key) => {
+    if (!key) return;
+    store.requestUseSet("");
+    useSetWanted = key;
+    if (selectedKey.value !== key) store.select(key);
+    tab.value = "workflow";
+    sidebarStore.openWorkflowInspector();
+    void openWantedSet();
+  },
+  { immediate: true },
+);
+async function openWantedSet() {
+  if (!useSetWanted || useSetWanted !== selectedKey.value) return;
+  if (!settableModels.value.length) return;
+  useSetWanted = "";
+  await nextTick();
+  useSetMenu.value?.open?.();
+}
+watch(() => settableModels.value.length, openWantedSet);
+const useSetMenu = ref(null);
 
 function fail(err, fallback) {
   console.warn("[workflows] a workflow write failed", err);
@@ -2390,16 +3106,11 @@ function goBack(row, key = selectedKey.value) {
     versionsAsk += 1;
     versionsFailed.value = false;
     versionsRead.value = versionsOf(key, body);
-    // Everything else the rail reads off the graph is another graph's now.
-    void loadChain(key);
-    void loadFormInputs(key);
-    await loadDetail(key);
-    // A workflow the grid does not list is drawn from the detail, so its head
-    // left the screen during that read and took focus with it.
-    await nextTick();
-    if (stillOn(key) && document.activeElement === document.body) {
-      versionMenu.value?.focus();
-    }
+    // Everything else the rail reads off the graph is another graph's now,
+    // and what was waiting was made against the version left.
+    graphAt = `${key}:${body?.version ?? ""}`;
+    void loadChanges(key);
+    await refreshGraph(key);
   });
 }
 
@@ -2774,10 +3485,11 @@ const runDescribedBy = computed(() =>
   multiple.value ? "wftab-run-reason" : undefined,
 );
 
-/** Why Open a copy in ComfyUI refuses, when it does. */
+/** What Open in ComfyUI is described by: why it refuses, or what it opens. */
 const openDescribedBy = computed(() => {
   if (multiple.value) return "wftab-open-reason";
-  return comfyuiLacksNode.value ? "wftab-open-node-reason" : undefined;
+  if (comfyuiLacksNode.value) return "wftab-open-node-reason";
+  return changeCount.value ? "wftab-open-unsaved" : undefined;
 });
 
 /**
@@ -2857,6 +3569,10 @@ watch(
     othersOpen.value = false;
     exposeOpen.value = false;
     versionError.value = "";
+    draftError.value = "";
+    naming.value = false;
+    newName.value = "";
+    void loadChanges(key);
     void loadDetail(key);
     void loadChain(key);
     void loadFormInputs(key);
@@ -2890,15 +3606,19 @@ watch(
   { immediate: true },
 );
 
-async function checkInstalled(key) {
+async function checkInstalled(key, { quiet = false } = {}) {
   const check = ++installedCheck;
-  missingBaseFiles.value = [];
-  missingFiles.value = {};
-  preflightAnswered.value = false;
-  replacementsByFile.value = {};
+  // `quiet`: the rows keep what they say until the new answers are in.
+  if (!quiet) {
+    missingByKind.value = {};
+    preflightAnswered.value = false;
+    replacementsByFile.value = {};
+  }
   if (!key) return;
-  await new Promise((resolve) => setTimeout(resolve, PREFLIGHT_SETTLE_MS));
-  if (check !== installedCheck) return;
+  if (!quiet) {
+    await new Promise((resolve) => setTimeout(resolve, PREFLIGHT_SETTLE_MS));
+    if (check !== installedCheck) return;
+  }
   try {
     const answer = await preflightWorkflowRun({
       workflow_id: key,
@@ -2910,37 +3630,33 @@ async function checkInstalled(key) {
       .flatMap((group) => group.reasons ?? [])
       .filter((reason) => reason.code === "missing_models")
       .flatMap((reason) => reason.models ?? []);
-    const filesIn = (folders) => [
-      ...new Set(
-        missing
-          .filter((model) => folders.has(model.folder))
-          .map((model) => String(model.file)),
-      ),
-    ];
-    missingBaseFiles.value = filesIn(BASE_MODEL_FOLDERS);
-    // A forgotten name is no file anybody could replace.
-    missingFiles.value = Object.fromEntries(
-      SUPPORT_KINDS.map((spec) => [
-        spec.kind,
-        filesIn(new Set([spec.folder])).filter(
-          (file) => file !== FORGOTTEN_MODEL,
-        ),
+    missingByKind.value = Object.fromEntries(
+      Object.entries(MODEL_ROWS).map(([kind, spec]) => [
+        kind,
+        [
+          ...new Set(
+            missing
+              .filter((model) => spec.folders.has(model.folder))
+              .map((model) => String(model.file)),
+          ),
+          // A forgotten name is no file anybody could replace; a base model
+          // keeps it, because the row still has to say one is missing.
+        ].filter((file) => kind === "checkpoint" || file !== FORGOTTEN_MODEL),
       ]),
     );
   } catch (err) {
+    // An unreachable ComfyUI leaves the card's own answer on what is
+    // missing. The pickers are still read: the shelf answers for them.
     console.warn(`[workflows] could not pre-flight ${key}`, err);
-    return;
+    if (check !== installedCheck || !stillOn(key)) return;
   }
-  // Only a file ComfyUI named can be replaced: a forgotten name is no file.
+  // Every row is a picker, so every row's file is asked about, once each.
   const asks = [
-    ...(missingCheckpointFile.value &&
-    missingCheckpointFile.value !== FORGOTTEN_MODEL &&
-    missingBaseFiles.value.includes(missingCheckpointFile.value)
-      ? [["checkpoint", missingCheckpointFile.value]]
-      : []),
-    ...SUPPORT_KINDS.flatMap((spec) =>
-      (missingFiles.value[spec.kind] ?? []).map((file) => [spec.kind, file]),
-    ),
+    ...new Map(
+      modelRows.value
+        .filter((row) => row.settable && row.file)
+        .map((row) => [`${row.kind}:${row.file}`, [row.kind, row.file]]),
+    ).values(),
   ];
   const results = await Promise.allSettled(
     asks.map(([kind, file]) =>
@@ -3240,38 +3956,11 @@ async function checkInstalled(key) {
   color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
 }
 
-.wftab-missing,
-.wftab-entries {
-  display: flex;
-  flex-direction: column;
+/* A missing file's name is often one long word: break it anywhere rather
+   than let it run past the column. */
+.wftab-model {
   gap: var(--space-2);
-  min-width: 0;
-}
-
-/* A missing file's name is often one long word (`someModel_v6.safetensors`):
-   break it anywhere rather than let it run past the column. */
-.wftab-missing {
   overflow-wrap: anywhere;
-}
-
-/* A replaced base model: the value field as every other row draws it, with
-   an icon-only Undo beside it. */
-.wftab-fixed {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-width: 0;
-}
-
-.wftab-fixed > .wftab-value {
-  flex: 1;
-  min-width: 0;
-  gap: var(--space-2);
-}
-
-.wftab-fixed-flag {
-  flex-shrink: 0;
-  color: rgb(var(--v-theme-surface-warning));
 }
 
 /* The hue drawn as text, so the surface variant: the fill is 2.1:1 on the
@@ -3325,6 +4014,122 @@ async function checkInstalled(key) {
   padding: var(--space-3) var(--space-4);
   /* `border`, not `divider`: divider all but vanishes on the sidebar tone. */
   border-top: 1px solid rgb(var(--v-theme-border));
+}
+
+/* The bar of unsaved changes: the count and Discard on one line, the two
+   verbs right-aligned on the next (the mock-up's `.draft`). */
+.wftab-draft {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid rgb(var(--v-theme-border));
+}
+
+.wftab-draft__line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  /* Discard's own padding, so its word ends on the content edge. */
+  margin-right: calc(-1 * var(--space-3));
+}
+
+.wftab-draft__count {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  font-variant-numeric: tabular-nums;
+}
+
+.wftab-draft__name {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.wftab-draft__verbs {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-3);
+}
+
+.wftab-draft__input,
+.wftab-strength {
+  border: 1px solid rgb(var(--v-theme-divider));
+  border-radius: var(--radius-sm);
+  background: rgba(var(--v-theme-on-surface), 0.06);
+  color: inherit;
+  font: inherit;
+  font-size: var(--text-sm);
+}
+
+.wftab-draft__input {
+  width: 100%;
+  height: var(--control-h);
+  padding: 0 var(--space-3);
+}
+
+/* A strength in its row: wide enough for "-0.85", right-aligned so the
+   figures of a column of rows line up. */
+.wftab-strength {
+  flex-shrink: 0;
+  width: var(--space-8);
+  height: var(--control-h-sm);
+  padding: 0 var(--space-2);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  appearance: textfield;
+}
+.wftab-strength::-webkit-inner-spin-button,
+.wftab-strength::-webkit-outer-spin-button {
+  appearance: none;
+}
+
+/* A loader that waits to be removed: its field recedes and its name is
+   struck, with Put back where the × was. */
+.wftab-lora-gone {
+  border-style: dashed;
+  background: none;
+}
+.wftab-lora-gone > s {
+  color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
+}
+
+/* The × and Put back sit in the field: pulled to its edge by the field's
+   own padding. */
+.wftab-lora-value > .app-btn {
+  flex-shrink: 0;
+  margin-right: calc(-1 * var(--space-2));
+}
+
+.wftab-checks {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+}
+
+.wftab-check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--control-h-sm);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.wftab-check > input {
+  width: var(--gutter-glyph);
+  height: var(--gutter-glyph);
+  margin: 0;
+  accent-color: rgb(var(--v-theme-primary));
+}
+
+/* A model row's picker opens over the label column too: the field alone is
+   too narrow for a model's name in a 288px rail. */
+.wftab-model :deep(.app-select__menu) {
+  left: calc(-1 * (var(--space-9) + var(--space-3)));
 }
 
 .wftab-foot > :first-child {

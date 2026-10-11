@@ -24,8 +24,12 @@ const getLoraSummary = vi.fn();
 const getLoraChain = vi.fn();
 const getWorkflowFormInputs = vi.fn();
 const readModelSwap = vi.fn();
-const setWorkflowModelFix = vi.fn();
 const setWorkflowDefaultLora = vi.fn();
+const getWorkflowChanges = vi.fn();
+const setWorkflowChanges = vi.fn();
+const discardWorkflowChanges = vi.fn();
+const saveWorkflow = vi.fn();
+const saveWorkflowAsNew = vi.fn();
 const getWorkflowVersions = vi.fn();
 const restoreWorkflowVersion = vi.fn();
 
@@ -43,8 +47,12 @@ vi.mock("../../api/workflows", () => ({
   getLoraChain: (...args) => getLoraChain(...args),
   getWorkflowFormInputs: (...args) => getWorkflowFormInputs(...args),
   readModelSwap: (...args) => readModelSwap(...args),
-  setWorkflowModelFix: (...args) => setWorkflowModelFix(...args),
   setWorkflowDefaultLora: (...args) => setWorkflowDefaultLora(...args),
+  getWorkflowChanges: (...args) => getWorkflowChanges(...args),
+  setWorkflowChanges: (...args) => setWorkflowChanges(...args),
+  discardWorkflowChanges: (...args) => discardWorkflowChanges(...args),
+  saveWorkflow: (...args) => saveWorkflow(...args),
+  saveWorkflowAsNew: (...args) => saveWorkflowAsNew(...args),
   getWorkflowVersions: (...args) => getWorkflowVersions(...args),
   restoreWorkflowVersion: (...args) => restoreWorkflowVersion(...args),
 }));
@@ -74,6 +82,11 @@ import { useSidebarStore } from "../../stores/useSidebarStore";
 import { useTasksStore } from "../../stores/useTasksStore";
 import { useWorkflowsStore } from "../../stores/useWorkflowsStore";
 
+/** Called with the workflow id when *Use a set…* is opened from outside. */
+const useSetOpened = vi.fn();
+/** What waits on the server: the changes routes below are one small fake. */
+let waitingOnServer = null;
+
 const KEY = "a".repeat(64);
 const OTHER = "b".repeat(64);
 
@@ -85,6 +98,20 @@ const globalOpts = {
         template: "<div><slot name='activator' :props='{}'/><slot/></div>",
       },
       Tooltip: true,
+      // The set picker is a component of its own with tests of its own: here
+      // it is the button, what it is given, and what it hands back.
+      WorkflowUseSetMenu: {
+        name: "WorkflowUseSetMenu",
+        props: ["workflowId", "models", "disabled", "disabledReason"],
+        emits: ["use"],
+        methods: {
+          open() {
+            useSetOpened(this.workflowId);
+          },
+        },
+        template:
+          '<button data-testid="wftab-use-set" :disabled="disabled">Use a set…</button>',
+      },
     },
   },
 };
@@ -341,10 +368,62 @@ beforeEach(() => {
   getWorkflowFormInputs.mockReset().mockResolvedValue({ nodes: [] });
   replace.mockReset();
   preflightWorkflowRun.mockReset().mockResolvedValue({ groups: [] });
+  // One small fake of the changes routes: a write is kept, a read answers
+  // it, a discard clears it. Every write answers the state it now holds.
+  waitingOnServer = null;
+  useSetOpened.mockReset();
+  getWorkflowChanges
+    .mockReset()
+    .mockImplementation(() => Promise.resolve(changesState(waitingOnServer)));
+  setWorkflowChanges.mockReset().mockImplementation((_key, set) => {
+    waitingOnServer = set;
+    return Promise.resolve(changesState(set));
+  });
+  discardWorkflowChanges.mockReset().mockImplementation(() => {
+    waitingOnServer = null;
+    return Promise.resolve(changesState());
+  });
+  saveWorkflow.mockReset().mockResolvedValue({
+    workflow_id: KEY,
+    version: 2,
+    new_workflow: false,
+    left_out: [],
+  });
+  saveWorkflowAsNew.mockReset().mockResolvedValue({
+    workflow_id: OTHER,
+    name: "Portrait, softer",
+    new_workflow: true,
+    left_out: [],
+  });
   getWorkflowVersions.mockReset().mockResolvedValue(versionsAt(3));
   restoreWorkflowVersion.mockReset().mockResolvedValue(versionsAt(4));
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
+
+/**
+ * `GET /workflows/{id}/changes`, and what every write of the set answers:
+ * `waiting` null when nothing waits, `count` as the server counts it.
+ */
+function changesState(waiting = null, overrides = {}) {
+  const set = waiting ?? {};
+  const count =
+    (set.models?.length ?? 0) +
+    (set.loras?.length ?? 0) +
+    (set.skip_loras?.length ?? 0) +
+    Object.keys(set.stages ?? {}).length +
+    (set.values?.length ?? 0);
+  return {
+    workflow_id: KEY,
+    version: null,
+    waiting: count ? set : null,
+    count,
+    ran: null,
+    save: { open: true, reason: null },
+    save_as_new: { open: true, reason: null },
+    ran_save: null,
+    ...overrides,
+  };
+}
 
 /** A card with a history: `number` is its current version. */
 function versioned(number = 3, overrides = {}) {
@@ -808,7 +887,8 @@ describe("the models the panel names", () => {
       ],
       "flux-2-klein-9b-bf16.safetensors",
     );
-    expect(text).toContain("flux-2-klein-9b-bf16.safetensors");
+    expect(text).toContain("flux-2-klein-9b-bf16");
+    expect(text).not.toContain(".safetensors");
     expect(text).not.toContain("FLUX.2 Klein 9B");
   });
 
@@ -921,13 +1001,15 @@ describe("a checkpoint that will not load", () => {
     await settle(wrapper);
     expect(textOf(wrapper)).toContain("Checkpoint missing");
     const line = missingLine(wrapper);
-    expect(line.text).toBe(
-      "realvisXL_v5.safetensors is not installed in ComfyUI.",
-    );
+    // The name as a person looks for it; the whole recorded value is the tip.
+    expect(line.text).toBe("realvisXL_v5 is not installed in ComfyUI.");
     expect(line.tooltip).toBe("SDXL/realvisXL_v5.safetensors");
   });
 
-  it("offers the shelf's checkpoints and replaces the missing file with one", async () => {
+  it("makes a missing checkpoint a row that needs a pick, asked for by the graph's spelling", async () => {
+    // The recipe says `realvisXL_v5`, the graph loads the fp8 build of it:
+    // the missing file is still the Checkpoint row's, and it is the graph's
+    // spelling the server is asked about.
     preflightWorkflowRun.mockResolvedValue(
       missingFile("SDXL/realvisXL_v5_fp8.safetensors"),
     );
@@ -939,56 +1021,36 @@ describe("a checkpoint that will not load", () => {
         ],
       }),
     );
-    const fixed = detail({
-      card: named,
-      model_fixes: [
-        {
-          slot_label: "n1/ckpt_name",
-          was: "SDXL/realvisXL_v5_fp8.safetensors",
-          now: "realvisXL_v5_bf16.safetensors",
-          slot_kind: "checkpoint",
-        },
-      ],
-    });
-    setWorkflowModelFix.mockReset().mockResolvedValue(fixed);
     const { wrapper } = await mountWith([KEY], [named]);
     await settle(wrapper);
 
-    const picker = wrapper.find('[data-testid="wftab-replace-model"] select');
+    expect(readModelSwap).toHaveBeenCalledWith(KEY, {
+      replacing: "SDXL/realvisXL_v5_fp8.safetensors",
+      slotKind: "checkpoint",
+    });
+    expect(textOf(wrapper)).toContain("Checkpoint missing");
+    const picker = wrapper.find('[data-testid="wftab-pick-checkpoint"] select');
     expect(picker.text()).toContain("RealVis 5");
     // Held to the missing one's base model: nothing to warn of.
     expect(wrapper.find('[data-testid="wftab-replace-unmatched"]').exists()).toBe(
       false,
     );
-    preflightWorkflowRun.mockResolvedValue({ groups: [] });
+
     await picker.setValue("realvisXL_v5_bf16.safetensors");
-    await settle(wrapper);
-
-    // The graph's own spelling of the missing file, folders and all: that is
-    // what the server matches the stored graphs on.
-    expect(setWorkflowModelFix).toHaveBeenCalledWith(KEY, {
-      was: "SDXL/realvisXL_v5_fp8.safetensors",
-      now: "realvisXL_v5_bf16.safetensors",
-      slot_kind: "checkpoint",
-    });
-    expect(textOf(wrapper)).not.toContain("Checkpoint missing");
-    const row = wrapper.find('[data-testid="wftab-fixed-model"]');
-    expect(row.text()).toContain("realvisXL_v5_bf16.safetensors");
-    // A checkpoint's fix is the Checkpoint row's, never the VAE row's.
-    expect(wrapper.find('[data-testid="wftab-fixed-vae"]').exists()).toBe(false);
-    // The original, a hover away: the provenance the flag is there for.
-    expect(row.find("tooltip-stub").attributes("text")).toBe(
-      "Replaced. This workflow originally used realvisXL_v5_fp8.safetensors",
-    );
-
-    setWorkflowModelFix.mockResolvedValue(detail({ card: named }));
-    await row.find('[data-testid="wftab-undo-fix"]').trigger("click");
     await flush(wrapper);
-    expect(setWorkflowModelFix).toHaveBeenLastCalledWith(KEY, {
-      was: "SDXL/realvisXL_v5_fp8.safetensors",
-      now: null,
-      slot_kind: "checkpoint",
-    });
+    // A pick waits with the other changes: it is not written by itself.
+    expect(setWorkflowChanges).toHaveBeenCalledTimes(1);
+    expect(setWorkflowChanges.mock.calls[0][1].models).toEqual([
+      {
+        address: "core:n1/ckpt_name/ckpt_name",
+        filename: "realvisXL_v5_bf16.safetensors",
+      },
+    ]);
+    // Picked: the warning gives way to the saved value under the field.
+    expect(textOf(wrapper)).not.toContain("Checkpoint missing");
+    expect(wrapper.find('[data-testid="wftab-saved"]').text()).toContain(
+      "Saved: realvisXL_v5_fp8",
+    );
   });
 
   it("says so when the picker lists every checkpoint, none known to match", async () => {
@@ -1003,7 +1065,7 @@ describe("a checkpoint that will not load", () => {
       );
     const { wrapper } = await mountWith([KEY], [named]);
     await settle(wrapper);
-    expect(wrapper.find('[data-testid="wftab-replace-model"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="wftab-pick-checkpoint"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="wftab-replace-unmatched"]').text()).toContain(
       "is known to match it",
     );
@@ -1014,7 +1076,7 @@ describe("a checkpoint that will not load", () => {
     ["none_loadable", "is one this loader can load"],
     ["unread", "Could not read what could replace it"],
     [null, "Nothing on your shelf can replace it."],
-  ])("says why no checkpoint is offered (%s)", async (reason, text) => {
+  ])("says why a missing checkpoint has nothing to pick (%s)", async (reason, text) => {
     preflightWorkflowRun.mockResolvedValue(
       missingFile("SDXL/realvisXL_v5_fp8.safetensors"),
     );
@@ -1024,7 +1086,7 @@ describe("a checkpoint that will not load", () => {
       .mockImplementation(replacementsByKind({}, { checkpoint: reason }));
     const { wrapper } = await mountWith([KEY], [named]);
     await settle(wrapper);
-    expect(wrapper.find('[data-testid="wftab-replace-model"]').exists()).toBe(
+    expect(wrapper.find('[data-testid="wftab-pick-checkpoint"]').exists()).toBe(
       false,
     );
     expect(
@@ -1032,38 +1094,31 @@ describe("a checkpoint that will not load", () => {
     ).toContain(text);
   });
 
-  it("says the replacement is missing only when it is the file missing", async () => {
-    const fix = {
-      slot_label: "n1/ckpt_name",
-      was: "realvisXL_v5_fp8.safetensors",
-      now: "realvisXL_v5_bf16.safetensors",
-      slot_kind: "checkpoint",
-    };
+  it("shows the file an earlier replacement loads, with no mark and no way back to write", async () => {
+    // A replacement made before #1850 is still applied by the server. The
+    // row reads as the file the workflow now loads; "Replaced" is gone.
     getWorkflowCard.mockResolvedValue(
-      detail({ card: named, model_fixes: [fix] }),
+      detail({
+        card: named,
+        model_fixes: [
+          {
+            slot_label: "n1/ckpt_name",
+            was: "realvisXL_v5.safetensors",
+            now: "SDXL/realvisXL_v5_bf16.safetensors",
+            slot_kind: "checkpoint",
+          },
+        ],
+      }),
     );
-    readModelSwap.mockReset().mockResolvedValue({ checkpoints: [] });
-
-    preflightWorkflowRun.mockResolvedValue(
-      missingFile("SDXL/refiner.safetensors"),
-    );
-    let { wrapper } = await mountWith([KEY], [named]);
+    const { wrapper } = await mountWith([KEY], [named]);
     await settle(wrapper);
-    expect(textOf(wrapper)).toContain("Checkpoint missing");
-    expect(wrapper.find('[data-testid="wftab-fix-missing"]').exists()).toBe(
-      false,
-    );
-    wrapper.unmount();
-    mounted.pop();
-
-    preflightWorkflowRun.mockResolvedValue(
-      missingFile("SDXL/realvisXL_v5_bf16.safetensors"),
-    );
-    ({ wrapper } = await mountWith([KEY], [named]));
-    await settle(wrapper);
-    expect(wrapper.find('[data-testid="wftab-fix-missing"]').text()).toContain(
-      "Replaced by realvisXL_v5_bf16.safetensors, which is missing too.",
-    );
+    const row = wrapper.find('[data-testid="wftab-row-checkpoint"]');
+    expect(row.find(".wftab-value").text()).toBe("realvisXL_v5_bf16");
+    expect(textOf(wrapper)).not.toMatch(/Replaced|originally used/);
+    expect(readModelSwap).toHaveBeenCalledWith(KEY, {
+      replacing: "SDXL/realvisXL_v5_bf16.safetensors",
+      slotKind: "checkpoint",
+    });
   });
 
   it("offers no replacement for a file nobody can name", async () => {
@@ -1077,7 +1132,7 @@ describe("a checkpoint that will not load", () => {
     const { wrapper } = await mountWith([KEY], [unnamed]);
     await settle(wrapper);
     expect(readModelSwap).not.toHaveBeenCalled();
-    expect(wrapper.find('[data-testid="wftab-replace-model"]').exists()).toBe(
+    expect(wrapper.find('[data-testid="wftab-pick-checkpoint"]').exists()).toBe(
       false,
     );
   });
@@ -1095,9 +1150,7 @@ describe("a checkpoint that will not load", () => {
     const { wrapper } = await mountWith([KEY], [unnamed]);
     await settle(wrapper);
     const line = missingLine(wrapper);
-    expect(line.text).toBe(
-      "klein-9b-fp8.safetensors is not installed in ComfyUI.",
-    );
+    expect(line.text).toBe("klein-9b-fp8 is not installed in ComfyUI.");
     expect(line.tooltip).toBe("Flux/klein-9b-fp8.safetensors");
     expect(textOf(wrapper)).not.toContain("Not recorded");
   });
@@ -1124,7 +1177,8 @@ describe("a checkpoint that will not load", () => {
     const { wrapper } = await mountWith([KEY], [unnamed]);
     await settle(wrapper);
     expect(textOf(wrapper)).not.toContain("Checkpoint missing");
-    expect(textOf(wrapper)).toContain("pony.safetensors");
+    expect(textOf(wrapper)).toContain("pony");
+    expect(textOf(wrapper)).not.toContain(".safetensors");
     expect(textOf(wrapper)).not.toContain("SDXL/");
   });
 
@@ -1140,9 +1194,7 @@ describe("a checkpoint that will not load", () => {
     await settle(wrapper);
     const row = wrapper.find("[data-testid='wftab-row-checkpoint']");
     expect(row.find(".wftab-label").text()).toBe("Checkpoints");
-    expect(textOf(wrapper)).toContain(
-      "wan2.2_high.safetensors + wan2.2_low.safetensors",
-    );
+    expect(textOf(wrapper)).toContain("wan2.2_high + wan2.2_low");
   });
 
   it("counts two gone shelf loaders as two, though they read alike", async () => {
@@ -1167,13 +1219,13 @@ describe("a checkpoint that will not load", () => {
     await settle(wrapper);
     expect(textOf(wrapper)).toContain("Checkpoint missing");
     // Named, but not claimed uninstalled: nobody could ask.
-    expect(missingLine(wrapper).text).toBe("pony.safetensors");
+    expect(missingLine(wrapper).text).toBe("pony");
   });
 
   it("draws no warning before the card's detail has arrived", async () => {
     getWorkflowCard.mockReturnValue(new Promise(() => {}));
     const { wrapper } = await mountWith([KEY], [unnamed]);
-    expect(wrapper.find(".wftab-missing").exists()).toBe(false);
+    expect(wrapper.find(".wftab-warn").exists()).toBe(false);
   });
 
   it("says None in this workflow for a graph that loads no base model", async () => {
@@ -1308,7 +1360,7 @@ describe("a checkpoint that will not load", () => {
   });
 });
 
-describe("a VAE or text encoder that will not load (#1596)", () => {
+describe("a VAE or text encoder row (#1596, #1850)", () => {
   const withSupport = card({
     models: [
       { name: "realvisXL_v5", kind: "checkpoint", slot_label: "n1/ckpt_name" },
@@ -1336,210 +1388,94 @@ describe("a VAE or text encoder that will not load (#1596)", () => {
     expect(row(wrapper, "text_encoder").text()).toContain("t5xxl");
   });
 
-  it("offers the shelf's VAEs and replaces the missing one, and only that row", async () => {
-    preflightWorkflowRun.mockResolvedValue(
-      missing({ file: "SDXL/sdxl_vae_fp8.safetensors", folder: "vae" }),
-    );
+  it("is a picker whether or not its file is missing, each asked about once", async () => {
     getWorkflowCard.mockResolvedValue(detail({ card: withSupport }));
     readModelSwap.mockReset().mockImplementation(
       replacementsByKind({
-        checkpoint: [{ id: 1, filename: "other-ckpt.safetensors" }],
-        vae: [
-          { id: 7, filename: "sdxl_vae_bf16.safetensors", display_name: "SDXL VAE", via: "grouped" },
-          { id: 9, filename: "sdxl_vae_alt.safetensors", via: "declared" },
-          { id: 10, filename: "sdxl_vae_shelf.safetensors", loader: "PixlStashVAELoader" },
-        ],
-        text_encoder: [{ id: 8, filename: "t5xxl_bf16.safetensors" }],
+        vae: [{ id: 3, filename: "sdxl_vae_bf16.safetensors", via: "declared" }],
+        text_encoder: [{ id: 4, filename: "t5xxl_fp16.safetensors" }],
       }),
     );
-    const fix = {
-      slot_label: "n2/vae_name",
-      was: "SDXL/sdxl_vae_fp8.safetensors",
-      now: "sdxl_vae_bf16.safetensors",
-      slot_kind: "vae",
-    };
-    setWorkflowModelFix
-      .mockReset()
-      .mockResolvedValue(detail({ card: withSupport, model_fixes: [fix] }));
     const { wrapper } = await mountWith([KEY], [withSupport]);
     await settle(wrapper);
 
-    expect(textOf(wrapper)).toContain("VAE missing");
-    // Not the checkpoint's picker, and not the text encoder row.
-    expect(textOf(wrapper)).not.toContain("Checkpoint missing");
-    expect(wrapper.find('[data-testid="wftab-replace-model"]').exists()).toBe(false);
-    expect(row(wrapper, "text_encoder").text()).toContain("t5xxl");
-    // Asked for THIS file in a VAE slot: the server filters by what goes with
-    // the checkpoint and what the loader lists.
+    // One read per row, by the file the row loads and its slot kind.
+    expect(readModelSwap).toHaveBeenCalledTimes(3);
     expect(readModelSwap).toHaveBeenCalledWith(KEY, {
-      replacing: "SDXL/sdxl_vae_fp8.safetensors",
+      replacing: "sdxl_vae.safetensors",
       slotKind: "vae",
     });
-    expect(readModelSwap).toHaveBeenCalledTimes(1);
-    const picker = row(wrapper, "vae").find('[data-testid="wftab-replace-vae"] select');
-    expect(picker.text()).toContain("SDXL VAE");
-    // Only the file layout fits: said, not hidden.
-    expect(picker.text()).toContain("sdxl_vae_alt.safetensors (untested)");
-    // The loader cannot load it; a run swaps in ours, and the option says so.
-    expect(picker.text()).toContain(
-      "sdxl_vae_shelf.safetensors (through a PixlStash loader)",
-    );
-    expect(picker.text()).not.toContain("other-ckpt");
-    preflightWorkflowRun.mockResolvedValue({ groups: [] });
-    await picker.setValue("sdxl_vae_bf16.safetensors");
-    await settle(wrapper);
-
-    expect(setWorkflowModelFix).toHaveBeenCalledWith(KEY, {
-      was: "SDXL/sdxl_vae_fp8.safetensors",
-      now: "sdxl_vae_bf16.safetensors",
-      slot_kind: "vae",
-    });
-    const fixed = row(wrapper, "vae").find('[data-testid="wftab-fixed-vae"]');
-    expect(fixed.text()).toContain("sdxl_vae_bf16.safetensors");
-    expect(fixed.find("tooltip-stub").attributes("text")).toBe(
-      "Replaced. This workflow originally used sdxl_vae_fp8.safetensors",
-    );
-    // The Checkpoint row is untouched by a VAE fix.
-    expect(wrapper.find('[data-testid="wftab-fixed-model"]').exists()).toBe(false);
-
-    setWorkflowModelFix.mockResolvedValue(detail({ card: withSupport }));
-    await fixed.find('[data-testid="wftab-undo-vae"]').trigger("click");
-    await flush(wrapper);
-    expect(setWorkflowModelFix).toHaveBeenLastCalledWith(KEY, {
-      was: "SDXL/sdxl_vae_fp8.safetensors",
-      now: null,
-      slot_kind: "vae",
-    });
+    expect(textOf(wrapper)).not.toContain("VAE missing");
+    const vae = row(wrapper, "vae").find('[data-testid="wftab-pick-vae"] select');
+    // Never a bare filename, and untested says so.
+    expect(vae.text()).toContain("sdxl_vae_bf16 (untested)");
+    expect(vae.text()).not.toContain(".safetensors");
+    expect(
+      row(wrapper, "text_encoder")
+        .find('[data-testid="wftab-pick-text_encoder"] select')
+        .text(),
+    ).toContain("t5xxl_fp16");
+    // The checkpoint has nothing to offer here: its row stays text, unblamed.
+    expect(row(wrapper, "checkpoint").find("select").exists()).toBe(false);
+    expect(
+      wrapper.find('[data-testid="wftab-no-replacement-checkpoint"]').exists(),
+    ).toBe(false);
   });
 
-  it("shows a missing text encoder on its own row, and never a vision one", async () => {
+  it("warns on the missing one's own row, and never on a vision encoder's account", async () => {
     preflightWorkflowRun.mockResolvedValue(
       missing(
-        { file: "t5xxl_fp8.safetensors", folder: "text_encoders" },
+        { file: "t5/t5xxl_fp8.safetensors", folder: "text_encoders" },
         { file: "clip_vision_h.safetensors", folder: "clip_vision" },
       ),
     );
     getWorkflowCard.mockResolvedValue(detail({ card: withSupport }));
+    readModelSwap
+      .mockReset()
+      .mockImplementation(
+        replacementsByKind({}, { text_encoder: "none_go_with_it" }),
+      );
+    const { wrapper } = await mountWith([KEY], [withSupport]);
+    await settle(wrapper);
+    expect(row(wrapper, "text_encoder").text()).toContain("Text encoder missing");
+    expect(row(wrapper, "text_encoder").text()).toContain(
+      "t5xxl_fp8 is not installed in ComfyUI.",
+    );
+    expect(
+      wrapper.find('[data-testid="wftab-no-replacement-text_encoder"]').text(),
+    ).toContain("is known to work with this checkpoint");
+    expect(row(wrapper, "vae").text()).not.toContain("missing");
+    expect(textOf(wrapper)).not.toContain("clip_vision_h");
+    expect(readModelSwap).toHaveBeenCalledWith(KEY, {
+      replacing: "t5/t5xxl_fp8.safetensors",
+      slotKind: "text_encoder",
+    });
+  });
+
+  it("says a failed read on a missing row rather than showing nothing", async () => {
+    preflightWorkflowRun.mockResolvedValue(
+      missing({ file: "SDXL/sdxl_vae_fp8.safetensors", folder: "vae" }),
+    );
+    getWorkflowCard.mockResolvedValue(detail({ card: withSupport }));
+    readModelSwap.mockReset().mockRejectedValue(new Error("offline"));
+    const { wrapper } = await mountWith([KEY], [withSupport]);
+    await settle(wrapper);
+    expect(
+      wrapper.find('[data-testid="wftab-no-replacement-vae"]').text(),
+    ).toContain("Could not read what could replace it");
+  });
+
+  it("still reads the pickers when ComfyUI cannot be asked what is missing", async () => {
+    preflightWorkflowRun.mockRejectedValue(new Error("ComfyUI is down"));
+    getWorkflowCard.mockResolvedValue(detail({ card: withSupport }));
     readModelSwap.mockReset().mockImplementation(
-      replacementsByKind(
-        { text_encoder: [{ id: 8, filename: "t5xxl_bf16.safetensors" }] },
-      ),
+      replacementsByKind({
+        vae: [{ id: 3, filename: "sdxl_vae_bf16.safetensors" }],
+      }),
     );
     const { wrapper } = await mountWith([KEY], [withSupport]);
     await settle(wrapper);
-
-    const encoders = row(wrapper, "text_encoder");
-    expect(encoders.text()).toContain("Text encoder missing");
-    expect(encoders.text()).toContain("t5xxl_fp8.safetensors");
-    expect(textOf(wrapper)).not.toContain("clip_vision_h");
-    expect(
-      encoders.find('[data-testid="wftab-replace-text_encoder"] select').text(),
-    ).toContain("t5xxl_bf16.safetensors");
-    expect(row(wrapper, "vae").text()).toContain("sdxl_vae");
-  });
-});
-
-describe("a missing replacement shared by two slots (#1596)", () => {
-  it("undoes every original it replaced, by the replacement's name", async () => {
-    const withVaes = card({
-      models: [{ name: "sdxl_vae", kind: "vae", slot_label: "n2/vae_name" }],
-    });
-    const fixes = ["a", "b"].map((slot) => ({
-      slot_label: `${slot}/vae_name`,
-      was: `vae_${slot}_fp8.safetensors`,
-      now: "vae_bf16.safetensors",
-      slot_kind: "vae",
-    }));
-    preflightWorkflowRun.mockResolvedValue({
-      groups: [
-        {
-          reasons: [
-            {
-              code: "missing_models",
-              models: [{ file: "SDXL/vae_bf16.safetensors", folder: "vae" }],
-            },
-          ],
-        },
-      ],
-    });
-    getWorkflowCard.mockResolvedValue(
-      detail({ card: withVaes, model_fixes: fixes }),
-    );
-    readModelSwap.mockReset().mockImplementation(replacementsByKind({}));
-    setWorkflowModelFix
-      .mockReset()
-      .mockResolvedValue(detail({ card: withVaes }));
-    const { wrapper } = await mountWith([KEY], [withVaes]);
-    await settle(wrapper);
-    const undo = wrapper.find('[data-testid="wftab-undo-missing-vae"]');
-    expect(undo.attributes("aria-label")).toBe(
-      "Undo: load vae_a_fp8.safetensors and vae_b_fp8.safetensors again",
-    );
-    await undo.trigger("click");
-    await flush(wrapper);
-    expect(setWorkflowModelFix).toHaveBeenCalledWith(KEY, {
-      was: "SDXL/vae_bf16.safetensors",
-      now: null,
-      slot_kind: "vae",
-    });
-  });
-});
-
-describe("no replacement to offer (#1596)", () => {
-  it("says why instead of drawing an empty picker", async () => {
-    const withVae = card({
-      models: [
-        { name: "realvisXL_v5", kind: "checkpoint", slot_label: "n1/ckpt_name" },
-        { name: "sdxl_vae", kind: "vae", slot_label: "n2/vae_name" },
-      ],
-    });
-    preflightWorkflowRun.mockResolvedValue({
-      groups: [
-        {
-          reasons: [
-            {
-              code: "missing_models",
-              models: [{ file: "sdxl_vae_fp8.safetensors", folder: "vae" }],
-            },
-          ],
-        },
-      ],
-    });
-    getWorkflowCard.mockResolvedValue(detail({ card: withVae }));
-    readModelSwap
-      .mockReset()
-      .mockImplementation(replacementsByKind({}, { vae: "none_loadable" }));
-    const { wrapper } = await mountWith([KEY], [withVae]);
-    await settle(wrapper);
-    expect(wrapper.find('[data-testid="wftab-replace-vae"]').exists()).toBe(false);
-    expect(
-      wrapper.find('[data-testid="wftab-no-replacement-vae"]').text(),
-    ).toContain("not something this loader can load");
-  });
-
-  it("says a failed read rather than showing nothing", async () => {
-    const withVae = card({
-      models: [{ name: "sdxl_vae", kind: "vae", slot_label: "n2/vae_name" }],
-    });
-    preflightWorkflowRun.mockResolvedValue({
-      groups: [
-        {
-          reasons: [
-            {
-              code: "missing_models",
-              models: [{ file: "sdxl_vae_fp8.safetensors", folder: "vae" }],
-            },
-          ],
-        },
-      ],
-    });
-    getWorkflowCard.mockResolvedValue(detail({ card: withVae }));
-    readModelSwap.mockReset().mockRejectedValue(new Error("offline"));
-    const { wrapper } = await mountWith([KEY], [withVae]);
-    await settle(wrapper);
-    expect(
-      wrapper.find('[data-testid="wftab-no-replacement-vae"]').text(),
-    ).toContain("Could not read what could replace it just now.");
+    expect(wrapper.find('[data-testid="wftab-pick-vae"]').exists()).toBe(true);
   });
 });
 
@@ -1557,7 +1493,8 @@ describe("the default recipe (#1623)", () => {
     getWorkflowCard.mockResolvedValue(shown);
     const { wrapper } = await mountWith([KEY]);
     const text = textOf(wrapper);
-    expect(text).toContain("juggernautXL_v9.safetensors");
+    expect(text).toContain("juggernautXL_v9");
+    expect(text).not.toContain(".safetensors");
     expect(text).not.toContain("realvisXL_v5");
   });
 
@@ -1572,11 +1509,18 @@ describe("the default recipe (#1623)", () => {
     ].map(([address, filename]) => ({ address, kind: "checkpoint", filename }));
     getWorkflowCard.mockResolvedValue(shown);
     const { wrapper } = await mountWith([KEY]);
-    const row = wrapper.find("[data-testid='wftab-row-checkpoint']");
-    expect(row.find(".wftab-label").text()).toBe("Checkpoints");
-    expect(row.find(".wftab-value").text()).toBe(
-      "wan2.2_high.safetensors + wan2.2_low.safetensors",
+    // A row per loader, since a pick is one loader's (#1850): one label
+    // over them, each named by its file.
+    const rows = wrapper.findAll("[data-testid='wftab-row-checkpoint']");
+    expect(rows.map((row) => row.find(".wftab-value").text())).toEqual([
+      "wan2.2_high",
+      "wan2.2_low",
+      "wan2.2_low",
+    ]);
+    expect(wrapper.findAll(".wftab-label").map((label) => label.text())).toContain(
+      "Checkpoints",
     );
+    expect(rows[1].find(".wftab-label").exists()).toBe(false);
   });
 
   it("lists the default recipe's values as the defaults, not the card's", async () => {
@@ -1626,7 +1570,9 @@ describe("the DEFAULT RECIPE section (#1653)", () => {
       "LoRAs",
       "Parameters",
     ]);
-    expect(heads[0].find("[data-testid='wftab-clone-onto-set']").exists()).toBe(true);
+    expect(heads[0].find("[data-testid='wftab-use-set']").text()).toBe(
+      "Use a set…",
+    );
     expect(heads[1].find("[data-testid='wftab-edit-loras']").exists()).toBe(true);
     expect(textOf(wrapper)).not.toContain("In every picture");
   });
@@ -1919,9 +1865,13 @@ describe("the DEFAULT RECIPE section (#1653)", () => {
       withRecipe({ stages: { upscale: true, face_detailer: false } }),
     );
     const { wrapper } = await mountWith([KEY]);
+    const stages = wrapper.find("[data-testid='wftab-stages']");
+    expect(stages.text().replace(/\s+/g, " ")).toBe(
+      "Stages Upscale Face detailer",
+    );
     expect(
-      wrapper.find("[data-testid='wftab-stages'] .wftab-value").text().replace(/\s+/g, " "),
-    ).toBe("Upscale · Face detailer off");
+      stages.findAll("input[type='checkbox']").map((box) => box.element.checked),
+    ).toEqual([true, false]);
     expect(textOf(wrapper)).toContain("Off: most of its pictures ran without it.");
 
     getWorkflowCard.mockResolvedValue(withRecipe({ stages: {} }));
@@ -1935,17 +1885,22 @@ describe("the DEFAULT RECIPE section (#1653)", () => {
     shown.card.default_recipe.stage_details = { upscale: "Upscale model (4x-UltraSharp)" };
     getWorkflowCard.mockResolvedValue(shown);
     const { wrapper } = await mountWith([KEY]);
-    const stage = wrapper.find("[data-testid='wftab-stage-upscale']");
-    expect(stage.text()).toBe("Upscale");
-    expect(stage.find("tooltip-stub").attributes("text")).toBe(
-      "Upscale model (4x-UltraSharp)",
-    );
+    const stage = wrapper
+      .find("[data-testid='wftab-stage-upscale']")
+      .element.closest("label");
+    expect(stage.textContent.trim()).toBe("Upscale");
+    expect(
+      stage.querySelector("tooltip-stub").getAttribute("text"),
+    ).toBe("Upscale model (4x-UltraSharp)");
     // A stage that is only ever one thing carries no tip, and is named as
     // the Run popup names it.
-    expect(wrapper.find("[data-testid='wftab-stage-intermediate_save']").exists()).toBe(false);
+    const plain = wrapper
+      .find("[data-testid='wftab-stage-intermediate_save']")
+      .element.closest("label");
+    expect(plain.querySelector("tooltip-stub")).toBe(null);
     expect(
-      wrapper.find("[data-testid='wftab-stages'] .wftab-value").text().replace(/\s+/g, " "),
-    ).toBe("Upscale · Intermediate save");
+      wrapper.find("[data-testid='wftab-stages']").text().replace(/\s+/g, " "),
+    ).toBe(`Stages Upscale Intermediate save`);
   });
 
   it("offers Show N on the checkpoint only below the workflow's count", async () => {
@@ -2042,8 +1997,12 @@ describe("the DEFAULT RECIPE section (#1653)", () => {
     }));
     getWorkflowCard.mockResolvedValue(shown);
     const { wrapper } = await mountWith([KEY]);
-    const row = wrapper.find("[data-testid='wftab-row-checkpoint']");
-    expect(row.find(".wftab-yours").exists()).toBe(true);
+    // Per loader now: the mark is on the row of the file that was set.
+    const rows = wrapper.findAll("[data-testid='wftab-row-checkpoint']");
+    expect(rows.map((row) => row.find(".wftab-yours").exists())).toEqual([
+      false,
+      true,
+    ]);
   });
 
   it("lists neither of a two-loader pair as another checkpoint, and shows each", async () => {
@@ -2704,7 +2663,7 @@ describe("Open in ComfyUI", () => {
     configure();
     const { wrapper } = await mountWith([ID], [card({ id: ID })]);
     expect(openButton(wrapper).attributes("aria-label")).toBe(
-      "Open a copy in ComfyUI",
+      "Open in ComfyUI",
     );
   });
 
@@ -3132,6 +3091,14 @@ describe("the LoRA chain (#1478)", () => {
     return wrapper.find("[data-testid='wftab-edit-loras']");
   }
 
+  /** A row's strength: the field where it can be set, else the text. */
+  function strengthOf(row) {
+    const field = row.find("[data-testid='wftab-lora-strength']");
+    return field.exists()
+      ? field.element.value
+      : row.find(".wftab-chain-strength").text();
+  }
+
   it("lists a picture-less workflow's loaders in apply order, with the shelf count", async () => {
     // Nothing to count, so nothing is shared and nothing changes: the rows
     // are the workflow's own chain.
@@ -3141,7 +3108,7 @@ describe("the LoRA chain (#1478)", () => {
     expect(
       rows.map((row) => [
         row.find(".wftab-chain-name").text(),
-        row.find(".wftab-chain-strength").text(),
+        strengthOf(row),
       ]),
     ).toEqual([
       ["lightning-8step", "1.00"],
@@ -3161,7 +3128,7 @@ describe("the LoRA chain (#1478)", () => {
     // Both verbs in one head overflowed a narrow inspector sideways.
     const { wrapper } = await mountChain();
     const models = wrapper.find("[data-testid='wftab-default-recipe'] .wftab-sec-head");
-    expect(models.find("[data-testid='wftab-clone-onto-set']").exists()).toBe(true);
+    expect(models.find("[data-testid='wftab-use-set']").exists()).toBe(true);
     expect(models.find("[data-testid='wftab-edit-loras']").exists()).toBe(false);
     const loras = wrapper.find("[data-testid='wftab-loras']");
     expect(loras.find(".wftab-sec-head [data-testid='wftab-edit-loras']").exists()).toBe(true);
@@ -3208,7 +3175,7 @@ describe("the LoRA chain (#1478)", () => {
     expect(
       rows.map((row) => [
         row.find(".wftab-chain-name").text(),
-        row.find(".wftab-chain-strength").text(),
+        strengthOf(row),
       ]),
     ).toEqual([
       ["Lightning", "1.00"],
@@ -3565,5 +3532,970 @@ describe("the selected workflow's failed run", () => {
     useRunDialogStore().runFailed(OTHER, { promptId: "p-1", message, stopped: false });
     await flush(wrapper);
     expect(block(wrapper).exists()).toBe(false);
+  });
+});
+
+// ── The tab as the editor (#1850 part 3) ────────────────────────────────────
+//
+// What can silently invert here: an edit written straight to the workflow
+// instead of joining the one set of unsaved changes; a row put back to its
+// saved value kept in the set as a change; the first of two quick edits
+// drawing over the second; and a rail that goes blank, or loses a notes draft,
+// when the workflow is saved from somewhere else.
+
+describe("the tab as the editor (#1850)", () => {
+  const ADDRESS = "core:m1/ckpt_name";
+  const JUGGERNAUT = {
+    id: 7,
+    filename: "SDXL/juggernautXL_v9.safetensors",
+    display_name: "Juggernaut XL 9",
+  };
+
+  const editorOpts = {
+    attachTo: document.body,
+    global: {
+      stubs: {
+        ...globalOpts.global.stubs,
+        EditLorasDialog: {
+          name: "EditLorasDialog",
+          props: ["open", "workflowId", "cardName", "pictureCount", "dropLora"],
+          emits: ["close", "apply", "overwritten"],
+          template: "<div class='eld-stub' />",
+        },
+      },
+    },
+  };
+
+  const bar = (wrapper) => wrapper.find('[data-testid="wftab-draft"]');
+  const count = (wrapper) =>
+    wrapper.find('[data-testid="wftab-draft-count"]').text().replace(/\s+/g, " ");
+  const lastSet = () => setWorkflowChanges.mock.calls.at(-1)[1];
+  const runLabel = (wrapper) =>
+    wrapper.find(".wftab-foot .app-btn--primary").text();
+  const picker = (wrapper) =>
+    wrapper.find('[data-testid="wftab-pick-checkpoint"] select');
+  const loraRowsOf = (wrapper) =>
+    wrapper.findAll("[data-testid='wftab-default-lora']");
+
+  /** A card whose checkpoint is named as the server names one: no extension. */
+  const plain = (overrides = {}) =>
+    card({
+      models: [{ name: "realvisXL_v5", kind: "checkpoint", slot_label: "m1" }],
+      ...overrides,
+    });
+
+  /** Mounted in the page, so focus can be followed. */
+  async function mountEditor(cards = [plain()], keys = [KEY]) {
+    const store = useWorkflowsStore();
+    store.cards = cards;
+    store.selectedKeys = keys;
+    listWorkflowCards.mockResolvedValue({ cards, one_offs: 0, hidden: 0 });
+    const wrapper = mount(WorkflowTab, editorOpts);
+    mounted.push(wrapper);
+    await flush(wrapper);
+    return { wrapper, store };
+  }
+
+  /** A picture-less workflow: its LoRA rows are the graph's own loaders. */
+  function chainDetail(overrides = {}) {
+    const shown = detail({ card: plain(), ...overrides });
+    shown.card.default_recipe.sampled = 0;
+    return shown;
+  }
+
+  beforeEach(() => {
+    readModelSwap
+      .mockReset()
+      .mockImplementation(replacementsByKind({ checkpoint: [JUGGERNAUT] }));
+    getWorkflowCard.mockResolvedValue(detail({ card: plain() }));
+    getLoraSummary.mockResolvedValue(loraSummary({ pictures: 0, varying: [] }));
+  });
+
+  describe("a model row", () => {
+    it("joins the unsaved changes with a pick, and writes nothing to the workflow", async () => {
+      const { wrapper } = await mountEditor();
+      await settle(wrapper);
+      expect(bar(wrapper).exists()).toBe(false);
+      expect(runLabel(wrapper)).toBe("Run…");
+      // Not missing, and still a picker: the saved file is its first option.
+      expect(textOf(wrapper)).not.toContain("Checkpoint missing");
+      expect(picker(wrapper).findAll("option").map((o) => o.text())).toEqual([
+        "realvisXL_v5",
+        "Juggernaut XL 9",
+      ]);
+
+      listWorkflowCards.mockClear();
+      await picker(wrapper).setValue(JUGGERNAUT.filename);
+      await flush(wrapper);
+
+      expect(setWorkflowChanges).toHaveBeenCalledTimes(1);
+      expect(setWorkflowChanges.mock.calls[0][0]).toBe(KEY);
+      // This tab's own write is not echoed back over the socket, so the grid
+      // is read again here: that is what puts Unsaved on the card.
+      expect(listWorkflowCards).toHaveBeenCalled();
+      expect(lastSet()).toEqual({
+        models: [{ address: ADDRESS, filename: JUGGERNAUT.filename }],
+        loras: [],
+        skip_loras: [],
+        stages: {},
+        values: [],
+      });
+      // Nothing saved, nothing made: only the set.
+      expect(saveWorkflow).not.toHaveBeenCalled();
+      expect(patchWorkflowCard).not.toHaveBeenCalled();
+
+      const row = wrapper.find('[data-testid="wftab-row-checkpoint"]');
+      expect(row.find('[data-testid="wftab-edited"]').text()).toBe("Edited");
+      expect(
+        row.find('[data-testid="wftab-saved"]').text().replace(/\s+/g, " "),
+      ).toBe("Saved: realvisXL_v5");
+      expect(picker(wrapper).element.value).toBe(JUGGERNAUT.filename);
+      expect(count(wrapper)).toBe("1 unsaved change");
+      expect(runLabel(wrapper)).toBe("Run with changes…");
+    });
+
+    it("leaves the set when it is put back, by the reset or by picking the saved file", async () => {
+      const { wrapper } = await mountEditor();
+      await settle(wrapper);
+      await picker(wrapper).setValue(JUGGERNAUT.filename);
+      await flush(wrapper);
+
+      const reset = wrapper.find('[data-testid="wftab-reset-model"]');
+      expect(reset.attributes("aria-label")).toBe(
+        "Put Checkpoint back to realvisXL_v5",
+      );
+      await reset.trigger("click");
+      await flush(wrapper);
+      // Removed, not kept as a change that changes nothing.
+      expect(lastSet().models).toEqual([]);
+      expect(bar(wrapper).exists()).toBe(false);
+      expect(wrapper.find('[data-testid="wftab-edited"]').exists()).toBe(false);
+
+      await picker(wrapper).setValue(JUGGERNAUT.filename);
+      await flush(wrapper);
+      await picker(wrapper).setValue("");
+      await flush(wrapper);
+      expect(lastSet().models).toEqual([]);
+      expect(bar(wrapper).exists()).toBe(false);
+    });
+
+    it("draws what already waits on the server when the workflow is opened", async () => {
+      waitingOnServer = {
+        models: [{ address: ADDRESS, filename: JUGGERNAUT.filename }],
+        stages: { upscale: true },
+      };
+      const { wrapper } = await mountEditor();
+      await settle(wrapper);
+      expect(getWorkflowChanges).toHaveBeenCalledWith(KEY);
+      expect(count(wrapper)).toBe("2 unsaved changes");
+      expect(picker(wrapper).element.value).toBe(JUGGERNAUT.filename);
+      expect(wrapper.find('[data-testid="wftab-edited"]').exists()).toBe(true);
+      expect(setWorkflowChanges).not.toHaveBeenCalled();
+    });
+
+    it("is text on a shelf loader, whose value is a shelf row and not a file", async () => {
+      const shown = detail();
+      shown.card.default_recipe.models = [
+        {
+          address: "core:m1/checkpoint_id",
+          kind: "checkpoint",
+          filename: "41",
+          shelf_filename: "SDXL/realvisXL_v5.safetensors",
+          provenance: "best",
+        },
+      ];
+      getWorkflowCard.mockResolvedValue(shown);
+      const { wrapper } = await mountEditor();
+      await settle(wrapper);
+      expect(readModelSwap).not.toHaveBeenCalled();
+      expect(picker(wrapper).exists()).toBe(false);
+      expect(
+        wrapper.find('[data-testid="wftab-row-checkpoint"] .wftab-value').text(),
+      ).toBe("realvisXL_v5");
+      // And a set is not handed a row it cannot fill.
+      expect(
+        wrapper.findComponent({ name: "WorkflowUseSetMenu" }).props("models"),
+      ).toEqual([]);
+    });
+
+    it("refuses an edit while what waits could not be read, so nothing waiting is replaced", async () => {
+      getWorkflowChanges.mockReset().mockRejectedValue(new Error("offline"));
+      const { wrapper } = await mountEditor();
+      await settle(wrapper);
+      getWorkflowChanges.mockClear();
+      await picker(wrapper).setValue(JUGGERNAUT.filename);
+      await flush(wrapper);
+      expect(setWorkflowChanges).not.toHaveBeenCalled();
+      expect(useNoticeStore().notices.at(-1).level).toBe("error");
+      // Asked again, so the next try can work.
+      expect(getWorkflowChanges).toHaveBeenCalledWith(KEY);
+    });
+  });
+
+  describe("Use a set…", () => {
+    it("is handed the rows a set may fill, and fills them as unsaved changes", async () => {
+      const { wrapper } = await mountEditor();
+      await settle(wrapper);
+      const menu = wrapper.findComponent({ name: "WorkflowUseSetMenu" });
+      expect(menu.props("workflowId")).toBe(KEY);
+      expect(menu.props("models")).toEqual([
+        { address: ADDRESS, filename: "realvisXL_v5.safetensors" },
+      ]);
+
+      menu.vm.$emit("use", {
+        name: "Pony stack",
+        models: [
+          { address: ADDRESS, filename: "pony/ponyV6.safetensors" },
+          // Not a row of this workflow: never written.
+          { address: "core:zz/vae_name", filename: "x.safetensors" },
+        ],
+      });
+      await flush(wrapper);
+
+      expect(lastSet().models).toEqual([
+        { address: ADDRESS, filename: "pony/ponyV6.safetensors" },
+      ]);
+      expect(saveWorkflow).not.toHaveBeenCalled();
+      // A pick the shelf read did not list is still what the field shows.
+      expect(picker(wrapper).element.value).toBe("pony/ponyV6.safetensors");
+      expect(
+        picker(wrapper).findAll("option").map((o) => o.text()),
+      ).toContain("ponyV6");
+      expect(count(wrapper)).toBe("1 unsaved change");
+    });
+
+    it("opens on the workflow the selection bar asked for", async () => {
+      const { wrapper, store } = await mountEditor();
+      await settle(wrapper);
+      useSidebarStore().workflowInspectorOpen = false;
+      store.requestUseSet(KEY);
+      await flush(wrapper);
+      expect(useSetOpened).toHaveBeenCalledWith(KEY);
+      expect(useSidebarStore().workflowInspectorOpen).toBe(true);
+      // One-shot: taken, so it does not open again by itself.
+      expect(store.useSetKey).toBe("");
+    });
+  });
+
+  describe("the stages", () => {
+    const box = (wrapper, name) =>
+      wrapper.find(`[data-testid="wftab-stage-${name}"]`);
+    const mark = (wrapper) =>
+      wrapper.find('[data-testid="wftab-stages-edited"]');
+
+    it("are checkboxes: a toggle joins the changes, and back again leaves them", async () => {
+      const { wrapper } = await mountEditor();
+      expect(box(wrapper, "upscale").element.checked).toBe(false);
+      expect(mark(wrapper).exists()).toBe(false);
+
+      await box(wrapper, "upscale").setValue(true);
+      await flush(wrapper);
+      expect(lastSet().stages).toEqual({ upscale: true });
+      expect(mark(wrapper).text()).toBe("Edited");
+      expect(count(wrapper)).toBe("1 unsaved change");
+
+      await box(wrapper, "upscale").setValue(false);
+      await flush(wrapper);
+      expect(lastSet().stages).toEqual({});
+      expect(mark(wrapper).exists()).toBe(false);
+      expect(bar(wrapper).exists()).toBe(false);
+    });
+  });
+
+  describe("a LoRA row", () => {
+    const strength = (row) => row.find("[data-testid='wftab-lora-strength']");
+
+    beforeEach(() => {
+      getWorkflowCard.mockResolvedValue(chainDetail());
+    });
+
+    it("sets a loader's strength where it is read, and the saved one puts it back", async () => {
+      const { wrapper } = await mountEditor();
+      const neon = () => loraRowsOf(wrapper)[1];
+      expect(strength(neon()).element.value).toBe("0.85");
+      expect(strength(neon()).attributes("aria-label")).toBe(
+        "Strength of neon-rain-v2",
+      );
+
+      await strength(neon()).setValue("0.5");
+      await strength(neon()).trigger("change");
+      await flush(wrapper);
+      expect(lastSet().loras).toEqual([
+        {
+          node_id: "22",
+          field: "lora_name",
+          sha256: "s2",
+          strength_model: 0.5,
+          strength_clip: 0.5,
+        },
+      ]);
+      expect(neon().find('[data-testid="wftab-lora-edited"]').text()).toBe(
+        "Edited",
+      );
+      expect(
+        neon().find('[data-testid="wftab-lora-saved"]').text().replace(/\s+/g, " "),
+      ).toBe("Saved: 0.85");
+
+      await neon().find('[data-testid="wftab-reset-strength"]').trigger("click");
+      await flush(wrapper);
+      expect(lastSet().loras).toEqual([]);
+      expect(bar(wrapper).exists()).toBe(false);
+    });
+
+    it("puts the field back, and writes nothing, for a strength that is not one", async () => {
+      const { wrapper } = await mountEditor();
+      const field = strength(loraRowsOf(wrapper)[1]);
+      for (const typed of ["", "11", "abc"]) {
+        field.element.value = typed;
+        await field.trigger("change");
+        await flush(wrapper);
+        expect(field.element.value).toBe("0.85");
+      }
+      expect(setWorkflowChanges).not.toHaveBeenCalled();
+    });
+
+    it("removes a loader with ×, keeps its row until the save, and moves focus with the control", async () => {
+      const { wrapper } = await mountEditor();
+      const film = () => loraRowsOf(wrapper)[2];
+      const remove = film().find('[data-testid="wftab-lora-remove"]');
+      expect(remove.attributes("aria-label")).toBe("Remove film-grain-35mm");
+
+      await remove.trigger("click");
+      await flush(wrapper);
+      expect(lastSet().skip_loras).toEqual([
+        { node_id: "31", field: "lora_name" },
+      ]);
+      expect(loraRowsOf(wrapper)).toHaveLength(4);
+      expect(film().find('[data-testid="wftab-lora-removed"]').text()).toBe(
+        "Removed",
+      );
+      expect(film().find("s").text()).toBe("film-grain-35mm");
+      expect(strength(film()).exists()).toBe(false);
+      const putBack = film().find('[data-testid="wftab-lora-put-back"]');
+      expect(putBack.attributes("aria-label")).toBe("Put film-grain-35mm back");
+      // × left with the row's state: focus is on what took its place.
+      expect(document.activeElement).toBe(putBack.element);
+
+      await putBack.trigger("click");
+      await flush(wrapper);
+      expect(lastSet().skip_loras).toEqual([]);
+      expect(film().find("s").exists()).toBe(false);
+      expect(document.activeElement).toBe(
+        film().find('[data-testid="wftab-lora-remove"]').element,
+      );
+    });
+
+    it("drops a waiting strength when its loader is removed: a slot is set or removed, never both", async () => {
+      const { wrapper } = await mountEditor();
+      const neon = () => loraRowsOf(wrapper)[1];
+      await strength(neon()).setValue("0.5");
+      await strength(neon()).trigger("change");
+      await flush(wrapper);
+      await neon().find('[data-testid="wftab-lora-remove"]').trigger("click");
+      await flush(wrapper);
+      expect(lastSet().loras).toEqual([]);
+      expect(lastSet().skip_loras).toEqual([
+        { node_id: "22", field: "lora_name" },
+      ]);
+      expect(count(wrapper)).toBe("1 unsaved change");
+    });
+
+    it("can remove a loader the shelf does not know, but not set its strength", async () => {
+      // A strength change names the shelf LoRA the loader holds; this one
+      // has none to name.
+      const { wrapper } = await mountEditor();
+      const hair = loraRowsOf(wrapper)[3];
+      expect(strength(hair).exists()).toBe(false);
+      expect(hair.find(".wftab-chain-strength").text()).toBe("0.60");
+      expect(hair.find('[data-testid="wftab-lora-remove"]').exists()).toBe(true);
+    });
+  });
+
+  describe("the bar", () => {
+    const WAITING = {
+      models: [{ address: ADDRESS, filename: JUGGERNAUT.filename }],
+    };
+    const save = (wrapper) => wrapper.find('[data-testid="wftab-save"]');
+    const saveAsNew = (wrapper) =>
+      wrapper.find('[data-testid="wftab-save-as-new"]');
+    const runButton = (wrapper) =>
+      wrapper.find(".wftab-foot .app-btn--primary").element;
+
+    it("says how many changes wait, never which, with the two verbs", async () => {
+      waitingOnServer = { ...WAITING, stages: { upscale: true, face_detailer: true } };
+      const { wrapper } = await mountEditor();
+      expect(count(wrapper)).toBe("3 unsaved changes");
+      expect(bar(wrapper).text()).not.toContain("juggernaut");
+      expect(save(wrapper).text()).toBe("Save");
+      expect(saveAsNew(wrapper).text()).toBe("Save as new…");
+      // Neutral: Run… stays the one amber button on the surface.
+      expect(save(wrapper).classes()).toContain("app-btn--secondary");
+      expect(wrapper.findAll(".app-btn--primary")).toHaveLength(1);
+    });
+
+    it("saves what waits over the workflow, then reads the rail again without blanking it", async () => {
+      waitingOnServer = { ...WAITING };
+      const { wrapper } = await mountEditor();
+      await settle(wrapper);
+      getWorkflowCard.mockClear();
+      saveWorkflow.mockImplementation(() => {
+        waitingOnServer = null;
+        return Promise.resolve({ workflow_id: KEY, version: 2, left_out: [] });
+      });
+      const slow = held();
+      getWorkflowCard.mockReturnValue(slow.promise);
+
+      await save(wrapper).trigger("click");
+      await flush(wrapper);
+
+      expect(saveWorkflow).toHaveBeenCalledTimes(1);
+      // The version the changes were read against goes with it (null here: an
+      // automatic workflow never saved over), so a workflow changed since is
+      // refused by the server.
+      expect(saveWorkflow).toHaveBeenCalledWith(KEY, { version: null });
+      expect(bar(wrapper).exists()).toBe(false);
+      expect(document.activeElement).toBe(runButton(wrapper));
+      expect(useNoticeStore().notices.at(-1).text).toBe(
+        "Saved as version 2. The version menu takes it back.",
+      );
+      // The rows are read again in place: the panel never says "Reading…".
+      expect(getWorkflowCard).toHaveBeenCalledWith(KEY);
+      expect(textOf(wrapper)).not.toContain("Reading its default recipe");
+      expect(wrapper.find('[data-testid="wftab-row-checkpoint"]').exists()).toBe(
+        true,
+      );
+      slow.release(detail());
+      await flush(wrapper);
+    });
+
+    it("says a refused save in the bar, in the server's words, and reads the verbs again", async () => {
+      waitingOnServer = { ...WAITING };
+      const { wrapper } = await mountEditor();
+      getWorkflowChanges.mockClear();
+      saveWorkflow.mockRejectedValue({
+        response: {
+          status: 409,
+          data: { detail: "This workflow has changed since these changes were made." },
+        },
+      });
+      await save(wrapper).trigger("click");
+      await flush(wrapper);
+      const error = wrapper.find('[data-testid="wftab-draft-error"]');
+      expect(error.attributes("role")).toBe("alert");
+      expect(error.text()).toBe(
+        "This workflow has changed since these changes were made.",
+      );
+      // Still waiting: a refusal discards nothing.
+      expect(count(wrapper)).toBe("1 unsaved change");
+      expect(getWorkflowChanges).toHaveBeenCalledWith(KEY);
+    });
+
+    it("draws no dead button for a verb the server closed: its reason is said instead", async () => {
+      waitingOnServer = { ...WAITING };
+      const reason =
+        "A change of checkpoint is saved as a new workflow, so this one keeps its pictures.";
+      getWorkflowChanges.mockImplementation(() =>
+        Promise.resolve(
+          changesState(waitingOnServer, { save: { open: false, reason } }),
+        ),
+      );
+      const { wrapper } = await mountEditor();
+      expect(save(wrapper).exists()).toBe(false);
+      expect(saveAsNew(wrapper).exists()).toBe(true);
+      expect(
+        wrapper.findAll('[data-testid="wftab-draft-reason"]').map((p) => p.text()),
+      ).toEqual([reason]);
+    });
+
+    it("says one sentence once when both verbs are closed for the same reason", async () => {
+      waitingOnServer = { ...WAITING };
+      const reason = "ComfyUI is not answering.";
+      getWorkflowChanges.mockImplementation(() =>
+        Promise.resolve(
+          changesState(waitingOnServer, {
+            save: { open: false, reason },
+            save_as_new: { open: false, reason },
+          }),
+        ),
+      );
+      const { wrapper } = await mountEditor();
+      expect(save(wrapper).exists()).toBe(false);
+      expect(saveAsNew(wrapper).exists()).toBe(false);
+      expect(wrapper.findAll('[data-testid="wftab-draft-reason"]')).toHaveLength(1);
+      // Discard is always there.
+      expect(wrapper.find('[data-testid="wftab-discard"]').exists()).toBe(true);
+    });
+
+    it("asks Save as new… its one question, the name, and selects the workflow it makes", async () => {
+      waitingOnServer = { ...WAITING };
+      const made = card({ id: OTHER, name: "Portrait, softer" });
+      const { wrapper, store } = await mountEditor();
+      await saveAsNew(wrapper).trigger("click");
+      await flush(wrapper);
+
+      const name = wrapper.find('[data-testid="wftab-new-name"]');
+      expect(document.activeElement).toBe(name.element);
+      expect(name.element.value).toBe("");
+      const confirm = () =>
+        wrapper.find('[data-testid="wftab-save-as-new-confirm"]');
+      // No name, nothing to press.
+      expect(confirm().attributes("disabled")).toBeDefined();
+
+      // Back: the two verbs again, nothing written.
+      await wrapper.find('[data-testid="wftab-new-name-back"]').trigger("click");
+      await flush(wrapper);
+      expect(name.exists() && wrapper.find('[data-testid="wftab-new-name"]').exists()).toBe(false);
+      expect(document.activeElement).toBe(saveAsNew(wrapper).element);
+      expect(saveWorkflowAsNew).not.toHaveBeenCalled();
+
+      await saveAsNew(wrapper).trigger("click");
+      await wrapper.find('[data-testid="wftab-new-name"]').setValue("  Portrait, softer ");
+      listWorkflowCards.mockResolvedValue({
+        cards: [card(), made],
+        one_offs: 0,
+        hidden: 0,
+      });
+      saveWorkflowAsNew.mockImplementation(() => {
+        waitingOnServer = null;
+        return Promise.resolve({
+          workflow_id: OTHER,
+          name: "Portrait, softer",
+          new_workflow: true,
+          left_out: [],
+        });
+      });
+      await confirm().trigger("click");
+      await flush(wrapper);
+      await flush(wrapper);
+
+      expect(saveWorkflowAsNew).toHaveBeenCalledWith(KEY, {
+        name: "Portrait, softer",
+      });
+      expect(saveWorkflow).not.toHaveBeenCalled();
+      expect(store.selectedKeys).toEqual([OTHER]);
+      expect(useNoticeStore().notices.at(-1).text).toBe(
+        "Saved as a new workflow, Portrait, softer.",
+      );
+    });
+
+    it("takes Enter in the name field as Save as new, and Escape as Back", async () => {
+      waitingOnServer = { ...WAITING };
+      const { wrapper } = await mountEditor();
+      await saveAsNew(wrapper).trigger("click");
+      await flush(wrapper);
+      const name = () => wrapper.find('[data-testid="wftab-new-name"]');
+
+      await name().trigger("keydown", { key: "Escape" });
+      await flush(wrapper);
+      expect(name().exists()).toBe(false);
+      expect(saveWorkflowAsNew).not.toHaveBeenCalled();
+
+      await saveAsNew(wrapper).trigger("click");
+      await name().setValue("Softer");
+      await name().trigger("keydown", { key: "Enter" });
+      await flush(wrapper);
+      expect(saveWorkflowAsNew).toHaveBeenCalledWith(KEY, { name: "Softer" });
+    });
+
+    it("says which loaders a save left out because they hold a person's LoRA", async () => {
+      waitingOnServer = { ...WAITING };
+      const { wrapper } = await mountEditor();
+      saveWorkflow.mockImplementation(() => {
+        waitingOnServer = null;
+        return Promise.resolve({
+          workflow_id: KEY,
+          version: 2,
+          left_out: [{ node_id: "9", file: "ada.safetensors" }],
+        });
+      });
+      await save(wrapper).trigger("click");
+      await flush(wrapper);
+      expect(useNoticeStore().notices.at(-1).text).toContain(
+        "1 loader holding a person's LoRA was left out",
+      );
+    });
+
+    it("discards without asking, and puts focus on Run…", async () => {
+      waitingOnServer = { ...WAITING };
+      const { wrapper } = await mountEditor();
+      await wrapper.find('[data-testid="wftab-discard"]').trigger("click");
+      await flush(wrapper);
+      expect(discardWorkflowChanges).toHaveBeenCalledTimes(1);
+      expect(discardWorkflowChanges).toHaveBeenCalledWith(KEY);
+      expect(wrapper.findComponent({ name: "ConfirmDialog" }).exists()).toBe(false);
+      expect(bar(wrapper).exists()).toBe(false);
+      expect(runLabel(wrapper)).toBe("Run…");
+      expect(document.activeElement).toBe(runButton(wrapper));
+    });
+
+    it("says Open in ComfyUI opens the saved workflow while changes wait, and not otherwise", async () => {
+      useFilterStore().comfyuiUrl = "http://127.0.0.1:8188";
+      getPixlstashNode.mockResolvedValue({ can_open_workflows: true });
+      const { wrapper } = await mountEditor();
+      const line = () => wrapper.find('[data-testid="wftab-open-unsaved"]');
+      expect(line().exists()).toBe(false);
+      await wrapper.find('[data-testid="wftab-stage-upscale"]').setValue(true);
+      await flush(wrapper);
+      expect(line().text().replace(/\s+/g, " ")).toBe(
+        "Open in ComfyUI opens the saved workflow. The unsaved changes are not in it until they are saved.",
+      );
+      expect(
+        wrapper.find('[data-testid="wftab-open-comfyui"]').attributes("aria-describedby"),
+      ).toBe("wftab-open-unsaved");
+    });
+  });
+
+  describe("two edits in a hurry", () => {
+    it("never lets the first write's answer draw over the second edit", async () => {
+      const first = held();
+      const second = held();
+      const { wrapper } = await mountEditor();
+      await settle(wrapper);
+      setWorkflowChanges
+        .mockImplementationOnce(() => first.promise)
+        .mockImplementationOnce(() => second.promise);
+
+      await wrapper.find('[data-testid="wftab-stage-upscale"]').setValue(true);
+      await wrapper.find('[data-testid="wftab-stage-face_detailer"]').setValue(true);
+      await flush(wrapper);
+      // One write on the wire: the second edit waits behind it.
+      expect(setWorkflowChanges).toHaveBeenCalledTimes(1);
+      expect(count(wrapper)).toBe("2 unsaved changes");
+
+      // The first answer, which knows of one change only, lands while the
+      // second write is still out: the rail goes on showing both.
+      first.release(changesState({ stages: { upscale: true } }));
+      await flush(wrapper);
+      expect(setWorkflowChanges).toHaveBeenCalledTimes(2);
+      expect(lastSet().stages).toEqual({ upscale: true, face_detailer: true });
+      expect(count(wrapper)).toBe("2 unsaved changes");
+      expect(
+        wrapper.find('[data-testid="wftab-stage-face_detailer"]').element.checked,
+      ).toBe(true);
+
+      second.release(
+        changesState({ stages: { upscale: true, face_detailer: true } }),
+      );
+      await flush(wrapper);
+      expect(count(wrapper)).toBe("2 unsaved changes");
+    });
+
+    it("does not let a late read of one workflow wipe what waits on the next", async () => {
+      // A's read is still out when B is selected, and lands after B's.
+      const slow = held();
+      const other = plain({ id: OTHER, name: "Other" });
+      getWorkflowCard.mockImplementation((key) =>
+        Promise.resolve(detail({ card: key === OTHER ? other : plain() })),
+      );
+      getWorkflowChanges.mockImplementation((key) =>
+        key === KEY
+          ? slow.promise
+          : Promise.resolve(changesState({ stages: { face_detailer: true } })),
+      );
+      const { wrapper, store } = await mountEditor([plain(), other]);
+      store.selectedKeys = [OTHER];
+      await flush(wrapper);
+      expect(count(wrapper)).toBe("1 unsaved change");
+
+      slow.release(changesState({ stages: { upscale: true } }));
+      await flush(wrapper);
+      // B's own change, and none of A's.
+      expect(count(wrapper)).toBe("1 unsaved change");
+      expect(
+        wrapper.find('[data-testid="wftab-stage-face_detailer"]').element.checked,
+      ).toBe(true);
+      expect(
+        wrapper.find('[data-testid="wftab-stage-upscale"]').element.checked,
+      ).toBe(false);
+    });
+
+    it("does not draw the last workflow's changes while the next one's are being read", async () => {
+      const other = plain({ id: OTHER, name: "Other" });
+      getWorkflowCard.mockImplementation((key) =>
+        Promise.resolve(detail({ card: key === OTHER ? other : plain() })),
+      );
+      getWorkflowChanges.mockImplementation((key) =>
+        key === OTHER
+          ? new Promise(() => {})
+          : Promise.resolve(changesState({ stages: { upscale: true } })),
+      );
+      const { wrapper, store } = await mountEditor([plain(), other]);
+      expect(count(wrapper)).toBe("1 unsaved change");
+
+      store.selectedKeys = [OTHER];
+      await flush(wrapper);
+      expect(bar(wrapper).exists()).toBe(false);
+      expect(
+        wrapper.find('[data-testid="wftab-stage-upscale"]').element.checked,
+      ).toBe(false);
+    });
+  });
+
+  describe("a workflow changed from somewhere else", () => {
+    it("reads its rows again in place when the card's version moves, keeping a notes draft", async () => {
+      const before = versioned(3);
+      getWorkflowCard.mockResolvedValue(detail({ card: before, notes: "as read" }));
+      const { wrapper, store } = await mountEditor([before]);
+      await settle(wrapper);
+      const notes = wrapper.find("textarea.wftab-notes");
+      await notes.setValue("half a sentence");
+
+      // A save from the Run popup, the Tasks tab or ComfyUI: announced, the
+      // grid re-read, and the card now says version 4.
+      const after = versioned(4);
+      const moved = detail({ card: after, notes: "as read" });
+      moved.card.default_recipe.models[0].filename = "SDXL/juggernautXL_v9.safetensors";
+      const slow = held();
+      getWorkflowCard.mockClear().mockReturnValue(slow.promise);
+      getLoraChain.mockClear();
+      getWorkflowChanges.mockClear();
+      store.cards = [after];
+      await flush(wrapper);
+
+      expect(getWorkflowCard).toHaveBeenCalledTimes(1);
+      expect(getLoraChain).toHaveBeenCalledWith(KEY);
+      expect(getWorkflowChanges).toHaveBeenCalledWith(KEY);
+      // Not blanked while the read is out.
+      expect(textOf(wrapper)).not.toContain("Reading its default recipe");
+      expect(textOf(wrapper)).not.toContain("Reading its notes");
+      expect(
+        wrapper.find('[data-testid="wftab-row-checkpoint"]').text(),
+      ).toContain("realvisXL_v5");
+
+      slow.release(moved);
+      await flush(wrapper);
+      expect(
+        wrapper.find('[data-testid="wftab-row-checkpoint"]').text(),
+      ).toContain("juggernautXL_v9");
+      // The draft the owner was typing is theirs.
+      expect(wrapper.find("textarea.wftab-notes").element.value).toBe(
+        "half a sentence",
+      );
+    });
+
+    it("keeps the LoRA rows on screen while their chain is read again", async () => {
+      const before = versioned(3, { models: plain().models });
+      getWorkflowCard.mockResolvedValue(chainDetail({ card: before }));
+      const { wrapper, store } = await mountEditor([before]);
+      expect(loraRowsOf(wrapper)).toHaveLength(4);
+
+      getLoraChain.mockReturnValue(new Promise(() => {}));
+      store.cards = [versioned(4, { models: plain().models })];
+      await flush(wrapper);
+      expect(loraRowsOf(wrapper)).toHaveLength(4);
+      expect(textOf(wrapper)).not.toContain("Reading its LoRAs");
+    });
+
+    it("takes notes written elsewhere when nothing was being typed", async () => {
+      const before = versioned(3);
+      getWorkflowCard.mockResolvedValue(detail({ card: before, notes: "as read" }));
+      const { wrapper, store } = await mountEditor([before]);
+      await settle(wrapper);
+      const after = versioned(4);
+      getWorkflowCard.mockResolvedValue(detail({ card: after, notes: "written elsewhere" }));
+      store.cards = [after];
+      await flush(wrapper);
+      expect(wrapper.find("textarea.wftab-notes").element.value).toBe(
+        "written elsewhere",
+      );
+    });
+
+    it("drops its bar when the changes were saved or discarded elsewhere", async () => {
+      waitingOnServer = { stages: { upscale: true } };
+      const waitingCard = card({ unsaved_changes: 1 });
+      getWorkflowCard.mockResolvedValue(detail({ card: waitingCard }));
+      const { wrapper, store } = await mountEditor([waitingCard]);
+      expect(count(wrapper)).toBe("1 unsaved change");
+
+      waitingOnServer = null;
+      getWorkflowChanges.mockClear();
+      store.cards = [card({ unsaved_changes: 0 })];
+      await flush(wrapper);
+      expect(getWorkflowChanges).toHaveBeenCalledWith(KEY);
+      expect(bar(wrapper).exists()).toBe(false);
+      expect(
+        wrapper.find('[data-testid="wftab-stage-upscale"]').element.checked,
+      ).toBe(false);
+    });
+
+    it("follows a save made from the Run popup or the Tasks tab in this window, which nothing announces", async () => {
+      // The server skips the window that wrote, and a save of stages alone
+      // moves neither the card's version nor, here, its count: the popup's
+      // own signal is the only word of it.
+      waitingOnServer = { stages: { upscale: true } };
+      const { wrapper } = await mountEditor();
+      await settle(wrapper);
+      expect(count(wrapper)).toBe("1 unsaved change");
+
+      waitingOnServer = null;
+      const after = detail({ card: plain() });
+      after.card.default_recipe.stages = { upscale: true, face_detailer: false };
+      const slow = held();
+      getWorkflowCard.mockClear().mockReturnValue(slow.promise);
+      getWorkflowChanges.mockClear();
+      getLoraChain.mockClear();
+      useRunDialogStore().saved = { workflowId: KEY, savedAs: null, at: 1 };
+      await flush(wrapper);
+
+      expect(getWorkflowChanges).toHaveBeenCalledWith(KEY);
+      expect(getWorkflowCard).toHaveBeenCalledWith(KEY);
+      expect(getLoraChain).toHaveBeenCalledWith(KEY);
+      expect(bar(wrapper).exists()).toBe(false);
+      // In place: nothing blanked while the rows are read again.
+      expect(textOf(wrapper)).not.toContain("Reading its default recipe");
+
+      slow.release(after);
+      await flush(wrapper);
+      // Saved, so the stage is on as saved and no longer a change.
+      expect(
+        wrapper.find('[data-testid="wftab-stage-upscale"]').element.checked,
+      ).toBe(true);
+      expect(wrapper.find('[data-testid="wftab-stages-edited"]').exists()).toBe(
+        false,
+      );
+    });
+
+    it("leaves the rail alone when the popup saved another workflow", async () => {
+      const { wrapper } = await mountEditor();
+      await settle(wrapper);
+      getWorkflowCard.mockClear();
+      getWorkflowChanges.mockClear();
+      useRunDialogStore().saved = { workflowId: OTHER, savedAs: null, at: 1 };
+      await flush(wrapper);
+      expect(getWorkflowCard).not.toHaveBeenCalled();
+      expect(getWorkflowChanges).not.toHaveBeenCalled();
+    });
+
+    it("asks nothing again when the card only catches up with what the rail already holds", async () => {
+      const { wrapper, store } = await mountEditor();
+      await wrapper.find('[data-testid="wftab-stage-upscale"]').setValue(true);
+      await flush(wrapper);
+      getWorkflowChanges.mockClear();
+      store.cards = [card({ unsaved_changes: 1 })];
+      await flush(wrapper);
+      expect(getWorkflowChanges).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("Edit LoRAs…", () => {
+    beforeEach(() => {
+      getWorkflowCard.mockResolvedValue(chainDetail());
+    });
+
+    async function openDialog(wrapper) {
+      await wrapper.find("[data-testid='wftab-edit-loras']").trigger("click");
+      return wrapper.findComponent({ name: "EditLorasDialog" });
+    }
+
+    it("takes Apply's removals and strengths into the unsaved changes, over what waits", async () => {
+      waitingOnServer = {
+        stages: { upscale: true },
+        // Waiting on the loader the dialog then removes.
+        loras: [
+          {
+            node_id: "31",
+            field: "lora_name",
+            sha256: "s3",
+            strength_model: 0.2,
+            strength_clip: 0.2,
+          },
+        ],
+      };
+      const { wrapper } = await mountEditor();
+      const dialog = await openDialog(wrapper);
+      dialog.vm.$emit("apply", {
+        skip_loras: [{ node_id: "31", field: "lora_name" }],
+        loras: [
+          {
+            node_id: "22",
+            field: "lora_name",
+            sha256: "s2",
+            strength_model: 0.5,
+            strength_clip: 0.5,
+          },
+        ],
+      });
+      await flush(wrapper);
+
+      expect(setWorkflowChanges).toHaveBeenCalledTimes(1);
+      expect(lastSet()).toEqual({
+        models: [],
+        loras: [
+          {
+            node_id: "22",
+            field: "lora_name",
+            sha256: "s2",
+            strength_model: 0.5,
+            strength_clip: 0.5,
+          },
+        ],
+        skip_loras: [{ node_id: "31", field: "lora_name" }],
+        stages: { upscale: true },
+        values: [],
+      });
+      expect(count(wrapper)).toBe("3 unsaved changes");
+      expect(
+        loraRowsOf(wrapper)[2].find('[data-testid="wftab-lora-removed"]').exists(),
+      ).toBe(true);
+    });
+
+    it("stores what was waiting again after a structural Save made a version, less the loaders it took out", async () => {
+      waitingOnServer = {
+        stages: { upscale: true },
+        skip_loras: [
+          { node_id: "31", field: "lora_name" },
+          { node_id: "14", field: "lora_name" },
+        ],
+      };
+      const { wrapper } = await mountEditor();
+      const dialog = await openDialog(wrapper);
+      // The chain as the dialog's Save left it: loader 31 is gone.
+      const [first, second] = loraChain().loaders;
+      getLoraChain.mockResolvedValue(loraChain({ loaders: [first, second] }));
+      const order = [];
+      discardWorkflowChanges.mockImplementation(() => {
+        order.push("discard");
+        waitingOnServer = null;
+        return Promise.resolve(changesState());
+      });
+      setWorkflowChanges.mockImplementation((_key, set) => {
+        order.push("put");
+        waitingOnServer = set;
+        return Promise.resolve(changesState(set, { version: 2 }));
+      });
+
+      dialog.vm.$emit("overwritten", KEY);
+      await flush(wrapper);
+      await flush(wrapper);
+
+      // Discarded, then stored against the new version: the same rows.
+      expect(order).toEqual(["discard", "put"]);
+      expect(lastSet().stages).toEqual({ upscale: true });
+      expect(lastSet().skip_loras).toEqual([
+        { node_id: "14", field: "lora_name" },
+      ]);
+      expect(count(wrapper)).toBe("2 unsaved changes");
+      expect(wrapper.find('[data-testid="wftab-save"]').exists()).toBe(true);
+    });
+
+    it("says so when the changes carried over can no longer be saved", async () => {
+      waitingOnServer = { stages: { upscale: true } };
+      const { wrapper } = await mountEditor();
+      const dialog = await openDialog(wrapper);
+      const reason = "These changes cannot be saved over this version.";
+      setWorkflowChanges.mockImplementation((_key, set) => {
+        waitingOnServer = set;
+        return Promise.resolve(
+          changesState(set, { save: { open: false, reason } }),
+        );
+      });
+      dialog.vm.$emit("overwritten", KEY);
+      await flush(wrapper);
+      await flush(wrapper);
+      expect(useNoticeStore().notices.at(-1)).toMatchObject({
+        level: "error",
+        text: reason,
+      });
+    });
   });
 });
