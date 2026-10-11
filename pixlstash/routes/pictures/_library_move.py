@@ -12,9 +12,15 @@ candidate, but with no workers and without being published
 while closed - embeddings, faces, scores - its own finders pick up the next
 time it is the active library.
 
+**A picture leaves this library only when this move copied it there.** One the
+other library already holds, live or in its Scrapheap, stays here and is
+reported: its tags and score there may differ from the ones here, and choosing
+between them is the owner's call, not a side effect of a move.
+
 **What travels:** the file, its tags, score, description and creation date.
-**What does not:** people, sets, projects and stacks. Their ids name different
-things in the other library, so they are left behind rather than guessed at.
+**What does not:** people, sets, projects and stacks, whose ids name different
+things in the other library; reviews, guest scores and the link to the workflow
+run that made the picture; and everything derived, which is computed again.
 """
 
 import os
@@ -51,10 +57,11 @@ class MoveToLibraryResponse(BaseModel):
     # Pictures that left this library: they are in the other one now, and in
     # this library's Scrapheap.
     moved_count: int
-    # Of those, how many the other library already held, byte for byte.
-    already_there_count: int = 0
     # Left here because a locked set freezes them.
     skipped_locked: list[int] = []
+    # Left here because the other library already holds the same file, byte
+    # for byte, with whatever tags and score it has there.
+    skipped_already_there: list[int] = []
     # Left here because the other library has the same file in its Scrapheap,
     # and restoring it there is that library's decision.
     skipped_scrapheaped: list[int] = []
@@ -165,8 +172,8 @@ def register_routes(router, server):
             "`pictures.scrapheap.move` operation, so one undo brings them back "
             "here. Tags, score, description and creation date travel with the "
             "file; people, sets, projects and stacks do not. A file the other "
-            "library already holds is not copied again, and one it holds in its "
-            "Scrapheap is left where it is in both."
+            "library already holds, live or in its Scrapheap, is left where it "
+            "is in both and reported."
         ),
         response_model=MoveToLibraryResponse,
     )
@@ -209,7 +216,7 @@ def register_routes(router, server):
             # running. Nothing was copied and nothing here was touched.
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-        arrived = [pid for pid, how in outcomes.items() if how in ("new", "duplicate")]
+        arrived = [pid for pid, how in outcomes.items() if how == "new"]
         moved, newly_locked = (
             scrapheap_pictures(server, request, arrived) if arrived else ([], [])
         )
@@ -223,10 +230,10 @@ def register_routes(router, server):
             status="success",
             library_name=library.name,
             moved_count=len(moved),
-            already_there_count=sum(
-                1 for pid in moved if outcomes.get(pid) == "duplicate"
-            ),
             skipped_locked=sorted(set(locked) | set(newly_locked)),
+            skipped_already_there=[
+                pid for pid, how in outcomes.items() if how == "duplicate"
+            ],
             skipped_scrapheaped=[
                 pid for pid, how in outcomes.items() if how == "scrapheaped"
             ],

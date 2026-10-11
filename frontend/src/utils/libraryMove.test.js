@@ -37,7 +37,23 @@ describe("buildLibraryMoveMessage", () => {
     });
   });
 
-  it("stays quiet when only a locked set kept pictures", () => {
+  it("says what the other library already had, and what a lock kept", () => {
+    expect(
+      buildLibraryMoveMessage({
+        libraryName: "Archive",
+        alreadyThereCount: 2,
+        lockedCount: 1,
+      }),
+    ).toEqual({
+      level: "warning",
+      body:
+        "Nothing was moved to Archive. 2 pictures stayed here because Archive " +
+        "already has them. 1 picture stayed here because a locked set holds " +
+        "it; unlock the set to move it.",
+    });
+  });
+
+  it("has nothing to say when nothing moved and nothing was kept", () => {
     expect(buildLibraryMoveMessage({ libraryName: "Archive" })).toBeNull();
   });
 });

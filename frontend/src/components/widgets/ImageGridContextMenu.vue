@@ -1011,9 +1011,13 @@ const entityLists = useEntityListsStore();
 // never loads the registry.
 const librariesStore = useLibrariesStore();
 const otherLibraries = computed(() =>
-  librariesStore.libraries.filter(
-    (library) => !library.is_active && library.is_reachable,
-  ),
+  // `canManage` is the server's own answer to "is this session on the tier the
+  // library routes need", and the move is on that tier.
+  librariesStore.canManage
+    ? librariesStore.libraries.filter(
+        (library) => !library.is_active && library.is_reachable,
+      )
+    : [],
 );
 const recentSnapshots = computed(() =>
   snapshotsStore.snapshots.filter((cp) => cp.is_compatible).slice(0, 5),

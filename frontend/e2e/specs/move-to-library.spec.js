@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -18,8 +18,10 @@ test.describe('move to library', () => {
 
   test.beforeAll(async ({ apiContext }) => {
     folder = mkdtempSync(join(tmpdir(), 'pixlstash-e2e-archive-'))
+    // Named for its own folder: a retry makes a new folder, and the detached
+    // row from the first attempt still holds the name it was given.
     const created = await apiContext.post('/api/v1/libraries', {
-      data: { path: folder, name: 'Archive' },
+      data: { path: folder, name: `Archive ${folder.slice(-6)}` },
     })
     expect(created.status(), await created.text()).toBe(201)
     archive = await created.json()
@@ -29,6 +31,33 @@ test.describe('move to library', () => {
     if (!archive) return
     const detached = await apiContext.delete(`/api/v1/libraries/${archive.uuid}`)
     expect(detached.ok(), await detached.text()).toBe(true)
+    // The folder this spec made, and nothing else: mkdtemp's own.
+    rmSync(folder, { recursive: true, force: true })
+  })
+
+  const scrapheapIds = async (apiContext) => {
+    const listed = await apiContext.get('/api/v1/pictures', {
+      params: { only_deleted: 'true', fields: 'grid' },
+    })
+    expect(listed.ok(), await listed.text()).toBe(true)
+    return (await listed.json()).map((picture) => picture.id)
+  }
+  let scrapheapBefore = null
+
+  // Whatever the test got to, what it sent to the Scrapheap goes back: every
+  // later spec counts on the fixture. Only what THIS test put there, since an
+  // earlier spec may have left pictures of its own.
+  test.afterEach(async ({ apiContext }) => {
+    if (!scrapheapBefore) return
+    const mine = (await scrapheapIds(apiContext)).filter(
+      (id) => !scrapheapBefore.includes(id),
+    )
+    scrapheapBefore = null
+    if (!mine.length) return
+    const restored = await apiContext.post('/api/v1/pictures/scrapheap/restore', {
+      data: { picture_ids: mine },
+    })
+    expect(restored.ok(), await restored.text()).toBe(true)
   })
 
   test('a right-clicked picture moves to the library picked, and Undo brings it back', async ({
@@ -36,6 +65,7 @@ test.describe('move to library', () => {
     grid,
     apiContext,
   }) => {
+    scrapheapBefore = await scrapheapIds(apiContext)
     await grid.goto()
     const src = await grid.thumbnails.first().locator('img').getAttribute('src')
     const pictureId = Number(src.match(/\/thumbnails\/(\d+)\./)[1])
@@ -44,7 +74,7 @@ test.describe('move to library', () => {
     await grid.openContextMenu(card)
     await grid.contextMenuItem('Move to library').hover()
     const target = grid.contextMenu.locator('.ctx-submenu .ctx-item', {
-      hasText: 'Archive',
+      hasText: archive.name,
     })
     await expect(target).toBeVisible()
 
@@ -56,33 +86,27 @@ test.describe('move to library', () => {
     await target.click()
     const body = await (await answered).json()
 
+    // At least one: the first card may lead a collapsed stack, which moves whole.
     expect(body).toMatchObject({
-      library_name: 'Archive',
-      moved_count: 1,
+      library_name: archive.name,
       skipped_locked: [],
+      skipped_already_there: [],
       skipped_scrapheaped: [],
       failed: [],
     })
+    expect(body.moved_count).toBeGreaterThanOrEqual(1)
     await expect(
-      page.locator('.notice-message', { hasText: 'Moved 1 picture to Archive.' }),
+      page.locator('.notice-message', {
+        hasText: new RegExp(`Moved ${body.moved_count} pictures? to ${archive.name}\\.`),
+      }),
     ).toBeVisible()
 
     // In this library it is in the Scrapheap, exactly as a delete leaves it.
-    const scrapheap = await apiContext.get('/api/v1/pictures', {
-      params: { only_deleted: 'true', fields: 'grid' },
-    })
-    expect(scrapheap.ok()).toBe(true)
-    const scrapheaped = (await scrapheap.json()).map((picture) => picture.id)
-    expect(scrapheaped).toContain(pictureId)
+    expect(await scrapheapIds(apiContext)).toContain(pictureId)
 
-    // One undo restores it here, which is what keeps later specs' fixture whole.
+    // One undo restores it here.
     const undone = await apiContext.post('/api/v1/operations/undo')
     expect(undone.ok(), await undone.text()).toBe(true)
-    const after = await apiContext.get('/api/v1/pictures', {
-      params: { only_deleted: 'true', fields: 'grid' },
-    })
-    expect((await after.json()).map((picture) => picture.id)).not.toContain(
-      pictureId,
-    )
+    expect(await scrapheapIds(apiContext)).not.toContain(pictureId)
   })
 })

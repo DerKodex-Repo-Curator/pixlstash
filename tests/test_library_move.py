@@ -32,6 +32,7 @@ from pixlstash.db_models import (
     UserToken,
 )
 from pixlstash.server import Server
+from pixlstash.services.library_switch_service import LibrarySwitchError
 from pixlstash.utils.image_processing.image_utils import ImageUtils
 
 API = "/api/v1"
@@ -48,7 +49,14 @@ def server():
     with tempfile.TemporaryDirectory() as temp_dir:
         config_path = f"{temp_dir}/server-config.json"
         with open(config_path, "w") as handle:
-            json.dump({"disable_background_workers": True}, handle)
+            json.dump(
+                {
+                    "disable_background_workers": True,
+                    # So a test can present a remote address at all.
+                    "trusted_proxies": ["testclient"],
+                },
+                handle,
+            )
         with Server(config_path) as srv:
             yield srv
 
@@ -183,7 +191,7 @@ class TestAMove:
         body = response.json()
         assert body["library_name"] == "Other"
         assert body["moved_count"] == 1
-        assert body["already_there_count"] == 0
+        assert body["skipped_already_there"] == []
         assert (
             body["skipped_locked"],
             body["skipped_scrapheaped"],
@@ -259,7 +267,10 @@ class TestAMove:
 
 
 class TestWhatTheOtherLibraryAlreadyHolds:
-    def test_a_file_it_already_has_is_not_copied_twice(self, server, owner, other):
+    def test_a_file_it_already_has_stays_here_with_its_own_tags(
+        self, server, owner, other
+    ):
+        """The copy there may be tagged differently; a move must not pick one."""
         data = _png()
         first = _add(server, data, tags=["first"])
         sha = _here(server, first).pixel_sha
@@ -268,8 +279,9 @@ class TestWhatTheOtherLibraryAlreadyHolds:
 
         body = _move(owner, other, [again]).json()
 
-        assert (body["moved_count"], body["already_there_count"]) == (1, 1)
-        assert _here(server, again).deleted is True
+        assert body["moved_count"] == 0
+        assert body["skipped_already_there"] == [again]
+        assert _here(server, again).deleted is False
         (only,) = _there(server, other, sha)
         assert only["tags"] == ["first"]
 
@@ -361,7 +373,7 @@ class TestRefusals:
         assert response.status_code == 404, response.text
         assert _here(server, picture_id).deleted is False
 
-    def test_a_move_waits_out_a_switch_instead_of_opening_the_library_twice(
+    def test_a_move_is_refused_while_a_switch_holds_the_library(
         self, server, owner, other
     ):
         picture_id = _add(server, _png())
@@ -428,4 +440,79 @@ class TestTheLibraryPin:
         response = _move(TestClient(server.api), other, [picture_id], headers=headers)
 
         assert response.status_code == 403, response.text
+        assert "read-only" in response.json()["detail"].lower()
         assert _here(server, picture_id).deleted is False
+
+    def test_a_session_made_from_that_token_keeps_the_pin(self, server, owner, other):
+        """Exchanging a pinned token for a cookie must not launder the pin."""
+        picture_id = _add(server, _png())
+        sha = _here(server, picture_id).pixel_sha
+        minted = owner.post(
+            "/users/me/token", json={"description": "move test", "scope": "ALL"}
+        )
+        session = TestClient(server.api)
+        assert (
+            session.post("/login", json={"token": minted.json()["token"]}).status_code
+            == 200
+        )
+        # In-scope control: the session does reach this library's pictures.
+        assert session.get(f"{API}/pictures/{picture_id}/tags").status_code == 200
+
+        response = _move(session, other, [picture_id])
+
+        assert response.status_code == 403, response.text
+        assert "cannot move pictures" in response.json()["detail"]
+        assert _here(server, picture_id).deleted is False
+        assert _there(server, other, sha) == []
+
+
+class TestLocality:
+    """The switch's tier: a remote owner may not open another library."""
+
+    def test_a_remote_owner_is_refused_and_told_no_host_path(
+        self, server, owner, other
+    ):
+        picture_id = _add(server, _png())
+        sha = _here(server, picture_id).pixel_sha
+        # 8.8.8.8 and not a documentation range: `ipaddress` calls those
+        # private, so the locality predicate would count them as local.
+        remote = {"X-Forwarded-For": "8.8.8.8"}
+        # Control: the same remote session is still the owner of this library.
+        assert (
+            owner.get(f"{API}/pictures/{picture_id}/tags", headers=remote).status_code
+            == 200
+        )
+
+        response = _move(owner, other, [picture_id], headers=remote)
+
+        assert response.status_code == 403, response.text
+        assert other.path not in response.text
+        assert _here(server, picture_id).deleted is False
+        assert _there(server, other, sha) == []
+
+
+class TestOpeningTheOtherLibrary:
+    def test_it_is_opened_without_workers_whatever_the_config_says(self, server, other):
+        """Closing a worker-capable vault frees models the active library uses."""
+        configured = server._server_config.get("disable_background_workers")
+        server._server_config["disable_background_workers"] = False
+        try:
+            with server.library_switch.open_other_library(other.uuid) as (_lib, vault):
+                assert vault._disable_background_workers is True
+        finally:
+            server._server_config["disable_background_workers"] = configured
+
+    def test_a_library_still_on_its_first_import_is_refused(
+        self, server, tmp_path_factory
+    ):
+        folder = tmp_path_factory.mktemp("still-importing")
+        pending = server.library_registry.create(
+            str(folder), "Still importing", pending_import=True
+        )
+        try:
+            with pytest.raises(LibrarySwitchError, match="first import"):
+                with server.library_switch.open_other_library(pending.uuid):
+                    pytest.fail("a library on its first import was opened")
+        finally:
+            with server.hub.transaction() as conn:
+                conn.execute("DELETE FROM library WHERE id = ?", (pending.id,))

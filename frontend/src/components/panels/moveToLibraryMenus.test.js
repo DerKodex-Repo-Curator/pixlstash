@@ -99,6 +99,7 @@ function trigger(wrapper) {
 beforeEach(() => {
   setActivePinia(createPinia());
   isReadOnly.value = false;
+  useLibrariesStore().canManage = true;
 });
 
 describe.each(MENUS)("$name", ({ mountMenu, scrapheap, readOnly }) => {
@@ -126,6 +127,12 @@ describe.each(MENUS)("$name", ({ mountMenu, scrapheap, readOnly }) => {
 
   it("is absent when this is the only library", () => {
     useLibrariesStore().libraries = [ACTIVE];
+    expect(trigger(mountMenu())).toBeUndefined();
+  });
+
+  it("is absent for an owner the library routes would refuse", () => {
+    useLibrariesStore().libraries = [ACTIVE, ARCHIVE];
+    useLibrariesStore().canManage = false;
     expect(trigger(mountMenu())).toBeUndefined();
   });
 

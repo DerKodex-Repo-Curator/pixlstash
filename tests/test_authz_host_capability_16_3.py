@@ -465,6 +465,13 @@ def test_host_capability_tier_split_is_49_local_7_loopback():
     decision on the local network and not one a remote session may take (a
     token may not either, which the handler sees to).
 
+    61 = 53 + 8 with ``POST /pictures/move-to-library``. It is on this tier for
+    ``POST /libraries/active``'s reason, not the path-authority one: it opens a
+    library that is not the active one with write authority, runs its pending
+    migrations and holds the switch lock while it copies, and its refusals name
+    that library's host folder, which ``GET /libraries`` redacts for a remote
+    owner. It takes a registry uuid and no path.
+
     Arithmetic, not judgement."""
     loopback = {
         key
@@ -478,7 +485,7 @@ def test_host_capability_tier_split_is_49_local_7_loopback():
     }
     assert loopback == _LOOPBACK_ROUTE_KEYS, loopback
     assert len(loopback) == 8, sorted(loopback)
-    assert len(local) == 52, sorted(local)
+    assert len(local) == 53, sorted(local)
 
 
 # ===========================================================================

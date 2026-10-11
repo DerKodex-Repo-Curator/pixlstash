@@ -536,9 +536,7 @@ class LibrarySwitchService:
                 f'"{library.name}" is already a library; nothing to promote.'
             )
         if not self._lock.acquire(blocking=False):
-            raise LibrarySwitchError(
-                "Another library switch is already in progress. Try again in a moment."
-            )
+            raise LibrarySwitchError(_BUSY_MESSAGE)
         try:
             registry = self._server.library_registry
             folder = resolve_path(library.path)

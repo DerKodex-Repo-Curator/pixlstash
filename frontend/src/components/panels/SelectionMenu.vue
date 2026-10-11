@@ -577,9 +577,13 @@ const entityLists = useEntityListsStore();
 // Where the selection can be moved to (mirrors ImageGridContextMenu.vue).
 const librariesStore = useLibrariesStore();
 const otherLibraries = computed(() =>
-  librariesStore.libraries.filter(
-    (library) => !library.is_active && library.is_reachable,
-  ),
+  // `canManage` is the server's own answer to "is this session on the tier the
+  // library routes need", and the move is on that tier.
+  librariesStore.canManage
+    ? librariesStore.libraries.filter(
+        (library) => !library.is_active && library.is_reachable,
+      )
+    : [],
 );
 
 const selectionMenuPanelRef = ref(null);

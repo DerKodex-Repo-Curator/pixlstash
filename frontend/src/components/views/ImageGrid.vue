@@ -3927,11 +3927,6 @@ function showLockedDeleteNotice(message) {
   lockedDeleteNotice.arm();
 }
 
-// `idsOverride` scopes the delete to an explicit picture list (the overlay
-// context menu passes `[overlayImageId]`). When set, the grid selection is
-// neither read for the target NOR mutated as a side effect - the overlay owns
-// its own post-delete cleanup (it closes the lightbox). Default (null) is the
-// grid path: act on, and update, `selectedImageIds`.
 /**
  * Move the selection into another library. To this library that is a delete -
  * the same stack expansion, the same ghosted tiles, the same one undo - so it
@@ -3943,6 +3938,29 @@ function moveSelectedToLibrary(library) {
   return deleteSelected(null, library);
 }
 
+/**
+ * Report a move's outcome on the card its "Moving…" notice opened, or take that
+ * card away when there is nothing to say.
+ */
+function showLibraryMoveNotice(library, counts) {
+  const message = buildLibraryMoveMessage({
+    libraryName: library.name,
+    ...counts,
+  });
+  if (!message) {
+    noticeStore.dismissByKey("pictures-move");
+    return;
+  }
+  noticeStore[message.level](message.body, { key: "pictures-move" });
+}
+
+// `idsOverride` scopes the delete to an explicit picture list (the overlay
+// context menu passes `[overlayImageId]`). When set, the grid selection is
+// neither read for the target NOR mutated as a side effect - the overlay owns
+// its own post-delete cleanup (it closes the lightbox). Default (null) is the
+// grid path: act on, and update, `selectedImageIds`.
+// `moveTo` is a library: the request becomes the move, and the outcome is
+// worded by `buildLibraryMoveMessage` instead of the delete's own notice.
 async function deleteSelected(idsOverride = null, moveTo = null) {
   const scoped = Array.isArray(idsOverride) && idsOverride.length > 0;
   const baseIds = scoped ? idsOverride : selectedImageIds.value;
@@ -4027,13 +4045,26 @@ async function deleteSelected(idsOverride = null, moveTo = null) {
     lockedSetsStore.isLocked(id),
   );
   if (idsToRemove.length && lockedInBatch.length === idsToRemove.length) {
-    showLockedDeleteNotice(
-      buildLockedDeleteMessage({
-        lockedCount: lockedInBatch.length,
-        deletedCount: 0,
-      }),
-    );
+    if (moveTo) {
+      showLibraryMoveNotice(moveTo, { lockedCount: lockedInBatch.length });
+    } else {
+      showLockedDeleteNotice(
+        buildLockedDeleteMessage({
+          lockedCount: lockedInBatch.length,
+          deletedCount: 0,
+        }),
+      );
+    }
     return;
+  }
+
+  if (moveTo) {
+    // The copy is one request with nothing to watch, so say that it started.
+    // Same key as the outcome, which replaces this card when it lands.
+    noticeStore.info(`Moving to ${moveTo.name}…`, {
+      key: "pictures-move",
+      timeout: 0,
+    });
   }
 
   try {
@@ -4046,10 +4077,14 @@ async function deleteSelected(idsOverride = null, moveTo = null) {
     // Ids the server refused because a locked set freezes them. Collected across
     // every chunk so the outcome message counts the whole operation.
     const skippedLocked = new Set();
-    // A move's other two ways of leaving a picture here: the other library has
-    // it in its Scrapheap, or the file could not be copied.
+    // A move's other ways of leaving a picture here: the other library already
+    // has it, live or in its Scrapheap, or the file could not be copied.
+    const alreadyThere = new Set();
     const inOtherScrapheap = new Set();
     const notCopied = new Set();
+    // Counted by the server, never derived here: an id it did not act on (a
+    // picture another tab already deleted) must not be announced as moved.
+    let movedCount = 0;
     for (let i = 0; i < idsToRemove.length; i += BULK_DELETE_CHUNK) {
       const chunk = idsToRemove.slice(i, i + BULK_DELETE_CHUNK);
       const resp = moveTo
@@ -4058,6 +4093,10 @@ async function deleteSelected(idsOverride = null, moveTo = null) {
       const skipped = resp?.skipped_locked;
       if (Array.isArray(skipped)) {
         for (const id of skipped) skippedLocked.add(String(id));
+      }
+      movedCount += Number(resp?.moved_count) || 0;
+      for (const id of resp?.skipped_already_there ?? []) {
+        alreadyThere.add(String(id));
       }
       for (const id of resp?.skipped_scrapheaped ?? []) {
         inOtherScrapheap.add(String(id));
@@ -4070,6 +4109,7 @@ async function deleteSelected(idsOverride = null, moveTo = null) {
     // refetch - a second, quieter version of the same lie.
     const stillHere = (id) =>
       skippedLocked.has(String(id)) ||
+      alreadyThere.has(String(id)) ||
       inOtherScrapheap.has(String(id)) ||
       notCopied.has(String(id));
     const removedIds = idsToRemove.filter((id) => !stillHere(id));
@@ -4103,22 +4143,21 @@ async function deleteSelected(idsOverride = null, moveTo = null) {
       debouncedFetchAllGridImages();
     }
     emit("refresh-sidebar");
-    showLockedDeleteNotice(
-      buildLockedDeleteMessage({
-        lockedCount: skippedLocked.size,
-        deletedCount: removedIds.length,
-      }),
-    );
     if (moveTo) {
-      const message = buildLibraryMoveMessage({
-        libraryName: moveTo.name,
-        movedCount: removedIds.length,
+      showLibraryMoveNotice(moveTo, {
+        movedCount,
+        lockedCount: skippedLocked.size,
+        alreadyThereCount: alreadyThere.size,
         inOtherScrapheapCount: inOtherScrapheap.size,
         notCopiedCount: notCopied.size,
       });
-      if (message) {
-        noticeStore[message.level](message.body, { key: "pictures-move" });
-      }
+    } else {
+      showLockedDeleteNotice(
+        buildLockedDeleteMessage({
+          lockedCount: skippedLocked.size,
+          deletedCount: removedIds.length,
+        }),
+      );
     }
   } catch (err) {
     console.error(moveTo ? "Move to library failed" : "Bulk delete failed", err);

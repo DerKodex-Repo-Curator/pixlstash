@@ -1,9 +1,10 @@
 // Copy for the outcome of "Move to library".
 //
-// A move can leave a picture where it was for two reasons the server reports
-// separately - the other library already has the file in its Scrapheap, or the
-// file could not be copied - and a locked set is a third, which
-// `lockedDelete.js` already words. Pure, so the counts and plurals are tested.
+// A picture leaves this library only when the move copied it into the other
+// one. The server reports every other outcome separately, and each has its own
+// sentence here because each has its own lever: unlock the set, look at the
+// copy that is already there, restore it there, or check the file. Pure, so the
+// counts and plurals are tested.
 
 function pictures(count) {
   return `${count} ${count === 1 ? "picture" : "pictures"}`;
@@ -14,24 +15,43 @@ function pictures(count) {
  *
  * @param {Object} outcome
  * @param {string} outcome.libraryName - the library the selection went to.
- * @param {number} outcome.movedCount - pictures that left this library.
+ * @param {number} outcome.movedCount - pictures that left this library, as the
+ *   server counted them.
+ * @param {number} outcome.lockedCount - kept: a locked set freezes them.
+ * @param {number} outcome.alreadyThereCount - kept: the other library already
+ *   holds the same file.
  * @param {number} outcome.inOtherScrapheapCount - kept: the other library has
  *   the same file in its Scrapheap.
  * @param {number} outcome.notCopiedCount - kept: the file could not be copied.
- * @returns {{level: "success"|"warning", body: string}|null} `null` when there
- *   is nothing to say (nothing moved and nothing kept for these two reasons).
+ * @returns {{level: "success"|"warning", body: string}|null} `null` when
+ *   nothing moved and nothing was kept, so there is nothing to say.
  */
 export function buildLibraryMoveMessage({
   libraryName = "the other library",
   movedCount = 0,
+  lockedCount = 0,
+  alreadyThereCount = 0,
   inOtherScrapheapCount = 0,
   notCopiedCount = 0,
 } = {}) {
+  const itThem = (count) => (count === 1 ? "it" : "them");
   const kept = [];
+  if (alreadyThereCount > 0) {
+    kept.push(
+      `${pictures(alreadyThereCount)} stayed here because ${libraryName} ` +
+        `already has ${itThem(alreadyThereCount)}.`,
+    );
+  }
   if (inOtherScrapheapCount > 0) {
     kept.push(
       `${pictures(inOtherScrapheapCount)} stayed here because ${libraryName} has ` +
-        `${inOtherScrapheapCount === 1 ? "it" : "them"} in its Scrapheap.`,
+        `${itThem(inOtherScrapheapCount)} in its Scrapheap.`,
+    );
+  }
+  if (lockedCount > 0) {
+    kept.push(
+      `${pictures(lockedCount)} stayed here because a locked set holds ` +
+        `${itThem(lockedCount)}; unlock the set to move ${itThem(lockedCount)}.`,
     );
   }
   if (notCopiedCount > 0) {

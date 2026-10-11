@@ -1059,21 +1059,25 @@ ROUTE_POLICIES: dict[tuple[str, str], RoutePolicy] = {
             "not in READ_SAFE. Gate loops enforce_picture_scope over every id."
         ),
     ),
-    # Owner-only rather than picture-scoped like DELETE /pictures, whose soft
-    # delete is this route's last step: it also WRITES into a second library,
-    # and a share grant reaches pictures in one library, never the registry.
+    # Not picture-scoped like DELETE /pictures, whose soft delete is this
+    # route's last step: it also WRITES into a second library, and a share
+    # grant reaches pictures in one library, never the registry.
     ("POST", "/api/v1/pictures/move-to-library"): RoutePolicy(
-        _OWNER,
+        _LOCAL,
         justification=(
-            "Copies the named pictures into another attached library, then "
-            "soft-deletes them here (the DELETE /pictures operation, one undo). "
-            "No caller-supplied path: the target is a registry uuid and the "
-            "destination folder is that library's own root. The gate pins the "
-            "credential to the ACTIVE library; the handler asks the same "
-            "token_covers_library of the TARGET, which the gate cannot see "
-            "because it is named in the body, so a token good for one library "
-            "cannot write into another. READ tokens are refused earlier by the "
-            "middleware: POST is not in READ_SAFE."
+            "§16.3 tier for POST /libraries/active's reason, not the "
+            "path-authority one: it opens a library that is not the active one "
+            "with write authority, runs its pending migrations and holds the "
+            "switch lock while it copies, and its refusals carry that "
+            "library's host folder path, as the switch's do. It takes a "
+            "registry uuid, never a caller-supplied path, and the destination "
+            "is that library's own root. The gate pins the credential to the "
+            "ACTIVE library; the handler asks the same token_covers_library of "
+            "the TARGET, which the gate cannot see because it is named in the "
+            "body, so a token good for one library cannot write into another. "
+            "READ tokens are refused earlier by the middleware: POST is not in "
+            "READ_SAFE; owner + loopback/LAN/Tailscale, or remote owner iff "
+            "allow_remote_host_ops=true (§16.3.1)"
         ),
     ),
     ("POST", "/api/v1/pictures/rotate"): RoutePolicy(
