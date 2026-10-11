@@ -68,6 +68,9 @@ class MoveToLibraryResponse(BaseModel):
     # Copied there, but the source soft delete failed. Still in both libraries;
     # distinct from a lock and from a file that could not be copied at all.
     copied_but_not_moved: list[int] = []
+    # Destination copies committed, but source state could not be re-read
+    # after a Scrapheap error. Do not assume the delete committed or rolled back.
+    copied_source_unknown: list[int] = []
     # Left here because the other library already holds the same file, byte
     # for byte, with whatever tags and score it has there.
     skipped_already_there: list[int] = []
@@ -248,6 +251,7 @@ def register_routes(router, server):
                         outcomes[row.id] = "failed"
                 arrived = [pid for pid, how in outcomes.items() if how == "new"]
                 moved, copied_but_locked, copied_but_not_moved = [], [], []
+                copied_source_unknown = []
                 if arrived:
                     try:
                         moved, copied_but_locked = scrapheap_pictures(
@@ -277,20 +281,33 @@ def register_routes(router, server):
                             # task. A lock never overrides a confirmed move.
                             return deleted, locked_picture_ids(session, arrived)
 
-                        deleted, locked_now = source.db.run_immediate_read_task(
-                            source_outcomes
-                        )
-                        moved = [pid for pid in arrived if pid in deleted]
-                        copied_but_locked = [
-                            pid
-                            for pid in arrived
-                            if pid not in deleted and pid in locked_now
-                        ]
-                        copied_but_not_moved = [
-                            pid
-                            for pid in arrived
-                            if pid not in deleted and pid not in locked_now
-                        ]
+                        try:
+                            deleted, locked_now = source.db.run_immediate_read_task(
+                                source_outcomes
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Could not re-read source state for copied pictures "
+                                "%s in library %s after Scrapheap processing failed",
+                                arrived,
+                                library.name,
+                            )
+                            # The destination commit is certain, the source
+                            # outcome is not. Report that uncertainty rather
+                            # than a bare 500 or an invented 'still live'.
+                            copied_source_unknown = arrived
+                        else:
+                            moved = [pid for pid in arrived if pid in deleted]
+                            copied_but_locked = [
+                                pid
+                                for pid in arrived
+                                if pid not in deleted and pid in locked_now
+                            ]
+                            copied_but_not_moved = [
+                                pid
+                                for pid in arrived
+                                if pid not in deleted and pid not in locked_now
+                            ]
         except LibraryNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except LibraryError as exc:
@@ -312,6 +329,7 @@ def register_routes(router, server):
             skipped_locked=sorted(locked),
             copied_but_locked=copied_but_locked,
             copied_but_not_moved=copied_but_not_moved,
+            copied_source_unknown=copied_source_unknown,
             skipped_already_there=[
                 pid for pid, how in outcomes.items() if how == "duplicate"
             ],

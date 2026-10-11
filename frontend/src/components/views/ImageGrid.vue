@@ -4035,6 +4035,7 @@ async function deleteSelected(idsOverride = null, moveTo = null) {
     const notCopied = new Set();
     const copiedButLocked = new Set();
     const copiedButNotMoved = new Set();
+    const copiedSourceUnknown = new Set();
     // One selection remains one undo batch across request chunks.
     const moveBatchId = moveTo ? newOperationBatchId() : undefined;
     for (let i = 0; i < idsToRemove.length; i += BULK_DELETE_CHUNK) {
@@ -4059,6 +4060,9 @@ async function deleteSelected(idsOverride = null, moveTo = null) {
       }
       for (const id of resp?.copied_but_not_moved ?? []) {
         copiedButNotMoved.add(String(id));
+      }
+      for (const id of resp?.copied_source_unknown ?? []) {
+        copiedSourceUnknown.add(String(id));
       }
     }
 
@@ -4091,9 +4095,10 @@ async function deleteSelected(idsOverride = null, moveTo = null) {
         lastSelectedImageId.value = null;
       }
     }
-    if (deletedExpandedStackLeader) {
+    if (deletedExpandedStackLeader || copiedSourceUnknown.size > 0) {
       // Repopulate so the promoted stack leader and remaining members reappear
-      // (same pattern as create/dissolve/remove-from-stack).
+      // (same pattern as create/dissolve/remove-from-stack), or reconcile a
+      // source deletion the server could not verify after a database failure.
       preserveScrollOnNextFetch.value = true;
       debouncedFetchAllGridImages();
     }
@@ -4107,6 +4112,7 @@ async function deleteSelected(idsOverride = null, moveTo = null) {
         notCopiedCount: notCopied.size,
         copiedButLockedCount: copiedButLocked.size,
         copiedButNotMovedCount: copiedButNotMoved.size,
+        copiedSourceUnknownCount: copiedSourceUnknown.size,
       });
     } else {
       showLockedDeleteNotice(

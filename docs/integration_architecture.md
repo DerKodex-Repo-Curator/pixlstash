@@ -1455,7 +1455,8 @@ it reads which library is active, and mid-swap that is the one thing moving.
 `POST /pictures/move-to-library` (`local_owner_only`, the switch's tier) takes
 `{ picture_ids, library_uuid }` and answers
 `{ library_name, moved_count, moved[], skipped_locked[], copied_but_locked[],
-copied_but_not_moved[], skipped_already_there[], skipped_scrapheaped[], failed[] }`.
+copied_but_not_moved[], copied_source_unknown[], skipped_already_there[],
+skipped_scrapheaped[], failed[] }`.
 `moved[]` names the pictures that left for this library's Scrapheap, in one undo
 batch, so the
 grid treats them exactly as it treats a `DELETE /pictures` (ghosted tiles, one
@@ -1471,7 +1472,13 @@ live after source Scrapheap processing failed, with the same destination-copy
 warning. On a processing exception, the server re-reads deletions and locks
 in one source read task: committed deletions go in `moved[]`, still-live locked
 sources in `copied_but_locked[]`, and other live sources in
-`copied_but_not_moved[]`. These outcome lists do not overlap. Chunked moves share one
+`copied_but_not_moved[]`. If that recovery read also fails, committed destination
+copies are reported in `copied_source_unknown[]` instead: the source may be live
+or soft-deleted, so neither `moved[]` nor a kept-source list can be asserted.
+`moved_count` counts confirmed moves only. The client warns about this
+uncertainty and refreshes source grid/sidebar state rather than dropping or
+ghosting unknown IDs as confirmed moves. Undo does not remove destination
+copies. These outcome lists do not overlap. Chunked moves share one
 `X-Operation-Batch-Id` gesture id, so one Undo restores every completed chunk.
 The client refreshes the grid and
 sidebar after a failed chunk, including when its server outcome is unknown.

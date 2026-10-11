@@ -80,4 +80,41 @@ describe("buildLibraryMoveMessage", () => {
         "Undo will not remove them from Archive.",
     });
   });
+
+  it.each([
+    [1, "1 picture was", "it"],
+    [2, "2 pictures were", "them"],
+  ])(
+    "warns when %i copied source outcomes could not be verified",
+    (count, copies, pronoun) => {
+      expect(
+        buildLibraryMoveMessage({
+          libraryName: "Archive",
+          copiedSourceUnknownCount: count,
+        }),
+      ).toEqual({
+        level: "warning",
+        body:
+          `The move to Archive could not be fully verified. ${copies} copied to Archive, ` +
+          `but whether ${pronoun} left this library could not be verified. ` +
+          `Refresh the source library to check. Undo will not remove ${pronoun} from Archive.`,
+      });
+    },
+  );
+
+  it("keeps confirmed moves distinct from unverified copied source outcomes", () => {
+    expect(
+      buildLibraryMoveMessage({
+        libraryName: "Archive",
+        movedCount: 3,
+        copiedSourceUnknownCount: 1,
+      }),
+    ).toEqual({
+      level: "warning",
+      body:
+        "Moved 3 pictures to Archive. 1 picture was copied to Archive, " +
+        "but whether it left this library could not be verified. " +
+        "Refresh the source library to check. Undo will not remove it from Archive.",
+    });
+  });
 });

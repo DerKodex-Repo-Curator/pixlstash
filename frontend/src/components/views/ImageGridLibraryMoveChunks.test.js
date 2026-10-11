@@ -82,6 +82,24 @@ async function prepareGrid() {
 }
 
 describe("a move spanning multiple requests", () => {
+  it("refreshes unverifiable source outcomes without treating them as confirmed moves", async () => {
+    await prepareGrid();
+    wrapper.vm.selectedImageIds = [1, 2];
+    apiPost.mockResolvedValue({ data: {
+      moved: [1], moved_count: 1, copied_source_unknown: [2],
+    } });
+
+    await wrapper.vm.$.setupState.moveSelectedToLibrary(library);
+
+    expect(wrapper.vm.selectedImageIds).toEqual([2]);
+    expect(useOperationStore().ghostPictureIds).toEqual([1]);
+    expect(wrapper.vm.allGridImages.some((picture) => picture.id === 2)).toBe(true);
+    expect(wrapper.emitted("refresh-sidebar")).toBeTruthy();
+    await vi.waitFor(() => expect(
+      apiGet.mock.calls.some(([url]) => String(url).includes("/pictures/count")),
+    ).toBe(true), { timeout: 2500 });
+  });
+
   it("retains tiles and selection for copies whose sources stayed live", async () => {
     await prepareGrid();
     wrapper.vm.selectedImageIds = [1, 2, 3];

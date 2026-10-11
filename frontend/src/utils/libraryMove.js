@@ -22,6 +22,8 @@ function pictures(count) {
  *   prevented moving the source to the Scrapheap.
  * @param {number} outcome.copiedButNotMovedCount - copied there, but source
  *   Scrapheap processing failed and the source remains live.
+ * @param {number} outcome.copiedSourceUnknownCount - copied there, but whether
+ *   the source reached the Scrapheap could not be verified.
  * @param {number} outcome.alreadyThereCount - kept: the other library already
  *   holds the same file.
  * @param {number} outcome.inOtherScrapheapCount - kept: the other library has
@@ -36,6 +38,7 @@ export function buildLibraryMoveMessage({
   lockedCount = 0,
   copiedButLockedCount = 0,
   copiedButNotMovedCount = 0,
+  copiedSourceUnknownCount = 0,
   alreadyThereCount = 0,
   inOtherScrapheapCount = 0,
   notCopiedCount = 0,
@@ -77,12 +80,22 @@ export function buildLibraryMoveMessage({
         `Undo will not remove ${itThem(copiedButNotMovedCount)} from ${libraryName}.`,
     );
   }
+  if (copiedSourceUnknownCount > 0) {
+    kept.push(
+      `${pictures(copiedSourceUnknownCount)} ${copiedSourceUnknownCount === 1 ? "was" : "were"} copied to ${libraryName}, ` +
+        `but whether ${itThem(copiedSourceUnknownCount)} left this library could not be verified. ` +
+        `Refresh the source library to check. ` +
+        `Undo will not remove ${itThem(copiedSourceUnknownCount)} from ${libraryName}.`,
+    );
+  }
   if (movedCount <= 0 && !kept.length) return null;
 
   const lead =
     movedCount > 0
       ? `Moved ${pictures(movedCount)} to ${libraryName}.`
-      : `Nothing was moved to ${libraryName}.`;
+      : copiedSourceUnknownCount > 0
+        ? `The move to ${libraryName} could not be fully verified.`
+        : `Nothing was moved to ${libraryName}.`;
   return {
     level: kept.length ? "warning" : "success",
     body: [lead, ...kept].join(" "),
