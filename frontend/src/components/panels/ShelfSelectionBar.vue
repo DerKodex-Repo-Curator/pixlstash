@@ -281,6 +281,7 @@ import { formatKeyHint, selectAllKeyHint } from "../../utils/shortcutHints";
 import {
   deletableModels,
   formatModelSize,
+  hideModelsVerb,
   movableCopies,
   trashName,
 } from "../../utils/modelShelf";
@@ -317,6 +318,7 @@ const emit = defineEmits([
   "clone-set",
   "remove-from-set",
   "hide-sets",
+  "hide-models",
 ]);
 
 const store = useModelShelfStore();
@@ -971,6 +973,10 @@ function onAttach(payload, attach) {
 const verbHandlers = computed(() => ({
   rows: store.selectedRows,
   hideSets: hideSetsVerb(props.sets),
+  hideModels: hideModelsVerb(
+    store.selectedModels.map((model) => model.id),
+    store.hiddenModelIds,
+  ),
   newSetTitle: newSetTitle.value,
   removableFromSet: removableFromSet.value,
   clonable: Boolean(clonableSet.value),
@@ -1110,7 +1116,16 @@ const VerbMenu = (props) => {
             : "",
         })
       : null,
-    props.hideSets ? sep() : null,
+    // The model's own Hide, worded apart from the set's just above. Beside it
+    // for the reason that one leads: it touches no file, and the verbs that do
+    // are at the foot.
+    props.hideModels
+      ? item(props.hideModels.icon, props.hideModels.label, {
+          on: () => props.onVerb("hide-models"),
+          title: props.hideModels.title,
+        })
+      : null,
+    props.hideSets || props.hideModels ? sep() : null,
     props.single
       ? item("mdi-pencil-outline", "Rename", {
           on: () => props.onVerb("rename"),

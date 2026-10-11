@@ -240,6 +240,29 @@ describe("opening", () => {
     expect(row(wrapper, "hand:7").exists()).toBe(true);
   });
 
+  it("offers no set named after a hidden model, and fills in no hidden member", async () => {
+    // 21 heads nothing from pictures; 31 does, so its set goes with it.
+    fetchWorkflowSets.mockResolvedValue({ ...SHELF, hidden_models: [31] });
+    let wrapper = mountMenu();
+    await openMenu(wrapper);
+    expect(planSetClones.mock.calls[0][1].map((set) => set.key)).toEqual([
+      "hand:7",
+      "hand:8",
+      "hand:9",
+    ]);
+
+    // A hidden support file leaves the set offered, without that file.
+    planSetClones.mockClear();
+    fetchWorkflowSets.mockResolvedValue({ ...SHELF, hidden_models: [32] });
+    wrapper = mountMenu();
+    await openMenu(wrapper);
+    expect(planSetClones.mock.calls[0][1].at(-1)).toEqual({
+      key: "model:31",
+      checkpoint_ids: [31],
+      model_ids: [],
+    });
+  });
+
   it("says the sets are being read until they are", async () => {
     const answer = held();
     planSetClones.mockReturnValue(answer.promise);

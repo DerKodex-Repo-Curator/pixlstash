@@ -26,6 +26,7 @@ const addWorkflowSetMembers = vi.fn();
 const removeWorkflowSetMembers = vi.fn();
 const listAdapters = vi.fn();
 const listCheckpoints = vi.fn();
+const setModelsHidden = vi.fn();
 
 vi.mock("../../api/modelShelf", () => ({
   BASE_MODEL_UNASSIGNED: "UNASSIGNED",
@@ -44,6 +45,7 @@ vi.mock("../../api/modelShelf", () => ({
   removeWorkflowSetMembers: (...args) => removeWorkflowSetMembers(...args),
   renameWorkflowSet: vi.fn(),
   setWorkflowSetDeclines: vi.fn(),
+  setModelsHidden: (...args) => setModelsHidden(...args),
 }));
 
 vi.mock("../../api/modelIcons", () => ({
@@ -198,6 +200,7 @@ beforeEach(() => {
   window.localStorage.clear();
   addWorkflowSetMembers.mockReset();
   removeWorkflowSetMembers.mockReset();
+  setModelsHidden.mockReset();
   listAdapters.mockReset().mockResolvedValue([]);
   listCheckpoints.mockReset().mockResolvedValue([]);
   fetchWorkflowSets
@@ -280,6 +283,44 @@ describe("what the rail lists", () => {
     expect(wrapper.find('[role="status"]').text()).toContain(
       "Night city is hidden in this library",
     );
+  });
+
+  it("leaves out a model this library hides, until Show asks for the hidden ones", async () => {
+    const { wrapper, store } = await mountRail({
+      rows: ROWS.map((r) => (r.id === 5 ? { ...r, hidden: true } : r)),
+    });
+    const names = () =>
+      wrapper.findAll('[role="option"]').map((o) => o.text()).join();
+    expect(names()).not.toContain("Soft");
+    expect(wrapper.findAll(".inspector-tab")[0].text()).toContain("2");
+
+    store.setFilters({ showHidden: true });
+    await wrapper.vm.$nextTick();
+    // Drawn again, and saying why it was not there.
+    expect(option(wrapper, "Soft").text()).toContain("Hidden");
+    expect(option(wrapper, "FilmGrain").text()).not.toContain("Hidden");
+  });
+
+  it("hides the model under the menu, and shows a hidden one again from it", async () => {
+    setModelsHidden.mockImplementation(async (ids, hidden) => (hidden ? ids : []));
+    const { wrapper, store } = await mountRail();
+    const hideRow = () =>
+      wrapper.find('.mrail-menu [data-testid="mrail-hide"]');
+
+    await option(wrapper, "Soft").trigger("contextmenu");
+    expect(hideRow().text()).toContain("Hide model");
+    await hideRow().trigger("click");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(setModelsHidden).toHaveBeenCalledWith([5], true);
+    expect(wrapper.findAll('[role="option"]')).toHaveLength(2);
+
+    store.setFilters({ showHidden: true });
+    await wrapper.vm.$nextTick();
+    await option(wrapper, "Soft").trigger("contextmenu");
+    expect(hideRow().text()).toContain("Show model again");
+    await hideRow().trigger("click");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(setModelsHidden).toHaveBeenLastCalledWith([5], false);
   });
 
   it("narrows to the models in no set when asked, and only then", async () => {

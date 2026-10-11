@@ -1083,14 +1083,17 @@ const fillPictureItems = computed(() =>
     ? fillFromPictures(
         openHand.value.set,
         store.workflowSets.combinations,
-        store.rows,
+        // The rows a list may offer: a model this library hides is not one.
+        store.offeredRows,
       )
     : [],
 );
 
 const fillSetItems = computed(() =>
   openHand.value
-    ? fillFromSets(openHand.value.set, store.shownHandMadeSets)
+    ? fillFromSets(openHand.value.set, store.shownHandMadeSets).filter(
+        (item) => !store.hiddenModelIds.has(item.id) || store.filters.showHidden,
+      )
     : [],
 );
 
@@ -1143,7 +1146,7 @@ const chooserSections = computed(() => {
   return slotSuggestions({
     set,
     slotId: chooser.value.slotId,
-    rows: store.rows,
+    rows: store.offeredRows,
     sets: store.shownHandMadeSets,
     combinations: store.workflowSets.combinations,
     query: chooserQuery.value,
@@ -1486,7 +1489,11 @@ async function dropOnSet(set, slotId) {
 /** How many shelf models fit the open set: the tray's Models · N fit. */
 const openFitCount = computed(() =>
   openHand.value
-    ? setFits(openHand.value.set, store.rows, store.workflowSets.combinations)
+    ? setFits(
+        openHand.value.set,
+        store.offeredRows,
+        store.workflowSets.combinations,
+      )
         .rows.length
     : 0,
 );

@@ -2848,7 +2848,10 @@ async function primeLoraCheck(type, item) {
         listAdapters({ fileKind, [filter]: Number(item.id) }),
       ),
     );
-    state = kinds.flat().some((row) => row?.sha256) ? "attached" : "none";
+    // The same rows the Run popup then offers: a hidden LoRA is not one.
+    state = kinds.flat().some((row) => row?.sha256 && !row.hidden)
+      ? "attached"
+      : "none";
   } catch (err) {
     console.warn(
       `Could not read the LoRAs attached to ${type} ${item.id}:`,

@@ -5773,7 +5773,7 @@ describe("the set grid is what the shelf opens on", () => {
     const { wrapper, store, lightCards } = await gridWithThreeCards();
     const bar = wrapper.findComponent({ name: "ShelfSelectionBar" });
     const hide = () =>
-      bar.findAll(".ctx-item").find((b) => b.text().startsWith("Hide "));
+      bar.findAll(".ctx-item").find((b) => b.text().includes("workflow set"));
     store.toggleSelected(1);
     store.toggleSelected(2);
     await wrapper.vm.$nextTick();
@@ -5804,7 +5804,7 @@ describe("the set grid is what the shelf opens on", () => {
     const fileRow = wrapper
       .findComponent({ name: "ShelfSelectionBar" })
       .findAll(".ctx-item")
-      .find((b) => b.text().startsWith("Hide "));
+      .find((b) => b.text().includes("workflow set"));
     const missingBar = wrapper.findComponent({ name: "MissingSetSelectionBar" });
     // One row, one count, on both: a card is a card whichever pill counts it.
     expect(fileRow.text()).toBe("Hide 2 workflow sets");

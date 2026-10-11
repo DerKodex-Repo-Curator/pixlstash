@@ -185,6 +185,27 @@ describe("the selection bar", () => {
     );
   });
 
+  it("words Hide by the selection, and emits it rather than hiding", async () => {
+    const hideRow = (wrapper) =>
+      wrapper.findAll(".ctx-item").find((mi) => / models?( again)?$/.test(mi.text()));
+    const store = selectRows([row(1, "present"), row(2, "present")]);
+    const wrapper = mount(ShelfSelectionBar, globalOpts);
+    expect(hideRow(wrapper).text()).toBe("Hide 2 models");
+
+    await hideRow(wrapper).trigger("click");
+    expect(wrapper.emitted("hide-models")).toHaveLength(1);
+
+    // One of the two already hidden: the verb still hides, the one left.
+    store.setFilters({ showHidden: true });
+    store.hiddenModelIds = new Set([1]);
+    await wrapper.vm.$nextTick();
+    expect(hideRow(wrapper).text()).toBe("Hide model");
+    // Both hidden: now it is the way back.
+    store.hiddenModelIds = new Set([1, 2]);
+    await wrapper.vm.$nextTick();
+    expect(hideRow(wrapper).text()).toBe("Show 2 models again");
+  });
+
   it("emits rather than acting, so the confirmations live in one place", async () => {
     // The two confirmations (Forget, Stack) are the view's, and this is what
     // keeps them there: the pill never calls a store verb of its own.

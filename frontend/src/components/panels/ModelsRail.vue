@@ -278,6 +278,29 @@
           <v-icon class="ctx-icon">mdi-plus-box-multiple-outline</v-icon>
           <span class="ctx-label-text">{{ newSetLabel }}</span>
         </button>
+        <!-- The one verb here that is not about a set, and like the rest it
+             touches no file: the model leaves this library's lists. -->
+        <div class="ctx-sep" role="separator"></div>
+        <button
+          class="ctx-item"
+          type="button"
+          role="menuitem"
+          :disabled="!hideVerb"
+          data-testid="mrail-hide"
+          @click="menuHide"
+        >
+          <Tooltip
+            v-if="hideVerb?.title"
+            :text="hideVerb.title"
+            activator="parent"
+          />
+          <v-icon class="ctx-icon">{{
+            hideVerb?.icon ?? "mdi-eye-off-outline"
+          }}</v-icon>
+          <span class="ctx-label-text">{{
+            hideVerb?.label ?? "Hide model"
+          }}</span>
+        </button>
       </template>
       <template v-else>
         <div class="ctx-label">{{ addSetsHeading }}</div>
@@ -362,7 +385,11 @@ import { GRID_GROUP_BY, useModelShelfStore } from "../../stores/useModelShelfSto
 import { useSidebarStore } from "../../stores/useSidebarStore";
 import { useTasksStore } from "../../stores/useTasksStore";
 import { onMenuKeydown } from "../../utils/menuKeyboard.js";
-import { formatModelSize, modelName } from "../../utils/modelShelf";
+import {
+  formatModelSize,
+  hideModelsVerb,
+  modelName,
+} from "../../utils/modelShelf";
 import {
   defaultSlot,
   handMadeBase,
@@ -381,6 +408,7 @@ import AppInput from "../widgets/AppInput.vue";
 import AppInspector from "../widgets/AppInspector.vue";
 import ModelMark from "../widgets/ModelMark.vue";
 import TasksPanel, { tasksTabFor } from "./TasksPanel.vue";
+import Tooltip from "../widgets/Tooltip.vue";
 
 /** How long the adds have to pause before the run's receipt goes up. */
 const RUN_PAUSE_MS = 1500;
@@ -411,8 +439,11 @@ watch(
   },
 );
 
-/** Every model the rail can offer: what the tab counts. */
-const listed = computed(() => store.rows.filter(railListed));
+/**
+ * Every model the rail can offer: what the tab counts. A model this library
+ * hides is not offered, until Show's *Hidden models* asks for those too.
+ */
+const listed = computed(() => store.offeredRows.filter(railListed));
 
 const tabs = computed(() => [
   {
@@ -658,7 +689,15 @@ function whereLine(row, { after = false } = {}) {
   return after ? text.charAt(0).toLowerCase() + text.slice(1) : text;
 }
 
+/** The row's second line; a model shown although hidden says so first. */
 function whyLine(row) {
+  const why = whyText(row);
+  return store.hiddenModelIds.has(row.id)
+    ? ["Hidden", why].filter(Boolean).join(" · ")
+    : why;
+}
+
+function whyText(row) {
   if (!row.sha256) return "Still hashing, can't be added yet";
   const state = rowState(row);
   if (state === "held" && addedHere.value.has(row.id)) {
@@ -1065,6 +1104,24 @@ function returnFocus() {
   const el = menuReturn?.isConnected ? menuReturn : listEl.value;
   menuReturn = null;
   el?.focus?.({ preventScroll: true });
+}
+
+/** The Hide row, worded by the shelf's own rule for the rows it acts on. */
+const hideVerb = computed(() =>
+  hideModelsVerb(
+    actionRows.value.map((row) => row.id),
+    store.hiddenModelIds,
+  ),
+);
+
+function menuHide() {
+  const rows = actionRows.value;
+  menuOpen.value = false;
+  // A hidden row leaves the list, so it leaves the rail's selection with it.
+  if (hideVerb.value?.hide && !store.filters.showHidden) {
+    selected.value = new Set();
+  }
+  store.toggleHiddenModels(rows);
 }
 
 async function menuAdd(set) {

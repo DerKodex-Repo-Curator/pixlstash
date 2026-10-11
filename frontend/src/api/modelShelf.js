@@ -199,7 +199,8 @@ export async function fetchModelCompanions(ids) {
  * `offer` and the `declined` models kept out of it (#1523).
  *
  * @returns {Promise<{combinations: Array<Object>, no_set: Array<number>,
- *   hand_made: Array<Object>, hidden_sets: Array<string>}>}
+ *   hand_made: Array<Object>, hidden_sets: Array<string>,
+ *   hidden_models: Array<number>}>}
  */
 export async function fetchWorkflowSets() {
   const body = await unwrap(apiClient.get("/models/workflow-sets"));
@@ -209,6 +210,7 @@ export async function fetchWorkflowSets() {
     hand_made: Array.isArray(body?.hand_made) ? body.hand_made : [],
     set_checks: Array.isArray(body?.set_checks) ? body.set_checks : [],
     hidden_sets: Array.isArray(body?.hidden_sets) ? body.hidden_sets : [],
+    hidden_models: Array.isArray(body?.hidden_models) ? body.hidden_models : [],
   };
 }
 
@@ -230,6 +232,23 @@ export async function setWorkflowSetsHidden(keys, hidden) {
     apiClient.put("/models/workflow-sets/hidden", { keys, hidden }),
   );
   return Array.isArray(body?.hidden_sets) ? body.hidden_sets : [];
+}
+
+/**
+ * Hide or show models in the ACTIVE library.
+ *
+ * Per library, on the server, as a set's hide is: a model hidden here is still
+ * on the shelf of another library. Nothing but the listing changes - no file,
+ * no row, and a workflow that already uses the model still runs with it.
+ * Answers with every model the library now hides.
+ *
+ * @param {Array<number>} ids - hub `model.id`s.
+ * @param {boolean} hidden - true hides, false shows again.
+ * @returns {Promise<Array<number>>} the library's hidden model ids, after.
+ */
+export async function setModelsHidden(ids, hidden) {
+  const body = await unwrap(apiClient.put("/models/hidden", { ids, hidden }));
+  return Array.isArray(body?.hidden_models) ? body.hidden_models : [];
 }
 
 // ── The owner's verdicts on a set and its members ───────────────────────────

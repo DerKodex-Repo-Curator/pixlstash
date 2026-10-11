@@ -917,7 +917,11 @@ async function loadShelf() {
   if (shelfRead.value) return;
   try {
     const adapters = await listAdapters();
-    shelf.value = (adapters || []).filter((adapter) => adapter?.sha256);
+    // The Add picker's list and nothing else (the chain's own rows are named
+    // by the server), so a LoRA this library hides is left out here.
+    shelf.value = (adapters || []).filter(
+      (adapter) => adapter?.sha256 && !adapter.hidden,
+    );
   } catch (err) {
     // Add is the only thing this costs, and it says so by staying disabled.
     console.warn("[workflows] could not read the model shelf's LoRAs", err);

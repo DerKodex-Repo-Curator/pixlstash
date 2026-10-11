@@ -65,6 +65,33 @@ describe("ShelfShowPanel", () => {
     expect(store.filters.duplicatesOnly).toBe(true);
   });
 
+  it("wires Hidden models to the filter the store reads, and counts them", async () => {
+    const { wrapper, store } = await mountPanel([
+      adapter({ id: 1 }),
+      adapter({ id: 2, hidden: true }),
+    ]);
+    const label = wrapper
+      .findAll("label.tbm-check")
+      .find((l) => l.text().includes("Hidden models"));
+    // The count says there is something to show before the box is ticked.
+    expect(label.text()).toBe("Hidden models (1)");
+    // As sets: this file's one double answers every block with the same rows.
+    const shown = () => new Set(store.visibleRows.map((r) => r.id));
+    expect(shown()).toEqual(new Set([1]));
+
+    await label.find("input").setValue(true);
+    expect(store.filters.showHidden).toBe(true);
+    expect(shown()).toEqual(new Set([1, 2]));
+  });
+
+  it("names no count when this library hides nothing", async () => {
+    const { wrapper } = await mountPanel([adapter({ id: 1 })]);
+    const label = wrapper
+      .findAll("label.tbm-check")
+      .find((l) => l.text().includes("Hidden models"));
+    expect(label.text()).toBe("Hidden models");
+  });
+
   it("offers the null base model as 'Not set' rather than omitting it", async () => {
     const { wrapper } = await mountPanel([
       adapter({ id: 1 }),

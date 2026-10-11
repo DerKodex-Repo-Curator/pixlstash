@@ -904,6 +904,30 @@ describe("the LoRAs a graph already loads", () => {
     };
   }
 
+  it("offers no LoRA this library hides, and still names one the workflow loads", async () => {
+    const hidden = "s".repeat(64);
+    const shown = "t".repeat(64);
+    listAdapters.mockResolvedValue([
+      { sha256: hidden, filename: "mira_v2.safetensors", hidden: true },
+      { sha256: shown, filename: "loras/film-grain-35mm.safetensors" },
+    ]);
+    getPictureRecipe.mockResolvedValue({
+      available: true,
+      workflow_id: KEY,
+      settings: {},
+      lora_slots: [filenameSlot("mira_v2.safetensors")],
+    });
+    const wrapper = await mountRun();
+
+    // Add LoRA and every other row's list: the hidden one is not a choice.
+    expect(wrapper.vm.adapterOptions.map((o) => o.value)).toEqual([shown]);
+    // The row that already loads it still reads as that file, not as empty.
+    expect(wrapper.vm.loras[0].sha256).toBe(hidden);
+    expect(
+      wrapper.vm.optionsFor(wrapper.vm.loras[0]).map((o) => o.value),
+    ).toEqual([hidden, shown]);
+  });
+
   it("shows the ordinary filename slots, which are all of them in practice", async () => {
     // `by: "digest"` is only PixlStash's own loader node. Filtering on it
     // meant every stock workflow opened the popup with no LoRAs at all.
