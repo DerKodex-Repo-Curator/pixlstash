@@ -369,6 +369,31 @@ export async function deleteWorkflow(workflowId) {
 }
 
 /**
+ * The versions a workflow keeps, newest first (#1849). Empty for an automatic
+ * workflow nobody has saved over.
+ *
+ * @param {string} workflowId
+ * @returns {Promise<{workflow_id: string, version: ?number,
+ *   versions: Array<{version: number, created_at: string, source: ?string, reason: ?string, current: boolean}>}>}
+ */
+export async function getWorkflowVersions(workflowId) {
+  return unwrap(apiClient.get(wf(workflowId, "/versions")));
+}
+
+/**
+ * Go back to an earlier version. Its graph becomes the newest version, so
+ * nothing is removed and going back can itself be undone. Answers with the
+ * versions re-read.
+ *
+ * @param {string} workflowId
+ * @param {number} version
+ * @returns {Promise<Object>} the same shape `getWorkflowVersions` returns
+ */
+export async function restoreWorkflowVersion(workflowId, version) {
+  return unwrap(apiClient.post(wf(workflowId, `/versions/${version}/restore`)));
+}
+
+/**
  * A workflow's LoRA chain, in the order the chain applies it (#1478).
  *
  * Source rail on top, the loaders from source to sink, the sink rail under

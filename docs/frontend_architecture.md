@@ -2255,7 +2255,7 @@ empty list. The footer is the Workflow tab's alone: Recipes runs a recipe from
 its own row, and Tasks replaces the body, so Run… would act on a card the reader
 can no longer see.
 
-- **Open a copy in ComfyUI is an icon-only button beside Run…**, wearing the ComfyUI
+- **Open in ComfyUI is an icon-only button beside Run…**, wearing the ComfyUI
   logomark (`widgets/ComfyuiIcon.vue`, `currentColor` on the AiToolkitIcon
   pattern), shown while `comfyuiUrl` is set. It opens what Run… runs
   (`runTarget`: the one selected workflow) and is refused with a reason, not
@@ -2277,6 +2277,22 @@ can no longer see.
   older shell without the bridge gets no button. An address of `0.0.0.0` is
   sent to the page's own host. The address is the one the *server* reaches
   ComfyUI on, so a browser on another machine resolves it against itself.
+  **What ComfyUI saves from there comes back as this workflow's next version**
+  (#1852), with no question in either app, so the button lost "a copy". The
+  card is re-read on the backend's `workflows_changed`, which moves the head
+  line to the new version; the tab then reads `GET …/versions` (again only
+  when the card's version moves) and, while the newest is one ComfyUI saved
+  (`source` `comfyui`, not the menu's words for it: a file the removed pull
+  read is worded the same), prints one line under
+  it, `Saved from ComfyUI just now · Go back`. *Go back* is an inline button
+  in a line of secondary text, as "N pictures" is, and restores the version
+  before (`POST …/versions/{n}/restore`); the line then goes, since the newest
+  version is the going back. No dialog and no bar to answer: the version menu
+  (#1850) is the lasting way back.
+  **With nodes from before saving back** (`GET /comfyui/pixlstash-node`
+  answers `saves_back: false`: no `save_workflow.js` in ComfyUI's extensions)
+  what opens is a copy that never comes back, and the tooltip reads *Open a
+  copy in ComfyUI*. Only on a definite no.
 
 - **Tasks is the shared `TasksPanel`, and always last.** This view replaces
   the grid, and its rail replaces the grid's, so without the tab a run started
