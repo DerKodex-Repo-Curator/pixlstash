@@ -2124,6 +2124,17 @@ def test_the_link_token_cannot_manage_tokens(workflow_env, comfy_at):
             assert r.status_code == 403, (method, path, r.text)
             assert r.json()["detail"] == auth.COMFYUI_SCOPE_REFUSAL
         assert len(_link_tokens(server)) == 1
+        # Behind the scope, each handler refuses a key bound to an address
+        # by itself: a full-access one, as links were before the scope, gets
+        # past the scope and is still refused all of it.
+        _set_link_key(server, scope="ALL")
+        try:
+            for method, path, body in attempts:
+                r = linked.request(method, path, json=body)
+                assert r.status_code == 403, (method, path, r.text)
+                assert "ComfyUI link key cannot" in r.json()["detail"]
+        finally:
+            _set_link_key(server, scope=auth.COMFYUI_SCOPE)
         # Positive control: the owner reaches the listings, and changes and
         # deletes the token.
         r = workflow_env.owner.get(f"{API}/users/me/token")
@@ -2267,6 +2278,81 @@ _COMFYUI_SCOPE_REFUSED = (
 )
 
 
+def _set_link_key(server, **values) -> None:
+    """Write columns of the one live link key, as an older build left them."""
+
+    def write(session):
+        (token_id,) = _link_tokens(server)
+        row = session.get(UserToken, token_id)
+        for name, value in values.items():
+            setattr(row, name, value)
+        session.add(row)
+        session.commit()
+
+    (_only,) = _link_tokens(server)
+    server.auth._db.run_task(write, priority=DBPriority.IMMEDIATE)
+    server.auth._flush_token_cache()
+
+
+def _link_key(server) -> UserToken:
+    (token_id,) = _link_tokens(server)
+    return server.auth._db.run_task(
+        lambda session: session.get(UserToken, token_id),
+        priority=DBPriority.IMMEDIATE,
+    )
+
+
+def test_start_up_narrows_a_link_made_before_the_scope(workflow_env, linked_comfyui):
+    """A link older than the address binding has a full-access key with no
+    address, which the hub cannot tell from the owner's own tokens. Start-up
+    narrows the recorded one, and only that one."""
+    server = workflow_env.server
+    r = workflow_env.owner.post(
+        f"{API}/users/me/token", json={"description": "owner's", "scope": "ALL"}
+    )
+    assert r.status_code == 200, r.text
+    owners = r.json()
+    try:
+        _set_link_key(server, scope="ALL", bound_address=None)
+        assert linked_comfyui.get(f"{API}/users/me/config").status_code == 200
+
+        comfyui_link_service.narrow_recorded_key(server)
+
+        assert _link_key(server).scope == auth.COMFYUI_SCOPE
+        assert linked_comfyui.get(f"{API}/pictures").status_code == 200
+        r = linked_comfyui.get(f"{API}/users/me/config")
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"] == auth.COMFYUI_SCOPE_REFUSAL
+        # The owner's own full-access token is not the link's and keeps its reach.
+        mine = _bearer(server, owners["token"])
+        assert mine.get(f"{API}/users/me/config").status_code == 200
+    finally:
+        workflow_env.owner.delete(f"{API}/users/me/token/{owners['token_id']}")
+
+
+def test_linking_again_keeps_use_in_every_library(workflow_env, linked_comfyui):
+    """The owner's choice belongs to the link, not to one key: the key that
+    replaces a widened one is widened, and a pinned one stays pinned."""
+    server = workflow_env.server
+    link = f"{API}/comfyui/link"
+    first = _link_key(server)
+    assert first.all_libraries is False
+    assert workflow_env.owner.post(link).json()["linked"] is True
+    second = _link_key(server)
+    assert (second.public_id != first.public_id, second.all_libraries) == (True, False)
+
+    r = workflow_env.owner.put(
+        f"{API}/users/me/token/{second.id}/libraries", json={"all_libraries": True}
+    )
+    assert r.status_code == 200, r.text
+    reply = workflow_env.owner.post(link).json()
+    assert reply["linked"] is True, reply
+    third = _link_key(server)
+    assert (third.public_id != second.public_id, third.all_libraries) == (True, True)
+    assert third.scope == auth.COMFYUI_SCOPE
+    assert reply["link"]["all_libraries"] is True
+
+
 @pytest.fixture
 def linked_comfyui(workflow_env, comfy_at):
     """A client holding the key a fresh link wrote into the fake ComfyUI."""
@@ -2290,6 +2376,7 @@ def test_the_link_key_is_let_through_to_every_route_the_nodes_call(
         assert_real_route(workflow_env.server.api, method, path, template)
         r = linked_comfyui.request(method, path, json=body)
         assert r.status_code not in {401, 403}, (method, path, r.text)
+        assert r.status_code < 500, (method, path, r.text)
 
 
 def test_the_link_key_is_refused_everything_the_nodes_do_not_call(
@@ -2317,6 +2404,10 @@ def test_each_layer_refuses_the_link_key_by_itself(
     server = workflow_env.server
     settings = f"{API}/users/me/config"
     assert linked_comfyui.get(f"{API}/pictures").status_code == 200
+    # The shape is the whole path: nothing may trail an admitted one.
+    assert auth.comfyui_scope_admits("GET", f"{API}/pictures")
+    assert not auth.comfyui_scope_admits("GET", f"{API}/pictures\n")
+    assert not auth.comfyui_scope_admits("GET", f"{API}/pictures/")
 
     # The gate alone: the middleware lets everything through.
     with monkeypatch.context() as patch:

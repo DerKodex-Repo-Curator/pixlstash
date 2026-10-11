@@ -280,7 +280,7 @@ def create_router(server) -> APIRouter:
         include_attachments: bool
         watermark: bool
         all_libraries: bool = False
-        # Bound to one client address (the ComfyUI link key): never widened.
+        # Bound to one client address (the ComfyUI link key).
         source_bound: bool = False
 
     class DeleteTokenResponse(BaseModel):

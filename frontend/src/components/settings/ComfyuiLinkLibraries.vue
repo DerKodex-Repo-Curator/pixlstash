@@ -4,7 +4,7 @@
 // local network (`can_manage`); the same switch as "Every library" in the
 // token list and "Use in every library" in Connect AI agent, and the same
 // call. `link` is the `GET /comfyui/link` body, whose `token_id` names the key.
-import { computed, ref } from "vue";
+import { computed, ref, useId, watch } from "vue";
 import { VSwitch } from "vuetify/components";
 import { setTokenLibraries } from "../../api/users";
 import { useLibrariesStore } from "../../stores/useLibrariesStore";
@@ -13,8 +13,6 @@ import { errorMessage } from "../../utils/apiError";
 const props = defineProps({
   link: { type: Object, default: null },
 });
-
-const emit = defineEmits(["changed"]);
 
 const librariesStore = useLibrariesStore();
 const offered = computed(
@@ -30,6 +28,14 @@ const chosen = ref(null);
 const everyLibrary = computed(() =>
   chosen.value === null ? props.link?.all_libraries === true : chosen.value,
 );
+// A new link status (linked again, or re-read) is the truth again.
+watch(
+  () => props.link,
+  () => {
+    chosen.value = null;
+  },
+);
+const hintId = useId();
 
 async function set(value) {
   if (saving.value) return;
@@ -39,7 +45,6 @@ async function set(value) {
   try {
     const body = await setTokenLibraries(props.link.token_id, value);
     chosen.value = body?.all_libraries === true;
-    emit("changed", chosen.value);
   } catch (e) {
     chosen.value = null;
     error.value = errorMessage(e, "Could not change which libraries it uses.");
@@ -58,10 +63,11 @@ async function set(value) {
       hide-details
       label="Use in every library"
       :disabled="saving"
+      :aria-describedby="hintId"
       data-testid="comfyui-link-every-library"
       @update:model-value="set"
     />
-    <p class="cll__hint">
+    <p :id="hintId" class="cll__hint">
       {{
         everyLibrary
           ? "ComfyUI works on whichever library is open, and follows you when you switch."

@@ -528,8 +528,10 @@ watch(
               </AppButton>
             </div>
             <p class="cf-small cf-muted">
-              Linking gives ComfyUI a key that lets its PixlStash nodes browse
-              this library and save pictures into it, and nothing else.
+              Linking gives ComfyUI a key for its PixlStash nodes: they can
+              browse this library, load its models, save pictures into it and
+              convert workflows. The key cannot delete, change settings or make
+              tokens.
             </p>
             <ComfyuiExposureNotice v-if="exposure" :exposure="exposure" />
           </template>

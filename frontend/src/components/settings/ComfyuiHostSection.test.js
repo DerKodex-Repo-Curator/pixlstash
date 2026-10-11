@@ -386,7 +386,7 @@ describe("linking ComfyUI", () => {
     expect(linkBtn.classes()).toContain("app-btn--primary");
     expect(wrapper.findAll(".app-btn--primary")).toHaveLength(1);
     expect(wrapper.text()).toContain(
-      "lets its PixlStash nodes browse this library and save pictures into it, and nothing else",
+      "The key cannot delete, change settings or make tokens.",
     );
     expect(byTestId(wrapper, "comfyui-disconnect-note").exists()).toBe(false);
   });

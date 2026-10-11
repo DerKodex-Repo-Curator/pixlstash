@@ -51,7 +51,7 @@ describe("ComfyuiLinkLibraries", () => {
     expect(toggle(show()).exists()).toBe(true);
   });
 
-  it("widens the link's key, says what that means and reports it", async () => {
+  it("widens the link's key and says what that means", async () => {
     const wrapper = show();
     expect(toggle(wrapper).attributes("aria-checked")).toBe("false");
     expect(wrapper.text()).toContain("one library only");
@@ -62,7 +62,10 @@ describe("ComfyuiLinkLibraries", () => {
     expect(setTokenLibraries).toHaveBeenCalledWith(7, true);
     expect(toggle(wrapper).attributes("aria-checked")).toBe("true");
     expect(wrapper.text()).toContain("whichever library is open");
-    expect(wrapper.emitted("changed")).toEqual([[true]]);
+
+    // A newer link status wins over what was last chosen here.
+    await wrapper.setProps({ link: { ...LINK, all_libraries: false } });
+    expect(toggle(wrapper).attributes("aria-checked")).toBe("false");
   });
 
   it("shows a key that already covers every library, and narrows it", async () => {
@@ -88,6 +91,5 @@ describe("ComfyuiLinkLibraries", () => {
 
     expect(toggle(wrapper).attributes("aria-checked")).toBe("false");
     expect(wrapper.find('[role="alert"]').text()).toContain("own session");
-    expect(wrapper.emitted("changed")).toBeUndefined();
   });
 });

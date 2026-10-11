@@ -12,7 +12,8 @@ Owner decisions (2026-10-06), which this module implements and nothing more:
   routes the ComfyUI-PixlStash nodes call and nothing else, so it cannot
   delete, change settings or make tokens.
 * It covers the library that is open when ComfyUI is linked. The owner can
-  set it to cover every library afterwards (``auth.set_token_libraries``).
+  set it to cover every library afterwards (``auth.set_token_libraries``),
+  and linking again keeps that.
 * The token works only from ComfyUI's own address (#1810). ComfyUI serves its
   settings, token included, to anyone who can reach it, so the token is bound
   to the source address PixlStash sees on the link's round-trip check, and
@@ -469,6 +470,20 @@ def _link(server, request: Request, saved_url: Optional[str]) -> dict:
         bound_address=TOKEN_BIND_PENDING,
     )
     public_id = minted["public_id"]
+    replaced = (server._server_config.get(LINK_CONFIG_KEY) or {}).get("token_public_id")
+    old_key = _token(server, replaced) if replaced else None
+    if old_key is not None and token_follows_active_library(old_key):
+        # Linking again must not quietly undo "Use in every library".
+        try:
+            _keep_every_library(server, public_id)
+        except Exception:
+            logger.exception(
+                "Could not carry every-library reach over to ComfyUI link "
+                "token %s; revoking it.",
+                public_id,
+            )
+            _revoke(server, request, public_id)
+            raise
     try:
         _write_settings(
             pinned,
@@ -624,6 +639,71 @@ def _clear_comfyui_key(pinned: str, comfyui_url: str) -> None:
             comfyui_url,
             exc,
         )
+
+
+def narrow_recorded_key(server) -> None:
+    """Hold the recorded link's key to the ComfyUI scope (#1811).
+
+    A link made before the scope has an ``ALL`` key. The hub narrows the ones
+    bound to an address when it opens; this narrows the recorded one whatever
+    its binding, which is the only way to tell a key from before #1810 (no
+    ``bound_address``) from the owner's own tokens. Run once at start-up.
+    """
+    public_id = (server._server_config.get(LINK_CONFIG_KEY) or {}).get(
+        "token_public_id"
+    )
+    if not public_id:
+        return
+
+    def narrow(session) -> bool:
+        token = session.exec(
+            select(UserToken).where(UserToken.public_id == public_id)
+        ).first()
+        if token is None or token.scope != "ALL":
+            return False
+        token.scope = COMFYUI_SCOPE
+        session.add(token)
+        session.commit()
+        return True
+
+    try:
+        narrowed = server.auth._db.run_task(narrow, priority=DBPriority.IMMEDIATE)
+    except Exception:
+        # Start-up goes on, but the key in ComfyUI is still full access.
+        logger.exception(
+            "Could not narrow ComfyUI link token %s to the ComfyUI scope; it "
+            "still has FULL ACCESS. Link ComfyUI again from Settings.",
+            public_id,
+        )
+        return
+    if narrowed:
+        server.auth._flush_token_cache()
+        logger.info(
+            "ComfyUI link token %s had full access; it now reaches only what "
+            "the PixlStash nodes call.",
+            public_id,
+        )
+
+
+def _keep_every_library(server, public_id: str) -> None:
+    """Give a link's new key the every-library reach of the key it replaces.
+
+    Not ``auth.set_token_libraries``: that is the owner widening a token, and
+    refuses a token caller. This widens nothing, it keeps what the owner set
+    on the link when another key takes the old one's place.
+    """
+
+    def keep(session) -> None:
+        token = session.exec(
+            select(UserToken).where(UserToken.public_id == public_id)
+        ).first()
+        if token is not None:
+            token.all_libraries = True
+            session.add(token)
+            session.commit()
+
+    server.auth._db.run_task(keep, priority=DBPriority.IMMEDIATE)
+    server.auth._flush_token_cache()
 
 
 def reannounce(server) -> None:

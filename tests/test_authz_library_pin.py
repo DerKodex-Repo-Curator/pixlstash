@@ -658,7 +658,8 @@ class TestATokenThatCoversEveryLibrary:
         client = TestClient(server.api)
         pinned = client.get(f"{API}/pictures", headers=bearer)
         assert pinned.status_code == 403
-        assert "different library" in pinned.json()["detail"]
+        # Anyone can read this key off ComfyUI, so it is not told the way out.
+        assert pinned.json()["detail"] == "Token belongs to a different library"
 
         widened = _cover(owner, row.id, True)
         assert widened.status_code == 200, widened.text

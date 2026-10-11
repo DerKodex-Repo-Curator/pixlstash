@@ -87,7 +87,8 @@ RESTORE_ADMISSION_PREFIXES: tuple[str, ...] = (*AUTH_API_PREFIXES, "/share/")
 # treated as read-only, so a scope value is admitted by declaration rather than
 # by omission. ``ALL`` is absent on purpose: ``request.state.token_scope`` is
 # populated only for non-ALL scopes, so an owner token never reaches the check.
-# ``WRITE`` has no mint path (``create_token`` allowlists ``ALL``/``READ``); it
+# ``WRITE`` has no mint path (``create_token`` allowlists ``ALL``, ``READ`` and
+# ``COMFYUI``, which has its own check in the middleware and the gate); it
 # is named here so the shape the ``*_SCOPED`` route policies exist for keeps its
 # write-ness deliberately rather than by the old ``!= "READ"`` accident.
 WRITE_ENABLED_SCOPES: frozenset[str] = frozenset({"WRITE"})
@@ -162,7 +163,7 @@ def comfyui_scope_admits(method: str, path: str) -> bool:
     or refuses the route the request actually matched.
     """
     return any(
-        method == admitted and shape.match(path)
+        method == admitted and shape.fullmatch(path)
         for admitted, shape in _COMFYUI_SCOPE_SHAPES
     )
 
@@ -2972,9 +2973,13 @@ class AuthService:
                         detail = "Token belongs to a different library"
                         # The way out is the owner's to take, so only a token
                         # that could be widened is told about it; a share link
-                        # or the ComfyUI link key learns nothing about how this
+                        # or the ComfyUI link key (bound to an address, and
+                        # readable off ComfyUI) learns nothing about how this
                         # server is set up.
-                        if token_may_cover_every_library(matched_token):
+                        if (
+                            token_may_cover_every_library(matched_token)
+                            and matched_token.bound_address is None
+                        ):
                             detail += (
                                 ". Switch to that library, or let the token "
                                 "cover every library under API Tokens in "
@@ -3103,12 +3108,15 @@ class AuthService:
                                     )
                             else:
                                 request.state.guest_session_id = None
-                                self._logger.info(
-                                    "[guest-scores] No valid guest_session cookie for %s (raw=%r, all_cookies=%r)",
-                                    request.url.path,
-                                    raw_gs,
-                                    list(request.cookies.keys()),
-                                )
+                                # Not for the ComfyUI key: it is no guest, and
+                                # its picker asks for a thumbnail a line.
+                                if matched_token.scope != COMFYUI_SCOPE:
+                                    self._logger.info(
+                                        "[guest-scores] No valid guest_session cookie for %s (raw=%r, all_cookies=%r)",
+                                        request.url.path,
+                                        raw_gs,
+                                        list(request.cookies.keys()),
+                                    )
 
                 if user_id is None:
                     self._logger.error(
@@ -3138,7 +3146,9 @@ class AuthService:
             if token_scope is not None and token_scope.scope == COMFYUI_SCOPE:
                 # The ComfyUI key: its own routes and nothing else, whatever
                 # the method. The gate checks the route this resolves to.
-                if not comfyui_scope_admits(request.method, request.url.path):
+                # The path the router matches on, not ``request.url.path``,
+                # which a decoded ``#`` or ``?`` in the path cuts short.
+                if not comfyui_scope_admits(request.method, request.scope["path"]):
                     self._logger.info(
                         "Refused ComfyUI key %s for %s %s: not a route its scope admits.",
                         getattr(request.state, "token_public_id", None),

@@ -1925,6 +1925,10 @@ def _apply_v2(conn: sqlite3.Connection) -> None:
     # Only the ComfyUI link sets ``bound_address``, and before #1811 it minted
     # a full-access key. Narrow those to the ComfyUI scope (``auth.COMFYUI_SCOPE``)
     # so an existing link is held to the nodes' routes without linking again.
+    # One statement that is a no-op once done, so it is here rather than in a
+    # one-shot backfill: a build from before #1811 opening this hub can still
+    # mint one. A link older than the binding has no ``bound_address`` and is
+    # narrowed by ``comfyui_link_service.narrow_recorded_key`` instead.
     conn.execute(
         "UPDATE usertoken SET scope = 'COMFYUI' "
         "WHERE bound_address IS NOT NULL AND scope = 'ALL'"
