@@ -1553,7 +1553,9 @@ class WorkflowChanges(BaseModel):
         """These changes with *other*'s on top: *other* wins thing by thing.
 
         A slot *other* removes is no longer set, and one it sets is no longer
-        removed, whichever of the two this set said.
+        removed, whichever of the two this set said. Never fails: two sets
+        that each fit the limits can be more than one together, which is for
+        the caller to refuse (:meth:`too_many`) and no reason to fail a read.
         """
         models = {m.address: m for m in [*self.models, *other.models]}
         values = {
@@ -1567,12 +1569,22 @@ class WorkflowChanges(BaseModel):
         for item in other.skip_loras:
             set_here.pop((item.node_id, item.field), None)
             gone_here[(item.node_id, item.field)] = item
-        return WorkflowChanges(
+        # Built from validated entries, one per key: only the lengths could
+        # fail validation here.
+        return WorkflowChanges.model_construct(
             models=list(models.values()),
             loras=list(set_here.values()),
             skip_loras=list(gone_here.values()),
             stages={**self.stages, **other.stages},
             values=list(values.values()),
+        )
+
+    def too_many(self) -> bool:
+        """Whether this is more than one save takes: the limits of each list,
+        which two sets laid over each other can pass together."""
+        return (
+            max(len(self.models), len(self.values)) > MAX_DEFAULTS
+            or max(len(self.loras), len(self.skip_loras)) > MAX_RUN_LORAS
         )
 
     def changes_the_graph(self) -> bool:
@@ -9758,6 +9770,15 @@ def create_router(server) -> APIRouter:
         changes = (waiting or WorkflowChanges()).over(
             _without_people(payload.changes or WorkflowChanges())
         )
+        if changes.too_many():
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "What waits on this workflow and what this request adds "
+                    "are together more changes than one save takes. Save or "
+                    "discard what waits first."
+                ),
+            )
         current = workflow_versions.current_version(hub, workflow_id)
         stale = (waiting is not None and base != current) or (
             "version" in payload.model_fields_set and payload.version != current

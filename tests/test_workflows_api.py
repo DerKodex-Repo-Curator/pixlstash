@@ -16810,6 +16810,39 @@ def test_the_unsaved_graph_opens_only_when_asked_for(saving):
     assert (unsaved["waiting_applied"], unsaved["version"]) == (True, 1)
 
 
+def test_two_sets_that_are_too_many_together_fail_no_read_and_are_refused(saving):
+    """Each fits the limit and together they do not: that was a 500, on the
+    read of a workflow's changes as on Save."""
+    many = workflows_routes.MAX_RUN_LORAS
+    _put_changes(
+        saving,
+        saving.manual,
+        skip_loras=[{"node_id": str(n), "field": "lora_name"} for n in range(many)],
+    )
+    workflow_group_writes.write_changes(
+        saving.server.hub,
+        saving.manual,
+        "run",
+        {
+            "skip_loras": [
+                {"node_id": str(1000 + n), "field": "lora_name"} for n in range(many)
+            ]
+        },
+        1,
+    )
+    state = _changes(saving, saving.manual)
+    assert (state["count"], len(state["ran"]["skip_loras"])) == (many, many)
+
+    r = _save(
+        saving,
+        saving.manual,
+        changes={"skip_loras": [{"node_id": "9999", "field": "lora_name"}]},
+    )
+    assert r.status_code == 422 and "more changes than one save" in r.json()["detail"]
+    assert [row[0] for row in _versions_of(saving, saving.manual)] == [1]
+    assert _changes(saving, saving.manual)["count"] == many, "the refusal dropped them"
+
+
 def test_save_writes_what_waits_over_the_workflow_as_its_next_version(saving):
     """Same id, a new version, the graph before kept, and nothing left waiting.
 
