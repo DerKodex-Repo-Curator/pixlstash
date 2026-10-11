@@ -15,12 +15,33 @@ export function noChanges() {
   return { models: [], loras: [], skip_loras: [], stages: {}, values: [] };
 }
 
-/** *changes* with every list present, so a reader never guards a field. */
+/**
+ * *changes* with every list present and nothing else, so a reader never
+ * guards a field. A copy, lists and stages both: the row edits
+ * (`workflowEdits.js`) write on what this answers.
+ *
+ * @param {?Object} changes - a set, or what a read answered (null when
+ *   nothing waits).
+ * @returns {{models: Array, loras: Array, skip_loras: Array, stages: Object, values: Array}}
+ */
 export function whole(changes) {
-  return { ...noChanges(), ...(changes || {}) };
+  return {
+    models: [...(changes?.models ?? [])],
+    loras: [...(changes?.loras ?? [])],
+    skip_loras: [...(changes?.skip_loras ?? [])],
+    stages: { ...(changes?.stages ?? {}) },
+    values: [...(changes?.values ?? [])],
+  };
 }
 
-const slotKey = (item) => `${item.node_id}\n${item.field || "lora_name"}`;
+/** A LoRA slot as the server addresses it: a node and a field, as strings. */
+export const slotOf = (slot) => ({
+  node_id: String(slot.node_id),
+  field: slot.field || "lora_name",
+});
+
+/** One string per slot: two entries name the same loader when theirs match. */
+export const slotKey = (item) => `${item.node_id}\n${item.field || "lora_name"}`;
 const valueKey = (item) => `${item.slot_label}\n${item.input_name}`;
 
 /**

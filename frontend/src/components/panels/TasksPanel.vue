@@ -119,7 +119,12 @@
        verbs again, once the pictures are back. Rows of the same list, not a
        toast: pictures get rated before this is decided, so the offer stays
        until that workflow runs again or the changes are saved. -->
-  <div v-if="offers.length" class="tm-worker-list" data-testid="tm-offers">
+  <div
+    v-if="offers.length"
+    ref="offersList"
+    class="tm-worker-list"
+    data-testid="tm-offers"
+  >
     <div
       v-for="offer in offers"
       :key="offer.workflowId"
@@ -143,7 +148,6 @@
            refusal has to find it there. -->
       <template v-if="naming === offer.workflowId">
         <AppInput
-          :ref="(el) => keep(nameFields, offer.workflowId, el)"
           v-model="newName"
           label="Name of the new workflow"
           :readonly="Boolean(busy)"
@@ -175,7 +179,7 @@
       </template>
       <div v-else class="tm-offer-acts">
         <AppButton
-          :ref="(el) => keep(asNewButtons, offer.workflowId, el)"
+          data-as-new
           size="sm"
           :disabled="Boolean(busy)"
           @click="askName(offer)"
@@ -400,12 +404,7 @@ const errors = reactive({});
 /** The workflow whose row is asking for a name, or "". */
 const naming = ref("");
 const newName = ref("");
-// Each row's name field and Save as new… button, by workflow. Vue hands a
-// function ref the element when it mounts and null when it leaves, and rows
-// patch in order: one variable shared by the rows would be emptied by a later
-// row's field leaving after an earlier row's had arrived.
-const nameFields = new Map();
-const asNewButtons = new Map();
+const offersList = ref(null);
 /** What the last save here did, or "". */
 const doneNote = ref("");
 const doneLine = ref(null);
@@ -423,9 +422,12 @@ const doneLine = ref(null);
 const doneLost = ref("");
 const doneWaits = ref("");
 
-function keep(kept, workflowId, el) {
-  if (el) kept.set(workflowId, el);
-  else kept.delete(workflowId);
+/** A control of one offer's row: found by the `data-offer` the row carries. */
+function inOffer(workflowId, selector) {
+  const row = [...(offersList.value?.children ?? [])].find(
+    (el) => el.dataset.offer === String(workflowId),
+  );
+  return row?.querySelector(selector) ?? null;
 }
 
 // The line is the receipt of the last save made here, and is taken down as
@@ -443,7 +445,7 @@ watch(
     doneNote.value = "";
     if (!held) return;
     await nextTick();
-    asNewButtons.get(arrived)?.focus?.();
+    inOffer(arrived, "[data-as-new]")?.focus();
   },
 );
 
@@ -504,9 +506,9 @@ async function askName(offer) {
   newName.value = suggestedName(offer.name);
   naming.value = offer.workflowId;
   await nextTick();
-  const field = nameFields.get(offer.workflowId);
-  field?.focus?.();
-  field?.select?.();
+  const field = inOffer(offer.workflowId, "input");
+  field?.focus();
+  field?.select();
 }
 
 async function backFromName(offer) {
@@ -515,7 +517,7 @@ async function backFromName(offer) {
   if (busy.value) return;
   naming.value = "";
   await nextTick();
-  asNewButtons.get(offer.workflowId)?.focus?.();
+  inOffer(offer.workflowId, "[data-as-new]")?.focus();
 }
 
 /** Save as new: the same changes stored as a new workflow; this one is left alone. */
