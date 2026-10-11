@@ -1449,15 +1449,17 @@ it reads which library is active, and mid-swap that is the one thing moving.
 **Moving pictures between libraries is a picture route, not a library one.**
 `POST /pictures/move-to-library` (`local_owner_only`, the switch's tier) takes
 `{ picture_ids, library_uuid }` and answers
-`{ library_name, moved_count, skipped_locked[], skipped_already_there[],
-skipped_scrapheaped[], failed[] }`. The four lists are the pictures that are
-**still here**, and the client keeps their tiles: a locked set freezes them, the
+`{ library_name, moved_count, moved[], skipped_locked[],
+skipped_already_there[], skipped_scrapheaped[], failed[] }`. `moved[]` names
+the pictures that left for this library's Scrapheap, under one operation, so the
+grid treats them exactly as it treats a `DELETE /pictures` (ghosted tiles, one
+Undo) and `ImageGrid.deleteSelected` serves both. The four `skipped`/`failed`
+lists say why the others are **still here**: a locked set freezes them, the
 other library already has the same file, has it in its Scrapheap, or the file
-could not be copied. Everything else left for this library's Scrapheap under one
-operation, so the grid treats the answer exactly as it treats `DELETE /pictures`
-(ghosted tiles, one Undo) and `ImageGrid.deleteSelected` serves both. The notice
-counts `moved_count`, never the ids the client sent: an id the server did not
-act on must not be announced as moved. `404` for an unknown library, `409` when
+could not be copied. The client drops and counts `moved[]` and nothing else: an
+id the server did not act on (already deleted from another tab) is in no list,
+and inferring "moved" from that absence would announce a move that did not
+happen. `404` for an unknown library, `409` when
 it is the active one, cannot be opened, or a switch or another move is running,
 `403` for a remote owner or a token that covers only the active library. The
 menus list `libraries[]` minus the active and the unreachable, and nothing

@@ -4082,9 +4082,10 @@ async function deleteSelected(idsOverride = null, moveTo = null) {
     const alreadyThere = new Set();
     const inOtherScrapheap = new Set();
     const notCopied = new Set();
-    // Counted by the server, never derived here: an id it did not act on (a
-    // picture another tab already deleted) must not be announced as moved.
-    let movedCount = 0;
+    // Named by the server, never derived here: an id in none of its lists (a
+    // picture another tab already deleted) is not one this move took, so it is
+    // neither announced as moved nor has its tile dropped by this.
+    const movedIds = new Set();
     for (let i = 0; i < idsToRemove.length; i += BULK_DELETE_CHUNK) {
       const chunk = idsToRemove.slice(i, i + BULK_DELETE_CHUNK);
       const resp = moveTo
@@ -4094,7 +4095,7 @@ async function deleteSelected(idsOverride = null, moveTo = null) {
       if (Array.isArray(skipped)) {
         for (const id of skipped) skippedLocked.add(String(id));
       }
-      movedCount += Number(resp?.moved_count) || 0;
+      for (const id of resp?.moved ?? []) movedIds.add(String(id));
       for (const id of resp?.skipped_already_there ?? []) {
         alreadyThere.add(String(id));
       }
@@ -4108,10 +4109,7 @@ async function deleteSelected(idsOverride = null, moveTo = null) {
     // too would hide pictures that are still in the library until the next
     // refetch - a second, quieter version of the same lie.
     const stillHere = (id) =>
-      skippedLocked.has(String(id)) ||
-      alreadyThere.has(String(id)) ||
-      inOtherScrapheap.has(String(id)) ||
-      notCopied.has(String(id));
+      moveTo ? !movedIds.has(String(id)) : skippedLocked.has(String(id));
     const removedIds = idsToRemove.filter((id) => !stillHere(id));
     // Keep the tiles mounted and greyed while the undo is still one click away,
     // and let the receipt's own clock decide when the grid closes the gap.
@@ -4145,7 +4143,7 @@ async function deleteSelected(idsOverride = null, moveTo = null) {
     emit("refresh-sidebar");
     if (moveTo) {
       showLibraryMoveNotice(moveTo, {
-        movedCount,
+        movedCount: movedIds.size,
         lockedCount: skippedLocked.size,
         alreadyThereCount: alreadyThere.size,
         inOtherScrapheapCount: inOtherScrapheap.size,

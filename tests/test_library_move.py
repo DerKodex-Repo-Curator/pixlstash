@@ -191,6 +191,7 @@ class TestAMove:
         body = response.json()
         assert body["library_name"] == "Other"
         assert body["moved_count"] == 1
+        assert body["moved"] == [picture_id]
         assert body["skipped_already_there"] == []
         assert (
             body["skipped_locked"],
@@ -348,6 +349,26 @@ class TestWhatIsLeftBehind:
         assert body["moved_count"] == 1
         assert _here(server, lost).deleted is False
         assert _here(server, fine).deleted is True
+
+    def test_an_id_that_is_not_a_live_picture_is_not_reported_as_moved(
+        self, server, owner, other
+    ):
+        """Already in the Scrapheap, or never existed: in no list at all."""
+        gone = _add(server, _png())
+        assert (
+            owner.request(
+                "DELETE", f"{API}/pictures", json={"picture_ids": [gone]}
+            ).json()["deleted_count"]
+            == 1
+        )
+        sha = _here(server, gone).pixel_sha
+        fine = _add(server, _png())
+
+        body = _move(owner, other, [gone, 999_999, fine]).json()
+
+        assert body["moved"] == [fine]
+        assert body["moved_count"] == 1
+        assert _there(server, other, sha) == []
 
 
 class TestRefusals:

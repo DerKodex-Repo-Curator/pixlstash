@@ -57,6 +57,9 @@ class MoveToLibraryResponse(BaseModel):
     # Pictures that left this library: they are in the other one now, and in
     # this library's Scrapheap.
     moved_count: int
+    # Their ids, so a client drops exactly these tiles rather than every id it
+    # sent that is in none of the lists below.
+    moved: list[int] = []
     # Left here because a locked set freezes them.
     skipped_locked: list[int] = []
     # Left here because the other library already holds the same file, byte
@@ -230,6 +233,7 @@ def register_routes(router, server):
             status="success",
             library_name=library.name,
             moved_count=len(moved),
+            moved=moved,
             skipped_locked=sorted(set(locked) | set(newly_locked)),
             skipped_already_there=[
                 pid for pid, how in outcomes.items() if how == "duplicate"

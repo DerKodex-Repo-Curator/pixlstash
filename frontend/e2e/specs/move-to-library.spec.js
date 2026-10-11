@@ -95,6 +95,7 @@ test.describe('move to library', () => {
       failed: [],
     })
     expect(body.moved_count).toBeGreaterThanOrEqual(1)
+    expect(body.moved).toContain(pictureId)
     await expect(
       page.locator('.notice-message', {
         hasText: new RegExp(`Moved ${body.moved_count} pictures? to ${archive.name}\\.`),

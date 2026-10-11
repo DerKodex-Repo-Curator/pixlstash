@@ -419,17 +419,17 @@ export async function deletePictures(pictureIds) {
  * Move pictures into another library.
  *
  * The server copies each one there and then moves it to this library's
- * Scrapheap, so `skipped_locked`, `skipped_already_there`,
- * `skipped_scrapheaped` and `failed` are the pictures that are STILL HERE and
- * whose tiles the caller must keep.
+ * Scrapheap. `moved` names the pictures that left, and those are the only
+ * tiles to drop; `skipped_locked`, `skipped_already_there`,
+ * `skipped_scrapheaped` and `failed` say why the others are still here.
  *
  * No timeout: the copy is one request, and a selection of videos outlasts the
  * client's default.
  *
  * @param {Array<number|string>} pictureIds
  * @param {string} libraryUuid - the target's stable id, from the libraries list.
- * @returns {Promise<Object>} `{ library_name, moved_count, skipped_locked,
- *   skipped_already_there, skipped_scrapheaped, failed }`.
+ * @returns {Promise<Object>} `{ library_name, moved_count, moved,
+ *   skipped_locked, skipped_already_there, skipped_scrapheaped, failed }`.
  */
 export async function movePicturesToLibrary(pictureIds, libraryUuid) {
   return unwrap(
