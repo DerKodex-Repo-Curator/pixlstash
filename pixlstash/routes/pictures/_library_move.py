@@ -184,7 +184,14 @@ def _copy_into(target, source_root: str, row) -> str:
                 written,
                 row.id,
             )
-        ImageUtils.remove_thumbnail(target.image_root, picture.file_path)
+        try:
+            ImageUtils.remove_thumbnail(target.image_root, picture.file_path)
+        except Exception:
+            logger.exception(
+                "Could not remove orphan thumbnail for %s after failed move of picture %s",
+                picture.file_path,
+                row.id,
+            )
         raise
     return "new"
 
@@ -257,8 +264,8 @@ def register_routes(router, server):
                         # The transaction rolls back on a database failure, but
                         # notification can fail AFTER commit. Re-read instead
                         # of claiming every source stayed live in either case.
-                        def deleted_sources(session: Session):
-                            return set(
+                        def source_outcomes(session: Session):
+                            deleted = set(
                                 session.exec(
                                     select(Picture.id).where(
                                         Picture.id.in_(arrived),
@@ -266,11 +273,23 @@ def register_routes(router, server):
                                     )
                                 ).all()
                             )
+                            # Classify locks and deletions in the same read
+                            # task. A lock never overrides a confirmed move.
+                            return deleted, locked_picture_ids(session, arrived)
 
-                        deleted = source.db.run_immediate_read_task(deleted_sources)
+                        deleted, locked_now = source.db.run_immediate_read_task(
+                            source_outcomes
+                        )
                         moved = [pid for pid in arrived if pid in deleted]
+                        copied_but_locked = [
+                            pid
+                            for pid in arrived
+                            if pid not in deleted and pid in locked_now
+                        ]
                         copied_but_not_moved = [
-                            pid for pid in arrived if pid not in deleted
+                            pid
+                            for pid in arrived
+                            if pid not in deleted and pid not in locked_now
                         ]
         except LibraryNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc

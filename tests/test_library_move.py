@@ -333,6 +333,63 @@ class TestWhatTheOtherLibraryAlreadyHolds:
 
 
 class TestWhatIsLeftBehind:
+    @pytest.mark.parametrize("fail_before_commit", [True, False])
+    def test_recovery_distinguishes_new_locks_from_other_delete_failures(
+        self, server, owner, other, monkeypatch, fail_before_commit
+    ):
+        from pixlstash.routes.pictures import _crud, _library_move
+
+        frozen = _add(server, _png())
+        free = _add(server, _png())
+        fingerprints = [_here(server, pid).pixel_sha for pid in [frozen, free]]
+        copy_into = _library_move._copy_into
+        scrapheap = _library_move.scrapheap_pictures
+
+        def copy_then_lock(target, source_root, row):
+            outcome = copy_into(target, source_root, row)
+            if row.id == frozen:
+
+                def lock(session: Session):
+                    group = PictureSet(name="locked-during-recovery-test", locked=True)
+                    session.add(group)
+                    session.flush()
+                    session.add(PictureSetMember(set_id=group.id, picture_id=frozen))
+                    session.commit()
+
+                server.vault.db.run_task(lock)
+            return outcome
+
+        def fail_record(*args, **kwargs):
+            raise RuntimeError("Source transaction failed")
+
+        def fail_after_commit(*args):
+            scrapheap(*args)
+            raise RuntimeError("Post-commit notification failed")
+
+        monkeypatch.setattr(_library_move, "_copy_into", copy_then_lock)
+        if fail_before_commit:
+            monkeypatch.setattr(
+                _crud.operation_log_service, "record_operation_in_session", fail_record
+            )
+        else:
+            monkeypatch.setattr(_library_move, "scrapheap_pictures", fail_after_commit)
+
+        response = _move(owner, other, [frozen, free])
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["copied_but_locked"] == [frozen]
+        assert body["copied_but_not_moved"] == ([free] if fail_before_commit else [])
+        assert body["moved"] == ([] if fail_before_commit else [free])
+        assert body["moved_count"] == (0 if fail_before_commit else 1)
+        assert body["skipped_locked"] == []
+        assert _here(server, frozen).deleted is False
+        assert _here(server, free).deleted is (not fail_before_commit)
+        for sha in fingerprints:
+            (arrived,) = _there(server, other, sha)
+            assert arrived["deleted"] is False
+            assert arrived["on_disk"] is True
+
     def test_source_transaction_failure_reports_committed_copies(
         self, server, owner, other, monkeypatch
     ):

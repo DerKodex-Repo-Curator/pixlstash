@@ -1468,8 +1468,10 @@ remains in both libraries. The
 notice reports this separately and explains that Undo does not remove the
 destination copy. `copied_but_not_moved[]` reports copies whose sources stayed
 live after source Scrapheap processing failed, with the same destination-copy
-warning. If processing fails after commit, the server re-reads source state
-and reports committed deletions in `moved[]` instead. Chunked moves share one
+warning. On a processing exception, the server re-reads deletions and locks
+in one source read task: committed deletions go in `moved[]`, still-live locked
+sources in `copied_but_locked[]`, and other live sources in
+`copied_but_not_moved[]`. These outcome lists do not overlap. Chunked moves share one
 `X-Operation-Batch-Id` gesture id, so one Undo restores every completed chunk.
 The client refreshes the grid and
 sidebar after a failed chunk, including when its server outcome is unknown.
