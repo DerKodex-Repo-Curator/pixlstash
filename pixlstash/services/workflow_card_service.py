@@ -540,14 +540,9 @@ def read_grid(
     checkboxes with the number it is letting in.
     """
     cards = card_index(hub)
-    counts = (
-        read_variant_picture_counts(vault)
-        if getattr(vault, "library_uuid", None)
-        else None
-    )
-    workflows = workflow_index(
-        hub, counts, cards, library_uuid=getattr(vault, "library_uuid", None)
-    )
+    library_uuid = getattr(vault, "library_uuid", None)
+    counts = read_variant_picture_counts(vault) if library_uuid else None
+    workflows = workflow_index(hub, counts, cards, library_uuid=library_uuid)
     run_filed = run_filed_workflow_ids(hub)
     activity, candidates, saved_recipes, model_values = read_card_grid(
         vault, COVER_DEPTH, run_filed

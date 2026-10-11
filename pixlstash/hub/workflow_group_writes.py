@@ -15,6 +15,7 @@ module writes rows, one transaction per logical write.
 from __future__ import annotations
 
 import json
+import sqlite3
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -83,19 +84,24 @@ def set_group_attributes(
         for column, value in (("name", name), ("notes", notes))
         if value is not UNSET
     }
-    if given:
-        columns = ", ".join(given)
-        placeholders = ", ".join("?" for _ in given)
-        updates = ", ".join(f"{column} = excluded.{column}" for column in given)
-        with hub.transaction() as conn:
+    if not given and hidden is UNSET:
+        return
+    # One transaction for the whole PATCH: SQLite has no nesting, and a nested
+    # hub.transaction() would commit its own block on exit, so the hidden half
+    # must share this connection to land or roll back with the rest.
+    with hub.transaction() as conn:
+        if given:
+            columns = ", ".join(given)
+            placeholders = ", ".join("?" for _ in given)
+            updates = ", ".join(f"{column} = excluded.{column}" for column in given)
             conn.execute(
                 f"INSERT INTO workflow_group_attr (workflow_id, {columns}) "
                 f"VALUES (?, {placeholders}) "
                 f"ON CONFLICT(workflow_id) DO UPDATE SET {updates}",
                 (workflow_id, *given.values()),
             )
-    if hidden is not UNSET:
-        set_group_hidden(hub, workflow_id, bool(hidden), library_uuid)
+        if hidden is not UNSET:
+            _write_hidden(conn, workflow_id, bool(hidden), library_uuid)
 
 
 def set_group_hidden(
@@ -107,22 +113,31 @@ def set_group_hidden(
     (``workflow_group_hidden``); without one - a hub with no active library -
     it is the machine-wide fallback on ``workflow_group_attr``.
     """
-    if library_uuid:
-        with hub.transaction() as conn:
-            conn.execute(
-                "INSERT INTO workflow_group_hidden "
-                "(workflow_id, library_uuid, hidden) VALUES (?, ?, ?) "
-                "ON CONFLICT(workflow_id, library_uuid) "
-                "DO UPDATE SET hidden = excluded.hidden",
-                (workflow_id, library_uuid, int(hidden)),
-            )
-        return
     with hub.transaction() as conn:
+        _write_hidden(conn, workflow_id, hidden, library_uuid)
+
+
+def _write_hidden(
+    conn: sqlite3.Connection,
+    workflow_id: str,
+    hidden: bool,
+    library_uuid: Optional[str],
+) -> None:
+    """Write one hidden flag on the caller's open transaction."""
+    if library_uuid:
         conn.execute(
-            "INSERT INTO workflow_group_attr (workflow_id, hidden) VALUES (?, ?) "
-            "ON CONFLICT(workflow_id) DO UPDATE SET hidden = excluded.hidden",
-            (workflow_id, int(hidden)),
+            "INSERT INTO workflow_group_hidden "
+            "(workflow_id, library_uuid, hidden) VALUES (?, ?, ?) "
+            "ON CONFLICT(workflow_id, library_uuid) "
+            "DO UPDATE SET hidden = excluded.hidden",
+            (workflow_id, library_uuid, int(hidden)),
         )
+        return
+    conn.execute(
+        "INSERT INTO workflow_group_attr (workflow_id, hidden) VALUES (?, ?) "
+        "ON CONFLICT(workflow_id) DO UPDATE SET hidden = excluded.hidden",
+        (workflow_id, int(hidden)),
+    )
 
 
 def replace_parameter_defaults(

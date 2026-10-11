@@ -62,7 +62,7 @@ from pixlstash.routes.model_imports import (
 from pixlstash.routes.model_shelf import MAX_ATTACHMENTS_PER_MODEL
 from pixlstash.server import Server
 from pixlstash.services import builtin_models, comfyui_service
-from pixlstash.services import model_shelf_service
+from pixlstash.services import model_shelf_service, model_workflow_sets
 from pixlstash.services.model_folder_scanner import ModelFolderScanner
 from pixlstash.utils.image_processing.image_utils import ImageUtils
 from pixlstash.services.model_mover import SHELF_IO_LOCK
@@ -1364,6 +1364,30 @@ def test_hiding_a_workflow_set_is_the_librarys_own_answer(shelf_env, monkeypatch
     assert (
         shelf_env.owner.get(f"{API}/models/workflow-sets").json()["hidden_sets"] == []
     )
+
+
+def test_a_set_hide_with_no_library_or_no_keys_writes_nothing(shelf_env):
+    """No library hides nothing, and no keys is a question: both answer the
+    library's current list and leave every row where it was."""
+    hub = shelf_env.server.hub
+    here = shelf_env.server.vault.library_uuid
+    held = "hand:held-set"
+    assert model_workflow_sets.set_sets_hidden(hub, here, [held], True) == [held]
+    rows_before = [
+        tuple(row)
+        for row in hub.fetchall("SELECT library_uuid, set_key FROM workflow_set_hidden")
+    ]
+
+    assert model_workflow_sets.set_sets_hidden(hub, None, [held], True) == []
+    assert model_workflow_sets.set_sets_hidden(hub, None, [held], False) == []
+    assert model_workflow_sets.set_sets_hidden(hub, here, [], False) == [held]
+    assert model_workflow_sets.set_sets_hidden(hub, here, [], True) == [held]
+
+    rows_after = [
+        tuple(row)
+        for row in hub.fetchall("SELECT library_uuid, set_key FROM workflow_set_hidden")
+    ]
+    assert rows_after == rows_before == [(here, held)]
 
 
 def test_deleting_a_hand_made_set_forgets_its_hide(shelf_env):

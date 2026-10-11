@@ -6875,6 +6875,150 @@ def test_unhiding_in_one_library_leaves_a_machine_wide_hide_standing(workflow_en
     }
 
 
+def _wipe_probe_workflow(hub, probe: str) -> None:
+    """Drop the group rows a probe id wrote; a probe is not a real workflow."""
+    with hub.transaction() as conn:
+        conn.execute("DELETE FROM workflow_group_attr WHERE workflow_id = ?", (probe,))
+        conn.execute(
+            "DELETE FROM workflow_group_hidden WHERE workflow_id = ?", (probe,)
+        )
+
+
+def test_a_hide_with_no_library_lands_on_the_machine_fallback(workflow_env):
+    """No active library means no per-library row: the hide is the machine-wide
+    flag on workflow_group_attr, and nothing is filed against a library."""
+    hub = workflow_env.server.hub
+    probe = "fallback-probe-workflow"
+    _wipe_probe_workflow(hub, probe)
+    try:
+        workflow_group_writes.set_group_hidden(hub, probe, True, library_uuid=None)
+
+        assert (
+            hub.fetchone(
+                "SELECT hidden FROM workflow_group_attr WHERE workflow_id = ?",
+                (probe,),
+            )["hidden"]
+            == 1
+        )
+        assert (
+            hub.fetchone(
+                "SELECT 1 FROM workflow_group_hidden WHERE workflow_id = ?", (probe,)
+            )
+            is None
+        )
+    finally:
+        _wipe_probe_workflow(hub, probe)
+
+
+def test_a_patch_with_a_name_and_a_hide_lands_whole_or_not_at_all(
+    workflow_env, monkeypatch
+):
+    """One PATCH is one write. The failure is injected between its two halves
+    (the name/notes row, then the hidden flag): the name must roll back with
+    the hide that never landed. A probe id keeps BUSY_WF's rows untouched."""
+    server, hub = workflow_env.server, workflow_env.server.hub
+    here = server.vault.library_uuid
+    probe = "atomic-probe-workflow"
+    _wipe_probe_workflow(hub, probe)
+    try:
+        original = workflow_group_writes._write_hidden
+
+        def fail(*_args, **_kwargs):
+            raise sqlite3.OperationalError("injected: the hidden half fails")
+
+        monkeypatch.setattr(workflow_group_writes, "_write_hidden", fail)
+        with pytest.raises(sqlite3.OperationalError):
+            workflow_group_writes.set_group_attributes(
+                hub, probe, name="Half landed?", hidden=True, library_uuid=here
+            )
+        assert (
+            hub.fetchone(
+                "SELECT 1 FROM workflow_group_attr WHERE workflow_id = ?", (probe,)
+            )
+            is None
+        )
+        assert (
+            hub.fetchone(
+                "SELECT 1 FROM workflow_group_hidden WHERE workflow_id = ?", (probe,)
+            )
+            is None
+        )
+
+        # Positive control on the same call: with the fault gone, both halves land.
+        monkeypatch.setattr(workflow_group_writes, "_write_hidden", original)
+        workflow_group_writes.set_group_attributes(
+            hub, probe, name="Whole", hidden=True, library_uuid=here
+        )
+        assert (
+            hub.fetchone(
+                "SELECT name FROM workflow_group_attr WHERE workflow_id = ?", (probe,)
+            )["name"]
+            == "Whole"
+        )
+        assert (
+            hub.fetchone(
+                "SELECT hidden FROM workflow_group_hidden WHERE workflow_id = ?",
+                (probe,),
+            )["hidden"]
+            == 1
+        )
+    finally:
+        _wipe_probe_workflow(hub, probe)
+
+
+def test_a_second_librarys_hidden_count_and_detail_are_its_own(
+    workflow_env, monkeypatch
+):
+    """The Filters-panel hidden count and the workflow detail answer for the
+    ACTIVE library. A hide filed in one library moves only that library's
+    count and detail; the other library's numbers stay where they were."""
+    owner, server, hub = (
+        workflow_env.owner,
+        workflow_env.server,
+        workflow_env.server.hub,
+    )
+    here = server.vault.library_uuid
+    other = _h("second-library-for-hidden-counts")
+
+    def grid():
+        r = owner.get(f"{API}/workflows")
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    def detail():
+        r = owner.get(f"{API}/workflows/{BUSY_WF}")
+        # The route must resolve before a `hidden` value means anything.
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    try:
+        # The other library's own baseline: an earlier test may leave a
+        # machine-wide hide standing, which both libraries inherit.
+        monkeypatch.setattr(server.vault, "_library_uuid", other)
+        other_count = grid()["hidden"]
+        other_detail = detail()["hidden"]
+
+        monkeypatch.setattr(server.vault, "_library_uuid", here)
+        here_count = grid()["hidden"]
+        assert (
+            owner.patch(f"{API}/workflows/{BUSY_WF}", json={"hidden": True}).status_code
+            == 200
+        )
+        assert grid()["hidden"] == here_count + 1
+        assert detail()["hidden"] is True
+
+        monkeypatch.setattr(server.vault, "_library_uuid", other)
+        assert grid()["hidden"] == other_count
+        assert detail()["hidden"] == other_detail
+    finally:
+        with hub.transaction() as conn:
+            conn.execute(
+                "DELETE FROM workflow_group_hidden "
+                "WHERE workflow_id = ? AND library_uuid = ?",
+                (BUSY_WF, here),
+            )
+
+
 def _group_defaults(hub, workflow_id) -> dict[str, str]:
     return {
         row["address"]: row["value"]
