@@ -28,7 +28,6 @@ from urllib3.util import parse_url
 
 import requests
 from fastapi import HTTPException
-from websockets.exceptions import WebSocketException
 from websockets.sync.client import connect as ws_connect
 from sqlmodel import select
 
@@ -112,6 +111,8 @@ RUN_LABEL_FALLBACK = "ComfyUI"
 # still in flight, and how long before it tries a socket that failed again.
 LISTEN_POLL_S = 2.0
 LISTEN_RETRY_S = 5.0
+# The largest frame the listener takes off ComfyUI's socket.
+LISTEN_MAX_FRAME = 16 * 1024 * 1024
 
 # The runs in flight, by prompt id, in the order they were queued: what
 # GET /workers/progress reports. From ``follow_run`` until
@@ -237,19 +238,57 @@ def _note_run_message(raw: str) -> None:
     prompt_id = data.get("prompt_id") if isinstance(data, dict) else None
     if not isinstance(prompt_id, str):
         return
-    value, top = data.get("value"), data.get("max")
+    percent = None
+    if payload.get("type") == "progress":
+        try:
+            percent = 100.0 * float(data.get("value")) / float(data.get("max"))
+        except (TypeError, ValueError, ArithmeticError) as exc:
+            # Not two numbers, a max of zero, or one too large to be a step.
+            logger.debug("Unreadable progress for prompt %s: %s", prompt_id, exc)
     with _run_outcomes_lock:
         run = _live_runs.get(prompt_id)
         if run is None:
             return
         run["status"] = "running"
-        if (
-            payload.get("type") == "progress"
-            and isinstance(value, (int, float))
-            and isinstance(top, (int, float))
-            and top > 0
-        ):
-            run["percent"] = max(0.0, min(100.0, 100.0 * value / top))
+        if percent is not None:
+            run["percent"] = max(0.0, min(100.0, percent))
+
+
+def _note_running_prompts(base_url: str) -> None:
+    """Mark the runs ComfyUI's queue lists as running.
+
+    Read once a socket is open: the run that started the listener was
+    submitted before the socket existed, so ComfyUI may already have said it
+    started on it, and through a long model load it says nothing more.
+    """
+    try:
+        response = requests.get(f"{base_url}/queue", timeout=30)
+        response.raise_for_status()
+        queue = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning(
+            "ComfyUI's queue at %s could not be read, so a run already "
+            "started reads as queued until ComfyUI next speaks of it: %s",
+            base_url,
+            exc,
+        )
+        return
+    running = queue.get("queue_running") if isinstance(queue, dict) else None
+    # Each entry is ``[number, prompt_id, prompt, ...]``.
+    ids = {
+        item[1]
+        for item in running or []
+        if isinstance(item, (list, tuple)) and len(item) > 1
+    }
+    with _run_outcomes_lock:
+        for prompt_id, run in _live_runs.items():
+            if prompt_id in ids:
+                run["status"] = "running"
+
+
+def _runs_on(base_url: str) -> bool:
+    """Whether a run on *base_url* is in flight. Call with the lock held."""
+    return any(run["base_url"] == base_url for run in _live_runs.values())
 
 
 def _still_listening(base_url: str) -> bool:
@@ -257,7 +296,7 @@ def _still_listening(base_url: str) -> bool:
     listener is struck off in the same breath, so a run queued a moment later
     starts a new one rather than counting on this one."""
     with _run_outcomes_lock:
-        if any(run["base_url"] == base_url for run in _live_runs.values()):
+        if _runs_on(base_url):
             return True
         _listening.discard(base_url)
         return False
@@ -271,43 +310,63 @@ def _listen_for_progress(base_url: str) -> None:
     ending is read from ComfyUI's history, so a socket that cannot be opened
     costs the step progress and nothing else.
 
-    ponytail: with no socket a run reads ``queued`` until it ends. The
-    queue read in ``_wait_for_comfyui_outputs`` could say ``running`` if a
-    ComfyUI behind a proxy that drops WebSockets ever matters.
+    Never two sockets on one address: ComfyUI keys its clients by id, and the
+    first of two to close would take the other's messages with it. So the
+    listener is struck off (``_still_listening``) only once its socket is
+    closed, and a run queued before that keeps this thread rather than
+    starting another.
+
+    ponytail: with no socket a run reads ``queued`` until it ends, or until
+    the next socket's queue read. The queue read in
+    ``_wait_for_comfyui_outputs`` could say ``running`` if a ComfyUI behind a
+    proxy that drops WebSockets ever matters.
     """
     ws_url = f"{re.sub('^http', 'ws', base_url)}/ws?clientId={RUN_CLIENT_ID}"
     warned = False
-    while _still_listening(base_url):
-        try:
-            # No proxy, as for every other request to ComfyUI (``NO_PROXY``).
-            # No pings: a ComfyUI loading a model answers nothing for minutes.
-            with ws_connect(
-                ws_url,
-                proxy=None,
-                ping_interval=None,
-                max_size=None,
-                open_timeout=10,
-                close_timeout=2,
-            ) as upstream:
-                warned = False
-                while _still_listening(base_url):
-                    try:
-                        message = upstream.recv(timeout=LISTEN_POLL_S)
-                    except TimeoutError:
-                        continue
-                    # Bytes are previews, which nothing here shows.
-                    if isinstance(message, str):
-                        _note_run_message(message)
-        except (OSError, WebSocketException) as exc:
-            if not warned:
-                logger.warning(
-                    "ComfyUI's socket at %s cannot be followed, so its runs "
-                    "show no step progress until it can: %s",
-                    base_url,
-                    exc,
-                )
-                warned = True
+    try:
+        while _still_listening(base_url):
+            try:
+                # No pings: a ComfyUI loading a model answers nothing for
+                # minutes. Frames are JSON and previews, far under the cap.
+                with ws_connect(
+                    ws_url,
+                    ping_interval=None,
+                    max_size=LISTEN_MAX_FRAME,
+                    open_timeout=10,
+                    close_timeout=2,
+                ) as upstream:
+                    warned = False
+                    _note_running_prompts(base_url)
+                    while True:
+                        with _run_outcomes_lock:
+                            if not _runs_on(base_url):
+                                break
+                        try:
+                            message = upstream.recv(timeout=LISTEN_POLL_S)
+                        except TimeoutError:
+                            continue
+                        # Bytes are previews, which nothing here shows.
+                        if isinstance(message, str):
+                            _note_run_message(message)
+                continue
+            except Exception as exc:
+                # Whatever it is, the socket is only the step progress: say so
+                # once and try again, rather than lose it until a restart.
+                if not warned:
+                    logger.warning(
+                        "ComfyUI's socket at %s cannot be followed, so its runs "
+                        "show no step progress until it can: %s: %s",
+                        base_url,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    warned = True
             time.sleep(LISTEN_RETRY_S)
+    finally:
+        # Normally struck off already; this is for a thread that is ending
+        # some other way, so the next run can start a listener again.
+        with _run_outcomes_lock:
+            _listening.discard(base_url)
 
 
 def _extract_history_entry(history_payload: dict, prompt_id: str) -> dict:
@@ -1154,9 +1213,8 @@ def _emit_comfyui_completed_progress(
 ) -> None:
     """Say a prompt's run is over, once what it made is in the library.
 
-    The tab following a run cannot learn this from ComfyUI's socket: ComfyUI
-    sends ``execution_success`` and the closing ``executing`` only to the
-    client a prompt named, and a run names none.
+    No browser listens to ComfyUI: this event is how a tab hears that a run
+    ended, and reads the runs in flight again to drop its row.
     """
     _emit_comfyui_progress(
         server, prompt_id, "completed", "ComfyUI complete", 100, workflow_id
@@ -1689,8 +1747,9 @@ def _process_comfyui_outputs(
 
     A run that did not fail ends with a ``PLUGIN_PROGRESS`` ``completed`` event
     (``_emit_comfyui_completed_progress``), after the import event and also
-    when every output was a duplicate: it is what takes the run's row out of
-    the Tasks tab.
+    when every output was a duplicate. The run's row in the Tasks tab is
+    ``live_runs``, which ``record_run_outcome`` takes it out of just before
+    either event; the event is what makes a tab read them again at once.
     """
     lease = None
     pinned_server = None

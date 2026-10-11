@@ -7,7 +7,8 @@
 //
 // A run's ending is read, never guessed. A run that has left the poll is asked
 // after (`GET /workflows/runs/{id}`), which also covers one that ended before
-// `/workflows/run` had answered.
+// `/workflows/run` had answered. One the backend no longer knows is said to be
+// lost, not finished.
 
 import { computed, onScopeDispose, reactive, ref, unref, watch } from "vue";
 import { getPictureMetadata } from "../api/pictures";
@@ -15,18 +16,22 @@ import { listStackPictures } from "../api/stacks";
 import { getRunOutcome } from "../api/workflows";
 import { useTasksStore } from "../stores/useTasksStore";
 
+// What a run PixlStash stopped following is said to have done.
+const LOST_RUN =
+  "PixlStash lost track of this run. Check ComfyUI for its pictures.";
 // How long the lightbox's bar says "complete" after the last run ends.
 const COMPLETE_TAIL_MS = 1200;
 
 /**
  * @param {Object} grid
  * @param {import("vue").Ref<boolean>} grid.overlayOpen
- * @param {import("vue").Ref} grid.overlayImageId
  * @param {import("vue").Ref<Array>} grid.allGridImages
  * @param {import("vue").Ref<Array>} grid.lastFetchedGridImages
  * @param {(img: Object) => ?string} grid.getPictureStackId
  * @param {(members: Array) => ?Object} grid.selectNewestStackMember
- * @param {(id: number) => void} grid.moveOverlayTo
+ * @param {(id: number, sourceId: number, stackId: string) => void} grid.showRunResult
+ *   the lightbox's own step to a run's result, which it takes only while it
+ *   is still on the source picture or its stack
  * @param {() => void} grid.refreshSidebar
  * @returns {{progress: import("vue").ComputedRef<Object>, follow: Function}}
  *   `progress` is `{visible, status, percent, message}` with `status` one of
@@ -35,12 +40,11 @@ const COMPLETE_TAIL_MS = 1200;
  */
 export function useGridComfyuiRuns({
   overlayOpen,
-  overlayImageId,
   allGridImages,
   lastFetchedGridImages,
   getPictureStackId,
   selectNewestStackMember,
-  moveOverlayTo,
+  showRunResult,
   refreshSidebar,
 }) {
   const tasksStore = useTasksStore();
@@ -85,8 +89,9 @@ export function useGridComfyuiRuns({
     if (!ids.length) return;
     const next = new Map(active.value);
     for (const id of ids) next.set(id, pictureId ?? null);
+    // A failure among runs still being followed is theirs to tell at the end.
+    if (!active.value.size) failure = "";
     active.value = next;
-    failure = "";
     clearTimeout(hideTimer);
     ended.status = "idle";
     ended.message = "";
@@ -107,14 +112,14 @@ export function useGridComfyuiRuns({
   }
 
   /**
-   * Move an open lightbox on to the newest picture of *sourceId*'s stack, when
-   * it is showing that picture or another of its stack. Read from the backend:
-   * a run is only said to be over once its pictures are imported and stacked,
-   * and the grid's own copy may not have them yet.
+   * Offer an open lightbox the newest picture of *sourceId*'s stack. Read from
+   * the backend: a run is only said to be over once its pictures are imported
+   * and stacked, and the grid's own copy does not have them while the
+   * lightbox is open (inserts wait for it to close). The lightbox takes the
+   * step itself, since only it knows what the reader is on now.
    */
   async function moveOverlayToResult(sourceId) {
     if (sourceId == null || !unref(overlayOpen)) return;
-    const shown = unref(overlayImageId);
     try {
       let stackId = getPictureStackId(findImage(sourceId));
       if (!stackId) {
@@ -124,22 +129,13 @@ export function useGridComfyuiRuns({
       }
       // Not stacked with its source: the new picture is one of its own.
       if (!stackId) return;
-      const shownStackId = getPictureStackId(findImage(shown));
-      if (
-        shownStackId &&
-        shownStackId !== stackId &&
-        String(shown ?? "") !== String(sourceId)
-      ) {
-        return;
-      }
       const members = await listStackPictures(stackId);
-      // The reader moved on, or closed the lightbox, while this was read.
-      if (!unref(overlayOpen) || unref(overlayImageId) !== shown) return;
+      if (!unref(overlayOpen)) return;
       const newest = selectNewestStackMember(
         Array.isArray(members) ? members : [],
       );
-      if (newest?.id != null && String(newest.id) !== String(shown ?? "")) {
-        moveOverlayTo(newest.id);
+      if (newest?.id != null && String(newest.id) !== String(sourceId)) {
+        showRunResult(newest.id, sourceId, stackId);
       }
     } catch (err) {
       console.warn(
@@ -183,9 +179,9 @@ export function useGridComfyuiRuns({
         console.warn(`Could not read how run ${id} ended:`, err);
         return;
       }
-      // The backend no longer knows the run (it restarted), so nothing more
-      // will be heard of it.
-      outcome = { status: "completed" };
+      // The backend no longer knows the run (it restarted mid-run), so
+      // nothing more will be heard of it: lost, which is not finished.
+      outcome = { status: "failed", message: LOST_RUN };
     } finally {
       asking.delete(id);
     }

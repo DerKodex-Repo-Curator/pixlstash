@@ -12528,8 +12528,8 @@ def test_a_run_in_flight_is_reported_with_the_workers_until_it_ends(runnable):
         "status": "queued",
         "percent": 0.0,
     }
-    # A run nobody named is called after its workflow.
-    assert runs[unnamed]["label"] not in ("", "Night market", "Clone picture")
+    # A run nobody named is called after its workflow, as the grid names it.
+    assert runs[unnamed]["label"] == "Krea 2: Text to Image"
 
     comfyui_service._note_run_message(
         json.dumps(
@@ -12594,7 +12594,7 @@ def test_a_run_that_keeps_its_own_pictures_seed_is_called_a_clone(runnable):
             for run in runnable.owner.get(f"{API}/workers/progress").json()["runs"]
         }
         assert runs[clone] == "Clone picture"
-        assert runs[varied] not in ("", "Clone picture")
+        assert runs[varied] == "Krea 2: Text to Image"
     finally:
         for prompt_id in (clone, varied):
             comfyui_service.record_run_outcome(prompt_id, "completed")
@@ -17383,8 +17383,9 @@ def test_the_first_save_over_an_automatic_workflow_keeps_it_the_same_workflow(vo
     voted.monkeypatch.setattr(
         workflows_routes.threading,
         "Thread",
-        lambda target, args, kwargs, daemon: SimpleNamespace(
-            start=lambda: target(*args, **kwargs)
+        # `kwargs` is optional: the run's progress listener starts without any.
+        lambda target, args, kwargs=None, daemon=None: SimpleNamespace(
+            start=lambda: target(*args, **(kwargs or {}))
         ),
     )
     ran = _run(voted, workflow_id=RUN_WF)

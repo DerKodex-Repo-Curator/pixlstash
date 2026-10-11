@@ -9,6 +9,7 @@ import { flushPromises } from "@vue/test-utils";
 import { useTasksStore } from "./useTasksStore";
 import { getWorkerProgress } from "../api/workers";
 import { abortRun } from "../api/comfyui";
+import { useNoticeStore } from "./useNoticeStore";
 
 vi.mock("../api/workers", () => ({ getWorkerProgress: vi.fn() }));
 vi.mock("../api/comfyui", () => ({ abortRun: vi.fn(async () => ({})) }));
@@ -84,8 +85,19 @@ describe("the runs in flight", () => {
         expect(getWorkerProgress.mock.calls.length).toBeGreaterThan(polls),
       );
       await vi.waitFor(() => expect(store.comfyuiRuns).toEqual([]));
+      expect(useNoticeStore().notices).toEqual([]);
     } finally {
       store.stopPolling();
     }
+  });
+
+  it("say so when the backend could not stop them", async () => {
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    abortRun.mockRejectedValueOnce(new Error("ComfyUI unreachable"));
+    await useTasksStore().abortComfyuiRuns();
+    expect(useNoticeStore().notices.map((notice) => notice.text)).toEqual([
+      "ComfyUI could not be told to stop.",
+    ]);
+    warned.mockRestore();
   });
 });

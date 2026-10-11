@@ -6911,7 +6911,15 @@ def create_router(server) -> APIRouter:
         for card, graph, swapped in plan.loader_swaps:
             _record_loader_swaps(card, graph, swapped)
         saved_over = workflow_versions.saved_over_ids(_hub())
-        cards = {id(graph): card for graph, _source, card, _swapped in plan.built}
+        # What a run nobody named is called: its workflow, as the grid shows it
+        # (a generated name needs the models, `Krea 2: Text to Image`).
+        names = (
+            {}
+            if body.label
+            else _display_names(
+                read_grid(_hub(), server.vault, manual_models=_manual_models).figures
+            )
+        )
         for graph, group, feeds in plan.submittable:
             output_node_ids = _extract_output_node_ids(graph, {})
             # The same finder `replace_missing_seed_nodes` checked its literals
@@ -6936,7 +6944,6 @@ def create_router(server) -> APIRouter:
             # source, as a run of a card has always stacked.
             per_picture = any(feed.picture_id is None for feed in feeds)
             passes = group.picture_ids if per_picture else group.picture_ids[:1]
-            card = cards.get(id(graph))
             label = body.label or (
                 # One graph, read from one of the pictures it is run for and
                 # not fed them, with that picture's seed: the picture again.
@@ -6944,7 +6951,7 @@ def create_router(server) -> APIRouter:
                 if body.seed_mode == "keep"
                 and not per_picture
                 and group.source_picture_id in group.picture_ids
-                else (_display_name(card) if card is not None else None)
+                else names.get(group.workflow_id)
             )
             for selected in passes or [None]:
                 # Hoisted out of the loop below: it is a WRITE task, idempotent,

@@ -1418,9 +1418,8 @@ function setOverlayImageById(nextId) {
  * `initialImageId` move found nothing and did nothing. Its grid row is read by
  * id and slotted in after the picture the run started from, so next/prev and
  * the filmstrip agree with what is on screen; then the grid is told, so the
- * URL follows. Only this path reads by id: the runner's own step to a newest
- * member goes by the grid's `overlayImageId`, which does not follow filmstrip
- * steps, and letting it through would pull a reader off a picture they moved to.
+ * URL follows. A run's own result comes through here too (`showRunResult`),
+ * which first checks the reader is still on the picture it was made from.
  */
 async function showEditResult(id, sourceId) {
   const idKey = String(id);
@@ -1462,6 +1461,22 @@ async function showEditResult(id, sourceId) {
   setOverlayImageById(idKey);
   void ensureOverlayFilmstripForImage();
   emit("show-picture", id);
+}
+
+/**
+ * A run started from the grid has landed a newer member in the stack of the
+ * picture it was made from (`useGridComfyuiRuns`): go to it as *Show it*
+ * does, unless the reader has since moved off that picture and its stack.
+ * Decided here because only the lightbox knows what is on screen: the grid's
+ * `overlayImageId` does not follow filmstrip steps.
+ */
+function showRunResult(id, sourceId, stackId) {
+  const shown = image.value;
+  if (!open.value || shown?.id == null) return;
+  const onSource = String(shown.id) === String(sourceId);
+  const inItsStack =
+    stackId != null && String(getPictureStackId(shown) ?? "") === String(stackId);
+  if (onSource || inItsStack) void showEditResult(id, sourceId);
 }
 
 const emit = defineEmits([
@@ -4659,6 +4674,6 @@ function canvasToBlob(canvas, type) {
   });
 }
 
-defineExpose({ saveMedia, saveMediaAs, copyMedia });
+defineExpose({ saveMedia, saveMediaAs, copyMedia, showRunResult });
 </script>
 <style scoped src="./ImageOverlay.css"></style>

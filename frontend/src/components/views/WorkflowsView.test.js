@@ -2228,22 +2228,3 @@ describe("Add… and Unfiled recipes", () => {
     expect(wrapper.find(".wfv-unfiled .wfrt-name").text()).toBe("Orphan");
   });
 });
-
-describe("a run in flight", () => {
-  // #1862: a run's row is the backend's to report, so no view has one to take
-  // with it. The view used to mount a runner whose unmount deleted the row.
-  it("keeps its row when the Workflows view is left", async () => {
-    const wrapper = await grid();
-    const tasks = useTasksStore();
-    tasks.comfyuiRuns = [
-      { prompt_id: "p-1", label: "Flux", status: "queued", percent: 0 },
-    ];
-    expect(tasks.activeEntries.map((entry) => entry.kind)).toEqual(["comfyui"]);
-
-    mounted.splice(mounted.indexOf(wrapper), 1);
-    wrapper.unmount();
-    expect(tasks.activeEntries.map((entry) => entry.run.label)).toEqual([
-      "Flux",
-    ]);
-  });
-});

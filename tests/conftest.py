@@ -565,6 +565,11 @@ def no_test_opens_a_comfyui_socket(monkeypatch):
     from pixlstash.services import comfyui_service
 
     monkeypatch.setattr(comfyui_service, "_listen_for_progress", lambda base_url: None)
+    yield
+    # Nor does a run a test queued stay in flight for the next one to list.
+    with comfyui_service._run_outcomes_lock:
+        comfyui_service._live_runs.clear()
+        comfyui_service._listening.clear()
 
 
 @pytest.fixture(autouse=True)

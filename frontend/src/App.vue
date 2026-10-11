@@ -452,8 +452,9 @@ function onRunStarted({ prompts = [], pictureIds = [], error = "" } = {}) {
   });
 }
 
-// How a run ended, heard on whatever view is up. A failure is told here and
-// nowhere else: once, as a notice.
+// How a run ended, heard on whatever view is up. A failure is raised here,
+// once, as a notice; no view draws a banner for it. (The lightbox's Edit tab
+// also keeps the line of its own last run.)
 watch(
   () => wsStore.wsPluginProgress,
   (wrapped) => {

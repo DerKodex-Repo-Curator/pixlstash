@@ -35,12 +35,11 @@ function listed(...runs) {
 function mountRuns(overrides = {}) {
   const grid = {
     overlayOpen: ref(false),
-    overlayImageId: ref(null),
     allGridImages: ref([]),
     lastFetchedGridImages: ref([]),
     getPictureStackId: (img) => (img?.stack_id != null ? String(img.stack_id) : null),
     selectNewestStackMember: (members) => members[members.length - 1] ?? null,
-    moveOverlayTo: vi.fn(),
+    showRunResult: vi.fn(),
     refreshSidebar: vi.fn(),
     ...overrides,
   };
@@ -147,12 +146,37 @@ describe("the lightbox's progress", () => {
     expect(progress.value.status).toBe("queued");
   });
 
-  it("takes a run the backend no longer knows as over", async () => {
+  // The backend restarted mid-run: nothing imported the outputs, so "complete"
+  // would be a guess. The Edit tab gets a sentence that says what happened.
+  it("says a run the backend no longer knows was lost, not finished", async () => {
     getRunOutcome.mockRejectedValue({ response: { status: 404 } });
-    const { progress, follow } = mountRuns();
-    follow({ prompts: [{ prompt_id: "p-1" }] });
+    const { progress, follow, grid } = mountRuns({ overlayOpen: ref(true) });
+    follow({ prompts: [{ prompt_id: "p-1" }], pictureId: 7 });
     await listed();
-    expect(progress.value.status).toBe("completed");
+    expect(progress.value).toMatchObject({
+      visible: false,
+      status: "failed",
+      message: "PixlStash lost track of this run. Check ComfyUI for its pictures.",
+    });
+    expect(listStackPictures).not.toHaveBeenCalled();
+    expect(grid.showRunResult).not.toHaveBeenCalled();
+  });
+
+  it("keeps a failure when another run is started before the batch is over", async () => {
+    getRunOutcome.mockImplementation(async (id) =>
+      id === "p-1"
+        ? { status: "failed", message: "KSampler failed" }
+        : { status: "completed" },
+    );
+    const { progress, follow } = mountRuns();
+    follow({ prompts: [{ prompt_id: "p-1" }, { prompt_id: "p-2" }] });
+    await listed(["p-2", "running", 5]);
+    follow({ prompts: [{ prompt_id: "p-3" }] });
+    await listed();
+    expect(progress.value).toMatchObject({
+      status: "failed",
+      message: "KSampler failed",
+    });
   });
 
   it("keeps following a run whose ending could not be read", async () => {
@@ -175,55 +199,58 @@ describe("the step to the new picture", () => {
     await flushPromises();
   };
 
-  it("moves an open lightbox to the newest picture of the source's stack", async () => {
+  it("offers an open lightbox the newest picture of the source's stack", async () => {
     // The grid's copy of the source predates the run: it is in no stack yet.
     getPictureMetadata.mockResolvedValue({ stack_id: 5 });
     listStackPictures.mockResolvedValue([{ id: 7 }, { id: 31 }]);
     const runs = mountRuns({
       overlayOpen: ref(true),
-      overlayImageId: ref(7),
       lastFetchedGridImages: ref([{ id: 7 }]),
     });
     await finishRunOn(runs, 7);
     expect(getPictureMetadata).toHaveBeenCalledWith(7);
     expect(listStackPictures).toHaveBeenCalledWith("5");
-    expect(runs.grid.moveOverlayTo).toHaveBeenCalledWith(31);
+    // The lightbox decides whether the reader is still there to be moved.
+    expect(runs.grid.showRunResult.mock.calls).toEqual([[31, 7, "5"]]);
   });
 
-  it("stays put when the lightbox is closed, or on another stack", async () => {
+  it("reads nothing for a closed lightbox", async () => {
     listStackPictures.mockResolvedValue([{ id: 7 }, { id: 31 }]);
     const closed = mountRuns({
       lastFetchedGridImages: ref([{ id: 7, stack_id: 5 }]),
     });
     await finishRunOn(closed, 7);
-    expect(closed.grid.moveOverlayTo).not.toHaveBeenCalled();
-    // Nothing is read for a lightbox that is not there.
+    expect(closed.grid.showRunResult).not.toHaveBeenCalled();
     expect(listStackPictures).not.toHaveBeenCalled();
+  });
+
+  it("offers nothing when the stack has no newer member, or the run was not stacked", async () => {
+    const grid = {
+      overlayOpen: ref(true),
+      lastFetchedGridImages: ref([{ id: 7, stack_id: 5 }]),
+    };
+    listStackPictures.mockResolvedValue([{ id: 3 }, { id: 7 }]);
+    const same = mountRuns(grid);
+    await finishRunOn(same, 7);
+    expect(same.grid.showRunResult).not.toHaveBeenCalled();
     scope.stop();
 
-    const elsewhere = mountRuns({
-      overlayOpen: ref(true),
-      overlayImageId: ref(8),
-      lastFetchedGridImages: ref([
-        { id: 7, stack_id: 5 },
-        { id: 8, stack_id: 6 },
-      ]),
-    });
-    await finishRunOn(elsewhere, 7);
-    expect(elsewhere.grid.moveOverlayTo).not.toHaveBeenCalled();
+    getPictureMetadata.mockResolvedValue({ stack_id: null });
+    const unstacked = mountRuns({ overlayOpen: ref(true) });
+    await finishRunOn(unstacked, 7);
+    expect(unstacked.grid.showRunResult).not.toHaveBeenCalled();
   });
 
   it("stays put for a run with no source picture, and for one that failed", async () => {
     listStackPictures.mockResolvedValue([{ id: 7 }, { id: 31 }]);
     const grid = {
       overlayOpen: ref(true),
-      overlayImageId: ref(7),
       lastFetchedGridImages: ref([{ id: 7, stack_id: 5 }]),
     };
     // The Edit tab's run: handed on without a picture, so the lightbox stays.
     const unsourced = mountRuns(grid);
     await finishRunOn(unsourced, null);
-    expect(unsourced.grid.moveOverlayTo).not.toHaveBeenCalled();
+    expect(unsourced.grid.showRunResult).not.toHaveBeenCalled();
     scope.stop();
 
     const failed = mountRuns(grid);
@@ -231,6 +258,6 @@ describe("the step to the new picture", () => {
     failed.follow({ prompts: [{ prompt_id: "p-9" }], pictureId: 7 });
     await listed();
     await flushPromises();
-    expect(failed.grid.moveOverlayTo).not.toHaveBeenCalled();
+    expect(failed.grid.showRunResult).not.toHaveBeenCalled();
   });
 });

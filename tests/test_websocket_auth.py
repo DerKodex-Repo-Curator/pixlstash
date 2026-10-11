@@ -187,16 +187,13 @@ def test_switch_cleanup_closes_and_forgets_every_live_websocket(server):
 
     first = _ClosableWS()
     second = _ClosableWS()
-    comfyui_proxy = _ClosableWS()
     with server._ws_clients_lock:
         saved = list(server._ws_clients)
         server._ws_clients = [{"ws": first}, {"ws": second}]
-        server._ws_clients.append({"ws": comfyui_proxy, "broadcast": False})
     try:
         asyncio.run(server._close_all_websockets())
         assert first.closed == (1012, "Library switched")
         assert second.closed == (1012, "Library switched")
-        assert comfyui_proxy.closed == (1012, "Library switched")
         assert server._ws_clients == []
     finally:
         with server._ws_clients_lock:
@@ -538,6 +535,44 @@ def test_updates_registration_failure_releases_generation_lease(server, owner_cl
         assert server.library_coordinator._readers == {}
     finally:
         server._ws_clients = original
+
+
+def test_library_switch_terminates_the_updates_socket(
+    server, owner_client, tmp_path, monkeypatch
+):
+    """A real socket, a real switch: the old library's subscriber is closed
+    with 1012 before the switch answers."""
+    original = server.library_registry.active_library()
+    target = server.library_registry.create(str(tmp_path / "ws-switch"), "WS switch")
+
+    try:
+        context = owner_client.websocket_connect(WS_UPDATES)
+        websocket = context.__enter__()
+        try:
+            updates_ws = _registered_ws(server, broadcast=True)
+            assert updates_ws is not None, "the socket did not register for the drain"
+            close_codes = _record_close_codes(monkeypatch, updates_ws)
+
+            response = owner_client.post(
+                f"{API}/libraries/active", json={"uuid": target.uuid}
+            )
+            assert response.status_code == 200, response.text
+            # The switch closes the claimed generation before it returns, so the
+            # code the socket was closed with is already recorded. The handler's
+            # own ``finally`` may close again afterwards; only the first close
+            # is the drain's.
+            assert close_codes[:1] == [1012], close_codes
+
+            with pytest.raises((WebSocketDisconnect, *_HARNESS_TEARDOWN)) as excinfo:
+                websocket.receive_text()
+            if isinstance(excinfo.value, WebSocketDisconnect):
+                assert excinfo.value.code == 1012
+        finally:
+            with contextlib.suppress(*_HARNESS_TEARDOWN):
+                context.__exit__(None, None, None)
+    finally:
+        if server.library_registry.active_library().uuid != original.uuid:
+            server.library_switch.switch_to(original.uuid)
 
 
 def test_restore_barrier_terminates_every_authenticated_websocket(

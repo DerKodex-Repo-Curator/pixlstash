@@ -1005,7 +1005,7 @@ def create_router(server) -> APIRouter:
             # A run is the owner's, and its label names one of their workflows
             # or recipes: a narrower token is told of none.
             "runs": (
-                live_runs(server.vault.library_uuid)
+                live_runs(request.state.library_lease.library_uuid)
                 if server.auth.is_unscoped_owner_request(request)
                 else []
             ),

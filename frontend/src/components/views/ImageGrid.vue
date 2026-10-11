@@ -5809,12 +5809,12 @@ function moveOverlayTo(id) {
 const { progress: comfyuiProgress, follow: followComfyuiRun } =
   useGridComfyuiRuns({
     overlayOpen,
-    overlayImageId,
     allGridImages,
     lastFetchedGridImages,
     getPictureStackId,
     selectNewestStackMember,
-    moveOverlayTo,
+    showRunResult: (id, sourceId, stackId) =>
+      imageOverlayRef.value?.showRunResult?.(id, sourceId, stackId),
     refreshSidebar: () => emit("refresh-sidebar"),
   });
 const comfyuiProgressPercent = computed(() => {

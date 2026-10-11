@@ -3,6 +3,7 @@ import { defineStore } from "pinia";
 import { isReadOnly } from "../utils/apiClient";
 import { getWorkerProgress } from "../api/workers";
 import { abortRun } from "../api/comfyui";
+import { useNoticeStore } from "./useNoticeStore";
 
 // Adaptive poll cadence (ms). Fast while the Tasks tab is open or something is
 // actively running; slow when the app is merely idle-watching for new work.
@@ -63,6 +64,9 @@ export const useTasksStore = defineStore("tasks", () => {
       await abortRun();
     } catch (e) {
       console.warn("tasks: ComfyUI could not be told to stop", e);
+      useNoticeStore().error("ComfyUI could not be told to stop.", {
+        key: "comfyui-abort-failed",
+      });
     }
     nudge();
   }
