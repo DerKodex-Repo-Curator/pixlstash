@@ -24,6 +24,7 @@ import time
 
 import pytest
 
+from pixlstash.auth import COMFYUI_SCOPE
 from pixlstash.hub.schema import (
     CURRENT_DATA_VERSION,
     CURRENT_SCHEMA_VERSION,
@@ -182,6 +183,47 @@ class TestFreshHub:
             "SELECT sql FROM sqlite_master WHERE name='ix_model_hash_queue'"
         ).fetchone()[0]
         assert "WHERE sha256 IS NULL" in sql
+
+
+class TestComfyuiLinkKeysAreNarrowed:
+    """#1811: a link key minted before the ComfyUI scope was a full-access
+    token. The next open narrows it, and nothing else."""
+
+    def test_only_a_full_access_token_bound_to_an_address_is_narrowed(self, hub):
+        apply_migrations(hub)
+        hub.execute("INSERT INTO user (id) VALUES (1)")
+        hub.execute(
+            "INSERT INTO library (uuid, name, path, created_at, attached_at) "
+            "VALUES ('example-library', 'Example', '/home/me/library', '2026-10-01', "
+            "'2026-10-01')"
+        )
+        rows = {
+            "link": ("ALL", "testclient"),
+            "pending link": ("ALL", "pending"),
+            "owner": ("ALL", None),
+            "share": ("READ", None),
+        }
+        for description, (scope, bound) in rows.items():
+            hub.execute(
+                "INSERT INTO usertoken (user_id, library_uuid, token_hash, "
+                "description, scope, created_at, bound_address) "
+                "VALUES (1, 'example-library', 'example-hash', ?, ?, '2026-10-01', ?)",
+                (description, scope, bound),
+            )
+
+        hub.commit()
+
+        def scopes():
+            return dict(hub.execute("SELECT description, scope FROM usertoken"))
+
+        assert set(scopes().values()) == {"ALL", "READ"}
+        apply_migrations(hub)
+        assert scopes() == {
+            "link": COMFYUI_SCOPE,
+            "pending link": COMFYUI_SCOPE,
+            "owner": "ALL",
+            "share": "READ",
+        }
 
 
 class TestReRunIsSafe:

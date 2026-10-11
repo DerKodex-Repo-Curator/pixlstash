@@ -28,6 +28,7 @@ vi.mock("../../api/users", () => ({
     { id: 1, description: "agent", scope: "ALL", resource_type: null, all_libraries: false },
     { id: 2, description: "share", scope: "READ", resource_type: "picture_set", resource_id: 3, all_libraries: false },
     { id: 3, description: "ComfyUI link", scope: "ALL", resource_type: null, all_libraries: false, source_bound: true },
+    { id: 4, description: "ComfyUI link", scope: "COMFYUI", resource_type: null, all_libraries: false, source_bound: true },
   ]),
   createToken: vi.fn(),
   patchToken: vi.fn(),
@@ -130,11 +131,22 @@ describe("the Every library switch", () => {
     expect(lockedReason(wrapper, 0)).toBe("");
   });
 
-  it("is locked on the ComfyUI link key, which names no resource either", async () => {
+  it("is locked on a full-access ComfyUI link key from before the ComfyUI scope", async () => {
     const wrapper = await table();
 
     expect(librarySwitch(wrapper, 2).attributes("disabled")).toBeDefined();
-    expect(lockedReason(wrapper, 2)).toMatch(/ComfyUI link key stays/i);
+    expect(lockedReason(wrapper, 2)).toMatch(/Link ComfyUI again/i);
+  });
+
+  it("works on the ComfyUI link key, which is named for what it reaches", async () => {
+    const wrapper = await table();
+
+    expect(wrapper.findAll("tbody tr")[3].text()).toContain("ComfyUI nodes");
+    expect(librarySwitch(wrapper, 3).attributes("disabled")).toBeUndefined();
+    expect(lockedReason(wrapper, 3)).toBe("");
+    await librarySwitch(wrapper, 3).trigger("click");
+    await nextTick();
+    expect(setTokenLibraries).toHaveBeenCalledWith(4, true);
   });
 
   it("is locked for a caller the server would refuse, and says why", async () => {

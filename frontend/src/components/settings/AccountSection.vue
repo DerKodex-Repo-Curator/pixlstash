@@ -358,8 +358,9 @@ const librariesUpdating = reactive(new Set());
 function librariesLockedReason(token) {
   if (token.resource_type)
     return "A share link stays with the library it was made in";
-  if (token.source_bound)
-    return "The ComfyUI link key stays with the library it was linked in";
+  // A link key from before the ComfyUI scope: full access, so not widened.
+  if (token.source_bound && token.scope !== "COMFYUI")
+    return "Link ComfyUI again to change which libraries its key works in";
   if (!librariesStore.canManage)
     return "Sign in from the local network to change this";
   return "";
@@ -696,6 +697,9 @@ watch(
                     <v-icon size="11">mdi-image-multiple-outline</v-icon>
                     {{ token.resource_name ?? `Set #${token.resource_id}` }}
                   </template>
+                  <template v-else-if="token.scope === 'COMFYUI'"
+                    >ComfyUI nodes</template
+                  >
                   <template v-else>Read-only</template>
                 </span>
               </td>

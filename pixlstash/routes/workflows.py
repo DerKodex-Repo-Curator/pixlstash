@@ -146,11 +146,12 @@ from pixlstash.services.comfyui_service import (
     FILE_SAVE_NODE_CLASSES,
     PIXLSTASH_PICTURE_LOADER,
     _extract_output_node_ids,
+    RUN_CLIENT_ID,
     _process_comfyui_outputs,
     _submit_comfyui_prompt,
     _upload_image_to_comfyui,
     library_ids_named,
-    record_run_outcome,
+    follow_run,
     run_outcome,
     swap_pixlstash_savers,
     unfed_picture_loaders,
@@ -1503,7 +1504,11 @@ class RunRequest(BaseModel):
     # required the literal JSON `true` (`payload.get(...) is True`); this is the
     # same rule, declared instead of hand-written.
     allow_unchecked: StrictBool = False
-    client_id: str | None = Field(None, max_length=MAX_LABEL_LENGTH)
+    # What the Tasks tab calls these runs while they are in flight. A caller
+    # that changed nothing has no need to say: left out, a run that keeps the
+    # seed of the picture its graph was read from is "Clone picture", and any
+    # other is named after its workflow.
+    label: str | None = Field(None, max_length=MAX_LABEL_LENGTH)
 
 
 class WorkflowChanges(BaseModel):
@@ -6991,6 +6996,15 @@ def create_router(server) -> APIRouter:
         for card, graph, swapped in plan.loader_swaps:
             _record_loader_swaps(card, graph, swapped)
         saved_over = workflow_versions.saved_over_ids(_hub())
+        # What a run nobody named is called: its workflow, as the grid shows it
+        # (a generated name needs the models, `Krea 2: Text to Image`).
+        names = (
+            {}
+            if body.label
+            else _display_names(
+                read_grid(_hub(), server.vault, manual_models=_manual_models).figures
+            )
+        )
         for graph, group, feeds in plan.submittable:
             output_node_ids = _extract_output_node_ids(graph, {})
             # The same finder `replace_missing_seed_nodes` checked its literals
@@ -7015,6 +7029,15 @@ def create_router(server) -> APIRouter:
             # source, as a run of a card has always stacked.
             per_picture = any(feed.picture_id is None for feed in feeds)
             passes = group.picture_ids if per_picture else group.picture_ids[:1]
+            label = body.label or (
+                # One graph, read from one of the pictures it is run for and
+                # not fed them, with that picture's seed: the picture again.
+                "Clone picture"
+                if body.seed_mode == "keep"
+                and not per_picture
+                and group.source_picture_id in group.picture_ids
+                else names.get(group.workflow_id)
+            )
             for selected in passes or [None]:
                 # Hoisted out of the loop below: it is a WRITE task, idempotent,
                 # and `count` runs of one pass all land in the one stack.
@@ -7045,8 +7068,10 @@ def create_router(server) -> APIRouter:
                         apply_seeds(instance, seed_targets, body.seed)
                     elif body.seed_mode == "new":
                         apply_seeds(instance, seed_targets, None)
+                    # Under the backend's own client, so ComfyUI tells the
+                    # one listener how far the run is (`follow_run`).
                     submitted = _submit_comfyui_prompt(
-                        comfyui_url, instance, body.client_id
+                        comfyui_url, instance, RUN_CLIENT_ID
                     )
                     prompt_id = submitted.get("prompt_id") or submitted.get("id")
                     # ComfyUI accepts a prompt when ANY output validates and
@@ -7064,8 +7089,12 @@ def create_router(server) -> APIRouter:
                         lease = request.state.library_lease
                         # Before the thread, so a read straight after this
                         # answer never finds the run unknown.
-                        record_run_outcome(
-                            str(prompt_id), "running", library_uuid=lease.library_uuid
+                        follow_run(
+                            str(prompt_id),
+                            comfyui_url,
+                            label=label,
+                            workflow_id=group.workflow_id,
+                            library_uuid=lease.library_uuid,
                         )
                         threading.Thread(
                             target=_process_comfyui_outputs,
@@ -7567,7 +7596,7 @@ def create_router(server) -> APIRouter:
             )
         try:
             place = plan_lora_insertion(graph, object_info)
-        except LookupError as exc:
+        except (LookupError, TypeError, ValueError, RecursionError) as exc:
             logger.info(
                 "[workflows] Workflow %s opens without a loader for people: %s",
                 workflow_id,
@@ -10518,15 +10547,16 @@ def create_router(server) -> APIRouter:
 
     def _superseded_by_the_same_opening(
         hub, workflow_id: str, version: int | None, opening: str | None, source: str
-    ) -> int | None:
+    ) -> tuple[int, datetime] | None:
         """*version* when the save about to be stored may take it away, else ``None``.
 
         It may when *version*, the workflow's current one, was saved from
         ComfyUI in the same *opening* as this save and nothing was made on it
-        (``saved_recipe_service.made_on_version``). Whether anything was is
-        read from the vault before the hub write; a read that fails keeps the
-        version, since keeping one too many costs nothing and losing one a
-        recipe runs on changes what that recipe makes (rule 8 of #1846).
+        (``saved_recipe_service.made_on_version``). The vault is read before
+        the hub write to skip an already-used version; the result is checked
+        again in the hub transaction immediately before deletion. If either
+        read fails, keep the version: losing one a recipe runs on changes
+        what that recipe makes (rule 8 of #1846).
         """
         if not opening or version is None or source != workflow_versions.FROM_COMFYUI:
             return None
@@ -10539,11 +10569,12 @@ def create_router(server) -> APIRouter:
         if row is None or row["opening"] != opening:
             return None
         try:
+            created_at = datetime.fromisoformat(row["created_at"])
             made = saved_recipe_service.made_on_version(
                 server.vault,
                 workflow_id,
                 version,
-                datetime.fromisoformat(row["created_at"]),
+                created_at,
             )
         except (ValueError, TypeError, SQLAlchemyError) as exc:
             logger.warning(
@@ -10555,7 +10586,7 @@ def create_router(server) -> APIRouter:
                 exc,
             )
             return None
-        return None if made else version
+        return None if made else (version, created_at)
 
     def _nests_deeper_than(value, limit: int) -> bool:
         """Whether a JSON *value* nests objects and lists past *limit* levels."""
@@ -10841,11 +10872,32 @@ def create_router(server) -> APIRouter:
                     (payload.opening, workflow_id, workflow_id),
                 )
             if superseded_version is not None:
-                conn.execute(
-                    "DELETE FROM workflow_version WHERE workflow_id = ? "
-                    "AND version = ? AND version > 1",
-                    (workflow_id, superseded_version),
-                )
+                version_to_delete, created_at = superseded_version
+                try:
+                    made = saved_recipe_service.made_on_version(
+                        server.vault,
+                        workflow_id,
+                        version_to_delete,
+                        created_at,
+                    )
+                except (ValueError, TypeError, SQLAlchemyError) as exc:
+                    # If the final check fails, keep the version: losing one
+                    # a recipe runs on changes what that recipe makes.
+                    logger.warning(
+                        "[workflows] Could not recheck whether anything was "
+                        "made on version %s of %s inside the write, so it is "
+                        "kept beside the save that supersedes it: %s",
+                        version_to_delete,
+                        workflow_id,
+                        exc,
+                    )
+                    made = True
+                if not made:
+                    conn.execute(
+                        "DELETE FROM workflow_version WHERE workflow_id = ? "
+                        "AND version = ? AND version > 1",
+                        (workflow_id, version_to_delete),
+                    )
             write_saved_defaults(conn, workflow_id, superseded, rows)
             if payload.waiting_applied:
                 clear_changes(conn, workflow_id)

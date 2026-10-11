@@ -142,7 +142,6 @@ import {
 } from "../../api/workflows";
 import { errorMessage } from "../../utils/apiError";
 import { BLOCKS_BATCH, repairNotices } from "../../utils/runReasons";
-import { labelPrompts, runTaskLabel } from "../../utils/runTaskLabel";
 import { pictureCount } from "../../utils/workflowSets";
 import AppButton from "../widgets/AppButton.vue";
 import AppDialog from "../widgets/AppDialog.vue";
@@ -154,7 +153,7 @@ const props = defineProps({
   open: { type: Boolean, default: false },
   /** `{pictureIds}` — see `useRunDialogStore`. */
   source: { type: Object, default: null },
-  /** `{client_id, set_id, project_id, character_id}` from the grid. */
+  /** `{set_id, project_id, character_id}` from the grid. */
   context: { type: Object, default: () => ({}) },
 });
 
@@ -272,37 +271,12 @@ function subOf(group) {
     : "Its own recipe, with a new seed";
 }
 
-/**
- * What each queued prompt's row in the Tasks tab is called (`runTaskLabel`),
- * given the run's own *answer*.
- *
- * A group runs ONE graph, untouched, and a kept seed is that graph's. So it is
- * a clone only when the answer says the graph was read from one of the
- * pictures selected (`source_picture_id`) - and not when the pictures are fed
- * into it, which is the recipe run ON them.
- */
-function taskLabelsFor(answer) {
-  const ran = groupsOf(answer);
-  return (prompt) => {
-    const group = ran.find((known) => known.workflow_id === prompt.workflow_id);
-    return runTaskLabel({
-      clone:
-        seedMode.value === "keep" &&
-        group != null &&
-        !feedsItsPictures(group) &&
-        group.picture_ids.includes(group.source_picture_id),
-      workflow: names.value[prompt.workflow_id],
-    });
-  };
-}
-
 /** The body both the pre-flight and the run take, so the two never disagree. */
 function runBody() {
   const body = {
     picture_ids: pictureIds.value,
     count: count.value,
     seed_mode: seedMode.value,
-    client_id: props.context?.client_id || null,
   };
   const destination = {
     set_id: props.context?.set_id ?? null,
@@ -378,7 +352,7 @@ async function submit() {
       return;
     }
     emit("run", {
-      prompts: labelPrompts(prompts, taskLabelsFor(answer)),
+      prompts,
       pictureIds: pictureIds.value,
       // Only on a `partial` answer: why the rest of the batch was not queued.
       ...(answer?.error ? { error: answer.error } : {}),

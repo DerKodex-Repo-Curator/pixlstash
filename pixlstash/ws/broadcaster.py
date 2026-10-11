@@ -112,8 +112,8 @@ class WsBroadcasterMixin:
     ) -> None:
         """Synchronously close one already-claimed socket generation.
 
-        TestClient can host separate WebSocket sessions on separate event loops,
-        and the ComfyUI proxy can be the only live socket. Keep each connection's
+        TestClient can host separate WebSocket sessions on separate event
+        loops. Keep each connection's
         owning loop instead of assuming the updates broadcaster's last loop owns
         them all. Production normally has one uvicorn loop, so this grouping is
         free there and makes the lifecycle invariant explicit everywhere.
@@ -381,11 +381,6 @@ class WsBroadcasterMixin:
             # outside a token's grant). Per-resource scoped delivery, if ever
             # wanted, would be an additive change here.
             if not client.get("owner"):
-                continue
-            # ComfyUI progress proxy sockets share the switch lifecycle registry
-            # so they are retired too, but they are not subscribers to vault
-            # event envelopes.
-            if not client.get("broadcast", True):
                 continue
             filters = client.get("filters") or {}
             if not self._should_send_ws_update(event_type, filters):

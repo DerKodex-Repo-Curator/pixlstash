@@ -55,6 +55,7 @@ RUN pip install --no-cache-dir \
     open_clip_torch \
     fastapi \
     "uvicorn[standard]" \
+    websockets \
     numpy \
     pillow \
     opencv-python-headless \

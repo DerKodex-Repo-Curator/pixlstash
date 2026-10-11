@@ -1,7 +1,7 @@
 <script setup>
 // Links the saved ComfyUI to this library: `POST /comfyui/link` mints a
-// full-access token and writes it, with PixlStash's URL, into ComfyUI's
-// settings. It posts the moment the dialog opens and renders the reply's four
+// token for the PixlStash nodes only and writes it, with PixlStash's URL, into
+// ComfyUI's settings. It posts the moment the dialog opens and renders the reply's four
 // steps; a step that failed or needs the person carries its fix inline.
 //
 // When the nodes are missing and the reply says `can_install_pack`, the nodes
@@ -11,6 +11,9 @@
 //
 // When the reply says other computers can reach this ComfyUI (`exposure`), a
 // notice under the steps says what that lets them do and how to stop it.
+//
+// Once linked, and with more than one library, a switch under the steps sets
+// whether the key works in this library or in every one.
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { VIcon, VProgressCircular } from "vuetify/components";
 import {
@@ -26,6 +29,7 @@ import {
 import AppButton from "../widgets/AppButton.vue";
 import AppDialog from "../widgets/AppDialog.vue";
 import ComfyuiExposureNotice from "./ComfyuiExposureNotice.vue";
+import ComfyuiLinkLibraries from "./ComfyuiLinkLibraries.vue";
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -407,6 +411,8 @@ onBeforeUnmount(stopPolling);
       </li>
     </ol>
 
+    <ComfyuiLinkLibraries v-if="linked" class="cl-libraries" :link="reply.link" />
+
     <ComfyuiExposureNotice
       v-if="reply?.exposure"
       class="cl-exposure"
@@ -513,6 +519,7 @@ onBeforeUnmount(stopPolling);
   font-weight: var(--weight-regular);
 }
 
+.cl-libraries,
 .cl-exposure {
   margin-top: var(--space-5);
 }
