@@ -91,6 +91,26 @@
         >
           {{ versionLine }}
         </p>
+        <!-- The newest version is one ComfyUI saved (#1852): said, with the
+             way back beside it, and nothing to answer. An inline button in a
+             line of secondary text, as "N pictures" above is. -->
+        <p
+          v-if="fromComfyui"
+          class="wftab-sublabel"
+          data-testid="wftab-from-comfyui"
+        >
+          Saved from ComfyUI {{ fromComfyui.when }} ·
+          <button
+            class="wftab-pictures"
+            type="button"
+            data-testid="wftab-go-back"
+            :aria-label="`Go back to version ${fromComfyui.back}`"
+            :disabled="busy === 'go-back'"
+            @click="goBack"
+          >
+            Go back
+          </button>
+        </p>
       </div>
 
       <!-- This workflow's last run ended without a picture (#1839). First in
@@ -795,14 +815,13 @@
              ComfyUI opens on whatever it had last. It opens what Run… runs
              (`runTarget`), and is refused rather than hidden otherwise, for
              Run…'s reason or a ComfyUI without the node. The tooltip is its
-             accessible name. "A copy", because that is what it is: nothing
-             ComfyUI saves comes back by itself, it reaches PixlStash only
-             when exported from ComfyUI or imported, and this one keeps its
-             graph. -->
+             accessible name. What ComfyUI saves from there comes back as
+             this workflow's next version (#1852); with nodes from before
+             that, what opens is a copy and the name says so. -->
         <AppButton
           v-if="canOpenComfyui"
           icon-only
-          tooltip="Open a copy in ComfyUI"
+          :tooltip="comfyuiOpensACopy ? 'Open a copy in ComfyUI' : 'Open in ComfyUI'"
           data-testid="wftab-open-comfyui"
           :aria-disabled="runTarget && !comfyuiLacksNode ? undefined : 'true'"
           :aria-describedby="openDescribedBy"
@@ -911,9 +930,11 @@ import {
   getLoraSummary,
   getWorkflowCard,
   getWorkflowFormInputs,
+  getWorkflowVersions,
   patchWorkflowCard,
   preflightWorkflowRun,
   readModelSwap,
+  restoreWorkflowVersion,
   setWorkflowDefaultLora,
   setWorkflowDefaults,
   setWorkflowModelFix,
@@ -957,6 +978,7 @@ import {
   setEachRun,
 } from "../../utils/workflowPins";
 import { pictureCount } from "../../utils/workflowSets";
+import { relativeDate } from "../../utils/snapshots";
 import { formatUserDay } from "../../utils/utils";
 import AppButton from "../widgets/AppButton.vue";
 import AppInspector from "../widgets/AppInspector.vue";
@@ -1000,16 +1022,25 @@ const canOpenComfyui = computed(
  * button to try.
  */
 const comfyuiLacksNode = ref(false);
+/**
+ * The nodes ComfyUI has are from before a workflow opened there saved back
+ * (#1852): what opens is a copy, and the button says so. Only a definite no.
+ */
+const comfyuiOpensACopy = ref(false);
 let nodeCheck = 0;
 watch(
   () => canOpenComfyui.value && filterStore.comfyuiUrl,
   async (url) => {
     const check = ++nodeCheck;
     comfyuiLacksNode.value = false;
+    comfyuiOpensACopy.value = false;
     if (!url) return;
     try {
-      const { can_open_workflows: canOpen } = await getPixlstashNode();
-      if (check === nodeCheck) comfyuiLacksNode.value = canOpen === false;
+      const { can_open_workflows: canOpen, saves_back: savesBack } =
+        await getPixlstashNode();
+      if (check !== nodeCheck) return;
+      comfyuiLacksNode.value = canOpen === false;
+      comfyuiOpensACopy.value = canOpen === true && savesBack === false;
     } catch (err) {
       console.warn("[workflows] could not ask ComfyUI for the PixlStash node", err);
     }
@@ -1162,6 +1193,70 @@ const versionLine = computed(() => {
   const number = c.version;
   return day ? `Version ${number} · ${day}` : `Version ${number}`;
 });
+
+// A workflow opened in ComfyUI from here saves back to itself, with no
+// question in either app (#1852). So when the newest version is one ComfyUI
+// saved, this tab says so in one line and offers the way back. Read from the
+// versions the workflow keeps, and again whenever its version moves: the card
+// is re-read when the backend announces the save.
+const versions = ref([]);
+let versionsRead = 0;
+let versionsOf = null;
+watch(
+  // A string, so a card re-read that changed nothing does not read again.
+  () => {
+    const c = card.value;
+    return c ? `${c.id}\n${c.version}\n${c.versions}` : "";
+  },
+  async () => {
+    const read = ++versionsRead;
+    const { id, versions: kept } = card.value || {};
+    // Another workflow's versions are never shown for this one; this
+    // workflow's own stay up until the new read lands.
+    if (id !== versionsOf) versions.value = [];
+    versionsOf = id ?? null;
+    if (!id || !(kept > 1)) {
+      versions.value = [];
+      return;
+    }
+    try {
+      const answer = await getWorkflowVersions(id);
+      if (read === versionsRead) versions.value = answer?.versions || [];
+    } catch (err) {
+      console.warn(`[workflows] could not read the versions of ${id}`, err);
+    }
+  },
+  { immediate: true },
+);
+const fromComfyui = computed(() => {
+  const [newest, before] = versions.value;
+  // By what the version is, not by the menu's words for it: a file the
+  // removed pull read is worded the same and was not saved from a canvas.
+  if (!before || newest?.source !== "comfyui") return null;
+  return { when: relativeDate(newest.created_at), back: before.version };
+});
+
+/** Make the version before ComfyUI's save current again. */
+async function goBack() {
+  const id = card.value?.id;
+  const back = fromComfyui.value?.back;
+  if (!id || back == null || busy.value) return;
+  busy.value = "go-back";
+  try {
+    const answer = await restoreWorkflowVersion(id, back);
+    versions.value = answer?.versions || [];
+    // The grid's card carries the version the head line prints.
+    store.invalidate();
+  } catch (err) {
+    console.warn(`[workflows] could not go back to version ${back} of ${id}`, err);
+    notices.push({
+      level: "error",
+      text: errorMessage(err, "Could not go back to the version before."),
+    });
+  } finally {
+    busy.value = "";
+  }
+}
 
 // All three read the MODEL SHELF's name where it has one, the same preference
 // the card's name row was built from, so the panel and the row do not describe
@@ -2584,7 +2679,7 @@ const runDescribedBy = computed(() =>
   multiple.value ? "wftab-run-reason" : undefined,
 );
 
-/** Why Open a copy in ComfyUI refuses, when it does. */
+/** Why Open in ComfyUI refuses, when it does. */
 const openDescribedBy = computed(() => {
   if (multiple.value) return "wftab-open-reason";
   return comfyuiLacksNode.value ? "wftab-open-node-reason" : undefined;
