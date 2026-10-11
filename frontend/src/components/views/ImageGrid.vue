@@ -147,6 +147,7 @@
       @remove-from-group="removeFromGroup"
       @keep-cover-only="openKeepCoverOnly"
       @delete-selected="deleteSelected"
+      @move-to-library="moveSelectedToLibrary"
       @open-tag-panel="handleContextMenuOpenTagPanel"
       @open-plugin-panel="handleContextMenuOpenPluginPanel"
       @make-more="makeMoreLikeSelection"
@@ -1119,6 +1120,7 @@
           @remove-from-group="removeFromGroup"
           @keep-cover-only="openKeepCoverOnly"
           @delete-selected="deleteSelected"
+          @move-to-library="moveSelectedToLibrary"
           @set-project="handleSetProjectForSelected"
           @add-to-character="handleAddToCharacter"
           @remove-from-character="handleRemoveFromCharacter"
@@ -1198,6 +1200,7 @@ import { markEnd, markStart } from "../../utils/perfMarks";
 import { useScopedNotice } from "../../composables/useScopedNotice";
 import { buildPurgeBadge } from "../../utils/retention.js";
 import { buildLockedDeleteMessage } from "../../utils/lockedDelete.js";
+import { buildLibraryMoveMessage } from "../../utils/libraryMove.js";
 import {
   cutFaceSuggestions,
   referenceFaceCount,
@@ -1259,6 +1262,7 @@ import {
   getPictureMetadata,
   getThumbnails,
   deletePictures,
+  movePicturesToLibrary,
   setPicturesProject,
   previewScrapheapDelete,
   purgeScrapheap,
@@ -3928,7 +3932,18 @@ function showLockedDeleteNotice(message) {
 // neither read for the target NOR mutated as a side effect - the overlay owns
 // its own post-delete cleanup (it closes the lightbox). Default (null) is the
 // grid path: act on, and update, `selectedImageIds`.
-async function deleteSelected(idsOverride = null) {
+/**
+ * Move the selection into another library. To this library that is a delete -
+ * the same stack expansion, the same ghosted tiles, the same one undo - so it
+ * is the delete with a different request.
+ * @param {{uuid: string, name: string}} library - from the libraries list.
+ */
+function moveSelectedToLibrary(library) {
+  if (!library?.uuid || isScrapheapView.value) return;
+  return deleteSelected(null, library);
+}
+
+async function deleteSelected(idsOverride = null, moveTo = null) {
   const scoped = Array.isArray(idsOverride) && idsOverride.length > 0;
   const baseIds = scoped ? idsOverride : selectedImageIds.value;
   if (!baseIds.length) return;
@@ -4031,21 +4046,33 @@ async function deleteSelected(idsOverride = null) {
     // Ids the server refused because a locked set freezes them. Collected across
     // every chunk so the outcome message counts the whole operation.
     const skippedLocked = new Set();
+    // A move's other two ways of leaving a picture here: the other library has
+    // it in its Scrapheap, or the file could not be copied.
+    const inOtherScrapheap = new Set();
+    const notCopied = new Set();
     for (let i = 0; i < idsToRemove.length; i += BULK_DELETE_CHUNK) {
       const chunk = idsToRemove.slice(i, i + BULK_DELETE_CHUNK);
-      const resp = await deletePictures(chunk);
+      const resp = moveTo
+        ? await movePicturesToLibrary(chunk, moveTo.uuid)
+        : await deletePictures(chunk);
       const skipped = resp?.skipped_locked;
       if (Array.isArray(skipped)) {
         for (const id of skipped) skippedLocked.add(String(id));
       }
+      for (const id of resp?.skipped_scrapheaped ?? []) {
+        inOtherScrapheap.add(String(id));
+      }
+      for (const id of resp?.failed ?? []) notCopied.add(String(id));
     }
 
     // Only drop the tiles the server actually deleted. Removing the skipped ones
     // too would hide pictures that are still in the library until the next
     // refetch - a second, quieter version of the same lie.
-    const removedIds = idsToRemove.filter(
-      (id) => !skippedLocked.has(String(id)),
-    );
+    const stillHere = (id) =>
+      skippedLocked.has(String(id)) ||
+      inOtherScrapheap.has(String(id)) ||
+      notCopied.has(String(id));
+    const removedIds = idsToRemove.filter((id) => !stillHere(id));
     // Keep the tiles mounted and greyed while the undo is still one click away,
     // and let the receipt's own clock decide when the grid closes the gap.
     // `markGhosted` declines when there is no undo window to hold them open for
@@ -4061,9 +4088,7 @@ async function deleteSelected(idsOverride = null) {
     if (!scoped) {
       // Keep the frozen pictures selected: they are still there, and the user's
       // next move (after unlocking the set) is to delete exactly them.
-      selectedImageIds.value = selectedImageIds.value.filter((id) =>
-        skippedLocked.has(String(id)),
-      );
+      selectedImageIds.value = selectedImageIds.value.filter(stillHere);
       // Drop the range-selection anchor unless it is one of the survivors -
       // otherwise a later shift-click would anchor on a deleted picture.
       const stillSelected = new Set(selectedImageIds.value.map(String));
@@ -4084,11 +4109,25 @@ async function deleteSelected(idsOverride = null) {
         deletedCount: removedIds.length,
       }),
     );
+    if (moveTo) {
+      const message = buildLibraryMoveMessage({
+        libraryName: moveTo.name,
+        movedCount: removedIds.length,
+        inOtherScrapheapCount: inOtherScrapheap.size,
+        notCopiedCount: notCopied.size,
+      });
+      if (message) {
+        noticeStore[message.level](message.body, { key: "pictures-move" });
+      }
+    }
   } catch (err) {
-    console.error("Bulk delete failed", err);
-    noticeStore.error(`Couldn't delete those pictures. ${errorDetail(err)}`, {
-      key: "pictures-delete",
-    });
+    console.error(moveTo ? "Move to library failed" : "Bulk delete failed", err);
+    noticeStore.error(
+      moveTo
+        ? `Couldn't move those pictures to ${moveTo.name}. ${errorDetail(err)}`
+        : `Couldn't delete those pictures. ${errorDetail(err)}`,
+      { key: moveTo ? "pictures-move" : "pictures-delete" },
+    );
   }
 }
 

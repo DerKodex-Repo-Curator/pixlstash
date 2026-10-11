@@ -416,6 +416,31 @@ export async function deletePictures(pictureIds) {
 }
 
 /**
+ * Move pictures into another library.
+ *
+ * The server copies each one there and then moves it to this library's
+ * Scrapheap, so `skipped_locked`, `skipped_scrapheaped` and `failed` are the
+ * pictures that are STILL HERE and whose tiles the caller must keep.
+ *
+ * No timeout: the copy is one request, and a selection of videos outlasts the
+ * client's default.
+ *
+ * @param {Array<number|string>} pictureIds
+ * @param {string} libraryUuid - the target's stable id, from the libraries list.
+ * @returns {Promise<Object>} `{ library_name, moved_count, already_there_count,
+ *   skipped_locked, skipped_scrapheaped, failed }`.
+ */
+export async function movePicturesToLibrary(pictureIds, libraryUuid) {
+  return unwrap(
+    apiClient.post(
+      `/pictures/move-to-library`,
+      { picture_ids: pictureIds, library_uuid: libraryUuid },
+      { timeout: 0 },
+    ),
+  );
+}
+
+/**
  * Rotate pictures in place, by 90° in either direction or by 180°.
  *
  * The file's EXIF orientation tag is rewritten and the bitmap is left alone, so

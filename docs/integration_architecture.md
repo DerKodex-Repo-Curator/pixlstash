@@ -1446,6 +1446,22 @@ not: these routes are hub-only and deliberately keep answering when no vault is
 open, which is the state an owner recovers from. Detach is the exception because
 it reads which library is active, and mid-swap that is the one thing moving.
 
+**Moving pictures between libraries is a picture route, not a library one.**
+`POST /pictures/move-to-library` (`owner_only`) takes
+`{ picture_ids, library_uuid }` and answers
+`{ library_name, moved_count, already_there_count, skipped_locked[],
+skipped_scrapheaped[], failed[] }`. The three lists are the pictures that are
+**still here**, and the client keeps their tiles: a locked set freezes them, the
+other library has the same file in its Scrapheap, or the file could not be
+copied. Everything else left for this library's Scrapheap under one operation,
+so the grid treats the answer exactly as it treats `DELETE /pictures` (ghosted
+tiles, one Undo) and `ImageGrid.deleteSelected` serves both. `404` for an
+unknown library, `409` when it is the active one, cannot be opened, or a switch
+or another move is running, `403` for a token that covers only the active
+library. The menus list `libraries[]` minus the active and the unreachable, so
+the entry is absent with one library. Backend: `docs/backend_architecture.md`
+§14, *Moving pictures to another library*.
+
 ---
 
 

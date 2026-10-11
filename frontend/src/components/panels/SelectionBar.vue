@@ -158,6 +158,7 @@
             @remove-from-group="$emit('remove-from-group')"
             @keep-cover-only="$emit('keep-cover-only', $event)"
             @delete-selected="$emit('delete-selected')"
+            @move-to-library="$emit('move-to-library', $event)"
           />
         </v-menu>
         <div v-if="!isScrapheapView && !isReadOnly" class="plugin-run-controls">
@@ -288,6 +289,7 @@ const emit = defineEmits([
   "remove-from-group",
   "keep-cover-only",
   "delete-selected",
+  "move-to-library",
   "set-project",
   "add-to-character",
   "remove-from-character",

@@ -1059,6 +1059,23 @@ ROUTE_POLICIES: dict[tuple[str, str], RoutePolicy] = {
             "not in READ_SAFE. Gate loops enforce_picture_scope over every id."
         ),
     ),
+    # Owner-only rather than picture-scoped like DELETE /pictures, whose soft
+    # delete is this route's last step: it also WRITES into a second library,
+    # and a share grant reaches pictures in one library, never the registry.
+    ("POST", "/api/v1/pictures/move-to-library"): RoutePolicy(
+        _OWNER,
+        justification=(
+            "Copies the named pictures into another attached library, then "
+            "soft-deletes them here (the DELETE /pictures operation, one undo). "
+            "No caller-supplied path: the target is a registry uuid and the "
+            "destination folder is that library's own root. The gate pins the "
+            "credential to the ACTIVE library; the handler asks the same "
+            "token_covers_library of the TARGET, which the gate cannot see "
+            "because it is named in the body, so a token good for one library "
+            "cannot write into another. READ tokens are refused earlier by the "
+            "middleware: POST is not in READ_SAFE."
+        ),
+    ),
     ("POST", "/api/v1/pictures/rotate"): RoutePolicy(
         _PIC,
         body_ids="picture_ids",

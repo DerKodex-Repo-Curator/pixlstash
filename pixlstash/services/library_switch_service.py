@@ -27,6 +27,7 @@ import os
 import pathlib
 import shutil
 import threading
+from contextlib import contextmanager
 from enum import Enum
 from typing import TYPE_CHECKING, Optional
 
@@ -54,6 +55,11 @@ if TYPE_CHECKING:
     from pixlstash.server import Server
 
 logger = get_logger(__name__)
+
+_BUSY_MESSAGE = (
+    "Another library switch, or a move of pictures between libraries, is "
+    "already in progress. Try again in a moment."
+)
 
 # Where the vault's Alembic revisions live. Used to answer "is this vault newer
 # than this build?" without opening it for migration.
@@ -244,9 +250,7 @@ class LibrarySwitchService:
                 the library it was already using.
         """
         if not self._lock.acquire(blocking=False):
-            raise LibrarySwitchError(
-                "Another library switch is already in progress. Try again in a moment."
-            )
+            raise LibrarySwitchError(_BUSY_MESSAGE)
         try:
             registry = self._server.library_registry
             target = registry.by_uuid(library_uuid)
@@ -280,6 +284,57 @@ class LibrarySwitchService:
                 if self._server.library_coordinator.state is SwitchState.SWITCHING:
                     self._server.library_coordinator.restore_ready()
                 raise
+        finally:
+            self._lock.release()
+
+    @contextmanager
+    def open_other_library(self, library_uuid: str):
+        """Open a library that is not the active one, to write pictures into it.
+
+        Yields ``(library, vault)``. The vault is built exactly as a switch
+        builds its candidate (revalidated folder, guarded connection, pending
+        migrations applied) but with no background workers, and it is closed on
+        the way out. It is never published: the active library stays active.
+
+        Holds the switch lock for as long as the vault is open, so a switch
+        cannot open the same database a second time, and neither can a second
+        caller of this.
+
+        Raises:
+            LibraryNotFoundError: No such attached library.
+            LibrarySwitchError: It is the active library, is still on its first
+                import, cannot be opened, or a switch or another move is
+                running.
+        """
+        if not self._lock.acquire(blocking=False):
+            raise LibrarySwitchError(_BUSY_MESSAGE)
+        try:
+            target = self._server.library_registry.by_uuid(library_uuid)
+            if target is None or not target.attached:
+                raise LibraryNotFoundError(
+                    f"No attached library with uuid {library_uuid}."
+                )
+            if target.is_active:
+                raise LibrarySwitchError(
+                    f'"{target.name}" is the library that is already open.'
+                )
+            if target.pending_import_at:
+                raise LibrarySwitchError(
+                    f'"{target.name}" is still on its first import. Finish that '
+                    "before moving pictures into it."
+                )
+            resolved = self._revalidate(target)
+            try:
+                vault = self._server.build_vault(resolved, workers=False)
+            except Exception as exc:
+                logger.exception("Could not open library %s to move into", target.name)
+                raise LibrarySwitchError(
+                    f'Could not open "{target.name}": {exc}. Nothing was moved.'
+                ) from exc
+            try:
+                yield target, vault
+            finally:
+                vault.close()
         finally:
             self._lock.release()
 

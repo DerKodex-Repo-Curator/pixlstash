@@ -708,6 +708,42 @@
         <div class="ctx-sep" />
       </template>
 
+      <!-- ── Move to library ───────────────────────────────────────────
+           Mirrored in SelectionMenu.vue. Absent rather than disabled with one
+           library: there is nowhere to move to and nothing to explain. -->
+      <template
+        v-if="!isReadOnly && !isScrapheapView && otherLibraries.length"
+      >
+        <div
+          class="ctx-submenu-wrap"
+          @mouseenter="moveSubmenuOpen = true"
+          @mouseleave="moveSubmenuOpen = false"
+        >
+          <button class="ctx-item" :disabled="!selectedImageIds.length">
+            <Tooltip
+              text="Copies the selection into another library and moves it to this library's Scrapheap. Tags, score and description go with it; people, sets, projects and stacks do not."
+              activator="parent"
+            />
+            <v-icon class="ctx-icon">mdi-folder-move-outline</v-icon>
+            Move to library
+            <v-icon class="ctx-arrow">mdi-chevron-right</v-icon>
+          </button>
+          <div v-if="moveSubmenuOpen" class="ctx-submenu">
+            <button
+              v-for="library in otherLibraries"
+              :key="library.uuid"
+              class="ctx-item"
+              :disabled="!selectedImageIds.length"
+              @click="onAction('move-to-library', library)"
+            >
+              <v-icon class="ctx-icon">mdi-image-multiple-outline</v-icon>
+              {{ library.name }}
+            </button>
+          </div>
+        </div>
+        <div class="ctx-sep" />
+      </template>
+
       <!-- ── Remove / Delete ───────────────────────────────────────────
            The trailing danger group, ordered by escalating severity: Keep
            recipes only → Keep cover only → Move to the Scrapheap → Delete
@@ -795,6 +831,7 @@ import {
 import { ROTATE_CCW, ROTATE_CW, rotateMenuLabel } from "../../utils/rotate";
 import { useSnapshotsStore } from "../../stores/useSnapshotsStore";
 import { useEntityListsStore } from "../../stores/useEntityListsStore";
+import { useLibrariesStore } from "../../stores/useLibrariesStore";
 import AddToEntityControl from "./AddToEntityControl.vue";
 import Tooltip from "./Tooltip.vue";
 
@@ -895,6 +932,7 @@ const emit = defineEmits([
   "remove-from-group",
   "keep-cover-only",
   "delete-selected",
+  "move-to-library",
   "open-tag-panel",
   "open-plugin-panel",
   "make-more",
@@ -924,6 +962,7 @@ const autoTagSubmenuOpen = ref(false);
 const descriptionSubmenuOpen = ref(false);
 const findFacesSubmenuOpen = ref(false);
 const restoreSubmenuOpen = ref(false);
+const moveSubmenuOpen = ref(false);
 const identicalSnapshotIds = ref(new Set());
 
 // Run token guards against rapid submenu toggles: when the watcher fires
@@ -967,6 +1006,15 @@ const snapshotsStore = useSnapshotsStore();
 // so the Project row would open a flyout that lists nothing and POSTs a
 // membership read the server 403s. Omit the row instead of offering a dead one.
 const entityLists = useEntityListsStore();
+// Where the selection can be moved to: every library but the open one that is
+// on a drive that is plugged in. Empty for a share or read-only session, which
+// never loads the registry.
+const librariesStore = useLibrariesStore();
+const otherLibraries = computed(() =>
+  librariesStore.libraries.filter(
+    (library) => !library.is_active && library.is_reachable,
+  ),
+);
 const recentSnapshots = computed(() =>
   snapshotsStore.snapshots.filter((cp) => cp.is_compatible).slice(0, 5),
 );
@@ -1157,6 +1205,7 @@ watch(
       descriptionSubmenuOpen.value = false;
       findFacesSubmenuOpen.value = false;
       restoreSubmenuOpen.value = false;
+      moveSubmenuOpen.value = false;
       if (props.overlayMode && previouslyFocused) {
         try {
           previouslyFocused.focus();
