@@ -1451,6 +1451,48 @@ not: these routes are hub-only and deliberately keep answering when no vault is
 open, which is the state an owner recovers from. Detach is the exception because
 it reads which library is active, and mid-swap that is the one thing moving.
 
+**Moving pictures between libraries is a picture route, not a library one.**
+`POST /pictures/move-to-library` (`local_owner_only`, the switch's tier) takes
+`{ picture_ids, library_uuid }` and answers
+`{ library_name, moved_count, moved[], skipped_locked[], copied_but_locked[],
+copied_but_not_moved[], copied_source_unknown[], skipped_already_there[],
+skipped_scrapheaped[], failed[] }`.
+`moved[]` names the pictures that left for this library's Scrapheap, in one undo
+batch, so the
+grid treats them exactly as it treats a `DELETE /pictures` (ghosted tiles, one
+Undo) and `ImageGrid.deleteSelected` serves both. The four `skipped`/`failed`
+lists say why the others are **still here**: a locked set freezes them, the
+other library already has the same file, has it in its Scrapheap, or the file
+could not be copied. An id in `copied_but_locked[]` was copied into the
+destination, but a set became locked before the source soft delete, so it
+remains in both libraries. The
+notice reports this separately and explains that Undo does not remove the
+destination copy. `copied_but_not_moved[]` reports copies whose sources stayed
+live after source Scrapheap processing failed, with the same destination-copy
+warning. On a processing exception, the server re-reads deletions and locks
+in one source read task: committed deletions go in `moved[]`, still-live locked
+sources in `copied_but_locked[]`, and other live sources in
+`copied_but_not_moved[]`. If that recovery read also fails, committed destination
+copies are reported in `copied_source_unknown[]` instead: the source may be live
+or soft-deleted, so neither `moved[]` nor a kept-source list can be asserted.
+`moved_count` counts confirmed moves only. The client warns about this
+uncertainty and refreshes source grid/sidebar state rather than dropping or
+ghosting unknown IDs as confirmed moves. Undo does not remove destination
+copies. These outcome lists do not overlap. Chunked moves share one
+`X-Operation-Batch-Id` gesture id, so one Undo restores every completed chunk.
+The client refreshes the grid and
+sidebar after a failed chunk, including when its server outcome is unknown.
+The client drops and counts `moved[]` and nothing else: an
+id the server did not act on (already deleted from another tab) is in no list,
+and inferring "moved" from that absence would announce a move that did not
+happen. `404` for an unknown library, `409` when
+it is the active one, cannot be opened, or a switch or another move is running,
+`403` for a remote owner or a token that covers only the active library. The
+menus list `libraries[]` minus the active and the unreachable, and nothing
+unless `can_manage`, so the entry is absent with one library and for a session
+the route would refuse. Backend: `docs/backend_architecture.md`
+§14, *Moving pictures to another library*.
+
 ---
 
 

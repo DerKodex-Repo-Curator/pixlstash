@@ -3,6 +3,9 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 vi.mock("../utils/apiClient", () => ({
   API_BASE_URL: "/api/v1",
   apiClient: { get: vi.fn(), post: vi.fn(), delete: vi.fn() },
+  operationBatchHeaders: (batchId) => batchId
+    ? { headers: { "X-Operation-Batch-Id": batchId } }
+    : undefined,
 }));
 
 import { apiClient } from "../utils/apiClient";
@@ -21,6 +24,7 @@ import {
   getPictureMetadata,
   getThumbnails,
   deletePictures,
+  movePicturesToLibrary,
   setPicturesProject,
   purgeScrapheap,
   restoreScrapheap,
@@ -37,6 +41,16 @@ beforeEach(() => {
 });
 
 describe("api/pictures", () => {
+  it("carries the shared move gesture id without imposing a copy timeout", async () => {
+    apiClient.post.mockResolvedValue({ data: { moved: [4] } });
+    expect(await movePicturesToLibrary([4], "archive", "cli-move-test"))
+      .toEqual({ moved: [4] });
+    expect(apiClient.post).toHaveBeenCalledWith(
+      "/pictures/move-to-library",
+      { picture_ids: [4], library_uuid: "archive" },
+      { headers: { "X-Operation-Batch-Id": "cli-move-test" }, timeout: 0 },
+    );
+  });
   it("listPicturesByIds repeats the id param once per picture", async () => {
     apiClient.get.mockResolvedValue({ data: [{ id: 4 }, { id: 5 }] });
     const result = await listPicturesByIds([4, 5]);

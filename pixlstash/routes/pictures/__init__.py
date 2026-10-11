@@ -16,6 +16,7 @@ from . import (
     _faces,
     _face_search,
     _import,
+    _library_move,
     _likeness_search,
     _listing,
     _misc,
@@ -50,6 +51,7 @@ def create_router(server) -> APIRouter:
     # {id}/{field} shape and would be answered by the catch-all if it were
     # registered after _crud.
     register_layout_picture_routes(router, server)
+    _library_move.register_routes(router, server)
     _crud.register_routes(router, server)
     _listing.register_routes(router, server)
     return router
