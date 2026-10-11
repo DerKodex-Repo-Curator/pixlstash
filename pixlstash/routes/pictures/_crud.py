@@ -431,6 +431,8 @@ def scrapheap_pictures(server, request: Request, pic_ids: list[int]):
             pic_ids,
             op_type=operation_log_service.OP_SCRAPHEAP_MOVE,
             picture_ids=pic_ids,
+            # Expand only the undo snapshot, not delete_pics' pic_ids argument:
+            # normalising positions can change siblings that remain live.
             expand_stacks=True,
             expand_stacks_include_deleted=True,
             summary=operation_log_service.scrapheap_move_summary,

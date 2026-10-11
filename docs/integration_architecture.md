@@ -1449,14 +1449,21 @@ it reads which library is active, and mid-swap that is the one thing moving.
 **Moving pictures between libraries is a picture route, not a library one.**
 `POST /pictures/move-to-library` (`local_owner_only`, the switch's tier) takes
 `{ picture_ids, library_uuid }` and answers
-`{ library_name, moved_count, moved[], skipped_locked[],
+`{ library_name, moved_count, moved[], skipped_locked[], copied_but_locked[],
 skipped_already_there[], skipped_scrapheaped[], failed[] }`. `moved[]` names
-the pictures that left for this library's Scrapheap, under one operation, so the
+the pictures that left for this library's Scrapheap, in one undo batch, so the
 grid treats them exactly as it treats a `DELETE /pictures` (ghosted tiles, one
 Undo) and `ImageGrid.deleteSelected` serves both. The four `skipped`/`failed`
 lists say why the others are **still here**: a locked set freezes them, the
 other library already has the same file, has it in its Scrapheap, or the file
-could not be copied. The client drops and counts `moved[]` and nothing else: an
+could not be copied. An id in `copied_but_locked[]` was copied into the
+destination, but a set became
+locked before the source soft delete, so it remains in both libraries. The
+notice reports this separately and explains that Undo does not remove the
+destination copy. Chunked moves share one `X-Operation-Batch-Id` gesture id,
+so one Undo restores every completed chunk. The client refreshes the grid and
+sidebar after a failed chunk, including when its server outcome is unknown.
+The client drops and counts `moved[]` and nothing else: an
 id the server did not act on (already deleted from another tab) is in no list,
 and inferring "moved" from that absence would announce a move that did not
 happen. `404` for an unknown library, `409` when

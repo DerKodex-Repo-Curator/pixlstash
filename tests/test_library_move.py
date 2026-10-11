@@ -27,6 +27,7 @@ from pixlstash.db_models import (
     Picture,
     PictureSet,
     PictureSetMember,
+    PictureStack,
     Tag,
     User,
     UserToken,
@@ -179,7 +180,9 @@ class TestAMove:
         headers = {"X-Operation-Batch-Id": "cli-move-chunks-test"}
 
         assert _move(owner, other, [first], headers=headers).json()["moved"] == [first]
-        assert _move(owner, other, [second], headers=headers).json()["moved"] == [second]
+        assert _move(owner, other, [second], headers=headers).json()["moved"] == [
+            second
+        ]
         assert _here(server, first).deleted is True
         assert _here(server, second).deleted is True
 
@@ -330,6 +333,40 @@ class TestWhatTheOtherLibraryAlreadyHolds:
 
 
 class TestWhatIsLeftBehind:
+    def test_moving_a_stack_leader_keeps_uncopied_siblings_and_undo_restores_positions(
+        self, server, owner, other
+    ):
+        leader = _add(server, _png())
+        sibling = _add(server, _png())
+        sibling_sha = _here(server, sibling).pixel_sha
+
+        def stack(session: Session):
+            group = PictureStack()
+            session.add(group)
+            session.flush()
+            for position, picture_id in enumerate([leader, sibling]):
+                picture = session.get(Picture, picture_id)
+                picture.stack_id = group.id
+                picture.stack_position = position
+                session.add(picture)
+            session.commit()
+
+        server.vault.db.run_task(stack)
+
+        body = _move(owner, other, [leader]).json()
+
+        assert body["moved"] == [leader]
+        assert _here(server, leader).deleted is True
+        assert _here(server, sibling).deleted is False
+        assert _here(server, sibling).stack_position == 0
+        assert _there(server, other, sibling_sha) == []
+
+        assert owner.post(f"{API}/operations/undo").status_code == 200
+        assert _here(server, leader).deleted is False
+        assert _here(server, leader).stack_position == 0
+        assert _here(server, sibling).deleted is False
+        assert _here(server, sibling).stack_position == 1
+
     def test_a_lock_added_after_copy_is_reported_as_present_in_both_libraries(
         self, server, owner, other, monkeypatch
     ):
