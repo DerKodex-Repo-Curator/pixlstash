@@ -180,10 +180,12 @@
           :label="`Your verdict: ${setVerdictText(card.verdict)}`"
         />
         <!-- A set from pictures is read off the library, so it is hidden rather
-             than deleted (the next read would only draw it again). Mouse-only,
-             like the toggle: the grid owns Tab, and Delete on the card hides. -->
+             than deleted (the next read would only draw it again). A hand-made
+             set is the owner's own and can be deleted, and hiding it is the
+             same view choice on top: out of the way in THIS library only.
+             Mouse-only, like the toggle: the grid owns Tab, and Delete on the
+             card deletes a hand-made set, hides a derived one. -->
         <AppButton
-          v-if="!card.handMade"
           class="msc__hide"
           variant="ghost"
           size="sm"
@@ -343,6 +345,7 @@ const accessibleName = computed(() => {
     return [
       name,
       "grouped by you",
+      props.card.hidden ? "hidden" : null,
       kindLabel,
       incomplete
         ? "incomplete: no checkpoint"
@@ -445,9 +448,12 @@ const accessibleName = computed(() => {
   border-style: dashed;
 }
 
-/* Hidden, drawn only while the grid shows hidden sets: the pictures fade, the
-   text does not, so the card stays readable and the "Hidden" tag says why. */
-.msc--hidden .msc__pic {
+/* Hidden, drawn only while the grid shows hidden sets: the cover fades, whether
+   it holds pictures or is the empty stand-in (a hand-made set with none, or a
+   picture set with no cover), and the card's own text does not, so the card
+   stays readable and the "Hidden" tag says why. */
+.msc--hidden .msc__pic,
+.msc--hidden .msc__cover--empty {
   opacity: var(--opacity-disabled);
 }
 

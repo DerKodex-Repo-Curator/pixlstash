@@ -31,6 +31,11 @@ const addWorkflowSetMembers = vi.fn();
 const removeWorkflowSetMembers = vi.fn();
 const renameWorkflowSet = vi.fn();
 const setWorkflowSetDeclines = vi.fn();
+const setWorkflowSetsHidden = vi.fn();
+// What the double's server holds as hidden in the active library (#1869): the
+// hide is the server's answer now, not a localStorage flag, so a hide and the
+// read that follows it must agree.
+let hiddenOnServer = new Set();
 const putSetVerdict = vi.fn();
 // One double per result set, like the store's own suite: `/adapters` is ONE
 // route serving five `file_kind`s, and a single mock would answer the engines
@@ -59,6 +64,7 @@ vi.mock("../../api/modelShelf", () => ({
   removeWorkflowSetMembers: (...args) => removeWorkflowSetMembers(...args),
   renameWorkflowSet: (...args) => renameWorkflowSet(...args),
   setWorkflowSetDeclines: (...args) => setWorkflowSetDeclines(...args),
+  setWorkflowSetsHidden: (...args) => setWorkflowSetsHidden(...args),
   putSetVerdict: (...args) => putSetVerdict(...args),
   putMemberVerdict: vi.fn(),
 }));
@@ -166,6 +172,7 @@ async function mountGrid({
     no_set: noSet,
     hand_made: handMade,
     set_checks: setChecks,
+    hidden_sets: [...hiddenOnServer],
   });
   const store = useModelShelfStore();
   await store.fetchRows();
@@ -185,6 +192,16 @@ beforeEach(() => {
   removeWorkflowSetMembers.mockReset();
   renameWorkflowSet.mockReset();
   setWorkflowSetDeclines.mockReset();
+  // A hide is a write to the library's own list, and the answer carries it: the
+  // double keeps that list so a hide and the next read agree, as the server does.
+  hiddenOnServer = new Set();
+  setWorkflowSetsHidden.mockReset().mockImplementation(async (keys, hidden) => {
+    for (const key of keys) {
+      if (hidden) hiddenOnServer.add(key);
+      else hiddenOnServer.delete(key);
+    }
+    return [...hiddenOnServer];
+  });
   putSetVerdict.mockReset().mockResolvedValue({});
   setActivePinia(createPinia());
   // The grid is mounted without the shelf, which is what declares the host.
@@ -1564,6 +1581,63 @@ describe("hand-made sets (#1520)", () => {
     expect(cards[0].text()).toContain("no pictures yet");
     // Honesty: no recipe count on a hand-made card.
     expect(cards[0].text()).not.toMatch(/recipe/);
+  });
+
+  it("announces a hidden hand-made card as hidden", async () => {
+    // The visible "Hidden" tag is aria-hidden, so the name is the only place a
+    // screen reader hears it - the derived branch says it, and so must this.
+    hiddenOnServer.add("hand:10");
+    const { wrapper, store } = await mountGrid({
+      rows: [row(1, "realvisXL_v5", "checkpoint")],
+      handMade: [handSet(10, [SET_CKPT])],
+    });
+    store.showHiddenSets = true;
+    await wrapper.vm.$nextTick();
+    const card = wrapper.find('[data-testid="model-set-card"]');
+    expect(card.attributes("aria-label")).toContain("hidden");
+  });
+
+  it("hides a hand-made card from its own eye, the set and not a file", async () => {
+    const { wrapper } = await mountGrid({
+      rows: [row(1, "realvisXL_v5", "checkpoint")],
+      handMade: [handSet(10, [SET_CKPT])],
+    });
+    await wrapper.find('[data-testid="set-hide"]').trigger("click");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(setWorkflowSetsHidden).toHaveBeenCalledWith(["hand:10"], true);
+    expect(wrapper.findAll('[data-testid="model-set-card"]')).toHaveLength(0);
+
+    await wrapper.find('[data-testid="toggle-hidden-sets"]').trigger("click");
+    const card = wrapper.find('[data-testid="model-set-card"]');
+    expect(card.classes()).toContain("msc--hidden");
+    await card.find('[data-testid="set-hide"]').trigger("click");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(setWorkflowSetsHidden).toHaveBeenLastCalledWith(["hand:10"], false);
+    wrapper.unmount();
+  });
+
+  it("offers no fill from a set hidden in this library, until Show them draws it", async () => {
+    hiddenOnServer.add("hand:12");
+    const { wrapper, store } = await mountGrid({
+      rows: [row(1, "realvisXL_v5", "checkpoint"), row(3, "filmgrain_xl")],
+      handMade: [
+        handSet(11, [SET_CKPT]),
+        handSet(12, [
+          slotMember(4, "juggernautXL_v9", "checkpoint"),
+          slotMember(3, "filmgrain_xl", "lora"),
+        ]),
+      ],
+    });
+    store.toggleSet("hand:11");
+    await wrapper.vm.$nextTick();
+    const fill = () =>
+      wrapper.findAll("button").find((b) => b.text().includes("Fill from a set"));
+    expect(fill().attributes("disabled")).toBeDefined();
+
+    store.showHiddenSets = true;
+    await wrapper.vm.$nextTick();
+    expect(fill().attributes("disabled")).toBeUndefined();
+    wrapper.unmount();
   });
 
   it("draws a combination the set covers on the set and not again as evidence", async () => {
@@ -3188,6 +3262,8 @@ describe("hiding a set from pictures", () => {
     window.addEventListener("keydown", onWindowKey);
     await grid.trigger("keydown", { key: "Delete" });
     window.removeEventListener("keydown", onWindowKey);
+    // The hide is a server write; the grid redraws when its answer lands.
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(onWindowKey).not.toHaveBeenCalled();
     expect(wrapper.findAll('[data-testid="model-set-card"]')).toHaveLength(0);
@@ -3220,6 +3296,7 @@ describe("hiding a set from pictures", () => {
   it("keeps the grid and its Show them line when every set is hidden", async () => {
     const { wrapper } = await mountOneSet();
     await wrapper.find('[data-testid="set-hide"]').trigger("click");
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(wrapper.text()).not.toContain("No picture in this library");
     expect(wrapper.find('[data-testid="toggle-hidden-sets"]').exists()).toBe(
       true,
@@ -3230,6 +3307,7 @@ describe("hiding a set from pictures", () => {
   it("hides from the card's button and draws hidden sets on request", async () => {
     const { wrapper } = await mountOneSet();
     await wrapper.find('[data-testid="set-hide"]').trigger("click");
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(wrapper.findAll('[data-testid="model-set-card"]')).toHaveLength(0);
 
     await wrapper.find('[data-testid="toggle-hidden-sets"]').trigger("click");
@@ -3238,6 +3316,7 @@ describe("hiding a set from pictures", () => {
     expect(card.text()).toContain("Hidden");
 
     await wrapper.find('[data-testid="set-hide"]').trigger("click");
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(card.classes()).not.toContain("msc--hidden");
     wrapper.unmount();
   });

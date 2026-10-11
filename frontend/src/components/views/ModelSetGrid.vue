@@ -261,8 +261,8 @@
         </template>
       </div>
 
-      <!-- Hidden sets from pictures are out of the grid, not gone: say how
-           many, and let them be drawn again so one can be shown. -->
+      <!-- Hidden sets are out of the grid, not gone: say how many, and let
+           them be drawn again so one can be shown. Derived and hand-made alike. -->
       <p v-if="store.hiddenSetCount" class="msg__hidden">
         <span class="num"
           >{{ store.hiddenSetCount.toLocaleString() }} hidden
@@ -1047,12 +1047,16 @@ function onSlotMenu({ member, event }) {
   }
 }
 
-/** The set-from-pictures group behind a card entry. */
+/** The group behind a set card: a set from pictures, or a hand-made one. */
 function groupOf(entry) {
-  return store.setGroups.find((group) => group.key === entry?.key) ?? null;
+  return (
+    store.setGroups.find((group) => group.key === entry?.key) ??
+    store.handMadeGroups.find((group) => group.key === entry?.key) ??
+    null
+  );
 }
 
-/** Hide one set from pictures. Never a file. */
+/** Hide one set, derived or hand-made. Never a file. */
 function hideCard(entry) {
   const group = groupOf(entry);
   if (group) store.hideSets([group]);
@@ -1085,7 +1089,9 @@ const fillPictureItems = computed(() =>
 );
 
 const fillSetItems = computed(() =>
-  openHand.value ? fillFromSets(openHand.value.set, store.handMadeSets) : [],
+  openHand.value
+    ? fillFromSets(openHand.value.set, store.shownHandMadeSets)
+    : [],
 );
 
 const chooserSlot = computed(() =>
@@ -1138,7 +1144,7 @@ const chooserSections = computed(() => {
     set,
     slotId: chooser.value.slotId,
     rows: store.rows,
-    sets: store.handMadeSets,
+    sets: store.shownHandMadeSets,
     combinations: store.workflowSets.combinations,
     query: chooserQuery.value,
   }).map((section) => ({

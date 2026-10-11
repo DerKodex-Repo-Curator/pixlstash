@@ -480,7 +480,7 @@ class TestDetach:
 
 
 class TestForget:
-    def test_forgetting_a_registration_erases_its_ghosts_and_no_others(
+    def test_forgetting_a_registration_erases_its_rows_and_no_others(
         self, hub, registry, tmp_path
     ):
         """Nothing could cover a forgotten library's ghosts again, and nothing
@@ -509,6 +509,16 @@ class TestForget:
                     "VALUES (?, 'edit.json', '1', 'fixed', 'sha')",
                     (library.uuid,),
                 )
+                conn.execute(
+                    "INSERT INTO workflow_group_hidden (workflow_id, "
+                    "library_uuid, hidden) VALUES ('wf', ?, 1)",
+                    (library.uuid,),
+                )
+                conn.execute(
+                    "INSERT INTO workflow_set_hidden (library_uuid, set_key) "
+                    "VALUES (?, 'set-key')",
+                    (library.uuid,),
+                )
 
         registry.forget(gone.id)
 
@@ -516,6 +526,8 @@ class TestForget:
             "workflow_picture_ghost",
             "workflow_recipe_instance",
             "workflow_picture_input",
+            "workflow_group_hidden",
+            "workflow_set_hidden",
         ):
             rows = hub.connection.execute(
                 f"SELECT library_uuid FROM {table}"

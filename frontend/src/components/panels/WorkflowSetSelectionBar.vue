@@ -1,7 +1,8 @@
 <template>
   <!-- The pill while hand-made SETS are selected (#1520). The same floating
        object as the file pill (`ShelfSelectionBar`), with the set vocabulary:
-       Rename, Duplicate set and Delete set. No file verb is here, and none of
+       Rename, Duplicate set, Hide and Delete set. Hide sits before Delete so
+       the one destructive verb stays last. No file verb is here, and none of
        these touches a file - which is why Delete set is not in the error
        colour the file Delete wears. -->
   <div
@@ -42,6 +43,15 @@
           : 'Duplicate one set at a time.'
       "
       @click="emit('duplicate')"
+    />
+    <AppBarButton
+      v-if="hide"
+      shape="round"
+      :icon="hide.icon.replace('mdi-', '')"
+      data-verb="hide-sets"
+      :aria-label="hide.label"
+      :tooltip="hide.label"
+      @click="emit('hide-sets')"
     />
     <AppBarButton
       shape="round"
@@ -88,6 +98,17 @@
       >
         <v-icon class="ctx-icon">mdi-content-duplicate</v-icon>
         <span class="ctx-label-text">Duplicate set</span>
+      </button>
+      <button
+        v-if="hide"
+        class="ctx-item"
+        type="button"
+        role="menuitem"
+        data-verb="hide-sets"
+        @click="verb('hide-sets')"
+      >
+        <v-icon class="ctx-icon">{{ hide.icon }}</v-icon>
+        <span class="ctx-label-text">{{ hide.label }}</span>
       </button>
       <!-- The merge offer (#1523), for the one set the menu is about. -->
       <template v-if="offered">
@@ -148,19 +169,29 @@ import { VIcon } from "vuetify/components";
 
 import { useModelShelfStore } from "../../stores/useModelShelfStore";
 import { onMenuKeydown } from "../../utils/menuKeyboard.js";
+import { hideSetsVerb } from "../../utils/workflowSets";
 import AppBarButton from "../widgets/AppBarButton.vue";
 import Tooltip from "../widgets/Tooltip.vue";
+
+const props = defineProps({
+  /** Every selected card from pictures and hand-made sets: what Hide takes. */
+  sets: { type: Array, default: () => [] },
+});
 
 const emit = defineEmits([
   "rename",
   "duplicate",
   "delete",
+  "hide-sets",
   "merge-offer",
   "keep-separate",
   "offer-again",
 ]);
 
 const store = useModelShelfStore();
+
+/** Hide over the selected cards, as the pill's button and the menu's row. */
+const hide = computed(() => hideSetsVerb(props.sets));
 
 const contextOpen = ref(false);
 const contextAt = ref([0, 0]);

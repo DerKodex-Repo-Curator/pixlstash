@@ -27,6 +27,7 @@ import {
   renameWorkflowSet,
   setAdapterAttachments,
   setWorkflowSetDeclines,
+  setWorkflowSetsHidden,
 } from "../api/modelShelf";
 import { onSessionReset } from "../utils/apiClient";
 import { useConfirm } from "../composables/useConfirm";
@@ -89,15 +90,6 @@ const FILTERS_SCHEMA_VERSION = 1;
  * cleared a filter is a different promise than the button makes.
  */
 const VIEW_KEY = "pixlstash:modelShelfView";
-
-/**
- * Where the hidden sets from pictures are remembered, as `{keys: [...]}`.
- *
- * A set from pictures is read off the library, so it cannot be deleted - the
- * next read would draw it again. It can only be hidden, which is a view choice,
- * so it lives beside the other view choices rather than in the hub.
- */
-const HIDDEN_SETS_KEY = "pixlstash:modelShelfHiddenSets";
 
 /**
  * Bumped when the shape below changes; a blob from another `v` is discarded.
@@ -768,6 +760,18 @@ function writeStored(key, value) {
   }
 }
 
+/**
+ * Drop a key this build no longer reads. Hides moved to the server (#1869), so
+ * a browser's old per-browser copy is dead weight; it is not carried over.
+ */
+function forgetStored(key) {
+  try {
+    window.localStorage?.removeItem(key);
+  } catch (err) {
+    console.warn(`[shelf] could not clear ${key}`, err);
+  }
+}
+
 /** Read the remembered selection, or null when there is none to trust. */
 function storedFilters() {
   const parsed = readStored(FILTERS_KEY);
@@ -1048,6 +1052,8 @@ function blockOf(row) {
 }
 
 export const useModelShelfStore = defineStore("modelShelf", () => {
+  // The per-browser hide list, retired with #1869; removed once it is seen.
+  forgetStored("pixlstash:modelShelfHiddenSets");
   const filters = reactive(storedFilters() || defaultFilters());
   /** Whether the Models rail is mounted; see `fetchedBlocks`. */
   const railMounted = ref(false);
@@ -1609,11 +1615,21 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     combinations: [],
     handMade: [],
     setChecks: [],
+    hiddenSets: [],
   });
   const setsLoading = ref(false);
   const setsError = ref("");
   const setsLoaded = ref(false);
   let setsEpoch = 0;
+  // Hide writes, numbered as they are sent. An answer is applied only when no
+  // newer write has been applied, so answers that land out of order cannot put
+  // an older list on top. `ponytail:` issue order stands in for the server's
+  // order; a version on the answer would make it exact.
+  let hideSent = 0;
+  let hideApplied = 0;
+  // Moves on every send and every applied answer. A read that straddles one
+  // keeps the local list rather than its own snapshot, which may predate it.
+  let hideEvents = 0;
 
   /** The stack whose member panel is open, by its card key. */
   const openSetKey = ref("");
@@ -1660,6 +1676,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     // `force` overrides both: a scan has changed the answer.
     if (!force && (setsLoaded.value || setsLoading.value)) return;
     const startedAt = (setsEpoch += 1);
+    const hidesAtStart = hideEvents;
     setsLoading.value = true;
     setsError.value = "";
     try {
@@ -1669,6 +1686,12 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
         combinations: body.combinations,
         handMade: body.hand_made ?? [],
         setChecks: body.set_checks ?? [],
+        // A hide sent or answered while this read was out is newer than the
+        // read's own list, which may have been served before it landed.
+        hiddenSets:
+          hideEvents === hidesAtStart
+            ? (body.hidden_sets ?? [])
+            : workflowSets.value.hiddenSets,
       };
       setsLoaded.value = true;
     } catch (err) {
@@ -1792,46 +1815,69 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
   );
 
   /** How many of the sets `Show` leaves on screen are hidden. */
-  const hiddenSetCount = computed(
-    () => evidenceGroups.value.filter((group) => group.hidden).length,
-  );
+  const hiddenSetCount = computed(() => {
+    const derived = evidenceGroups.value.filter((group) => group.hidden).length;
+    const hand = handMadeSets.value.filter((set) =>
+      hiddenSetKeys.value.has(`hand:${set.id}`),
+    ).length;
+    return derived + hand;
+  });
 
   // ── Hiding sets from pictures ─────────────────────────────────────────────
   //
   // A set from pictures is the library's own reading of its recipes, so there
   // is nothing to delete: the next read would draw it again. Hide is the verb,
   // remembered by group key (the base model's id, or a missing one's name).
+  //
+  // The answer is per library and lives on the server (`workflow_set_hidden`,
+  // #1869), served with the set payload under `hiddenSets`: a set hidden in one
+  // library is still drawn in another, and it survives a browser or a machine
+  // change. Hand-made sets hide the same way, under their own `hand:<id>` keys.
 
-  /** The keys of the hidden sets from pictures. */
-  const hiddenSetKeys = ref(
-    new Set(
-      [readStored(HIDDEN_SETS_KEY)?.keys]
-        .filter(Array.isArray)
-        .flat()
-        .filter((key) => typeof key === "string" && key !== ""),
-    ),
-  );
+  /** The keys the active library hides, as the last read or write left them. */
+  const hiddenSetKeys = computed(() => new Set(workflowSets.value.hiddenSets));
 
   /** Draw the hidden sets too, dimmed, so one can be shown again. */
   const showHiddenSets = ref(false);
 
-  function writeHiddenSets(keys) {
-    hiddenSetKeys.value = keys;
-    writeStored(HIDDEN_SETS_KEY, { keys: [...keys] });
-  }
-
-  function changeHidden(keys, hide) {
-    const next = new Set(hiddenSetKeys.value);
-    for (const key of keys) {
-      if (hide) next.add(key);
-      else next.delete(key);
+  /**
+   * Hide or show sets, on the server, and close what the hide took away.
+   *
+   * Never throws: a failure is reported and the previous answer stands, so a
+   * fire-and-forget caller (a card's eye button, the verb bar) needs no catch.
+   *
+   * @param {Array<string>} keys - the sets' own keys.
+   * @param {boolean} hide - true hides, false shows again.
+   * @returns {Promise<boolean>} false when the write did not land, so a caller
+   *   whose own work depends on it (the twin swap) can fail rather than report
+   *   a state the server never took.
+   */
+  async function changeHidden(keys, hide) {
+    const notices = useNoticeStore();
+    const sent = (hideSent += 1);
+    hideEvents += 1;
+    try {
+      const hiddenSets = await setWorkflowSetsHidden(keys, hide);
+      if (sent > hideApplied) {
+        hideApplied = sent;
+        hideEvents += 1;
+        workflowSets.value = { ...workflowSets.value, hiddenSets };
+      }
+    } catch (err) {
+      notices.push({
+        level: "error",
+        text: errorDetail(err) || "Could not change what this library hides.",
+      });
+      return false;
     }
-    writeHiddenSets(next);
-    if (!hide || showHiddenSets.value) return;
+    // Only when the card actually leaves the screen: with "Show them" on it is
+    // drawn dimmed, and dropping the selection under a visible card would be a
+    // change the reader did not ask for.
+    if (!hide || showHiddenSets.value) return true;
+    // A hidden card leaves the screen, so it leaves the selection and the open
+    // panel with it: otherwise Undo or "Show them" would bring it back lit, with
+    // the file pill armed by no gesture.
     if (keys.includes(openSetKey.value)) openSetKey.value = "";
-    // The card has left the screen, so its head leaves the selection with it,
-    // as a missing card's key does: otherwise Undo or "Show them" would bring
-    // it back lit, with the file pill armed by no gesture.
     const gone = new Set(
       evidenceGroups.value
         .filter((group) => keys.includes(group.key))
@@ -1842,44 +1888,59 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
         [...selectedIds.value].filter((id) => !gone.has(id)),
       );
     }
+    const goneSets = new Set(
+      keys
+        .filter((key) => key.startsWith("hand:"))
+        .map((key) => Number(key.slice(5))),
+    );
+    if ([...selectedSetIds.value].some((id) => goneSets.has(id))) {
+      selectedSetIds.value = new Set(
+        [...selectedSetIds.value].filter((id) => !goneSets.has(id)),
+      );
+    }
+    return true;
   }
 
   /**
-   * Hide sets from pictures, with a receipt whose Undo shows them again.
+   * Hide sets, with a receipt whose Undo shows them again.
    *
-   * @param {Array<Object>} groups - entries of `setGroups`.
+   * @param {Array<Object>} groups - entries of `setGroups` or `handMadeGroups`.
    */
-  function hideSets(groups) {
+  async function hideSets(groups) {
     const fresh = groups.filter((group) => !hiddenSetKeys.value.has(group.key));
     if (!fresh.length) return;
     const keys = fresh.map((group) => group.key);
     const wasOpen = keys.includes(openSetKey.value) ? openSetKey.value : "";
-    changeHidden(keys, true);
+    // The receipt claims the hide happened, so it waits for the write to land:
+    // a failed PUT is already noticed, and raising Undo over it would offer to
+    // undo a change the server never took.
+    if (!(await changeHidden(keys, true))) return;
     raiseSetReceipt(
       fresh.length === 1
         ? `Hid the set "${fresh[0].card.name}". No file was touched.`
         : `Hid ${fresh.length} sets. No file was touched.`,
       "hide",
       async () => {
-        changeHidden(keys, false);
+        if (!(await changeHidden(keys, false))) return false;
         // Undo puts back the tray the hide closed, unless another has opened.
         if (wasOpen && !openSetKey.value) openSetKey.value = wasOpen;
+        return true;
       },
       async () => changeHidden(keys, true),
     );
   }
 
   /**
-   * Show hidden sets from pictures again, with a receipt whose Undo hides them.
+   * Show hidden sets again, with a receipt whose Undo hides them.
    *
-   * @param {Array<Object>} groups - entries of `setGroups`.
+   * @param {Array<Object>} groups - entries of `setGroups` or `handMadeGroups`.
    */
-  function unhideSets(groups) {
+  async function unhideSets(groups) {
     const keys = groups
       .map((group) => group.key)
       .filter((key) => hiddenSetKeys.value.has(key));
     if (!keys.length) return;
-    changeHidden(keys, false);
+    if (!(await changeHidden(keys, false))) return;
     raiseSetReceipt(
       keys.length === 1
         ? `"${groups.find((g) => g.key === keys[0]).card.name}" is shown again.`
@@ -1891,10 +1952,10 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
   }
 
   /**
-   * Hide over a selection of sets from pictures: the one rule the menus' row
-   * is worded by (`hideSetsVerb`), so what it says is what runs.
+   * Hide over a selection of sets: the one rule the menus' row is worded by
+   * (`hideSetsVerb`), so what it says is what runs.
    *
-   * @param {Array<Object>} groups - entries of `setGroups`.
+   * @param {Array<Object>} groups - entries of `setGroups` or `handMadeGroups`.
    */
   function toggleHiddenSets(groups) {
     if (hideSetsVerb(groups)?.hide) hideSets(groups);
@@ -1968,20 +2029,39 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     return handMadeName(withShelfNames(set));
   }
   const handMadeGroups = computed(() =>
-    handMadeSets.value.map((set) => {
-      const models = (set.members ?? []).filter(
-        (m) => m.on_shelf && m.id != null,
-      );
-      const check = checkOf(models);
-      return {
-        key: `hand:${set.id}`,
-        set,
-        head: null,
-        models,
-        check,
-        card: { ...handMadeCard(set), verdict: check?.verdict ?? null },
-      };
-    }),
+    handMadeSets.value
+      .map((set) => {
+        const models = (set.members ?? []).filter(
+          (m) => m.on_shelf && m.id != null,
+        );
+        const check = checkOf(models);
+        const hidden = hiddenSetKeys.value.has(`hand:${set.id}`);
+        return {
+          key: `hand:${set.id}`,
+          set,
+          head: null,
+          models,
+          check,
+          hidden,
+          card: {
+            ...handMadeCard(set),
+            verdict: check?.verdict ?? null,
+            hidden,
+          },
+        };
+      })
+      // A hand-made set hides the same way a derived one does (#1869): the
+      // owner's own grouping, still theirs, just out of the way until shown.
+      .filter((group) => showHiddenSets.value || !group.hidden),
+  );
+
+  /**
+   * The hand-made sets a surface other than the grid offers or names (the
+   * rail, the set chooser). Hidden is a filter on the library (#1869), so a
+   * set hidden here is left out of those too, until "Show them" draws it.
+   */
+  const shownHandMadeSets = computed(() =>
+    handMadeGroups.value.map((group) => group.set),
   );
 
   /**
@@ -2409,6 +2489,10 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
    * set from pictures (a checkpoint that only ever ran alone) that it is not
    * meant to stop at.
    *
+   * A hidden hand-made set is never swapped (`yieldOne`): hiding is the owner
+   * keeping it out of the way, and each route that closes its tray - the hide
+   * itself, "Show them" turning off, a read that brings the hide - lands here.
+   *
    * @param {number} setId
    * @returns {Promise<boolean>} true when the set gave way.
    */
@@ -2430,6 +2514,9 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
       await Promise.allSettled([...setWritesInFlight]);
       await loadWorkflowSets({ force: true });
     }
+    // Checked after the wait, since a hide may have landed while it was out.
+    // Not re-checked on unhide: the next close of the tray asks again.
+    if (hiddenSetKeys.value.has(`hand:${setId}`)) return false;
     const set = handMadeSets.value.find((candidate) => candidate.id === setId);
     const twin = automaticTwin(set);
     if (!twin) return false;
@@ -2446,7 +2533,9 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
         if (set.declined?.length) {
           await setWorkflowSetDeclines(restored.id, set.declined);
         }
-        if (wasHidden) changeHidden([twin.key], true);
+        // `false` (the hide did not land, already reported) fails the undo:
+        // the twin would otherwise stay shown over the set this undid.
+        if (wasHidden && !(await changeHidden([twin.key], true))) return false;
         return restored;
       },
       // The swap again, checked again: the restored set may have changed since.
@@ -2462,7 +2551,9 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
       failure: "The set could not be swapped for the set from pictures.",
     });
     if (!done) return false;
-    if (wasHidden) changeHidden([twin.key], false);
+    // A twin that would not come back on screen means the swap left nothing
+    // shown where the hand-made set was: fail it rather than report the swap.
+    if (wasHidden && !(await changeHidden([twin.key], false))) return false;
     // Opened only over a closed tray: an owner who has opened another set
     // since keeps it, and this never moves the view off a hand-made tray -
     // which the watch below would read as that set being closed too.
@@ -3328,14 +3419,18 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
    * while a card still lists it.
    *
    * Select-all means all of it, so both kinds are taken and both pills come up
-   * together. Hand-made sets are never narrowed by `Show`, so all of them are
-   * drawn.
+   * together - but only what is drawn: a hand-made set that its own hide takes
+   * off the grid (with "Show them" off) must not be selected, or Delete would
+   * take it off screen unasked. `Show` never narrows a hand-made set, so the
+   * set's own hide is the only thing that does.
    */
   function selectVisible() {
     const drawn = screenRows.value;
-    if (view.groupBy === GRID_GROUP_BY && handMadeSets.value.length) {
-      selectedSetIds.value = new Set(handMadeSets.value.map((set) => set.id));
-      setAnchor = handMadeSets.value[0].id;
+    if (view.groupBy === GRID_GROUP_BY && handMadeGroups.value.length) {
+      selectedSetIds.value = new Set(
+        handMadeGroups.value.map((group) => group.set.id),
+      );
+      setAnchor = handMadeGroups.value[0].set.id;
     }
     if (view.groupBy === GRID_GROUP_BY && missingSetKeys.value.length) {
       selectedMissingKeys.value = new Set(missingSetKeys.value);
@@ -3789,10 +3884,13 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     // derived from this machine's models and this library's pictures, and the
     // credential that could read both has just changed.
     setsEpoch += 1;
+    // A hide still on the wire answers into the session it was sent in: drop it.
+    hideApplied = hideSent;
     workflowSets.value = {
       combinations: [],
       handMade: [],
       setChecks: [],
+      hiddenSets: [],
     };
     setsLoaded.value = false;
     setsLoading.value = false;
@@ -3887,6 +3985,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     toggleSet,
     handMadeSets,
     handMadeGroups,
+    shownHandMadeSets,
     selectedSetIds,
     selectedMissingKeys,
     selectedMissingGroups,

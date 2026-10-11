@@ -1040,6 +1040,11 @@ def rederive_cores_from(conn: sqlite3.Connection, rule: str) -> int:
     for old_id, heirs in heirs_of.items():
         for heir in heirs:
             merged_into.setdefault(heir, {heir} & existed).add(old_id)
+    # Only the machine-wide ``hidden`` is read here, so a per-library hide
+    # (#1869) on a merged-away id is not carried onto its heir. No hub can hold
+    # such a row when this runs today (a core-rule bump happens once per hub,
+    # and per-library rows postdate the last bump); a future bump must fold
+    # ``workflow_group_hidden`` into this rule too.
     for heir, sources in sorted(merged_into.items()):
         if sources & hidden and not sources <= hidden:
             conn.execute(
@@ -1393,6 +1398,7 @@ def _retire_workflow(
 _WORKFLOW_ID_COLUMNS = (
     ("workflow_group", "workflow_id"),
     ("workflow_group_attr", "workflow_id"),
+    ("workflow_group_hidden", "workflow_id"),
     ("workflow_group_default", "workflow_id"),
     ("workflow_group_pins", "workflow_id"),
     ("workflow_group_picture_input", "workflow_id"),
@@ -1712,6 +1718,9 @@ def _carry_group_state(
         ("workflow_group_default", "address"),
         ("workflow_group_pins", None),
         ("workflow_group_picture_input", "address"),
+        # Each library's own hide rides with the id, so re-identifying a
+        # workflow does not drop it back to the machine-wide fallback (#1869).
+        ("workflow_group_hidden", "library_uuid"),
     ):
         if table == "workflow_group_pins" and both_pinned:
             if not keep:

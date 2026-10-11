@@ -222,6 +222,24 @@ describe("opening", () => {
     ]);
   });
 
+  it("offers no set hidden in this library, of either kind (#1869)", async () => {
+    fetchWorkflowSets.mockResolvedValue({
+      ...SHELF,
+      hidden_sets: ["hand:8", "model:31"],
+    });
+    const wrapper = mountMenu();
+    await openMenu(wrapper);
+    // The hide took exactly its own two: no plan is asked for either, and
+    // neither has a row.
+    expect(planSetClones.mock.calls[0][1].map((set) => set.key)).toEqual([
+      "hand:7",
+      "hand:9",
+    ]);
+    expect(row(wrapper, "hand:8").exists()).toBe(false);
+    expect(row(wrapper, "model:31").exists()).toBe(false);
+    expect(row(wrapper, "hand:7").exists()).toBe(true);
+  });
+
   it("says the sets are being read until they are", async () => {
     const answer = held();
     planSetClones.mockReturnValue(answer.promise);

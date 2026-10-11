@@ -199,7 +199,7 @@ export async function fetchModelCompanions(ids) {
  * `offer` and the `declined` models kept out of it (#1523).
  *
  * @returns {Promise<{combinations: Array<Object>, no_set: Array<number>,
- *   hand_made: Array<Object>}>}
+ *   hand_made: Array<Object>, hidden_sets: Array<string>}>}
  */
 export async function fetchWorkflowSets() {
   const body = await unwrap(apiClient.get("/models/workflow-sets"));
@@ -208,7 +208,28 @@ export async function fetchWorkflowSets() {
     no_set: Array.isArray(body?.no_set) ? body.no_set : [],
     hand_made: Array.isArray(body?.hand_made) ? body.hand_made : [],
     set_checks: Array.isArray(body?.set_checks) ? body.set_checks : [],
+    hidden_sets: Array.isArray(body?.hidden_sets) ? body.hidden_sets : [],
   };
+}
+
+/**
+ * Hide or show workflow sets in the ACTIVE library (#1869).
+ *
+ * Per library, on the server: a set hidden here is still drawn in another. The
+ * key is the set's own - `model:<head id>` (or `missing:<filename>`), or
+ * `hand:<id>` for a hand-made set.
+ * Answers with every set the library now hides, so the caller can draw from one
+ * answer rather than re-reading the whole set payload.
+ *
+ * @param {Array<string>} keys - the sets' own keys.
+ * @param {boolean} hidden - true hides, false shows again.
+ * @returns {Promise<Array<string>>} the library's hidden set keys, after.
+ */
+export async function setWorkflowSetsHidden(keys, hidden) {
+  const body = await unwrap(
+    apiClient.put("/models/workflow-sets/hidden", { keys, hidden }),
+  );
+  return Array.isArray(body?.hidden_sets) ? body.hidden_sets : [];
 }
 
 // ── The owner's verdicts on a set and its members ───────────────────────────

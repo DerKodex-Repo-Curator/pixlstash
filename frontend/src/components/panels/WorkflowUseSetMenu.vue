@@ -191,7 +191,10 @@ function setsOf(payload) {
         loraIds: models.filter((m) => m.kind === "adapter").map((m) => m.id),
       };
     });
-  return [...handMade, ...evidence];
+  // A set hidden in this library is not offered (#1869), whichever kind it
+  // is. No "Show them" here, so the payload's own list decides.
+  const hidden = new Set(payload.hidden_sets ?? []);
+  return [...handMade, ...evidence].filter((set) => !hidden.has(set.key));
 }
 
 /** Whether `files` names `file`, under whatever folder and case. */
