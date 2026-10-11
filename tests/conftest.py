@@ -554,6 +554,20 @@ def no_object_info_map_outlives_its_test():
 
 
 @pytest.fixture(autouse=True)
+def no_test_opens_a_comfyui_socket(monkeypatch):
+    """Keep a queued run from opening a socket to whatever ComfyUI is nearby.
+
+    ``follow_run`` starts ``_listen_for_progress`` on a thread that lives until
+    its runs end, and a test that queues a run stubs the poller that would end
+    it. Left alone the thread would outlive the session (and on a development
+    box would reach a real ComfyUI). The listener's own test calls it directly.
+    """
+    from pixlstash.services import comfyui_service
+
+    monkeypatch.setattr(comfyui_service, "_listen_for_progress", lambda base_url: None)
+
+
+@pytest.fixture(autouse=True)
 def no_model_move_outlives_its_test():
     """Fail a test that leaves a model move running rather than the next one.
 

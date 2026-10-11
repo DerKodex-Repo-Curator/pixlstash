@@ -72,7 +72,6 @@ const STUBS = {
   CharacterEditor: true,
   StarRatingOverlay: true,
   PluginParametersUI: true,
-  ComfyUiRunner: true,
   ProgressOverlay: true,
   // Real-but-thin panel, so the test can read the card actually on screen.
   OverlayMetadataPanel: {

@@ -2783,12 +2783,14 @@ describe("the Tasks tab", () => {
         .exists(),
     ).toBe(false);
 
-    tasksStore.setComfyuiRun("run-1", {
-      status: "running",
-      percent: 10,
-      message: "sampling",
-      label: "Cinematic portrait",
-    });
+    tasksStore.comfyuiRuns = [
+      {
+        prompt_id: "run-1",
+        status: "running",
+        percent: 10,
+        label: "Cinematic portrait",
+      },
+    ];
     await flush(wrapper);
     expect(
       wrapper

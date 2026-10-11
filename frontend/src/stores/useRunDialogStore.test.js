@@ -17,6 +17,20 @@ describe("useRunDialogStore", () => {
     expect(store.source.pictureIds).toEqual([2]);
   });
 
+  // What the grid reads for its lightbox (#1862). One source picture is what
+  // lets the lightbox step to the result; several, or none, leave it put.
+  it("holds the run a popup started, with its one source picture", () => {
+    const store = useRunDialogStore();
+    expect(store.startedRun).toBe(null);
+    const prompts = [{ workflow_id: "wf-a", prompt_id: "p-1" }];
+    store.started(prompts, [7]);
+    expect(store.startedRun).toEqual({ prompts, pictureIds: [7], pictureId: 7 });
+    store.started(prompts, [7, 8]);
+    expect(store.startedRun.pictureId).toBe(null);
+    store.started(prompts);
+    expect(store.startedRun).toEqual({ prompts, pictureIds: [], pictureId: null });
+  });
+
   // A run that ended without a picture is shown on its workflow, and the
   // popup that started it is closed by then, so the store holds it.
   describe("a workflow's failed run", () => {

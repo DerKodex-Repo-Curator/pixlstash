@@ -257,6 +257,20 @@ export async function runWorkflowCard(body) {
 }
 
 /**
+ * How one run `runWorkflowCard` queued stands, by its prompt id: `running`,
+ * `completed` or `failed`, with the message the app shows. A 404 for a run the
+ * backend no longer knows (it restarted, or the run is another library's).
+ *
+ * @param {string} promptId
+ * @returns {Promise<{prompt_id: string, status: string, message: ?string, stopped: boolean, picture_ids: number[]}>}
+ */
+export async function getRunOutcome(promptId) {
+  return unwrap(
+    apiClient.get(`/workflows/runs/${encodeURIComponent(promptId)}`),
+  );
+}
+
+/**
  * This card as a ComfyUI file somebody else can open (v1.12 B8).
  *
  * Scrubbed by the server - prompts and seeds blanked, recipe LoRA slots

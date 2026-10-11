@@ -94,3 +94,100 @@ class TestSubmitPayload:
         assert stdlib_json.loads(sent["body"])["prompt"] == {
             "81": {"class_type": "LoadImage", "inputs": {"image": "a.png"}}
         }
+
+
+# --- the runs in flight, and the one socket that follows them (#1862) --------
+
+_REAL_LISTENER = comfyui_service._listen_for_progress
+
+
+def test_the_listener_reads_progress_until_no_run_is_in_flight(monkeypatch):
+    """One socket per ComfyUI, opened as the client every run is submitted
+    under, up only while a run is in flight."""
+    monkeypatch.setattr(comfyui_service, "_live_runs", {})
+    monkeypatch.setattr(comfyui_service, "_listening", set())
+    monkeypatch.setattr(comfyui_service, "_run_outcomes", {})
+    opened = []
+
+    class _Upstream:
+        messages = [
+            b"\x00\x00\x00\x01 a preview",
+            "not json",
+            stdlib_json.dumps({"type": "status", "data": {"status": {}}}),
+            stdlib_json.dumps(
+                {"type": "executing", "data": {"prompt_id": "run-b", "node": "3"}}
+            ),
+            stdlib_json.dumps(
+                {
+                    "type": "progress",
+                    "data": {"prompt_id": "run-b", "value": 3, "max": 4},
+                }
+            ),
+            stdlib_json.dumps(
+                {"type": "progress", "data": {"prompt_id": "stranger", "value": 1}}
+            ),
+        ]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def recv(self, timeout=None):
+            if self.messages:
+                return self.messages.pop(0)
+            # Everything was heard: what the listener then sees, and the runs
+            # end, which is what lets it go.
+            seen.update({run["prompt_id"]: dict(run) for run in _runs()})
+            comfyui_service.record_run_outcome("run-a", "completed")
+            comfyui_service.record_run_outcome("run-b", "failed", message="boom")
+            raise TimeoutError
+
+    def fake_connect(url, **kwargs):
+        opened.append((url, kwargs.get("proxy", "unset")))
+        return _Upstream()
+
+    def _runs():
+        return comfyui_service.live_runs("lib")
+
+    seen: dict = {}
+    monkeypatch.setattr(comfyui_service, "ws_connect", fake_connect)
+    # `follow_run` would start the thread; here the loop runs on this one.
+    monkeypatch.setattr(comfyui_service.threading, "Thread", _NoThread)
+    comfyui_service.follow_run("run-a", "https://comfy.test", library_uuid="lib")
+    comfyui_service.follow_run("run-b", "https://comfy.test", "Portrait", "wf-1", "lib")
+    assert comfyui_service._listening == {"https://comfy.test"}
+
+    _REAL_LISTENER("https://comfy.test")
+
+    assert opened == [
+        (f"wss://comfy.test/ws?clientId={comfyui_service.RUN_CLIENT_ID}", None)
+    ]
+    assert seen == {
+        "run-a": {
+            "prompt_id": "run-a",
+            "label": "ComfyUI",
+            "workflow_id": None,
+            "status": "queued",
+            "percent": 0.0,
+        },
+        "run-b": {
+            "prompt_id": "run-b",
+            "label": "Portrait",
+            "workflow_id": "wf-1",
+            "status": "running",
+            "percent": 75.0,
+        },
+    }
+    # Struck off, so the next run starts a listener of its own.
+    assert comfyui_service._listening == set()
+    assert _runs() == []
+
+
+class _NoThread:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def start(self):
+        pass

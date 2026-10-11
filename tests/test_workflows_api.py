@@ -12495,6 +12495,111 @@ def test_a_queued_run_is_followed_and_its_ending_can_be_read(runnable):
     assert r.status_code == 404, r.text
 
 
+def test_a_run_in_flight_is_reported_with_the_workers_until_it_ends(runnable):
+    """``GET /workers/progress`` carries the runs in flight (#1862), which is
+    what puts a run's row in the Tasks tab of every tab and view: queued from
+    the moment ComfyUI takes it, running once ComfyUI speaks of it, and gone
+    as soon as its ending is recorded. Each is submitted under the backend's
+    own ComfyUI client, which is how the backend hears its progress."""
+    path = f"{API}/workers/progress"
+    assert_real_route(runnable.server.api, "GET", path, path)
+
+    def reported(client=runnable.owner) -> dict:
+        r = client.get(path)
+        assert r.status_code == 200, r.text
+        return {run["prompt_id"]: run for run in r.json()["runs"]}
+
+    r = runnable.owner.post(
+        f"{API}/workflows/run", json={"workflow_id": RUN_WF, "label": "Night market"}
+    )
+    assert r.status_code == 200, r.text
+    named = r.json()["prompts"][0]["prompt_id"]
+    r = runnable.owner.post(f"{API}/workflows/run", json={"workflow_id": RUN_WF})
+    unnamed = r.json()["prompts"][0]["prompt_id"]
+    assert [call["client_id"] for call in runnable.submitted] == [
+        comfyui_service.RUN_CLIENT_ID
+    ] * 2
+
+    runs = reported()
+    assert runs[named] == {
+        "prompt_id": named,
+        "label": "Night market",
+        "workflow_id": RUN_WF,
+        "status": "queued",
+        "percent": 0.0,
+    }
+    # A run nobody named is called after its workflow.
+    assert runs[unnamed]["label"] not in ("", "Night market", "Clone picture")
+
+    comfyui_service._note_run_message(
+        json.dumps(
+            {"type": "progress", "data": {"prompt_id": named, "value": 5, "max": 20}}
+        )
+    )
+    runs = reported()
+    assert (runs[named]["status"], runs[named]["percent"]) == ("running", 25.0)
+    assert runs[unnamed]["status"] == "queued"
+
+    # A run is the owner's: a narrower token reads the workers and no run.
+    scoped = _bearer(
+        runnable.server,
+        _mint(
+            runnable.owner,
+            "runs in flight scoped",
+            resource_type="character",
+            resource_id=runnable.env.character_id,
+        ),
+    )
+    assert reported(scoped) == {}
+    # Nor is a run of another library listed in this one.
+    comfyui_service.follow_run(
+        "run-elsewhere", "http://comfy.test", library_uuid="another-library"
+    )
+    assert "run-elsewhere" not in reported()
+
+    comfyui_service.record_run_outcome(named, "completed", picture_ids=[1])
+    comfyui_service.record_run_outcome(
+        unnamed, "failed", message="KeyError", stopped=True
+    )
+    comfyui_service.record_run_outcome("run-elsewhere", "completed")
+    assert not {named, unnamed} & set(reported())
+
+
+def test_a_run_that_keeps_its_own_pictures_seed_is_called_a_clone(runnable):
+    """What the Tasks tab calls a run nobody named (#1862): Make more and MCP
+    send no label, so the server says which runs are a picture again."""
+    embedded = json.loads(json.dumps(RUN_DOCUMENT))
+    embedded["3"]["inputs"]["seed"] = 4242
+    embedded["1"]["inputs"]["ckpt_name"] = "realvisxl.safetensors"
+    embedded["2"]["inputs"]["lora_name"] = "add_detail.safetensors"
+    runnable.monkeypatch.setattr(
+        workflows_routes,
+        "_load_embedded_api_prompt",
+        lambda server, pid, object_info=None: (embedded, []),
+    )
+    r = runnable.owner.post(
+        f"{API}/workflows/run",
+        json={"picture_ids": [runnable.picture_id], "seed_mode": "keep"},
+    )
+    assert r.status_code == 200, r.text
+    clone = r.json()["prompts"][0]["prompt_id"]
+    r = runnable.owner.post(
+        f"{API}/workflows/run",
+        json={"picture_ids": [runnable.picture_id], "seed_mode": "new"},
+    )
+    varied = r.json()["prompts"][0]["prompt_id"]
+    try:
+        runs = {
+            run["prompt_id"]: run["label"]
+            for run in runnable.owner.get(f"{API}/workers/progress").json()["runs"]
+        }
+        assert runs[clone] == "Clone picture"
+        assert runs[varied] not in ("", "Clone picture")
+    finally:
+        for prompt_id in (clone, varied):
+            comfyui_service.record_run_outcome(prompt_id, "completed")
+
+
 def test_a_runs_ending_stays_closed_with_the_gate_rolled_back(workflow_env):
     """The belt behind the gate: ``/api/v1/workflows/`` in
     ``READ_BLOCKED_GET_PREFIXES`` refuses a share token when

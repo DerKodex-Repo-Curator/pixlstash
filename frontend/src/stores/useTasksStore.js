@@ -2,6 +2,7 @@ import { computed, reactive, ref } from "vue";
 import { defineStore } from "pinia";
 import { isReadOnly } from "../utils/apiClient";
 import { getWorkerProgress } from "../api/workers";
+import { abortRun } from "../api/comfyui";
 
 // Adaptive poll cadence (ms). Fast while the Tasks tab is open or something is
 // actively running; slow when the app is merely idle-watching for new work.
@@ -27,11 +28,13 @@ const SERIES_WINDOW_SECONDS = 120;
  * Tasks-tab indicator, and the app-wide stats-sidebar activity light all read
  * the same state, and so we never poll the endpoint from two places at once.
  *
- * Two kinds of work are merged into one `activeEntries` list:
+ * Three kinds of work are merged into one `activeEntries` list:
  *  - backend workers (quality scoring, tagging, embeddings, faces, likeness…),
  *    fetched from /workers/progress;
- *  - ComfyUI runs, which are frontend-driven (ComfyUiRunner talks to ComfyUI's
- *    own WebSocket) and push their progress in via setComfyuiRun / clearComfyuiRun.
+ *  - ComfyUI runs in flight, which the backend follows and reports in the same
+ *    poll (`runs`), so a run's row is there on every view and in every tab,
+ *    whoever started it;
+ *  - the async import, which is frontend-driven (ImageImporter).
  */
 export const useTasksStore = defineStore("tasks", () => {
   // ── Backend worker state ──────────────────────────────────────────────────
@@ -45,48 +48,30 @@ export const useTasksStore = defineStore("tasks", () => {
   const lastActiveAtByWorker = new Map();
   const lastProgressAtByWorker = new Map();
 
-  // ── ComfyUI run state (frontend-driven) ───────────────────────────────────
-  // runId → { status, percent, message, label }
-  const comfyuiRuns = reactive({});
-  // Abort callbacks, keyed by runId. Kept out of reactive state (they're plain
-  // functions, never rendered) so the Tasks-tab row can abort a run that lives
-  // in a different component (ComfyUiRunner inside ImageGrid / ImageOverlay).
-  const comfyuiAbortHandlers = new Map();
+  // ── ComfyUI runs (backend-reported) ───────────────────────────────────────
+  // The runs in flight as the last poll listed them, oldest first:
+  // [{ prompt_id, label, workflow_id, status: "queued" | "running", percent }].
+  const comfyuiRuns = ref([]);
 
-  function setComfyuiRun(runId, run) {
-    if (!runId) return;
-    comfyuiRuns[runId] = {
-      status: run?.status || "running",
-      percent: Number(run?.percent) || 0,
-      message: run?.message || "ComfyUI running…",
-      label: run?.label || "ComfyUI",
-    };
-  }
-
-  function clearComfyuiRun(runId) {
-    if (runId && runId in comfyuiRuns) delete comfyuiRuns[runId];
-  }
-
-  function registerComfyuiAbort(runId, handler) {
-    if (runId && typeof handler === "function") {
-      comfyuiAbortHandlers.set(runId, handler);
+  /**
+   * Stop ComfyUI: the run in progress is interrupted and its queue emptied,
+   * which is every run in flight, whichever tab or tool started it. Each
+   * then ends as stopped, and the next poll drops it.
+   */
+  async function abortComfyuiRuns() {
+    try {
+      await abortRun();
+    } catch (e) {
+      console.warn("tasks: ComfyUI could not be told to stop", e);
     }
-  }
-
-  function unregisterComfyuiAbort(runId) {
-    comfyuiAbortHandlers.delete(runId);
-  }
-
-  function abortComfyuiRun(runId) {
-    const handler = comfyuiAbortHandlers.get(runId);
-    if (handler) handler();
+    nudge();
   }
 
   // ── Import run state (frontend-driven, #459) ──────────────────────────────
   // The async import (ImageImporter) surfaces its server-side Phase B here as a
-  // determinate task row, mirroring the ComfyUI run pattern: the two-phase
-  // dialog auto-hides at the safe transition and the import continues as just
-  // another entry in the Tasks tab. runId → { status, percent, message, label,
+  // determinate task row: the two-phase dialog auto-hides at the safe
+  // transition and the import continues as just another entry in the Tasks
+  // tab. runId → { status, percent, message, label,
   // current, total, abortable }.
   //
   // `abortable` is the honest gate for the Tasks-tab cancel affordance: it is
@@ -174,13 +159,29 @@ export const useTasksStore = defineStore("tasks", () => {
       .map(([key, snapshot]) => ({ kind: "worker", key, snapshot }));
   });
 
-  const comfyuiEntries = computed(() =>
-    Object.entries(comfyuiRuns).map(([key, run]) => ({
-      kind: "comfyui",
-      key,
-      run,
-    })),
-  );
+  // One row for the runs in flight, not one each: ComfyUI works through them
+  // one at a time, and the row's abort stops them all. It names the run
+  // ComfyUI is on (the first in line until one starts) and counts the rest.
+  const comfyuiEntries = computed(() => {
+    const runs = comfyuiRuns.value;
+    if (!runs.length) return [];
+    const front = runs.find((run) => run.status === "running") || runs[0];
+    const state =
+      front.status === "running" ? "ComfyUI running…" : "ComfyUI queued…";
+    const behind = runs.length - 1;
+    return [
+      {
+        kind: "comfyui",
+        key: "comfyui",
+        run: {
+          status: front.status,
+          percent: Number(front.percent) || 0,
+          label: front.label || "ComfyUI",
+          message: behind ? `${state} ${behind} more queued` : state,
+        },
+      },
+    ];
+  });
 
   const importEntries = computed(() =>
     Object.entries(importRuns).map(([key, run]) => ({
@@ -296,6 +297,7 @@ export const useTasksStore = defineStore("tasks", () => {
       const progress = await getWorkerProgress();
       const workers = progress?.workers || {};
       systemUsage.value = progress?.process || progress?.system || null;
+      comfyuiRuns.value = Array.isArray(progress?.runs) ? progress.runs : [];
       const now = Date.now() / 1000;
       nowSeconds.value = now;
       const nextSeries = { ...series.value };
@@ -403,11 +405,7 @@ export const useTasksStore = defineStore("tasks", () => {
     series,
     // comfyui runs
     comfyuiRuns,
-    setComfyuiRun,
-    clearComfyuiRun,
-    registerComfyuiAbort,
-    unregisterComfyuiAbort,
-    abortComfyuiRun,
+    abortComfyuiRuns,
     // import runs (#459)
     importRuns,
     setImportRun,

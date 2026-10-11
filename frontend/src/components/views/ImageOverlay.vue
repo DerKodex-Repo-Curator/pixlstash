@@ -405,9 +405,6 @@
       <div
         v-if="comfyuiProgress && comfyuiProgress.visible && !editTabShowsRun"
         class="overlay-progress overlay-progress--comfyui"
-        :class="{
-          'overlay-progress--error': comfyuiProgress.status === 'failed',
-        }"
       >
         <div class="overlay-progress-title">
           {{ comfyuiProgress.message }}

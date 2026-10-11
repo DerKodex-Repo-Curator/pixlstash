@@ -14,15 +14,31 @@ const read = (relative) =>
 
 const app = read("../../App.vue");
 const view = read("./WorkflowsView.vue");
+const grid = read("./ImageGrid.vue");
 
 describe("a failed run reaches its workflow", () => {
   it("is read off every plugin_progress event, on every view", () => {
     expect(app).toMatch(
       /watch\(\s*\(\) => wsStore\.wsPluginProgress,[\s\S]{0,400}runDialogStore\.runEvent\(wrapped\?\.payload\)/,
     );
-    // Before the runner check, which only decides whether a notice is raised.
+    // And told as a notice whatever view is up: no view owns a run, so there
+    // is no mounted runner to ask first.
+    expect(app).not.toMatch(/hasRunner/);
     const watcher = app.slice(app.indexOf("runDialogStore.runEvent("));
-    expect(watcher.indexOf("hasRunner")).toBeGreaterThan(0);
+    expect(watcher).toMatch(/^[^\n]*\n\s*if \(!failure\) return;/);
+  });
+
+  // No view owns a run (#1862). The grid only reads the runs a popup started,
+  // for its lightbox, and the Workflows view reads none.
+  it("leaves the grid to follow a started run for its lightbox only", () => {
+    expect(grid).toMatch(
+      /watch\(\s*\(\) => runDialogStore\.startedRun,\s*\(run\) => \{\s*if \(run\) followComfyuiRun\(run\);/,
+    );
+    expect(grid).toMatch(/:comfyuiProgress="comfyuiProgress"/);
+    expect(app).toMatch(/function onRunStarted\([^)]*\) \{\s*tasksStore\.nudge\(\);/);
+    for (const source of [grid, view]) {
+      expect(source).not.toMatch(/ComfyUiRunner|attachRunner|new WebSocket/);
+    }
   });
 
   it("is handed to the workflow's card", () => {

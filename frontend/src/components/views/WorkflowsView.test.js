@@ -2229,33 +2229,21 @@ describe("Add… and Unfiled recipes", () => {
   });
 });
 
-describe("a run started from the Workflows view", () => {
-  it("shows up in the task manager, and leaves it with the view", async () => {
-    // The runner follows progress over a socket; jsdom's would dial out.
-    vi.stubGlobal(
-      "WebSocket",
-      class {
-        close() {}
-      },
-    );
-    try {
-      const wrapper = await grid();
-      const runDialog = useRunDialogStore();
-      const tasks = useTasksStore();
-      expect(runDialog.hasRunner).toBe(true);
+describe("a run in flight", () => {
+  // #1862: a run's row is the backend's to report, so no view has one to take
+  // with it. The view used to mount a runner whose unmount deleted the row.
+  it("keeps its row when the Workflows view is left", async () => {
+    const wrapper = await grid();
+    const tasks = useTasksStore();
+    tasks.comfyuiRuns = [
+      { prompt_id: "p-1", label: "Flux", status: "queued", percent: 0 },
+    ];
+    expect(tasks.activeEntries.map((entry) => entry.kind)).toEqual(["comfyui"]);
 
-      runDialog.started([{ prompt_id: "p-1" }]);
-      await flush();
-      const runs = Object.values(tasks.comfyuiRuns);
-      expect(runs).toHaveLength(1);
-      expect(runs[0].status).toBe("queued");
-
-      mounted.splice(mounted.indexOf(wrapper), 1);
-      wrapper.unmount();
-      expect(runDialog.hasRunner).toBe(false);
-      expect(Object.keys(tasks.comfyuiRuns)).toHaveLength(0);
-    } finally {
-      vi.unstubAllGlobals();
-    }
+    mounted.splice(mounted.indexOf(wrapper), 1);
+    wrapper.unmount();
+    expect(tasks.activeEntries.map((entry) => entry.run.label)).toEqual([
+      "Flux",
+    ]);
   });
 });

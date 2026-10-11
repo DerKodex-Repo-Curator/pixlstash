@@ -413,11 +413,12 @@ function onRestoreConfirmed() {
 }
 
 /**
- * A Run popup queued something. The prompts go to the attached ComfyUI runner
- * for progress, and the toast says where the pictures will turn up: the Tasks
- * tab, which is where a run this app started is followed.
+ * A Run popup queued something. The backend follows the runs and the Tasks
+ * tab shows them from its next poll, which is asked for now; the toast says
+ * that is where they are followed.
  */
 function onRunStarted({ prompts = [], pictureIds = [], error = "" } = {}) {
+  tasksStore.nudge();
   // ComfyUI took some of the batch and refused the next: the ones it took are
   // followed as usual, and the rest must not vanish without a word. Ahead of
   // the Edit tab's return on purpose: that tab tells the runs that were
@@ -428,7 +429,7 @@ function onRunStarted({ prompts = [], pictureIds = [], error = "" } = {}) {
       { key: `comfyui-run-partial-${error}` },
     );
   }
-  // From the lightbox's Edit tab: no picture ids, so the runner leaves the
+  // From the lightbox's Edit tab: no picture ids, so the grid leaves the
   // lightbox on the original, and no "started" toast, because the tab tells
   // the run.
   if (runDialogStore.source?.fromEditTab) {
@@ -451,16 +452,20 @@ function onRunStarted({ prompts = [], pictureIds = [], error = "" } = {}) {
   });
 }
 
-// A mounted ComfyUI runner (the grid's, or the Workflows view's) banners a
-// failed run; on a view with neither nothing else would, so the failure
-// becomes a notice.
+// How a run ended, heard on whatever view is up. A failure is told here and
+// nowhere else: once, as a notice.
 watch(
   () => wsStore.wsPluginProgress,
   (wrapped) => {
+    if (String(wrapped?.payload?.plugin || "").toLowerCase() === "comfyui") {
+      // The run has left the runs in flight: its row goes now, not at the
+      // next poll.
+      tasksStore.nudge();
+    }
     // On the workflow that ran, whatever view is up: its card and the
     // Workflow tab keep saying so until it is dismissed or run again.
     const failure = runDialogStore.runEvent(wrapped?.payload);
-    if (!failure || runDialogStore.hasRunner) return;
+    if (!failure) return;
     // Keyed by the message, not the run: a batch whose every prompt failed
     // the same way is one card with a count, not one card per prompt. A run
     // somebody stopped is news, not an error, so it does not stay up.
