@@ -412,7 +412,10 @@ const doneLine = ref(null);
 // A save here writes what the run used. A change made in the Workflow tab
 // after the run is not part of it: the server keeps it waiting
 // (`still_waiting`), or drops it where the saved workflow can no longer take
-// it (`not_kept`), and says which once, in the save's answer. Both are said
+// it (`not_kept`), and says which once, in the save's answer. `still_waiting`
+// also counts a waiting set that was already stale, which the save leaves
+// untouched and which was not necessarily made after the run, so its sentence
+// says only that they wait and were not part of this save. Both are said
 // in the receipt, inside the line that takes focus, so they are read with it
 // and stand as long as it does. Not a notice while there is a line: a card
 // is announced politely just as focus moves here and holds one sentence,
@@ -457,7 +460,7 @@ async function landed(offer, note, saved, savedAs = "") {
   // They wait on the workflow the offer was for, which Save as new left alone.
   const waits = Number(saved?.still_waiting) || 0;
   doneWaits.value = waits
-    ? `${offer.name} still has ${changesWord(waits)} waiting in the Workflow tab, made after the run and not part of this save.`
+    ? `${offer.name} still has ${changesWord(waits)} waiting in the Workflow tab. They were not part of this save.`
     : "";
   // Its own name question goes with it; another row's is still being answered.
   if (naming.value === offer.workflowId) naming.value = "";

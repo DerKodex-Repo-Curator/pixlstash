@@ -890,7 +890,8 @@
            sentence saying why one is not, are the server's, so this bar, the
            Run popup and the Tasks tab cannot disagree. -->
       <div
-        v-if="tab === 'workflow' && card && !multiple && changeCount"
+        v-if="barOf"
+        ref="draftBar"
         class="wftab-draft"
         role="group"
         aria-label="Unsaved changes"
@@ -2668,6 +2669,8 @@ const changesFailed = ref(false);
  * for the workflow just left must never retire the read of the one arrived at.
  */
 let changesAsk = 0;
+/** The newest read of what waits: the one out, or the last to come back. */
+let changesReading = Promise.resolve();
 
 /**
  * The set as the last edit left it, drawn until the server answers:
@@ -2707,9 +2710,10 @@ const changeCount = computed(() =>
 
 /**
  * What is settling each workflow's set, from the press until its answer is
- * drawn, as `{ what }`: `save`, `save-as-new`, `discard`, a go-back to
- * another `version`, the `rebase` after Edit LoRAs… saved, or an `apply` of
- * that dialog's made off the rows.
+ * drawn, as `{ what, fromBar }`: `save`, `save-as-new`, `discard`, a go-back
+ * to another `version`, the `rebase` after Edit LoRAs… saved, or an `apply`
+ * of that dialog's made off the rows. `fromBar` says the press was made with
+ * focus in the bar, whose verbs it disables (see the watcher on `barOf`).
  *
  * **The one rule for who may touch a set.** While something settles it,
  * nothing else of it is made or sent: no row edits it and no verb is pressed.
@@ -2810,27 +2814,47 @@ const closedReasons = computed(() =>
       ],
 );
 
-/** Read what waits on the shown workflow. */
+/**
+ * Read what waits on the shown workflow.
+ *
+ * **Awaited, it ends when what waits is drawn, whoever read it.** A read that
+ * a newer one overtook draws nothing, so it waits for that one instead. The
+ * grid's card starts such a read the moment a save here empties the set, and
+ * whatever follows an `await loadChanges(…)` would otherwise run with the
+ * old state still on screen. A read that a write's answer retired has nothing
+ * to wait for, since the answer is drawn already; nor has a read for a
+ * workflow the rail has left.
+ */
 async function loadChanges(key) {
-  if (!stillOn(key)) return;
+  if (!stillOn(key)) return undefined;
   const ask = ++changesAsk;
   changesFailed.value = false;
   if (!key) {
     changesRead.value = null;
-    return;
+    return undefined;
   }
-  try {
-    const state = await getWorkflowChanges(key);
-    // Another workflow may have been selected while this was on the wire, or
-    // a write's answer, which is newer, already landed.
-    if (ask !== changesAsk || !stillOn(key)) return;
-    changesRead.value = { key, state };
-  } catch (err) {
-    console.warn(`[workflows] could not read the changes of ${key}`, err);
-    if (ask !== changesAsk || !stillOn(key)) return;
-    changesRead.value = null;
-    changesFailed.value = true;
-  }
+  const turn = (async () => {
+    let state;
+    let failed = false;
+    try {
+      state = await getWorkflowChanges(key);
+    } catch (err) {
+      console.warn(`[workflows] could not read the changes of ${key}`, err);
+      failed = true;
+    }
+    // Another workflow may have been selected while this was on the wire.
+    if (!stillOn(key)) return undefined;
+    // Overtaken: by a newer read, or by a write's answer (`takeChanges`),
+    // which starts no read. A turn must not wait for itself.
+    if (ask !== changesAsk) {
+      return changesReading === turn ? undefined : changesReading;
+    }
+    changesRead.value = failed ? null : { key, state };
+    changesFailed.value = failed;
+    return undefined;
+  })();
+  changesReading = turn;
+  return turn;
 }
 
 /**
@@ -2956,11 +2980,38 @@ function setLoraStrength(lora, raw, field = null) {
   );
 }
 
-/** After the bar has gone, focus goes to Run…, never to the page. */
-async function focusRun() {
-  await nextTick();
-  runButton.value?.focus?.();
+/** The workflow whose bar of unsaved changes is drawn, or "". */
+const barOf = computed(() =>
+  tab.value === "workflow" && card.value && !multiple.value && changeCount.value
+    ? selectedKey.value
+    : "",
+);
+const draftBar = ref(null);
+function focusInBar() {
+  return Boolean(draftBar.value?.contains(document.activeElement));
 }
+
+// The bar leaves with whatever in it held focus, and a browser then drops
+// that focus on the page. So when the bar goes, focus goes to Run…, the next
+// control down, whatever took the bar away: a save or a discard here, a save
+// made elsewhere, the selection moving to the workflow Save as new made.
+//
+// Only when focus was the bar's to lose: it is in the bar now (read before
+// the bar is taken out), or the press that is settling the set was made from
+// it. A pressed verb is disabled until its answer is drawn, which drops focus
+// just as a removal does, so `settle` notes where the press came from. Never
+// when the owner has put focus somewhere else meanwhile.
+//
+// No verb moves focus itself. A button that gets focus back when its loading
+// ends (`AppButton`), or from the rows' lock (the watcher on `canEdit`), is
+// in the bar again, and is covered when the bar then goes.
+watch(barOf, async (now, was) => {
+  if (now || !was) return;
+  if (!focusInBar() && !settling.get(was)?.fromBar) return;
+  await nextTick();
+  const active = document.activeElement;
+  if (!active || active === document.body) runButton.value?.focus();
+});
 
 /** A finished save's words: the version it made, and what it left out. */
 function savedText(saved, lead) {
@@ -2982,7 +3033,7 @@ function savedText(saved, lead) {
  * other write, so two things settling one set never run beside each other.
  */
 function settle(key, what, work) {
-  const mark = { what };
+  const mark = { what, fromBar: stillOn(key) && focusInBar() };
   settling.set(key, mark);
   const sent = changeWrites;
   return queueWrite(what, async () => {
@@ -3035,11 +3086,10 @@ function saveChanges() {
     });
     if (!stillOn(key)) return;
     // Started with the save's answer, before the grid's card can say the
-    // version moved; the rows are locked until it is in (`rereading`).
-    const graph = refreshGraph(key);
-    await loadChanges(key);
-    if (stillOn(key)) void focusRun();
-    await graph;
+    // version moved; the rows are locked until it is in (`rereading`). The
+    // set stays locked until both are drawn, so nothing is handed focus in a
+    // bar that is about to go.
+    await Promise.all([refreshGraph(key), loadChanges(key)]);
   });
 }
 
@@ -3098,8 +3148,7 @@ function saveAsNew() {
     await store.refetch();
     if (!unmoved()) return;
     if (saved?.workflow_id) store.select(saved.workflow_id);
-    else void loadChanges(key);
-    void focusRun();
+    else await loadChanges(key);
   });
 }
 
@@ -3122,7 +3171,6 @@ function discardChanges() {
       return;
     }
     void store.refetch();
-    if (stillOn(key)) void focusRun();
   });
 }
 

@@ -4348,6 +4348,11 @@ describe("the tab as the editor (#1850)", () => {
       wrapper.find('[data-testid="wftab-save-as-new"]');
     const runButton = (wrapper) =>
       wrapper.find(".wftab-foot .app-btn--primary").element;
+    /** A real click: focus goes to the button, then it is pressed. */
+    const press = (button) => {
+      button.element.focus();
+      return button.trigger("click");
+    };
 
     it("says how many changes wait, never which, with the two verbs", async () => {
       waitingOnServer = { ...WAITING, stages: { upscale: true, face_detailer: true } };
@@ -4373,7 +4378,7 @@ describe("the tab as the editor (#1850)", () => {
       const slow = held();
       getWorkflowCard.mockReturnValue(slow.promise);
 
-      await save(wrapper).trigger("click");
+      await press(save(wrapper));
       await flush(wrapper);
 
       expect(saveWorkflow).toHaveBeenCalledTimes(1);
@@ -4394,6 +4399,63 @@ describe("the tab as the editor (#1850)", () => {
       );
       slow.release(detail());
       await flush(wrapper);
+    });
+
+    // The grid is read again with the save's answer, and its card saying
+    // nothing waits starts a read of the changes newer than the save's own.
+    // The save's read is then dropped, and the newer one takes the bar away.
+    it("holds the lock until the read that overtook the save's is drawn, and focuses Run… once the bar has left", async () => {
+      waitingOnServer = { ...WAITING };
+      const { wrapper } = await mountEditor([plain({ unsaved_changes: 1 })]);
+      await settle(wrapper);
+      saveWorkflow.mockImplementation(() => {
+        waitingOnServer = null;
+        return Promise.resolve({ workflow_id: KEY, version: 2, left_out: [] });
+      });
+      listWorkflowCards.mockResolvedValue({
+        cards: [plain({ unsaved_changes: 0 })],
+        one_offs: 0,
+        hidden: 0,
+      });
+      const reads = [];
+      getWorkflowChanges.mockImplementation(() => {
+        reads.push(held());
+        return reads.at(-1).promise;
+      });
+      // Every focus() from here on: on what, and whether the bar was drawn.
+      const focused = [];
+      const focus = HTMLElement.prototype.focus;
+      const spy = vi
+        .spyOn(HTMLElement.prototype, "focus")
+        .mockImplementation(function record(...args) {
+          focused.push({ on: this, barUp: bar(wrapper).exists() });
+          return focus.apply(this, args);
+        });
+      try {
+        await press(save(wrapper));
+        focused.length = 0;
+        await flush(wrapper);
+        // The save's read, then the card's.
+        expect(reads).toHaveLength(2);
+
+        reads[0].release(changesState());
+        await flush(wrapper);
+        // Overtaken: nothing is drawn of it, and the save is not over. A
+        // lock lifted here hands focus back to Save, which is about to go.
+        expect(bar(wrapper).exists()).toBe(true);
+        expect(save(wrapper).attributes("disabled")).toBeDefined();
+        expect(picker(wrapper).element.disabled).toBe(true);
+        expect(focused).toEqual([]);
+
+        reads[1].release(changesState());
+        await flush(wrapper);
+        expect(bar(wrapper).exists()).toBe(false);
+        expect(picker(wrapper).element.disabled).toBe(false);
+        expect(focused).toEqual([{ on: runButton(wrapper), barUp: false }]);
+        expect(document.activeElement).toBe(runButton(wrapper));
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     it("says a refused save in the bar, in the server's words, and reads the verbs again", async () => {
@@ -4492,7 +4554,7 @@ describe("the tab as the editor (#1850)", () => {
           left_out: [],
         });
       });
-      await confirm().trigger("click");
+      await press(confirm());
       await flush(wrapper);
       await flush(wrapper);
 
@@ -4501,6 +4563,9 @@ describe("the tab as the editor (#1850)", () => {
       });
       expect(saveWorkflow).not.toHaveBeenCalled();
       expect(store.selectedKeys).toEqual([OTHER]);
+      // The bar went with the selection: focus is on the new workflow's Run….
+      expect(bar(wrapper).exists()).toBe(false);
+      expect(document.activeElement).toBe(runButton(wrapper));
       expect(useNoticeStore().notices.at(-1).text).toBe(
         "Saved as a new workflow, Portrait, softer.",
       );
@@ -4523,12 +4588,22 @@ describe("the tab as the editor (#1850)", () => {
       // Held, so the second Enter lands while the save is still out.
       const answer = held();
       saveWorkflowAsNew.mockImplementation(() => answer.promise);
+      listWorkflowCards.mockResolvedValue({
+        cards: [card(), card({ id: OTHER, name: "Softer" })],
+        one_offs: 0,
+        hidden: 0,
+      });
       await name().trigger("keydown", { key: "Enter" });
       await name().trigger("keydown", { key: "Enter" });
+      waitingOnServer = null;
       answer.release({ workflow_id: OTHER, name: "Softer", new_workflow: true, left_out: [] });
+      await flush(wrapper);
       await flush(wrapper);
       expect(saveWorkflowAsNew).toHaveBeenCalledTimes(1);
       expect(saveWorkflowAsNew).toHaveBeenCalledWith(KEY, { name: "Softer" });
+      // The field that held focus went with the question, and then the bar.
+      expect(bar(wrapper).exists()).toBe(false);
+      expect(document.activeElement).toBe(runButton(wrapper));
     });
 
     it("says which loaders a save left out because they hold a person's LoRA", async () => {
@@ -4552,7 +4627,7 @@ describe("the tab as the editor (#1850)", () => {
     it("discards without asking, and puts focus on Run…", async () => {
       waitingOnServer = { ...WAITING };
       const { wrapper } = await mountEditor();
-      await wrapper.find('[data-testid="wftab-discard"]').trigger("click");
+      await press(wrapper.find('[data-testid="wftab-discard"]'));
       await flush(wrapper);
       expect(discardWorkflowChanges).toHaveBeenCalledTimes(1);
       expect(discardWorkflowChanges).toHaveBeenCalledWith(KEY);
@@ -4561,6 +4636,29 @@ describe("the tab as the editor (#1850)", () => {
       expect(runLabel(wrapper)).toBe("Run…");
       expect(document.activeElement).toBe(runButton(wrapper));
     });
+
+    // Nothing here pressed anything: the set was saved somewhere else, and
+    // the grid's card says so.
+    it.each([
+      ["moves focus that was in the bar to Run…", save, runButton],
+      ["leaves focus that was on a row where it is", picker, (wrapper) => picker(wrapper).element],
+    ])(
+      "%s when a save made elsewhere takes the bar away",
+      async (_what, holder, after) => {
+        waitingOnServer = { ...WAITING };
+        const { wrapper, store } = await mountEditor([
+          plain({ unsaved_changes: 1 }),
+        ]);
+        await settle(wrapper);
+        holder(wrapper).element.focus();
+
+        waitingOnServer = null;
+        store.cards = [plain({ unsaved_changes: 0 })];
+        await flush(wrapper);
+        expect(bar(wrapper).exists()).toBe(false);
+        expect(document.activeElement).toBe(after(wrapper));
+      },
+    );
 
     it.each([
       // The node asks for the unsaved graph and saves back (#1852).

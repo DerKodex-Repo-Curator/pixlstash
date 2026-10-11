@@ -736,7 +736,7 @@ describe("the offer to save what a run changed", () => {
     const LOST =
       "Could not keep 2 changes made after the run: Checkpoint, 1 LoRA changed. The saved workflow no longer has what was changed, so this is gone: not saved, and not left waiting.";
     const waiting = (count) =>
-      `Portrait, soft window light still has ${count} waiting in the Workflow tab, made after the run and not part of this save.`;
+      `Portrait, soft window light still has ${count} waiting in the Workflow tab. They were not part of this save.`;
     const lostLine = (wrapper) => wrapper.find(".tm-offer-lost");
 
     async function saved(answer) {
