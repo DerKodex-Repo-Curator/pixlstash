@@ -34,6 +34,7 @@ from pixlstash.services import (
     scrapheap_service,
     workflow_ghost_service,
 )
+from pixlstash.services.comfyui_service import live_runs
 from pixlstash.telemetry import mark_install_established
 from pixlstash.server_config_io import persist_server_config
 from pixlstash.utils.quality.smart_score_utils import smart_score_penalised_tags
@@ -333,6 +334,7 @@ def create_router(server) -> APIRouter:
 
         status: str
         workers: dict
+        runs: list[dict] = []
         process: dict
 
     class WatchFoldersResponse(BaseModel):
@@ -986,7 +988,13 @@ def create_router(server) -> APIRouter:
         "/workers/progress",
         summary="Get worker progress",
         response_model=WorkersProgressResponse,
-        description="Returns background worker progress plus process CPU, RAM, and VRAM usage metrics.",
+        description=(
+            "Returns background worker progress plus process CPU, RAM, and VRAM "
+            "usage metrics. runs lists the ComfyUI runs in flight in this "
+            "library, oldest first, each with its prompt_id, label, "
+            "workflow_id, status (queued or running) and percent (the running "
+            "node's own progress); empty for any token but the owner's."
+        ),
     )
     def get_workers_progress(request: Request):
         _ensure_secure_when_required(request)
@@ -994,6 +1002,13 @@ def create_router(server) -> APIRouter:
         return {
             "status": "success",
             "workers": server.vault.get_worker_progress(),
+            # A run is the owner's, and its label names one of their workflows
+            # or recipes: a narrower token is told of none.
+            "runs": (
+                live_runs(request.state.library_lease.library_uuid)
+                if server.auth.is_unscoped_owner_request(request)
+                else []
+            ),
             "process": hw_monitor.get_usage(),
         }
 

@@ -54,7 +54,6 @@ function makeHarness() {
     rebuildGridImagesFromLastFetch: vi.fn(),
     triggerNewImageHighlight: vi.fn(),
     updateVisibleThumbnails: vi.fn(),
-    maybeRefreshOverlayForComfyui: vi.fn(),
     removeImagesById,
   });
   return { scoring, allGridImages, removeImagesById };

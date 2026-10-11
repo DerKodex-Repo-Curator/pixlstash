@@ -2079,9 +2079,9 @@ if _undeclared_conditionals:  # pragma: no cover - import-time invariant
 del _undeclared_conditionals
 
 # WS routes: see authn/websocket.py - the HTTP authz gate does NOT cover
-# WebSockets; their chokepoint is authenticate_websocket (plan §6). The two WS
-# routes (/ws/comfyui, /api/v1/ws/updates) are acknowledged in the coverage
+# WebSockets; their chokepoint is authenticate_websocket (plan §6). The one WS
+# route (/api/v1/ws/updates) is acknowledged in the coverage
 # matrix (tests/test_architecture_guardrails.py::test_websocket_routes_are_acknowledged)
-# and are deliberately absent from ROUTE_POLICIES.
+# and is deliberately absent from ROUTE_POLICIES.
 
 __all__ = ["ROUTE_POLICIES", "CONDITIONALLY_MOUNTED_ROUTES"]

@@ -763,7 +763,6 @@ _EXPECTED_ROUTE_MODULES = frozenset(
 # entry is stable regardless of that prefix-resolution quirk.
 _KNOWN_WEBSOCKET_ROUTES = frozenset(
     {
-        ("comfyui_progress_proxy", "/ws/comfyui"),
         ("websocket_updates", "/api/v1/ws/updates"),
     }
 )

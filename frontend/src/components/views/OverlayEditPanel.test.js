@@ -227,15 +227,13 @@ describe("the Edit tab", () => {
         target: "i2i",
         prompt: "warmer light",
         stack: true,
+        // The workflow, which is what the Tasks tab calls the run.
+        label: "Relight",
       }),
     );
-    // No source picture: that is what would make the runner step the
-    // lightbox to the output, and this design stays on the original.
-    // Labelled with the workflow, which is what the Tasks tab calls the run.
-    expect(started).toHaveBeenCalledWith(
-      [{ prompt_id: "p1", label: "Relight" }],
-      [],
-    );
+    // No source picture: that is what would make the grid step the lightbox
+    // to the output, and this design stays on the original.
+    expect(started).toHaveBeenCalledWith([{ prompt_id: "p1" }], []);
     expect(wrapper.text()).toContain("Running");
   });
 

@@ -509,7 +509,7 @@ async function startImport(files, options = {}) {
   importRunId = `import-${crypto?.randomUUID?.() ?? Date.now().toString(36)}`;
   // Make the (otherwise dead) import-abort subsystem live: register the real
   // client-side abort so tasksStore.abortImportRun(runId) actually stops the
-  // in-flight upload. Mirrors ComfyUiRunner's registerComfyuiAbort. Unregistered
+  // in-flight upload. Unregistered
   // on every terminal path (finalizeCancelled / finalizeError / completion) and
   // on unmount.
   tasksStore.registerImportAbort(importRunId, () => handleCancelImport());

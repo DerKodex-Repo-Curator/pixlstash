@@ -384,20 +384,6 @@
       anchor="top"
       @abort="abortExport"
     />
-    <ComfyUiRunner
-      ref="comfyuiRunner"
-      :wsPluginProgress="wsStore.wsPluginProgress"
-      :overlayOpen="overlayOpen"
-      :overlayImageId="overlayImageId"
-      :allGridImages="allGridImages"
-      :lastFetchedGridImages="lastFetchedGridImages"
-      :getPictureStackId="getPictureStackId"
-      :selectNewestStackMember="selectNewestStackMember"
-      @refresh-grid="onComfyuiRefreshGrid"
-      @refresh-sidebar="emit('refresh-sidebar')"
-      @update:overlayImageId="moveOverlayTo"
-    />
-
     <ProgressOverlay
       :visible="pluginProgress.visible"
       :status="pluginProgress.status"
@@ -1244,7 +1230,7 @@ import SearchResultBar from "../widgets/SearchResultBar.vue";
 import StarRatingOverlay from "../widgets/StarRatingOverlay.vue";
 import StackBadge from "../widgets/StackBadge.vue";
 import StackEdgeTicks from "../widgets/StackEdgeTicks.vue";
-import ComfyUiRunner from "../io/ComfyUiRunner.vue";
+import { useGridComfyuiRuns } from "../../composables/useGridComfyuiRuns";
 import ProgressOverlay from "../widgets/ProgressOverlay.vue";
 import ShareDialog from "../io/ShareDialog.vue";
 import SnapshotsWithDeletedDialog from "../widgets/SnapshotsWithDeletedDialog.vue";
@@ -2034,29 +2020,6 @@ function triggerFaceOverlayRedraw() {
 // ============================================================
 // COMFYUI
 // ============================================================
-const comfyuiRunner = ref(null);
-
-const comfyuiClientId = computed(
-  () => comfyuiRunner.value?.clientId?.value ?? null,
-);
-const comfyuiProgress = computed(
-  () =>
-    comfyuiRunner.value?.progress ?? {
-      visible: false,
-      status: "idle",
-      percent: 0,
-      message: "",
-    },
-);
-const comfyuiProgressPercent = computed(() => {
-  const p = comfyuiProgress.value;
-  return Math.min(100, Math.max(0, Math.round(Number(p?.percent) || 0)));
-});
-
-function handleComfyuiRun(payload) {
-  comfyuiRunner.value?.handleComfyuiRun(payload);
-}
-
 // ── The Run popup (v1.12 F5) ─────────────────────────────────────────────
 // The dialogs themselves are mounted in App.vue - the one parent the grid and
 // the Workflows view share - so the grid only says what to run.
@@ -2064,8 +2027,8 @@ function handleComfyuiRun(payload) {
 // **Every close here is `closeOverlay(false)`** (#1446's rule): this component
 // is closing the lightbox to reveal its own result, so it must not honour
 // `?from=`. Doing so would be worse here than on the other such paths - the
-// popup is App's, but the progress runner and the view context are the grid's,
-// and `onUnmounted` closes the popup with them. Leaving for the workflow shelf
+// popup is App's, but the view context is the grid's, and `onUnmounted` closes
+// the popup with it. Leaving for the workflow shelf
 // would unmount this grid and shut the popup the reader had just opened.
 
 /** Run one picture's own recipe: the lightbox's Recipe tab, and the grid. */
@@ -2237,23 +2200,11 @@ const runViewContext = computed(() => {
       ? Number(rawChar)
       : NaN;
   return {
-    client_id: comfyuiClientId.value || undefined,
     set_id: primarySelectedSetId.value ?? undefined,
     project_id: projectStore.selectedProjectId ?? undefined,
     character_id: Number.isFinite(charNum) && charNum > 0 ? charNum : undefined,
   };
 });
-
-function onComfyuiRefreshGrid() {
-  // The new grid card for an in-app ComfyUI result now arrives via the
-  // origin-aware WebSocket `picture_imported` insert (useGridRealtimeSync →
-  // insertGridImagesById), so this no longer triggers a full grid refetch and
-  // the old "pops in → disappears → comes back" flicker is gone. The runner
-  // still fires this on completion/retry; we use it only to reconcile an OPEN
-  // overlay (i2i/upscale) to the freshly-stacked output. maybeRefreshOverlayForComfyui
-  // is a guarded no-op when the overlay is closed or no comfyui refresh is pending.
-  void maybeRefreshOverlayForComfyui();
-}
 
 function getNowMs() {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
@@ -2393,10 +2344,6 @@ function completeSmartScoreProgress(loadId, measuredDurationMs, wasSuccessful) {
   setSmartScoreProgressPercent(0, { allowReset: true });
   smartScoreProgress.message = "Calculating smart scores";
   smartScoreProgressSortKey.value = "";
-}
-
-async function maybeRefreshOverlayForComfyui() {
-  await comfyuiRunner.value?.maybeRefreshOverlayForComfyui();
 }
 
 // ============================================================
@@ -2702,8 +2649,8 @@ watch(
       return;
     }
     if (pluginName === "comfyui") {
-      // ComfyUI has its own dedicated runner banner; suppress duplicate
-      // generic plugin overlay to avoid showing two concurrent error banners.
+      // A run's row is in the Tasks tab and its failure is a notice
+      // (App.vue): the generic plugin overlay would say it a second time.
       pluginProgress.visible = false;
       return;
     }
@@ -5659,7 +5606,8 @@ function selectedPictureIds() {
 }
 
 // The Run popups are mounted in App.vue, outside the grid: they read the view
-// context a run's output is filed into, and the progress runner, from here.
+// context a run's output is filed into from here, and the grid reads the runs
+// they start for its lightbox.
 const runDialogStore = useRunDialogStore();
 watch(
   runViewContext,
@@ -5668,14 +5616,11 @@ watch(
   },
   { immediate: true },
 );
-const detachWorkflowRunner = runDialogStore.attachRunner(handleComfyuiRun);
 onUnmounted(() => {
-  detachWorkflowRunner();
-  // No grid, no selection to run on and no runner to follow the run - and no
-  // view either, so the context goes too. Left behind it is the LAST grid's:
-  // a run started afterwards from the Workflows view would file its output
-  // into whichever set happened to be open before, and quote a `client_id`
-  // whose socket nothing is listening on.
+  // No grid, no selection to run on - and no view either, so the context goes
+  // too. Left behind it is the LAST grid's: a run started afterwards from the
+  // Workflows view would file its output into whichever set happened to be
+  // open before.
   runDialogStore.close();
   runDialogStore.context = {};
 });
@@ -5857,6 +5802,31 @@ function moveOverlayTo(id) {
   overlayImageId.value = id;
   _pushOverlayRoute(id);
 }
+
+// A run belongs to the app (the backend follows it, the Tasks tab shows it on
+// every view). The grid keeps the lightbox's part: the progress of the runs
+// started from here, and moving on to the new picture when one lands.
+const { progress: comfyuiProgress, follow: followComfyuiRun } =
+  useGridComfyuiRuns({
+    overlayOpen,
+    allGridImages,
+    lastFetchedGridImages,
+    getPictureStackId,
+    selectNewestStackMember,
+    showRunResult: (id, sourceId, stackId) =>
+      imageOverlayRef.value?.showRunResult?.(id, sourceId, stackId),
+    refreshSidebar: () => emit("refresh-sidebar"),
+  });
+const comfyuiProgressPercent = computed(() => {
+  const p = comfyuiProgress.value;
+  return Math.min(100, Math.max(0, Math.round(Number(p?.percent) || 0)));
+});
+watch(
+  () => runDialogStore.startedRun,
+  (run) => {
+    if (run) followComfyuiRun(run);
+  },
+);
 
 // Closing the lightbox drops `?overlay=` and stays put - except when the
 // picture was opened from a destination that replaces this grid (the workflow
@@ -6210,7 +6180,6 @@ const {
     triggerNewImageHighlight,
     updateVisibleThumbnails,
     fetchThumbnailsBatch,
-    maybeRefreshOverlayForComfyui,
     startSmartScoreProgress,
     completeSmartScoreProgress,
     onGridFetchStart,
@@ -6462,7 +6431,6 @@ const {
   rebuildGridImagesFromLastFetch,
   triggerNewImageHighlight,
   updateVisibleThumbnails,
-  maybeRefreshOverlayForComfyui,
   removeImagesById,
 });
 
@@ -6755,9 +6723,6 @@ function closeOverlay(returnToOrigin = true) {
   overlayImageId.value = null;
   overlayInitialExpandedStackIds.value = [];
   _removeOverlayRoute(returnToOrigin);
-  if (comfyuiRunner.value?.comfyuiPendingOverlayRefresh) {
-    comfyuiRunner.value.comfyuiPendingOverlayRefresh.value = false;
-  }
   // A deferred smart-score re-rank is reconciled by moving just the affected
   // cards. Only when no broader refresh is already queued - a full reload
   // re-sorts everything anyway, so repositioning first would be wasted work (and

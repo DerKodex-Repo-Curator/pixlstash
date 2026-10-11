@@ -149,7 +149,6 @@ describe("ImageOverlay mounted detection refresh", () => {
     CharacterEditor: true,
     StarRatingOverlay: true,
     PluginParametersUI: true,
-    ComfyUiRunner: true,
     ProgressOverlay: true,
     VTooltip: true,
   };

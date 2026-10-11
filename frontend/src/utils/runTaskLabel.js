@@ -1,4 +1,6 @@
-// runTaskLabel.js - what a ComfyUI run's row in the Tasks tab is called.
+// runTaskLabel.js - what a ComfyUI run's row in the Tasks tab is called, as
+// the popup that starts it knows it. Sent with the run (`label`); the server
+// names a run that is sent without one.
 
 /** The row's name when a run says nothing about itself. */
 export const RUN_TASK_FALLBACK = "ComfyUI";
@@ -17,9 +19,4 @@ export function runTaskLabel({ clone = false, recipe = "", workflow = "" } = {})
     String(workflow || "").trim() ||
     RUN_TASK_FALLBACK
   );
-}
-
-/** The prompts a run answered with, each carrying the row name it runs under. */
-export function labelPrompts(prompts, labelOf) {
-  return prompts.map((prompt) => ({ ...prompt, label: labelOf(prompt) }));
 }

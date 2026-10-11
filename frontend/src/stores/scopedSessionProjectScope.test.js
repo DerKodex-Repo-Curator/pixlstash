@@ -127,7 +127,6 @@ function makeGrid({ primarySelectedSetId = null } = {}) {
     triggerNewImageHighlight: vi.fn(),
     updateVisibleThumbnails: vi.fn(),
     fetchThumbnailsBatch: vi.fn(),
-    maybeRefreshOverlayForComfyui: vi.fn(),
     startSmartScoreProgress: vi.fn(),
     completeSmartScoreProgress: vi.fn(),
     onGridFetchStart: vi.fn(),
