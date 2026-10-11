@@ -11,6 +11,12 @@ vi.mock("vuetify/components", () => ({
   },
   VIcon: { template: "<i><slot /></i>" },
   VProgressCircular: { template: '<i class="spinner" />' },
+  VSwitch: {
+    props: ["modelValue", "disabled"],
+    emits: ["update:modelValue"],
+    template:
+      '<button role="switch" :aria-checked="String(!!modelValue)" :disabled="disabled" @click="$emit(\'update:modelValue\', !modelValue)" />',
+  },
   VTooltip: {
     setup:
       (_p, { slots }) =>
@@ -25,6 +31,12 @@ const comfyui = vi.hoisted(() => ({
   getPixlstashNode: vi.fn(),
 }));
 vi.mock("../../api/comfyui", () => comfyui);
+const users = vi.hoisted(() => ({ setTokenLibraries: vi.fn() }));
+vi.mock("../../api/users", () => users);
+const libraries = vi.hoisted(() => ({ libraries: [], canManage: true }));
+vi.mock("../../stores/useLibrariesStore", () => ({
+  useLibrariesStore: () => libraries,
+}));
 
 import ComfyuiLinkDialog from "./ComfyuiLinkDialog.vue";
 
@@ -64,6 +76,8 @@ beforeEach(() => {
   comfyui.linkComfyui.mockReset();
   comfyui.installComfyuiPack.mockReset();
   comfyui.getPixlstashNode.mockReset();
+  users.setTokenLibraries.mockReset();
+  libraries.libraries = [{ uuid: "a" }];
 });
 
 afterEach(() => {
@@ -72,6 +86,32 @@ afterEach(() => {
 });
 
 describe("ComfyuiLinkDialog", () => {
+  it("offers Use in every library once linked, with more than one library", async () => {
+    const linkedReply = {
+      ...replyWith(step("link", "done")),
+      link: { linked: true, token_id: 7, all_libraries: false },
+    };
+    comfyui.linkComfyui.mockResolvedValue(linkedReply);
+    expect(byTestId(await openDialog(), "comfyui-link-every-library").exists()).toBe(
+      false,
+    );
+
+    libraries.libraries = [{ uuid: "a" }, { uuid: "b" }];
+    users.setTokenLibraries.mockResolvedValue({ all_libraries: true });
+    const wrapper = await openDialog();
+    await byTestId(wrapper, "comfyui-link-every-library").trigger("click");
+    await flushPromises();
+    expect(users.setTokenLibraries).toHaveBeenCalledWith(7, true);
+
+    // Not while the link is not made: there is no key to widen.
+    comfyui.linkComfyui.mockResolvedValue(
+      replyWith(step("link", "needs_you", { reason: "https_off" })),
+    );
+    expect(byTestId(await openDialog(), "comfyui-link-every-library").exists()).toBe(
+      false,
+    );
+  });
+
   it("posts on open and shows row 1 working, the rest waiting", async () => {
     comfyui.linkComfyui.mockReturnValue(new Promise(() => {}));
     const wrapper = mount(ComfyuiLinkDialog, { props: { open: true } });

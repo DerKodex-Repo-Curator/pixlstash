@@ -16,6 +16,12 @@ vi.mock("vuetify/components", () => ({
   },
   VIcon: { template: "<i />" },
   VProgressCircular: { template: "<i />" },
+  VSwitch: {
+    props: ["modelValue", "disabled"],
+    emits: ["update:modelValue"],
+    template:
+      '<button role="switch" :aria-checked="String(!!modelValue)" :disabled="disabled" @click="$emit(\'update:modelValue\', !modelValue)" />',
+  },
 }));
 
 const config = vi.hoisted(() => ({
@@ -31,6 +37,12 @@ const comfyui = vi.hoisted(() => ({
   unlinkComfyui: vi.fn(),
 }));
 vi.mock("../../api/comfyui", () => comfyui);
+const users = vi.hoisted(() => ({ setTokenLibraries: vi.fn() }));
+vi.mock("../../api/users", () => users);
+const libraries = vi.hoisted(() => ({ libraries: [], canManage: true }));
+vi.mock("../../stores/useLibrariesStore", () => ({
+  useLibrariesStore: () => libraries,
+}));
 vi.mock("../../stores/useFilterStore", () => ({
   useFilterStore: () => ({ comfyuiUrl: "" }),
 }));
@@ -374,7 +386,7 @@ describe("linking ComfyUI", () => {
     expect(linkBtn.classes()).toContain("app-btn--primary");
     expect(wrapper.findAll(".app-btn--primary")).toHaveLength(1);
     expect(wrapper.text()).toContain(
-      "Linking gives ComfyUI full access to this library",
+      "lets its PixlStash nodes browse this library and save pictures into it, and nothing else",
     );
     expect(byTestId(wrapper, "comfyui-disconnect-note").exists()).toBe(false);
   });
@@ -472,11 +484,24 @@ describe("linking ComfyUI", () => {
     expect(byTestId(wrapper, "comfyui-key-refused").exists()).toBe(true);
   });
 
-  it("says Full access with the date when linked, with no primary", async () => {
+  it("offers Use in every library for a linked key, with more than one library", async () => {
+    comfyui.getComfyuiLink.mockResolvedValue({ ...LINKED, token_id: 7 });
+    libraries.libraries = [{ uuid: "a" }];
+    expect(byTestId(await mountPane(), "comfyui-link-every-library").exists()).toBe(
+      false,
+    );
+    libraries.libraries = [{ uuid: "a" }, { uuid: "b" }];
+    expect(byTestId(await mountPane(), "comfyui-link-every-library").exists()).toBe(
+      true,
+    );
+    libraries.libraries = [];
+  });
+
+  it("says what the key reaches with the date when linked, with no primary", async () => {
     comfyui.getComfyuiLink.mockResolvedValue(LINKED);
     const wrapper = await mountPane();
     expect(byTestId(wrapper, "comfyui-access-value").text()).toBe(
-      "Full access · linked 2026-10-06",
+      "PixlStash nodes only · linked 2026-10-06",
     );
     expect(byTestId(wrapper, "comfyui-link").exists()).toBe(false);
     expect(wrapper.findAll(".app-btn--primary")).toHaveLength(0);

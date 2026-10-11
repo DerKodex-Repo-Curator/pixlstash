@@ -21,6 +21,7 @@ import FieldLabel from "../widgets/FieldLabel.vue";
 import Segmented from "../widgets/Segmented.vue";
 import ComfyuiExposureNotice from "./ComfyuiExposureNotice.vue";
 import ComfyuiLinkDialog from "./ComfyuiLinkDialog.vue";
+import ComfyuiLinkLibraries from "./ComfyuiLinkLibraries.vue";
 import SettingsSection from "./SettingsSection.vue";
 import { errorMessage } from "../../utils/apiError";
 import {
@@ -510,7 +511,7 @@ watch(
           <p class="cf-small">
             <span class="cf-muted">Access</span>
             <span v-if="link.linked" data-testid="comfyui-access-value"
-              >Full access · linked {{ linkedOn }}</span
+              >PixlStash nodes only · linked {{ linkedOn }}</span
             >
             <span v-else data-testid="comfyui-access-value">Not linked</span>
           </p>
@@ -527,8 +528,8 @@ watch(
               </AppButton>
             </div>
             <p class="cf-small cf-muted">
-              Linking gives ComfyUI full access to this library so its
-              PixlStash nodes can load and save pictures.
+              Linking gives ComfyUI a key that lets its PixlStash nodes browse
+              this library and save pictures into it, and nothing else.
             </p>
             <ComfyuiExposureNotice v-if="exposure" :exposure="exposure" />
           </template>
@@ -564,6 +565,7 @@ watch(
                 Link again
               </AppButton>
             </div>
+            <ComfyuiLinkLibraries :link="link" />
             <ComfyuiExposureNotice v-if="exposure" :exposure="exposure" />
           </template>
         </div>
