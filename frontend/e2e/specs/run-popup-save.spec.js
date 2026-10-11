@@ -19,6 +19,7 @@ import { test, expect } from "../fixtures/test.js";
 
 const WF = `auto:${"a".repeat(64)}`;
 const NEW_WF = `manual:${"b".repeat(32)}`;
+const OTHER_WF = `auto:${"c".repeat(64)}`;
 const CKPT = "core:CheckpointLoader/ckpt_name";
 const VAE = "core:VAELoader/vae_name";
 const GRAIN_SHA = "1".repeat(64);
@@ -169,8 +170,16 @@ async function stubWorkflow(page, world = {}) {
       changes: changesState(),
       dryRun: { save: OPEN, save_as_new: OPEN },
       people: PEOPLE.slice(0, 2),
+      /** Another workflow in the list, for the picker: `{ name }`. */
+      second: null,
+      /** Fields a save's answer carries besides the version: `still_waiting`, `not_kept`. */
+      saveExtra: {},
+      /** ComfyUI configured, so the toolbar offers Generate. */
+      comfyui: false,
       ...world,
     },
+    /** A held answer, by route: a gate to release (see `gate`). */
+    hold: {},
     saves: [],
     savesAsNew: [],
     dryRuns: [],
@@ -208,10 +217,19 @@ async function stubWorkflow(page, world = {}) {
         return json(route, { adapters });
       }
       if (path === "/recipes" && method === "GET") return json(route, []);
+      if (now.comfyui && path === "/users/me/config" && method === "GET") {
+        const real = await route.fetch();
+        return route.fulfill({
+          response: real,
+          json: { ...(await real.json()), comfyui_url: "http://127.0.0.1:8188" },
+        });
+      }
       if (!path.startsWith("/workflows")) return route.fallback();
 
       if (path === "/workflows" && method === "GET") {
-        return json(route, { cards: [now.card], one_offs: 0, hidden: 0 });
+        const cards = [now.card];
+        if (now.second) cards.push({ ...now.card, id: OTHER_WF, ...now.second });
+        return json(route, { cards, one_offs: 0, hidden: 0 });
       }
       if (path === "/workflows/run/preflight" && method === "POST") {
         return json(route, {
@@ -219,7 +237,7 @@ async function stubWorkflow(page, world = {}) {
           runs: 1,
           groups: [
             {
-              workflow_id: WF,
+              workflow_id: request.postDataJSON()?.workflow_id || WF,
               reasons: [],
               picture_inputs: [],
               prompt: {
@@ -240,11 +258,13 @@ async function stubWorkflow(page, world = {}) {
         });
       }
 
-      const own = [WF, NEW_WF].find((id) => path.startsWith(`/workflows/${id}`));
+      const own = [WF, NEW_WF, OTHER_WF].find((id) => path.startsWith(`/workflows/${id}`));
       const rest = own ? path.slice(`/workflows/${own}`.length) : null;
       if (rest === "" && method === "GET") {
+        // The card of the workflow the picker moved to may be held on the wire.
+        if (own === OTHER_WF && net.hold.card) await net.hold.card.promise;
         return json(route, {
-          card: { ...now.card, id: own },
+          card: { ...now.card, id: own, ...(own === OTHER_WF ? now.second : {}) },
           notes: null,
           hidden: false,
           variants: [],
@@ -267,6 +287,11 @@ async function stubWorkflow(page, world = {}) {
         });
       }
       if (rest === "/changes" && method === "GET") {
+        // The workflow a Save as new made has not been run: it has no `ran`
+        // to offer. The receipt of that save is taken down when an offer
+        // arrives after it, so a mock that answered the new workflow with the
+        // old one's `ran` would make one arrive.
+        if (own === NEW_WF) return json(route, changesState({ workflow_id: own }));
         return json(route, { ...now.changes, workflow_id: own });
       }
       if (rest === "/changes") {
@@ -310,17 +335,36 @@ async function stubWorkflow(page, world = {}) {
           });
         }
         net.saves.push(body);
+        if (net.hold.save) await net.hold.save.promise;
         if (now.saveRefusal) return json(route, { detail: now.saveRefusal }, 409);
         // The workflow now holds what was saved: later reads answer for it.
         if (now.afterSave) Object.assign(now, now.afterSave);
-        return json(route, { workflow_id: own, version: 4, new_workflow: false, left_out: [] });
+        return json(route, {
+          workflow_id: own,
+          version: 4,
+          new_workflow: false,
+          left_out: [],
+          ...now.saveExtra,
+        });
       }
       if (rest === "/save-as-new" && method === "POST") {
         const body = request.postDataJSON();
         net.savesAsNew.push(body);
+        if (net.hold.saveAsNew) await net.hold.saveAsNew.promise;
+        if (now.saveAsNewRefusal) return json(route, { detail: now.saveAsNewRefusal }, 409);
+        // Any save, this one too, drops what the run changed (the server's
+        // `clear_changes`): the offer for it must not come back.
+        if (now.afterSave) Object.assign(now, now.afterSave);
         return json(
           route,
-          { workflow_id: NEW_WF, name: body.name, new_workflow: true, version: 1, left_out: [] },
+          {
+            workflow_id: NEW_WF,
+            name: body.name,
+            new_workflow: true,
+            version: 1,
+            left_out: [],
+            ...now.saveExtra,
+          },
           201,
         );
       }
@@ -389,6 +433,15 @@ async function shotRail(page, last, name) {
 const overflows = (locator) =>
   locator.evaluate((el) => el.scrollWidth > el.clientWidth);
 const heightOf = async (locator) => (await locator.boundingBox()).height;
+
+/** A promise a test releases by hand: what a route holds its answer on. */
+function gate() {
+  let release;
+  const promise = new Promise((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
+}
 
 let net;
 test.afterEach(() => {
@@ -970,6 +1023,9 @@ test.describe("the Tasks tab's offer", () => {
   }) => {
     net = await stubWorkflow(page, {
       changes: changesState({ ran: RAN, ran_save: OPEN }),
+      // The save drops `ran`, as the server does: an offer that came back
+      // after the receipt would take the receipt down.
+      afterSave: { changes: changesState() },
     });
     await openTasks(page);
     const asNew = offer(page).getByRole("button", { name: "Save as new…" });
@@ -1018,5 +1074,284 @@ test.describe("the Tasks tab's offer", () => {
     await offer(page).getByRole("button", { name: "Save as new…" }).click();
     await expect(offer(page).getByRole("textbox", { name: "Name of the new workflow" })).toBeFocused();
     expect(net.saves).toEqual([]);
+  });
+});
+
+// ── What only a browser shows: a save in flight, and who has the keyboard ───
+
+test.describe("a band save that is slow", () => {
+  const AFTER = () => ({
+    afterSave: {
+      card: workflowCard({ checkpoint: "juggernautXL_v9.safetensors", steps: 32 }),
+      chain: [CHAIN[0]],
+      changes: changesState({ version: 4 }),
+    },
+  });
+
+  test("the form cannot be edited, Run and Cancel and Escape do nothing, and the line it ends on has the keyboard", async ({
+    page,
+  }) => {
+    net = await stubWorkflow(page, AFTER());
+    await openPopup(page);
+    await changeThree(page);
+    const steps = dialog(page).getByRole("spinbutton", { name: "Steps" });
+    await expect(steps).toHaveValue("32");
+
+    net.hold.save = gate();
+    await band(page).getByRole("button", { name: "Save", exact: true }).click();
+    await expect.poll(() => net.saves.length).toBe(1);
+
+    // The form is inert and Run says why: its wait sentence, in the footer.
+    const wait = dialog(page).locator('footer p[tabindex="-1"]');
+    await expect(wait).toHaveText("Run waits for the save to finish.");
+    await expect(dialog(page).locator(".rund")).toHaveAttribute("inert", "");
+    // A pointer on the field and keys typed: neither reaches it.
+    await steps.click({ force: true });
+    await page.keyboard.type("9");
+    await expect(steps).toHaveValue("32");
+
+    // Run is inert: pressed (a person can press an aria-disabled button), it
+    // sends nothing and the popup stays.
+    await expect(runButton(page)).toHaveAttribute("aria-disabled", "true");
+    await runButton(page).click({ force: true });
+    // Cancel and Escape do not close it.
+    await expect(dialog(page).locator("footer").getByRole("button", { name: "Cancel" })).toBeDisabled();
+    await page.keyboard.press("Escape");
+    await expect(dialog(page)).toBeVisible();
+    expect(net.runs).toEqual([]);
+    expect(net.saves).toHaveLength(1);
+
+    net.hold.save.release();
+    const done = dialog(page).getByTestId("rund-band-done");
+    await expect(done).toHaveText("Saved to this workflow.");
+    await expect(done).toBeFocused();
+    await expect(wait).toHaveCount(0);
+    await expect(dialog(page).locator(".rund")).not.toHaveAttribute("inert", "");
+    await expect(steps).toHaveValue("32");
+    // Only the one save went out, and Run is live again.
+    expect(net.saves).toHaveLength(1);
+    expect(net.runs).toEqual([]);
+    await expect(runButton(page)).not.toHaveAttribute("aria-disabled", "true");
+  });
+
+  test("Save as new… sent with Enter and refused leaves the keyboard in the name, beside the refusal", async ({
+    page,
+  }) => {
+    const refusal = "A workflow with that name is already kept. Pick another name.";
+    net = await stubWorkflow(page, { saveAsNewRefusal: refusal });
+    await openPopup(page);
+    await changeThree(page);
+    await band(page).getByRole("button", { name: "Save as new…" }).click();
+    const name = dialog(page).getByRole("textbox", { name: "Name of the new workflow" });
+    await expect(name).toBeFocused();
+    await name.fill("Taken");
+
+    net.hold.saveAsNew = gate();
+    await page.keyboard.press("Enter");
+    await expect.poll(() => net.savesAsNew.length).toBe(1);
+    // Out: read-only, not disabled, so it is still where the keyboard is.
+    await expect(name).toHaveAttribute("readonly", "");
+    await expect(name).toBeEnabled();
+    await expect(name).toBeFocused();
+    await expect(dialog(page).locator("footer p")).toHaveText("Run waits for the save to finish.");
+
+    net.hold.saveAsNew.release();
+    await expect(band(page).getByRole("alert")).toHaveText(refusal);
+    await expect(name).toBeFocused();
+    await expect(name).not.toHaveAttribute("readonly", "");
+    await expect(name).toHaveValue("Taken");
+    // Nothing moved: still this workflow, still its changes, no second send.
+    await expect(dialog(page).locator(".app-dialog__subtitle")).toHaveText("Portrait, soft window light");
+    // Still the question, with its changes behind it, and one send only.
+    await band(page).getByRole("button", { name: "Back" }).click();
+    await expect(band(page)).toContainText("3 changes from the workflow");
+    expect(net.savesAsNew).toHaveLength(1);
+  });
+
+  test("a click that leaves the caret in the form: the keyboard waits on the footer's sentence, never the page, and returns to the verb pressed after a refusal", async ({
+    page,
+  }) => {
+    net = await stubWorkflow(page, { saveRefusal: "This workflow changed since you opened this." });
+    await openPopup(page);
+    await changeThree(page);
+    const steps = dialog(page).getByRole("spinbutton", { name: "Steps" });
+    await steps.focus();
+    await expect(steps).toBeFocused();
+    // Safari does not focus a button a click lands on. Chromium does, so the
+    // press is made as Safari makes it: the mouse goes down on the verb and
+    // the focus stays where it was.
+    await page.evaluate(() =>
+      document.addEventListener(
+        "mousedown",
+        (event) => {
+          if (event.target.closest('[data-testid="rund-band"] button')) event.preventDefault();
+        },
+        true,
+      ),
+    );
+    const save = band(page).getByRole("button", { name: "Save", exact: true });
+
+    net.hold.save = gate();
+    await save.click();
+    await expect.poll(() => net.saves.length).toBe(1);
+    const wait = dialog(page).locator('footer p[tabindex="-1"]');
+    await expect(wait).toHaveText("Run waits for the save to finish.");
+    // On the sentence, and so not on the page.
+    await expect(wait).toBeFocused();
+    expect(await page.evaluate(() => document.activeElement === document.body)).toBe(false);
+
+    net.hold.save.release();
+    await expect(band(page).getByRole("alert")).toHaveText("This workflow changed since you opened this.");
+    await expect(save).toBeFocused();
+    await expect(wait).toHaveCount(0);
+
+    // And a save that lands, started the same way: the line it ends on.
+    net.world.saveRefusal = "";
+    net.hold.save = null;
+    await steps.focus();
+    await save.click();
+    const done = dialog(page).getByTestId("rund-band-done");
+    await expect(done).toHaveText("Saved to this workflow.");
+    await expect(done).toBeFocused();
+  });
+});
+
+test.describe("a run of a workflow by itself", () => {
+  const WHOLE = { models: [], loras: [], skip_loras: [], stages: {}, values: [] };
+
+  test("carries what waited as the popup read it, all five keys, whatever was put back here", async ({
+    page,
+  }) => {
+    const waiting = {
+      models: [],
+      loras: [],
+      skip_loras: [{ node_id: "8", field: "lora_name" }],
+      stages: {},
+      values: [{ slot_label: "KSampler", input_name: "steps", value: 32 }],
+    };
+    net = await stubWorkflow(page, {
+      changes: changesState({ waiting, count: 2, version: 6, save: OPEN }),
+    });
+    await openPopup(page);
+    // Put back here: the run no longer has it, and the save of it has to know
+    // it had been seen.
+    await dialog(page).getByRole("button", { name: "Put film-grain-35mm back" }).click();
+    await runButton(page).click();
+    await expect(dialog(page)).toHaveCount(0);
+    expect(net.runs).toHaveLength(1);
+    expect(net.runs[0].waited).toEqual(waiting);
+    expect(net.runs[0].skip_loras ?? []).toEqual([]);
+    expect(net.runs[0].workflow_id).toBe(WF);
+  });
+
+  test("carries the empty set where nothing waited, which is not the same as not saying", async ({
+    page,
+  }) => {
+    net = await stubWorkflow(page);
+    await openPopup(page);
+    await runButton(page).click();
+    await expect(dialog(page)).toHaveCount(0);
+    expect(net.runs[0].waited).toEqual(WHOLE);
+  });
+});
+
+test.describe("the picker moves to another workflow", () => {
+  test("no band and no Run until the workflow arrived at is read", async ({ page }) => {
+    net = await stubWorkflow(page, {
+      comfyui: true,
+      second: { name: "Landscape, golden hour" },
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Generate new pictures with a ComfyUI workflow" }).click();
+    await expect(dialog(page)).toBeVisible();
+    const picker = dialog(page).getByRole("combobox", { name: "Workflow" });
+    await picker.selectOption(WF);
+    await expect(dialog(page).getByRole("spinbutton", { name: "Steps" })).toBeVisible();
+    // A change on the first workflow: the band is up.
+    await dialog(page).getByRole("spinbutton", { name: "Steps" }).fill("32");
+    await expect(band(page)).toContainText("1 change from the workflow");
+
+    // The card of the other is held on the wire.
+    net.hold.card = gate();
+    await picker.selectOption(OTHER_WF);
+    const wait = dialog(page).locator("footer p");
+    await expect(wait).toHaveText("Reading this workflow…");
+    await expect(band(page)).toHaveCount(0);
+    await expect(runButton(page)).toHaveAttribute("aria-disabled", "true");
+    await expect(dialog(page).getByRole("button", { name: "Save as recipe" })).toBeDisabled();
+    await runButton(page).click({ force: true });
+    expect(net.runs).toEqual([]);
+    await expect(dialog(page)).toBeVisible();
+
+    net.hold.card.release();
+    await expect(wait).toHaveCount(0);
+    await expect(runButton(page)).not.toHaveAttribute("aria-disabled", "true");
+    // Steps is a parameter this workflow has too, so the popup keeps what was
+    // typed (it names what it could not keep), and the band is back, of the
+    // workflow arrived at.
+    await expect(dialog(page).getByRole("spinbutton", { name: "Steps" })).toHaveValue("32");
+    await expect(band(page)).toContainText("1 change from the workflow");
+    await runButton(page).click();
+    await expect(dialog(page)).toHaveCount(0);
+    expect(net.runs).toHaveLength(1);
+    expect(net.runs[0].workflow_id).toBe(OTHER_WF);
+  });
+});
+
+test.describe("the Tasks tab's receipt says what the save left", () => {
+  const RAN = THREE_CHANGES;
+  const rail = (page) => page.getByRole("complementary", { name: "Inspector" });
+  const offer = (page) => rail(page).locator("[data-offer]");
+
+  async function save(page, saveExtra) {
+    net = await stubWorkflow(page, {
+      changes: changesState({ ran: RAN, ran_save: OPEN }),
+      afterSave: { changes: changesState({ version: 4 }) },
+      saveExtra,
+    });
+    await selectWorkflow(page);
+    await rail(page).getByRole("button", { name: "Tasks" }).click();
+    await offer(page).getByRole("button", { name: "Save", exact: true }).click();
+    const done = rail(page).getByTestId("tm-offer-done");
+    await expect(done).toContainText("Saved to Portrait, soft window light.");
+    await expect(done).toBeFocused();
+    return done;
+  }
+
+  test("a change still waiting is said under the receipt, inside the rail", async ({ page }) => {
+    const done = await save(page, { still_waiting: 2 });
+    await expect(done).toContainText(
+      "Portrait, soft window light still has 2 changes waiting in the Workflow tab. They were not part of this save.",
+    );
+    // The receipt is one line of text for a reader and two for the eye.
+    await expect(done).toHaveText(
+      "Saved to Portrait, soft window light. Portrait, soft window light still has 2 changes waiting in the Workflow tab. They were not part of this save.",
+    );
+    expect(await overflows(done)).toBe(false);
+    expect(await overflows(rail(page).locator(".inspector-body"))).toBe(false);
+  });
+
+  test("a change that could not be kept is said, in the warning colour", async ({ page }) => {
+    const done = await save(page, {
+      not_kept: {
+        models: [],
+        loras: [],
+        skip_loras: [{ node_id: "8", field: "lora_name" }],
+        stages: {},
+        values: [],
+      },
+    });
+    const lost = done.locator(".tm-offer-lost");
+    await expect(lost).toHaveText(
+      "Could not keep 1 change made after the run: 1 LoRA removed. The saved workflow no longer has what was changed, so this is gone: not saved, and not left waiting.",
+    );
+    await expect(done).not.toContainText("still has");
+    expect(await overflows(done)).toBe(false);
+    // Not the colour of the rest of the receipt.
+    const colours = await done.evaluate((el) => [
+      getComputedStyle(el).color,
+      getComputedStyle(el.querySelector(".tm-offer-lost")).color,
+    ]);
+    expect(colours[1]).not.toBe(colours[0]);
   });
 });

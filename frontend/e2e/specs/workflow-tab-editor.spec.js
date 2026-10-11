@@ -168,8 +168,16 @@ async function stubWorkflows(page, world = {}) {
       verbs: { save: OPEN, save_as_new: OPEN },
       chain: CHAIN,
       restoreRefusal: "",
+      /** Per workflow id: what waits was made on a version since left. */
+      stale: {},
+      /** ComfyUI configured, with the node that opens a workflow. */
+      comfyui: false,
       ...world,
     },
+    /** A held answer, by route: a gate to release (see `gate`). */
+    hold: {},
+    /** The writes in the order they reached the server. */
+    order: [],
     changePuts: [],
     discards: [],
     saves: [],
@@ -192,6 +200,7 @@ async function stubWorkflows(page, world = {}) {
   };
   const changesOf = (id) => {
     const waiting = net.world.waiting[id] ?? null;
+    const stale = Boolean(net.world.stale[id]) && countOf(waiting) > 0;
     return {
       workflow_id: id,
       version: versionOf(id),
@@ -199,6 +208,15 @@ async function stubWorkflows(page, world = {}) {
       count: countOf(waiting),
       ran: null,
       ...net.world.verbs,
+      // As the real server answers for a set made on a version since left:
+      // marked, and Save closed for it. Absent otherwise, as for a mock that
+      // never heard of the field.
+      ...(stale
+        ? {
+            stale: true,
+            save: { open: false, reason: "This workflow has changed since." },
+          }
+        : {}),
       ran_save: null,
     };
   };
@@ -231,6 +249,16 @@ async function stubWorkflows(page, world = {}) {
       // The dialog's Add reads the shelf's LoRAs; none is needed here.
       if (path === "/adapters" && method === "GET") return json(route, { adapters: [] });
       if (path === "/recipes" && method === "GET") return json(route, []);
+      if (now.comfyui && path === "/users/me/config" && method === "GET") {
+        const real = await route.fetch();
+        return route.fulfill({
+          response: real,
+          json: { ...(await real.json()), comfyui_url: "http://127.0.0.1:8188" },
+        });
+      }
+      if (now.comfyui && path === "/comfyui/pixlstash-node" && method === "GET") {
+        return json(route, { can_open_workflows: true, saves_back: true });
+      }
       if (!path.startsWith("/workflows")) return route.fallback();
 
       if (path === "/workflows" && method === "GET") {
@@ -368,6 +396,8 @@ async function stubWorkflows(page, world = {}) {
       if (rest === "/changes" && method === "PUT") {
         const body = request.postDataJSON();
         net.changePuts.push(body);
+        net.order.push("put");
+        if (net.hold.put) await net.hold.put.promise;
         now.waiting[own] = countOf(body) ? body : null;
         return json(route, changesOf(own));
       }
@@ -382,12 +412,17 @@ async function stubWorkflows(page, world = {}) {
         net.restores.push(Number(restore[1]));
         if (now.restoreRefusal) return json(route, { detail: now.restoreRefusal }, 409);
         addVersion(own, `went back to version ${restore[1]}`);
+        // What waits was made on the version left: the server marks it so.
+        if (countOf(now.waiting[own])) now.stale[own] = true;
         return json(route, versionsOf(own));
       }
       if (rest === "/save" && method === "POST") {
         const body = request.postDataJSON();
         net.saves.push(body);
+        net.order.push("save");
+        if (net.hold.save) await net.hold.save.promise;
         now.waiting[own] = null;
+        now.stale[own] = false;
         addVersion(own, "models changed");
         return json(route, {
           workflow_id: own,
@@ -414,6 +449,15 @@ async function stubWorkflows(page, world = {}) {
     },
   );
   return net;
+}
+
+/** A promise a test releases by hand: what a route holds its answer on. */
+function gate() {
+  let release;
+  const promise = new Promise((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
 }
 
 let net;
@@ -1146,5 +1190,108 @@ test.describe("Edit LoRAs…", () => {
     expect(net.chainWrites).toEqual([]);
     expect(net.changePuts).toEqual([]);
     await expect(bar(page)).toBeHidden();
+  });
+});
+
+// ── 7. What only a browser shows: locks, order, and the stale sentence ──────
+
+test.describe("a save that is slow", () => {
+  test("locks every row control until it answers, and an edit made meanwhile goes nowhere", async ({ page }) => {
+    net = await stubWorkflows(page);
+    await selectWorkflow(page);
+    await stage(page, "Face detailer").check();
+    const save = bar(page).getByRole("button", { name: "Save", exact: true });
+    await expect(save).toBeVisible();
+    await expect(save).toBeEnabled();
+    await expect.poll(() => net.changePuts.length).toBe(1);
+
+    net.hold.save = gate();
+    await save.click();
+    await expect.poll(() => net.saves.length).toBe(1);
+    // Out: nothing that edits the set can be reached, and the verbs wait too.
+    await expect(checkpointPicker(page)).toBeDisabled();
+    await expect(stage(page, "Upscale")).toBeDisabled();
+    await expect(stage(page, "Face detailer")).toBeDisabled();
+    await expect(strength(page, "detail_slider_v2")).toBeDisabled();
+    await expect(rail(page).getByRole("button", { name: "Remove film-grain-35mm" })).toBeDisabled();
+    await expect(bar(page).getByRole("button", { name: "Discard" })).toBeDisabled();
+    await expect(bar(page).getByRole("button", { name: "Save as new…" })).toBeDisabled();
+
+    // Pressed anyway, by a pointer: nothing was edited, and nothing was sent.
+    await stage(page, "Upscale").click({ force: true });
+    await rail(page).getByRole("button", { name: "Remove film-grain-35mm" }).click({ force: true });
+    await expect(stage(page, "Upscale")).toBeChecked();
+    await expect(rail(page).getByRole("button", { name: "Put film-grain-35mm back" })).toHaveCount(0);
+    expect(net.changePuts).toHaveLength(1);
+
+    net.hold.save.release();
+    await expect(bar(page)).toBeHidden();
+    await expect(checkpointPicker(page)).toBeEnabled();
+    await expect(stage(page, "Upscale")).toBeEnabled();
+    await expect(strength(page, "detail_slider_v2")).toBeEnabled();
+    expect(net.saves).toEqual([{ version: 3 }]);
+    // And an edit can be made again, which is one write more.
+    await stage(page, "Upscale").uncheck();
+    await expect(bar(page)).toContainText("1 unsaved change");
+    expect(net.changePuts).toHaveLength(2);
+    expect(net.changePuts[1].stages).toEqual({ upscale: false });
+  });
+
+  test("a strength typed and Save pressed in one gesture send the edit first, then the save", async ({ page }) => {
+    net = await stubWorkflows(page);
+    await selectWorkflow(page);
+    // The bar is up with its verbs before the strength is typed.
+    await stage(page, "Face detailer").check();
+    const save = bar(page).getByRole("button", { name: "Save", exact: true });
+    await expect(save).toBeVisible();
+    await expect.poll(() => net.changePuts.length).toBe(1);
+
+    // The strength's write is held on the wire: the press lands while it is out.
+    net.hold.put = gate();
+    const field = strength(page, "detail_slider_v2");
+    await field.fill("0.45");
+    // The click blurs the field (the edit) and then presses Save.
+    await save.click();
+    await expect.poll(() => net.order).toEqual(["put", "put"]);
+    expect(net.saves).toEqual([]);
+    net.hold.put.release();
+
+    await expect(bar(page)).toBeHidden();
+    expect(net.order).toEqual(["put", "put", "save"]);
+    expect(net.saves).toEqual([{ version: 3 }]);
+    expect(net.changePuts.at(-1).loras).toEqual([
+      {
+        node_id: "7",
+        field: "lora_name",
+        sha256: SHA.detail,
+        strength_model: 0.45,
+        strength_clip: 0.45,
+      },
+    ]);
+    expect(net.changePuts.at(-1).stages).toEqual({ face_detailer: true });
+  });
+});
+
+test.describe("going back a version with changes waiting", () => {
+  test("the note under Open in ComfyUI says the changes are not in what opens", async ({ page }) => {
+    net = await stubWorkflows(page, { comfyui: true });
+    await selectWorkflow(page);
+    await expect(rail(page).getByTestId("wftab-open-comfyui")).toBeVisible();
+    await checkpointPicker(page).selectOption({ label: "Juggernaut XL v9" });
+    await expect(bar(page)).toContainText("1 unsaved change");
+    const note = rail(page).getByTestId("wftab-open-unsaved");
+    await expect(note).toHaveText(
+      "Open in ComfyUI opens the workflow with the unsaved changes in it. Saving there saves them too.",
+    );
+
+    await chip(page).click();
+    await versionRow(page, 2).click();
+    await expect(chip(page)).toHaveText("Version 4 · today");
+    expect(net.restores).toEqual([2]);
+    // The changes are still there, and now say where they were made.
+    await expect(bar(page)).toContainText("1 unsaved change");
+    await expect(note).toHaveText(
+      "Open in ComfyUI opens the workflow as it is now. The unsaved changes were made on an earlier version and are not in it.",
+    );
   });
 });
