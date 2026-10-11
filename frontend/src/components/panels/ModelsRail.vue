@@ -395,7 +395,6 @@ import {
   handMadeBase,
   handMadeName,
   pictureCount,
-  railListed,
   rowMatches,
   SET_SLOTS,
   setCheckpoint,
@@ -440,10 +439,11 @@ watch(
 );
 
 /**
- * Every model the rail can offer: what the tab counts. A model this library
- * hides is not offered, until Show's *Hidden models* asks for those too.
+ * Every model the rail can offer: what the tab counts. A stack is one row, its
+ * leader. A model this library hides is not offered, until Show's *Hidden
+ * models* asks for those too.
  */
-const listed = computed(() => store.offeredRows.filter(railListed));
+const listed = computed(() => store.railRows);
 
 const tabs = computed(() => [
   {
@@ -592,7 +592,12 @@ const shown = computed(() => {
       (row) => !row.sha256 || !setsBySha.value.has(row.sha256),
     );
   }
-  if (needle.value) rows = rows.filter((row) => rowMatches(row, needle.value));
+  // By any file of a stack: a step's own filename still finds its stack.
+  if (needle.value) {
+    rows = rows.filter((row) =>
+      (row.members ?? [row]).some((one) => rowMatches(one, needle.value)),
+    );
+  }
   return rows;
 });
 
@@ -1106,10 +1111,18 @@ function returnFocus() {
   el?.focus?.({ preventScroll: true });
 }
 
+/**
+ * What Hide acts on: a stack whole, as on the shelf. Hiding the leader alone
+ * would put the next member in its place.
+ */
+const hideRows = computed(() =>
+  actionRows.value.flatMap((row) => row.members ?? [row]),
+);
+
 /** The Hide row, worded by the shelf's own rule for the rows it acts on. */
 const hideVerb = computed(() =>
   hideModelsVerb(
-    actionRows.value.map((row) => row.id),
+    hideRows.value.map((row) => row.id),
     store.hiddenModelIds,
   ),
 );
@@ -1118,7 +1131,7 @@ const hideVerb = computed(() =>
 // `flat` above, once the hide has landed: only that row, and not at all when
 // the write fails.
 function menuHide() {
-  const rows = actionRows.value;
+  const rows = hideRows.value;
   menuOpen.value = false;
   store.toggleHiddenModels(rows);
 }

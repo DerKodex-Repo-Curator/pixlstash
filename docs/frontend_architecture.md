@@ -6306,10 +6306,16 @@ rail="models"` toggles it. Closed, the shelf shows a plain `InspectorEdgeTab`
 with the count (named `Show models (N)`), which moves at most once a session:
 the first time a hand-made set opens while the rail is closed.
 
-- **What it lists.** Every shelf row some set slot takes (`railListed`), under
+- **What it lists.** Every shelf model some set slot takes (`railListed`), under
   the set panel's slot headings, each saying where it already is ("In no set
   yet", "In Night city", "In 2 of your sets"). Picking a model already in
-  another set is ordinary. The tab shows the count. Every means every: while
+  another set is ordinary. The tab shows the count. A stack is one row, its
+  leader (`store.railRows` folds with `collapseStacks`, as the row list does;
+  the closed handle and the set panel's *Models · N fit* count the same list),
+  and the row's words, its Fits evidence and its Add are the leader's own; only
+  the search reads every member, so a step's filename finds its stack. *Hide
+  model* on that row hides every member, since hiding the leader alone would
+  put the next member in its place. Every means every: while
   the rail is mounted (`store.setRailMounted`) every `fetchRows` also reads the
   blocks Show has unticked (`fetchedBlocks`) into `rows`, which is everything
   known, not the shown set, so the shelf's own list is unchanged and a scan or

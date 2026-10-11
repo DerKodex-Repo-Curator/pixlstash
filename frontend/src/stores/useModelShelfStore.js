@@ -63,6 +63,7 @@ import {
   headModel,
   hideSetsVerb,
   pictureCount,
+  railListed,
   rowBaseModel,
   setCard,
   setCheckpoint,
@@ -1426,6 +1427,17 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     filters.showHidden
       ? rows.value
       : rows.value.filter((row) => !hiddenModelIds.value.has(row.id)),
+  );
+
+  /**
+   * What the Models rail lists and its closed handle counts: every offered row
+   * some set slot takes, a stack folded into its leader as the row list folds
+   * it. The leader is the one file the rail offers. Folded after the hidden
+   * rows are left out, so a stack whose leader alone is hidden is stood for by
+   * its next member.
+   */
+  const railRows = computed(() =>
+    collapseStacks(offeredRows.value.filter(railListed)),
   );
 
   /** The rows the current selection actually shows, with display fields. */
@@ -4155,6 +4167,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     showHiddenSets,
     hiddenModelIds,
     offeredRows,
+    railRows,
     toggleHiddenModels,
     hideSets,
     unhideSets,

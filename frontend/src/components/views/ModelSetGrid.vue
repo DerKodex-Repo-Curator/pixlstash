@@ -1489,7 +1489,7 @@ const openFitCount = computed(() =>
   openHand.value
     ? setFits(
         openHand.value.set,
-        store.offeredRows,
+        store.railRows,
         store.workflowSets.combinations,
       )
         .rows.length
