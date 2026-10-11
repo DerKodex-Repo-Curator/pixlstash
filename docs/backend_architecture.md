@@ -3122,8 +3122,10 @@ next, and a graph that only moved nodes is `unchanged` and still replaces it.
   editor document, is past the stored-workflow size, or nests past
   `MAX_LAYOUT_DEPTH` (it is handed back in a response). Past that the graph
   is stored first, and a layout that then cannot be kept is dropped and
-  logged: the workflow opens auto-arranged. A save with no `editor` (the MCP
-  server's) leaves the layout there is.
+  logged: the workflow opens auto-arranged. The read is held to the same
+  (`_layout_for`): `GET …/graph` answered before there were layouts, so a
+  graph or a row that will not compare opens without one, logged, never a
+  500. A save with no `editor` (the MCP server's) leaves the layout there is.
 - **It has no history.** One layout per workflow: going back a version opens
   with the layout only if that version is wired as the layout's graph was.
 

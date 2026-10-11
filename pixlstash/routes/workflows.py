@@ -7501,6 +7501,35 @@ def create_router(server) -> APIRouter:
                     inputs[name] = ""
         return graph, source, card, unsaved.count() > 0, plan.object_info
 
+    def _layout_for(hub, workflow_id: str, graph: dict) -> dict | None:
+        """The layout *workflow_id* opens with over *graph*, or ``None``.
+
+        A layout only over the wiring it was saved with: its values are the
+        graph's to give, its connections are not. **Never an error**, as when
+        it is kept: this read answered before there were layouts, so a graph
+        or a row that will not compare opens auto-arranged, and says so in
+        the log.
+        """
+        try:
+            return workflow_versions.layout_for(
+                hub, workflow_id, run_service.graph_structure(graph)
+            )
+        except (
+            RecursionError,
+            LookupError,
+            TypeError,
+            ValueError,
+            sqlite3.Error,
+        ) as exc:
+            logger.warning(
+                "[workflows] Workflow %s opens without its ComfyUI layout: it "
+                "could not be matched to the graph (%s: %s).",
+                workflow_id,
+                type(exc).__name__,
+                exc,
+            )
+            return None
+
     def _who_fits(hub, workflow_id: str) -> dict | None:
         """``people_who_fit`` for *workflow_id*'s checkpoint; ``None`` for no
         such workflow. The one read behind the people route and the loader."""
@@ -7631,11 +7660,7 @@ def create_router(server) -> APIRouter:
             forgotten=source.forgotten,
             version=source.workflow_version,
             waiting_applied=waiting_applied,
-            # A layout only over the wiring it was saved with: its values are
-            # `workflow`'s to give, its connections are not.
-            editor=workflow_versions.layout_for(
-                hub, workflow.workflow_id, run_service.graph_structure(graph)
-            ),
+            editor=_layout_for(hub, workflow.workflow_id, graph),
             people_loader=_people_loader_place(
                 workflow.workflow_id, graph, object_info
             ),
@@ -10318,16 +10343,28 @@ def create_router(server) -> APIRouter:
         return None
 
     def _layout_nodes(editor: dict):
-        """Every node of an editor document, those inside its subgraphs too."""
-        definitions = editor.get("definitions")
-        subgraphs = (
-            definitions.get("subgraphs") if isinstance(definitions, dict) else []
-        )
-        for holder in [editor, *(subgraphs if isinstance(subgraphs, list) else [])]:
-            nodes = holder.get("nodes") if isinstance(holder, dict) else None
+        """Every node of an editor document, those inside its subgraphs too.
+
+        ComfyUI writes every subgraph's definition into the root's
+        ``definitions.subgraphs``, a nested one included, but what is scrubbed
+        here must not depend on where a serialiser puts them: a definition
+        holding definitions of its own is walked as well.
+        """
+        holders = [editor]
+        while holders:
+            holder = holders.pop()
+            if not isinstance(holder, dict):
+                continue
+            nodes = holder.get("nodes")
             for node in nodes if isinstance(nodes, list) else []:
                 if isinstance(node, dict):
                     yield node
+            definitions = holder.get("definitions")
+            subgraphs = (
+                definitions.get("subgraphs") if isinstance(definitions, dict) else None
+            )
+            if isinstance(subgraphs, list):
+                holders.extend(subgraphs)
 
     def _widget_strings(node: dict):
         """The strings among an editor node's widget values, list or object."""

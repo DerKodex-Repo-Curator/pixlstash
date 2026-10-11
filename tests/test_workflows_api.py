@@ -18493,6 +18493,18 @@ def test_a_layout_holds_no_credential_the_graph_holds(saving):
     assert opened["editor"]["nodes"][1]["widgets_values"] == ["", 3]
     assert "example-key" not in json.dumps(opened)
 
+    # Wherever a serialiser puts a subgraph's definition: a node of one
+    # nested inside another runs as "<outer>:<inner>:<id>".
+    graph["20:21:8"] = graph.pop("8")
+    inner = {"id": "inner", "nodes": [dict(keyed)]}
+    outer = {"id": "outer", "nodes": [], "definitions": {"subgraphs": [inner]}}
+    nested = _editor(definitions={"subgraphs": [outer]})
+    r = _put_graph(saving, saving.manual, graph, editor=nested)
+    assert r.status_code == 200 and r.json()["version"] == 3, r.text
+    opened = _opened(saving, saving.manual, all_stages="true")
+    assert opened["editor"] is not None
+    assert "example-key" not in json.dumps(opened)
+
 
 def test_open_says_where_the_people_loader_goes(a_persons_lora):
     """Where a run splices a person's LoRA: straight after the model source.
@@ -18609,6 +18621,26 @@ def test_a_layout_that_cannot_be_kept_never_fails_the_save(saving):
         )
         == []
     )
+
+
+def test_a_layout_that_will_not_compare_never_fails_the_open(saving):
+    """`GET …/graph` answered before there were layouts: a graph that cannot
+    be matched to the kept layout opens without it, never a 500.
+
+    Wrong if the read answers an error, or hands the layout back unmatched.
+    """
+    graph = _strength(0.7)
+    r = _put_graph(saving, saving.manual, graph, editor=_editor())
+    assert r.status_code == 200, r.text
+    assert _opened(saving, saving.manual, all_stages="true")["editor"] is not None
+
+    def broken(*args, **kwargs):
+        raise TypeError("this graph will not compare")
+
+    saving.monkeypatch.setattr(workflows_routes.run_service, "graph_structure", broken)
+    opened = _opened(saving, saving.manual, all_stages="true")
+    assert opened["editor"] is None
+    assert opened["workflow"]["5"]["inputs"]["strength_model"] == 0.7
 
 
 def test_the_key_comfyui_holds_always_saves_as_comfyui(saving):
