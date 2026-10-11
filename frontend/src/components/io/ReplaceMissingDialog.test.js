@@ -180,6 +180,28 @@ describe("ReplaceMissingDialog", () => {
     );
   });
 
+  it("says each one's tab when several manual workflows load it, and none can be written", async () => {
+    const wrapper = mount(ReplaceMissingDialog, {
+      props: {
+        open: true,
+        heads: [
+          {
+            name: "solo.sft",
+            names: ["solo.sft"],
+            workflowIds: ["manual:x", "manual:y"],
+            workflowsByName: { "solo.sft": ["manual:x", "manual:y"] },
+          },
+        ],
+      },
+      global: { stubs: { teleport: true } },
+    });
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("Loaded by");
+    expect(wrapper.text()).toContain(
+      "2 manual workflows load it; pick another model on each one's Workflow tab and save.",
+    );
+  });
+
   it("lists a refusal by workflow, keeps going, and stays open", async () => {
     setWorkflowModelFix
       .mockRejectedValueOnce({ response: { data: { detail: "Not loaded there." } } })

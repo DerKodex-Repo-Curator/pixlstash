@@ -301,7 +301,7 @@ const TAKE_OUT_CHOICES = [
   {
     id: "workflow",
     label: "The workflow",
-    hint: "Opens Edit LoRAs… with that entry deleted, ready to save as a new workflow.",
+    hint: "Opens Edit LoRAs… on the workflow, with that loader already removed.",
   },
 ];
 

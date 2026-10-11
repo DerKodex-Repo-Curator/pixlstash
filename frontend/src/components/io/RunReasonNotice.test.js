@@ -239,7 +239,7 @@ describe("a LoRA the owner removed, and one that cannot be removed", () => {
     const said = wrapper.text().replace(/\s+/g, " ");
     expect(said).toContain("Cinematic portrait can't run.");
     expect(said).toContain(
-      "stacked-a.safetensors cannot be skipped for this run. It sits in a stacker whose other LoRAs are present.",
+      "stacked-a.safetensors cannot be removed from this run. It sits in a stacker whose other LoRAs are present.",
     );
     expect(rail(wrapper)).not.toContain("rrn--notice");
   });

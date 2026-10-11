@@ -238,7 +238,7 @@ export function readReason(reason) {
       const file = String(reason.file || "").split(/[\\/]/).pop();
       const said = String(reason.text || reason.detail || reason.message || "").trim();
       return read(
-        `${file || "This LoRA"} cannot be skipped for this run. ${said || "Its loader cannot be taken out of this graph."} Use it, or edit the workflow's LoRAs.`,
+        `${file || "This LoRA"} cannot be removed from this run. ${said || "Its loader cannot be taken out of this graph."} Put it back, or edit the workflow's LoRAs.`,
       );
     }
     case "stage_not_skippable": {

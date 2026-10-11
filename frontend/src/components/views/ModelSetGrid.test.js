@@ -371,6 +371,24 @@ describe("the cards", () => {
     expect(replace().exists()).toBe(false);
   });
 
+  it("says each one's Workflow tab when several manual workflows load a missing model", async () => {
+    const { wrapper, store } = await mountGrid({
+      combinations: [
+        {
+          ...combination('+["pair.sft"]', []),
+          missing: [{ name: "pair.sft", workflow_ids: ["manual:p1", "manual:p2"] }],
+        },
+      ],
+    });
+    store.toggleSet("missing:pair.sft");
+    await wrapper.vm.$nextTick();
+    const note = wrapper.find('[data-testid="model-set-missing"]').text();
+    expect(note.replace(/\s+/g, " ")).toContain("Manual workflows load it:");
+    expect(note.replace(/\s+/g, " ")).toContain(
+      "pick another model on each one's Workflow tab and save to change that.",
+    );
+  });
+
   it("ranges from the first missing card after select-all", async () => {
     const { store } = await mountGrid({
       combinations: ["a", "b", "c"].map((n) => ({
