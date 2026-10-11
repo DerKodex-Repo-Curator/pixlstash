@@ -5,17 +5,31 @@
     :title="title"
     :subtitle="subtitle"
     :persistent="submitting || dirty"
-    @close="onRequestClose"
+    @close="close"
     @keydown.esc="onEscape"
   >
-    <p v-if="loadFailed" class="rund-note rund-note--bad" role="alert">
+    <!-- Focusable, for the one failure that takes the control holding focus
+         with it: a save that landed and could not be read again (`keep`). -->
+    <p
+      v-if="loadFailed"
+      :id="loadFailedId"
+      ref="loadFailedLine"
+      class="rund-note rund-note--bad"
+      role="alert"
+      tabindex="-1"
+    >
       {{ loadFailed }}
     </p>
     <p v-else-if="loading" class="rund-note" role="status">
       Reading what this runs…
     </p>
 
-    <div v-else class="rund">
+    <!-- Inert while a band save is out, from its POST until the workflow is
+         read again: an edit made then is in neither the save nor the form
+         that comes back, so it would be lost without a word. This is every
+         control that edits; the band, whose name field keeps the keyboard,
+         and the footer are outside it. -->
+    <div v-else class="rund" :inert="Boolean(saving) || undefined">
       <!-- ── Left: what the run is made from ──────────────────────────────
            168px wide and the picture 168×252, which is the design's own
            measurement and nothing else in the app uses: a component-local
@@ -66,7 +80,7 @@
               variant="ghost"
               icon-left="sitemap-outline"
               tooltip="Close this and show the workflow in the Workflows view"
-              :disabled="submitting"
+              :disabled="submitting || Boolean(saving)"
               @click="openInWorkflows"
             >
               Open in Workflows
@@ -230,11 +244,11 @@
                say. A suggestion, never a blocker: a word's button goes once
                the word is typed, and the box then marks the word instead.
                ONE line whatever is missing: the words do not shrink, the
-               buttons do, and past three one button adds them all. -->
+               buttons do, and past three one button adds them all. Said by
+               `triggerLive`, below the form: this line comes and goes. -->
           <p
             v-if="triggerAdds.length"
             class="rund-note rund-note--bad rund-trigger"
-            role="status"
             data-testid="rund-trigger"
           >
             <span class="rund-trigger-text">
@@ -810,23 +824,29 @@
          body and readable at rest, because a count nobody sees is how a
          one-off gets saved by accident. Run never saves, and neither does
          closing. -->
-    <template v-if="savesOffered && !loading && !loadFailed">
+    <template v-if="!loading && !loadFailed">
       <div
-        v-if="band.count"
+        v-if="bandShown"
+        ref="bandBox"
         class="rund-band"
         :class="{ 'rund-band--naming': naming }"
         role="group"
         aria-label="Changes from the workflow"
         data-testid="rund-band"
       >
-        <!-- Save as new… is this band's one question: the name. -->
+        <!-- Save as new… is this band's one question: the name. Read-only
+             while the save is out, never disabled: a disabled field cannot
+             hold focus, and a save sent with Enter and refused would leave
+             the keyboard nowhere, beside the sentence saying what to fix.
+             Dimmed by hand for it, as `disabled` would have. -->
         <template v-if="naming">
           <AppInput
             ref="nameField"
             v-model="newName"
             class="rund-band-name"
+            :class="{ 'run-refused': Boolean(saving) }"
             label="Name of the new workflow"
-            :disabled="Boolean(saving)"
+            :readonly="Boolean(saving)"
             @enter="saveAsNew"
             @keydown.esc="backFromName"
             @keydown.stop
@@ -840,6 +860,7 @@
             Back
           </AppButton>
           <AppButton
+            ref="bandVerb"
             size="sm"
             :loading="saving === 'new'"
             :aria-disabled="newName.trim() ? undefined : 'true'"
@@ -869,6 +890,7 @@
                in the tab order so the server's reason, which it points at, can
                be reached. `saveOver` does the refusing. -->
           <AppButton
+            ref="bandVerb"
             size="sm"
             icon-left="content-save-outline"
             :loading="saving === 'save'"
@@ -904,9 +926,19 @@
       >
         {{ bandNote }}
       </p>
-      <!-- Said once when the band arrives, never per key. -->
-      <p class="visually-hidden" role="status" aria-live="polite">{{ bandLive }}</p>
     </template>
+
+    <!-- In the document for as long as the popup is, and only their words
+         change: a reader announces a change to a region it already knows, not
+         a region that arrives holding its sentence. Each is emptied when what
+         it says is no longer so, or the same words coming back change nothing.
+         The band's is said once when it arrives, never per key. -->
+    <p class="visually-hidden" role="status" aria-live="polite" data-testid="rund-band-live">
+      {{ bandLive }}
+    </p>
+    <p class="visually-hidden" role="status" aria-live="polite" data-testid="rund-trigger-live">
+      {{ triggerLive }}
+    </p>
 
     <template #footer>
       <!-- Status, never an alert: it says a gesture is already done, and the
@@ -915,7 +947,14 @@
       <p v-if="keptAs" :id="savedReasonId" class="rund-note rund-kept">
         Already kept as “{{ keptAs.name || "Untitled" }}”.
       </p>
-      <p v-if="runBlocker" :id="blockerId" class="rund-note rund-note--bad">
+      <!-- A wait is the popup's own work and no fault of the form's, so it is
+           not said in a refusal's colour. Focusable: it is here for the whole
+           of a save, which nothing in the band is, so it is where focus waits
+           when a save leaves it nowhere else (`keep`). -->
+      <p v-if="runWait" :id="blockerId" ref="runWaitLine" class="rund-note" tabindex="-1">
+        {{ runWait }}
+      </p>
+      <p v-else-if="runBlocker" :id="blockerId" class="rund-note rund-note--bad">
         {{ runBlocker }}
       </p>
       <!-- `aria-disabled`, not `disabled`, for this dialog's own stated
@@ -924,7 +963,7 @@
            inert. `onSave` does the refusing. -->
       <AppButton
         :icon-left="keptAs ? 'check' : 'bookmark-plus-outline'"
-        :disabled="!activeKey || submitting"
+        :disabled="!activeKey || !formRead || submitting || Boolean(saving)"
         :aria-disabled="keptAs ? 'true' : undefined"
         :aria-describedby="keptAs ? savedReasonId : undefined"
         @click="onSave"
@@ -932,7 +971,7 @@
         {{ keptAs ? "Saved" : "Save as recipe" }}
       </AppButton>
       <span class="rund-sp" />
-      <AppButton :disabled="submitting || Boolean(saving)" @click="onRequestClose">Cancel</AppButton>
+      <AppButton :disabled="submitting || Boolean(saving)" @click="close">Cancel</AppButton>
       <!-- `aria-disabled`, not `disabled`: a natively-disabled button is out of
            the tab order, so a keyboard reader could never reach the reason
            `aria-describedby` points at. `submit()` does the actual refusing.
@@ -943,7 +982,7 @@
         :loading="submitting"
         :class="{ 'run-refused': !canRun }"
         :aria-disabled="canRun ? undefined : 'true'"
-        :aria-describedby="runBlocker ? blockerId : undefined"
+        :aria-describedby="runWhyId"
         @click="submit"
       >
         {{ runLabel }}
@@ -967,7 +1006,7 @@
     :settings-aside="seedMode === 'keep' ? KEEP_SEED_ASIDE : ''"
     :source-picture-id="pictureIds[0] ?? null"
     @close="saveOpen = false"
-    @handoff="emit('close')"
+    @handoff="close"
     @saved="onSaved"
   />
 
@@ -1057,6 +1096,7 @@ import {
   noChanges,
   over,
   saveFailure,
+  SIZE_INPUTS,
   suggestedName,
   whole,
 } from "../../utils/workflowChanges";
@@ -1115,7 +1155,6 @@ const MAX_SEED = 2n ** 64n - 1n;
 const MAX_VALUES = 200;
 /** The numbers drawn as one-column cells, in this order, when set each run. */
 const SCALAR_PINNED = ["steps", "cfg", "cfg_scale", "guidance"];
-const SIZE_INPUTS = ["width", "height"];
 const CHECKPOINT_INPUT = "ckpt_name";
 /**
  * Said in the Save dialog when the form is set to keep the source's seed.
@@ -1131,17 +1170,26 @@ const KEEP_SEED_ASIDE =
 const SEPARATOR = "/";
 
 const blockerId = useId();
+const loadFailedId = useId();
 const picsLabelId = useId();
 const stackId = useId();
 const stageId = useId();
 /** Bumped per open, so a slower earlier read cannot write over a later one. */
 let loadToken = 0;
+/**
+ * Bumped per read of a workflow into the form: the open, a move of the
+ * picker, the read after a band save. Only the newest may write any of the
+ * form. Two reads of ONE workflow can be out at once (picked, left, picked
+ * again), and the key cannot tell those apart.
+ */
+let readAsk = 0;
 const runDialog = useRunDialogStore();
 const entityLists = useEntityListsStore();
 const workflows = useWorkflowsStore();
 
 const loading = ref(false);
 const loadFailed = ref("");
+const loadFailedLine = ref(null);
 const submitting = ref(false);
 const submitError = ref("");
 const preflighting = ref(false);
@@ -1298,9 +1346,7 @@ const changedLoras = computed(() =>
     .map((row) => ({
       node_id: row.node_id,
       field: row.field,
-      sha256: row.sha256,
-      strength_model: Number.isFinite(row.strength) ? row.strength : null,
-      ...clipStrength(row),
+      ...loraEntry(row),
     })),
 );
 
@@ -1314,6 +1360,19 @@ const changedLoras = computed(() =>
 function clipStrength(row) {
   if (row.baseClip === undefined || !Number.isFinite(row.strength)) return {};
   return { strength_clip: row.clipTied ? row.strength : row.baseClip };
+}
+
+/**
+ * What a row's loader is set to, as a run and a save both state it. The CLIP
+ * strength is said with the model's: left unsaid, a save would write the one
+ * and leave the graph's other beside it.
+ */
+function loraEntry(row) {
+  return {
+    sha256: row.sha256,
+    strength_model: Number.isFinite(row.strength) ? row.strength : null,
+    ...clipStrength(row),
+  };
 }
 
 /**
@@ -1380,6 +1439,11 @@ const workflowId = computed({
   },
 });
 
+/**
+ * The owner picked another workflow. Only that: a save that moves the popup
+ * onto the workflow it made goes by `keep`, which leaves the run's own
+ * choices where they are, since that workflow is this graph.
+ */
 async function switchCard(key, keepEdits) {
   // What the last save and the server's verbs said is about the card left.
   leaveBand();
@@ -1397,20 +1461,54 @@ async function switchCard(key, keepEdits) {
   // would replace the new dialog's refusals with the old gesture's.
   const token = loadToken;
   try {
-    await loadCard(key, { keepEdits });
-    if (token !== loadToken) return;
-    if (runsWorkflowItself.value) {
-      // The loaders, and what waits, are the workflow's: read for this one.
-      await loadOwn(key, token);
-      if (token !== loadToken || key !== activeKey.value) return;
-      layOwn();
-    }
-    await runPreflight(token);
+    if (await readWorkflow(key, token, keepEdits)) await runPreflight(token);
   } catch (err) {
-    if (token === loadToken) {
+    // A workflow the picker has since left is nobody's failure to be told.
+    if (token === loadToken && key === activeKey.value) {
       loadFailed.value = errorMessage(err, "Could not read that workflow.");
     }
   }
+}
+
+/**
+ * The workflow whose card, loaders and waiting changes the form holds, or "".
+ *
+ * From the instant the picker moves until those are read, the form is still a
+ * reading of the workflow left (its edits, its LoRA rows, its version), and
+ * nothing of it may be saved or run against the one arrived at. So the band
+ * and Run both ask `formRead`, and a read that fails leaves it unset.
+ */
+const formKey = ref("");
+const formRead = computed(() => formKey.value === activeKey.value);
+
+/**
+ * Read the workflow in the picker into the form: its card, and on a run of
+ * the workflow by itself its loaders and what waits on it, laid over the
+ * form. False when the picker moved on, the popup was reopened or a newer
+ * read began meanwhile, and then it has written nothing since: not its card,
+ * not its failure.
+ */
+async function readWorkflow(key, token, keepEdits = false) {
+  const ask = ++readAsk;
+  const stale = () =>
+    token !== loadToken || key !== activeKey.value || ask !== readAsk;
+  formKey.value = "";
+  try {
+    await loadCard(key, ask, { keepEdits });
+    if (stale()) return false;
+    if (runsWorkflowItself.value) {
+      // The loaders, and what waits, are the workflow's: read for this one.
+      await loadOwn(key, token, ask);
+      if (stale()) return false;
+      layOwn();
+    }
+  } catch (err) {
+    // A read a newer one replaced has no failure to report either.
+    if (stale()) return false;
+    throw err;
+  }
+  formKey.value = key;
+  return true;
 }
 
 /**
@@ -1449,6 +1547,16 @@ function baseModelFiles(detailCard) {
 }
 /** The owner's checkpoint, or null while the row is untouched. */
 const checkpointEdit = ref(null);
+/** Whether the last checkpoint set was typed in the row's box (`setCheckpoint`). */
+const typedCheckpoint = ref(false);
+/**
+ * Whether the row holds a name the owner typed in its box, which a list
+ * arriving under the caret would take away. A file picked from a list, or
+ * laid from the Workflow tab (`layOwn`), is not that, and holds no list back.
+ */
+const checkpointTyped = computed(
+  () => typedCheckpoint.value && checkpointEdit.value !== null,
+);
 
 /**
  * The card's parameters. Its `ckpt_name` is left out where the default recipe
@@ -1672,9 +1780,11 @@ const checkpointBase = computed(() => inPlaceOf(checkpointNamed.value));
 const checkpointValue = computed(() => checkpointEdit.value ?? checkpointBase.value);
 const checkpointEdited = computed(() => checkpointEdit.value !== null);
 
-function setCheckpoint(raw) {
+/** Set the row, as the box does it: a pick or a laid change says `typed` is false. */
+function setCheckpoint(raw, typed = true) {
   const text = String(raw ?? "").trim();
   checkpointEdit.value = text === checkpointBase.value ? null : text;
+  typedCheckpoint.value = typed;
 }
 
 /**
@@ -1732,7 +1842,7 @@ const checkpointOptions = computed(() => {
       checkpointValue.value,
     );
   }
-  return [
+  const offered = [
     {
       value: fix.file,
       label: fix.missing
@@ -1741,6 +1851,12 @@ const checkpointOptions = computed(() => {
     },
     ...modelOptionsOf(fix.options),
   ];
+  // A file laid from the Workflow tab, or brought from another workflow, may
+  // be none of these, and a select whose value is not an option draws empty.
+  const value = checkpointValue.value;
+  return offered.some((option) => option.value === value)
+    ? offered
+    : [{ value, label: shownModel(value) }, ...offered];
 });
 
 const checkpointFixNote = computed(() => {
@@ -1769,7 +1885,7 @@ const checkpointFixNote = computed(() => {
 });
 
 function pickCheckpoint(filename) {
-  setCheckpoint(filename);
+  setCheckpoint(filename, false);
   void runPreflight();
 }
 
@@ -1824,7 +1940,7 @@ async function offerCheckpoints(found, key, token) {
   }
   if (!current()) return;
   // Typed over while the read was out: the owner's name stays in its box.
-  if (checkpointEdit.value !== null) {
+  if (checkpointTyped.value) {
     checkpointFix.value = null;
     return;
   }
@@ -2052,7 +2168,8 @@ const fixedFields = computed(() =>
  */
 async function freeField(field) {
   const key = activeKey.value;
-  if (!key || freeing.value) return;
+  // The whole list is the card's: mid-switch that is the workflow left's.
+  if (!key || !formRead.value || freeing.value) return;
   const all = card.value?.defaults || [];
   const current = Array.isArray(pins.value)
     ? pins.value
@@ -2267,6 +2384,9 @@ watch(
 /** The gesture, refused here rather than by a `disabled` nobody can reach. */
 function onSave() {
   if (keptAs.value || !activeKey.value || submitting.value) return;
+  // The recipe is made from the form, so not from one a save or a read is
+  // still putting right.
+  if (saving.value || !formRead.value) return;
   saveOpen.value = true;
 }
 
@@ -2525,6 +2645,11 @@ const triggerAdds = computed(() => {
     words: [word],
   }));
 });
+/** The trigger-word line for a reader: the words still missing, or nothing. */
+const triggerLive = computed(() => {
+  const words = triggerAdds.value.flatMap((add) => add.words);
+  return words.length ? `Trigger word missing: ${words.join(", ")}.` : "";
+});
 const promptField = ref(null);
 
 /** Put the words first, where a trigger word goes, and hand the box back. */
@@ -2666,7 +2791,26 @@ const runBlocker = computed(() => {
   if (reasonsBlock(reasons.value)) return "This run cannot start; see below.";
   return "";
 });
-const canRun = computed(() => !runBlocker.value && !submitting.value);
+/**
+ * Why Run waits on the popup's own work, or "": the workflow in the picker
+ * not read into the form yet, or a band save still out. Between a save's
+ * POST and the re-read behind it the form is neither the workflow as it was
+ * nor as it is, and a run then would send the one over the other.
+ */
+const runWait = computed(() => {
+  // A read that failed is said where it failed, and is no wait.
+  if (!activeKey.value || loadFailed.value) return "";
+  if (!formRead.value) return "Reading this workflow…";
+  return saving.value ? "Run waits for the save to finish." : "";
+});
+const canRun = computed(
+  () => formRead.value && !saving.value && !runBlocker.value && !submitting.value,
+);
+/** The sentence that says why Run does nothing, wherever it is printed. */
+const runWhyId = computed(() => {
+  if (loadFailed.value) return loadFailedId;
+  return runWait.value || runBlocker.value ? blockerId : undefined;
+});
 /**
  * The refusals drawn as notices. `picture_input_unfilled` is not one of them:
  * the Pictures section draws that as an empty slot, and a second, louder copy
@@ -2800,7 +2944,7 @@ function readSwap(key, file, kind) {
  * (what goes with the checkpoint and the loader can load). A row nothing
  * answers for stays as it was: text, or the checkpoint's typed box.
  */
-function loadModelChoices(key, token) {
+function loadModelChoices(key, token, read) {
   for (const row of Object.keys(modelChoices)) delete modelChoices[row];
   if (!runsWorkflowItself.value || !key) return;
   const asks = modelRows.value
@@ -2818,10 +2962,10 @@ function loadModelChoices(key, token) {
   for (const ask of asks) {
     readSwap(key, ask.file, ask.kind)
       .then((answer) => {
-        if (token !== loadToken || key !== activeKey.value) return;
+        if (token !== loadToken || key !== activeKey.value || read !== readAsk) return;
         // Typed over while the read was out: the owner's name stays in its
         // box, which a list arriving under the caret would take away.
-        if (ask.row === CHECKPOINT_ROW && checkpointEdit.value !== null) return;
+        if (ask.row === CHECKPOINT_ROW && checkpointTyped.value) return;
         const options = modelOptionsOf(answer?.replacements || []);
         if (options.length) modelChoices[ask.row] = options;
       })
@@ -2850,10 +2994,16 @@ const changesState = ref(null);
 const laid = ref(noChanges());
 /** The part it has no control for, which a run of the workflow still carries. */
 const carried = ref(noChanges());
+/**
+ * All of what waited as `layOwn` read it, `laid` and `carried` together, or
+ * null where it could not be read: a run's `waited`. Kept by `layOwn` and not
+ * read off `changesState`, which a read that is out has already emptied.
+ */
+const seen = ref(null);
 /** `formChanges` as the form opened, for `dirty`. */
 const changesAtOpen = ref(JSON.stringify(noChanges()));
 const savesOffered = computed(
-  () => runsWorkflowItself.value && changesState.value !== null,
+  () => runsWorkflowItself.value && formRead.value && changesState.value !== null,
 );
 
 /** The parameters the owner changed; both halves of a Size when either moved. */
@@ -2907,14 +3057,9 @@ const formAnswers = {
   lora(nodeId, field) {
     const row = loraRowAt(nodeId, field);
     if (!row) return undefined;
-    if (row.skipped) return null;
-    return {
-      sha256: row.sha256,
-      strength_model: Number.isFinite(row.strength) ? row.strength : null,
-      // As a changed row states it: left unsaid, the save would write the
-      // model strength and leave the graph's clip strength beside it.
-      ...clipStrength(row),
-    };
+    // `null` only for a row `skippedLoras` also names, which is what
+    // `answering` relies on. Otherwise as a changed row states it.
+    return row.skipped ? null : loraEntry(row);
   },
   stage(name) {
     return stageRows.value.some((row) => row.name === name) ? stageOn(name) : undefined;
@@ -2980,6 +3125,10 @@ const newName = ref("");
 const nameField = ref(null);
 const asNewButton = ref(null);
 const bandNoteLine = ref(null);
+const bandBox = ref(null);
+/** The verb a save is sent with: Save, or the name question's own button. */
+const bandVerb = ref(null);
+const runWaitLine = ref(null);
 
 /** Asked a beat after the last edit, never per keystroke. */
 const VERBS_ASK_MS = 300;
@@ -3021,15 +3170,20 @@ watch(
 );
 onBeforeUnmount(() => clearTimeout(verbTimer));
 
+/** Whether the band is on screen: something differs, on a form that is drawn. */
+const bandShown = computed(
+  () => band.value.count > 0 && !loading.value && !loadFailed.value,
+);
+
 // The band's arrival is said once; its count and list are there to be read.
+// Unsaid when it goes: the same words written again are no change to say.
 watch(
-  () => band.value.count > 0,
+  bandShown,
   (shown) => {
-    if (shown) {
-      bandNote.value = "";
-      bandLive.value =
-        "This run differs from the workflow. Save and Save as new are above the Run button.";
-    }
+    if (shown) bandNote.value = "";
+    bandLive.value = shown
+      ? "This run differs from the workflow. Save and Save as new are above the Run button."
+      : "";
   },
 );
 
@@ -3071,32 +3225,95 @@ function tellSaved(key, savedAs = "") {
  */
 async function saveOver() {
   if (saving.value || submitting.value || !band.value.count || saveClosed.value) return;
-  saving.value = "save";
-  bandError.value = "";
-  const token = loadToken;
-  const key = activeKey.value;
-  const stillHere = () => token === loadToken && key === activeKey.value;
-  try {
+  await keep("save", async (key) => {
     await saveWorkflow(key, {
       changes: saveChanges.value,
       version: changesState.value?.version ?? null,
     });
-    tellSaved(key);
-    if (!stillHere()) return;
+    return { key, done: "Saved to this workflow." };
+  });
+}
+
+/**
+ * One band save, either verb. *write* is the POST: it answers the workflow
+ * the form is of afterwards, and the line that says what was done.
+ *
+ * **The save is settled when its POST answers**, and only that failing is
+ * printed as a save that failed. What follows is reading the workflow again,
+ * so the chips go and the LoRA rows are built from the chain the save left;
+ * prompt, seed, count, people and pictures are the run's and are not touched,
+ * for a new workflow as for this one, since the new one is this graph. A
+ * read that fails there is said as that. The form is then a reading of a
+ * workflow that has moved on, so it is taken down (`loadFailed`): nothing of
+ * it can be run over the save, and no second workflow made from it.
+ *
+ * **Focus is never left on nothing by a save.** A keyboard in the band stays
+ * where it is. Focus anywhere else waits on the footer's sentence: a click
+ * does not focus a button everywhere (Safari), so a verb can be pressed with
+ * the caret still in the form, which goes inert. Not on the verb, which is
+ * disabled while it spins, nor on the band, which leaves when the POST lands;
+ * whatever it held waits on that sentence from then. The save's end puts it
+ * on the line saying what was done, or back on the verb where it was refused.
+ */
+async function keep(verb, write) {
+  const waited = !bandBox.value?.contains(document.activeElement);
+  saving.value = verb;
+  bandError.value = "";
+  // Once drawn: the sentence comes with `saving`.
+  const waitInFooter = () => void nextTick(() => runWaitLine.value?.focus());
+  if (waited) waitInFooter();
+  const token = loadToken;
+  const from = activeKey.value;
+  const here = (key) => token === loadToken && key === activeKey.value;
+  try {
+    let saved = null;
+    try {
+      saved = await write(from);
+    } catch (err) {
+      if (here(from)) bandError.value = saveFailure(err);
+    }
+    if (saved) tellSaved(from, saved.key === from ? "" : saved.key);
+    if (!saved?.key || !here(from)) {
+      // The band is still up. Focus that waited goes to the verb pressed,
+      // once that can hold it again; one that had the keyboard gets it back
+      // from `AppButton` itself, and the name field never lost it.
+      saving.value = "";
+      if (waited) {
+        await nextTick();
+        bandVerb.value?.focus?.();
+      }
+      return;
+    }
+    // Saved, so none of these is an edit of the workflow any more. The band
+    // goes with them, and with it whatever in it held focus.
+    const held = document.activeElement;
+    if (!held || held === document.body || bandBox.value?.contains(held)) waitInFooter();
     clearChanges();
-    await loadCard(key);
-    if (!stillHere()) return;
-    await loadOwn(key, token);
-    if (!stillHere()) return;
-    layOwn();
-    bandNote.value = "Saved to this workflow.";
+    formKey.value = "";
+    let at = from;
+    try {
+      if (saved.key !== from && props.source?.pickWorkflow) {
+        // Before the picker moves: its list has no row for the new workflow.
+        cards.value = (await listWorkflowCards()).cards;
+        if (!here(from)) return;
+      }
+      activeKey.value = at = saved.key;
+      if (!(await readWorkflow(at, token))) return;
+    } catch (err) {
+      console.warn(`[run] saved, but could not read ${saved.key} again`, err);
+      if (!here(at)) return;
+      loadFailed.value = `${saved.done} It could not be read again, so it cannot be run from here: close this and open it again.`;
+      // The band's buttons went with the form: focus must not fall to the page.
+      await nextTick();
+      loadFailedLine.value?.focus?.();
+      return;
+    }
+    bandNote.value = saved.done;
     // The band's buttons went with it: focus must not fall to the page. The
     // line it lands on is read then, so nothing else announces it.
     await nextTick();
     bandNoteLine.value?.focus?.();
     await runPreflight(token);
-  } catch (err) {
-    if (stillHere()) bandError.value = saveFailure(err);
   } finally {
     saving.value = "";
   }
@@ -3119,6 +3336,8 @@ async function askName() {
 }
 
 async function backFromName() {
+  // The name is the save's while it is out, and its field still has the keys.
+  if (saving.value) return;
   naming.value = false;
   await nextTick();
   asNewButton.value?.focus?.();
@@ -3131,32 +3350,13 @@ async function backFromName() {
 async function saveAsNew() {
   const name = newName.value.trim();
   if (saving.value || submitting.value || !name || !band.value.count) return;
-  saving.value = "new";
-  bandError.value = "";
-  const token = loadToken;
-  const key = activeKey.value;
-  const stillHere = () => token === loadToken && key === activeKey.value;
-  try {
+  await keep("new", async (key) => {
     const saved = await saveWorkflowAsNew(key, { name, changes: saveChanges.value });
-    tellSaved(key, saved?.workflow_id || "");
-    if (!stillHere() || !saved?.workflow_id) return;
-    if (props.source?.pickWorkflow) {
-      cards.value = (await listWorkflowCards()).cards;
-      if (!stillHere()) return;
-    }
-    // The new workflow holds every change, so none is an edit of it.
-    clearChanges();
-    activeKey.value = saved.workflow_id;
-    await switchCard(saved.workflow_id, false);
-    if (token !== loadToken || activeKey.value !== saved.workflow_id) return;
-    bandNote.value = `Saved as ${saved.name || name}.`;
-    await nextTick();
-    bandNoteLine.value?.focus?.();
-  } catch (err) {
-    if (stillHere()) bandError.value = saveFailure(err);
-  } finally {
-    saving.value = "";
-  }
+    return {
+      key: saved?.workflow_id || "",
+      done: `Saved as ${saved?.name || name}.`,
+    };
+  });
 }
 
 /** The inputs nothing fills, which is what keeps the Run button back. */
@@ -3496,6 +3696,11 @@ function runBody() {
     }
   } else {
     body.workflow_id = activeKey.value;
+    // What waited in the Workflow tab as this form was laid from it, whatever
+    // the owner undid of it here: a save made after the run clears that much
+    // and keeps what was edited in the tab since. Unsent where it could not
+    // be read, and the server reads it for itself.
+    if (seen.value) body.waited = seen.value;
   }
   const setId = picksDestination.value ? destinationSetId.value : props.context?.set_id;
   if (loraSource.value?.entityType === "character") {
@@ -3842,11 +4047,11 @@ function ownSlots(chain) {
  * was made against. Neither holds the popup back: without the loaders there
  * are no LoRA rows, and without the other there is no band.
  */
-async function loadOwn(key, token = loadToken) {
+async function loadOwn(key, token, ask) {
   chainSlots.value = [];
   changesState.value = null;
   if (!runsWorkflowItself.value || !key) return;
-  loadModelChoices(key, token);
+  loadModelChoices(key, token, ask);
   const [chain, state] = await Promise.all([
     getLoraChain(key).catch((err) => {
       console.warn(`[run] could not read the LoRA loaders of ${key}`, err);
@@ -3857,7 +4062,7 @@ async function loadOwn(key, token = loadToken) {
       return null;
     }),
   ]);
-  if (token !== loadToken || key !== activeKey.value) return;
+  if (token !== loadToken || key !== activeKey.value || ask !== readAsk) return;
   chainSlots.value = ownSlots(chain);
   changesState.value = state;
 }
@@ -3892,7 +4097,7 @@ function layOwn() {
       if (loraBase(model.filename) === loraBase(row.file)) delete modelEdits[row.key];
       else modelEdits[row.key] = model.filename;
     } else {
-      setCheckpoint(model.filename);
+      setCheckpoint(model.filename, false);
     }
     took.models.push(model);
   }
@@ -3936,6 +4141,7 @@ function layOwn() {
   }
   laid.value = took;
   carried.value = left;
+  seen.value = changesState.value && waiting;
   changesAtOpen.value = JSON.stringify(clean ? formChanges.value : noChanges());
 }
 
@@ -3963,8 +4169,7 @@ async function dropLoras() {
  */
 function editLoras(workflowId) {
   const key = workflowId || activeKey.value;
-  if (!key) return;
-  emit("close");
+  if (!key || !close()) return;
   void router?.push?.(editLorasRoute(key));
 }
 
@@ -3974,9 +4179,8 @@ function editLoras(workflowId) {
  * because the screen it opens on is behind it.
  */
 function openInWorkflows() {
-  if (!activeKey.value || submitting.value) return;
   const key = activeKey.value;
-  emit("close");
+  if (!key || !close()) return;
   void router?.push?.({ name: "workflows", query: { workflow: key } });
 }
 
@@ -4044,7 +4248,7 @@ async function loadAdapters() {
  * switching workflows is a deliberate comparison, and a steps value that
  * quietly went back to 8 is the thing the design asks to be told about.
  */
-async function loadCard(key, { keepEdits = false } = {}) {
+async function loadCard(key, ask, { keepEdits = false } = {}) {
   // A popup reopened on another source while this read was out has its own
   // card; this one's answer must not replace it.
   const token = loadToken;
@@ -4054,7 +4258,7 @@ async function loadCard(key, { keepEdits = false } = {}) {
   // into a list, so a ComfyUI that does not answer leaves the boxes typed.
   getWorkflowFormInputs(key)
     .then((body) => {
-      if (token === loadToken && key === activeKey.value) {
+      if (token === loadToken && key === activeKey.value && ask === readAsk) {
         formOptions.value = optionsByAddress(body.nodes);
         formNodeNames.value = nodesByAddress(body.nodes);
       }
@@ -4063,7 +4267,9 @@ async function loadCard(key, { keepEdits = false } = {}) {
       console.warn(`[run] could not read the choices of ${key}`, err);
     });
   const detail = await getWorkflowCard(key);
-  if (token !== loadToken) return;
+  // Nor one the picker has since left: two moves in a row answer in either
+  // order, and the slower must not put its card under the faster's key.
+  if (token !== loadToken || key !== activeKey.value || ask !== readAsk) return;
   const next = detail?.card || null;
   pins.value = detail?.pins ?? null;
   modelFixes.value = detail?.model_fixes ?? [];
@@ -4111,8 +4317,16 @@ async function loadCard(key, { keepEdits = false } = {}) {
   card.value = next;
 }
 
+/** Bumped per pre-flight, so only the newest one's answer is kept. */
+let preflightAsk = 0;
+
 async function runPreflight(token = loadToken) {
-  const mine = () => token === loadToken;
+  // Asked on every edit, around every switch and after every save, and
+  // answered in any order: an older answer is about a form that has moved on,
+  // and nothing of it (the refusals, the picture rows a pin is written from,
+  // the notices, the prompt, a checkpoint offer) may land over a newer one's.
+  const ask = (preflightAsk += 1);
+  const mine = () => token === loadToken && ask === preflightAsk;
   if (!activeKey.value) {
     reasons.value = [];
     bypassed.value = [];
@@ -4192,7 +4406,9 @@ async function runPreflight(token = loadToken) {
 
 async function load() {
   const token = (loadToken += 1);
-  const mine = () => token === loadToken;
+  const ask = ++readAsk;
+  // The open's own writes of the form are a read's, like any other.
+  const mine = () => token === loadToken && ask === readAsk;
   // Everything else starts empty: App.vue mounts a fresh popup per source.
   loading.value = true;
   // The caller's own checkbox, explicit false included; else the popup decides.
@@ -4219,7 +4435,7 @@ async function load() {
       (loraSource.value ? workflowOptions.value[0]?.value : "") ||
       "";
     activeKey.value = key;
-    if (key) await loadCard(key);
+    if (key) await loadCard(key, ask);
     if (!mine()) return;
     prompt.value = props.source?.emptyPrompt ? "" : basePrompt.value;
     negative.value = baseNegative.value;
@@ -4235,12 +4451,14 @@ async function load() {
     // simply has no digest to send, which is exactly what leaving it untouched
     // means anyway.
     await loadAdapters();
+    if (!mine()) return;
     if (offersPerson.value) void loadPeople();
     if (runsWorkflowItself.value && key) {
-      await loadOwn(key, token);
+      await loadOwn(key, token, ask);
       if (!mine()) return;
     }
     layOwn();
+    formKey.value = key;
     addedAtOpen.value = addedSignature.value;
     applySavedRecipe();
     destinationSetId.value =
@@ -4257,7 +4475,8 @@ async function load() {
       loadFailed.value = errorMessage(err, "Could not read what this would run.");
     }
   } finally {
-    if (mine()) loading.value = false;
+    // The open's, not the read's: a read that replaced it does not end it.
+    if (token === loadToken) loading.value = false;
   }
 }
 
@@ -4318,11 +4537,15 @@ function rememberSet(value) {
   }
 }
 
-function onRequestClose() {
-  // A band save in flight is this popup's work: closing over it would leave
-  // its answer nowhere to land, so closing waits for it like a run does.
-  if (submitting.value || saving.value) return;
+/**
+ * Close, unless a run or a band save is out: either is this popup's work, and
+ * closing over it would leave its answer nowhere to land. Every close is made
+ * here but the run's own, which is that answer. True when it closed.
+ */
+function close() {
+  if (submitting.value || saving.value) return false;
   emit("close");
+  return true;
 }
 
 /**
@@ -4334,9 +4557,7 @@ function onRequestClose() {
  * to back out of first.
  */
 function onEscape(event) {
-  if (submitting.value || saving.value) return;
-  event.stopPropagation();
-  emit("close");
+  if (close()) event.stopPropagation();
 }
 
 async function submit() {
