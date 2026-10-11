@@ -19199,6 +19199,24 @@ def test_a_layout_that_cannot_be_kept_never_fails_the_save(saving):
     )
 
 
+def test_a_hub_failure_while_writing_a_layout_never_fails_the_save(saving):
+    import sqlite3
+
+    r = _put_graph(saving, saving.manual, _strength(0.7), editor=_editor())
+    assert r.status_code == 200, r.text
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    with saving.monkeypatch.context() as patch:
+        patch.setattr(workflows_routes.workflow_versions, "write_layout", locked)
+        r = _put_graph(saving, saving.manual, _strength(0.6), editor=_editor(moved=3))
+    assert r.status_code == 200 and r.json()["version"] == 3, r.text
+    opened = _opened(saving, saving.manual, all_stages="true")
+    assert opened["workflow"]["5"]["inputs"]["strength_model"] == 0.6
+    assert opened["editor"]["nodes"][0]["pos"] == [100, 40]
+
+
 def test_a_vault_failure_while_keeping_a_layout_never_fails_the_save(saving):
     from sqlalchemy.exc import SQLAlchemyError
 
@@ -19283,6 +19301,34 @@ def test_the_key_comfyui_holds_always_saves_as_comfyui(saving, scope, bound):
         assert _versions_of(saving, saving.manual)[-1][1] == "mcp"
     finally:
         saving.owner.delete(f"{API}/users/me/token/{token_id}")
+
+
+@pytest.mark.parametrize("inputs", [None, [], "invalid", {}])
+def test_graph_structure_includes_nodes_without_dictionary_inputs(inputs):
+    graph = {"1": {"class_type": "Source", "inputs": {}}}
+    before = run_service.graph_structure(graph)
+    graph["2"] = {"class_type": "Primitive", "inputs": inputs}
+    added = run_service.graph_structure(graph)
+    assert added != before
+    assert added == run_service.graph_structure(
+        {"1": graph["1"], "2": {"class_type": "Primitive"}}
+    )
+    graph["2"]["class_type"] = "AnotherPrimitive"
+    assert run_service.graph_structure(graph) != added
+    graph["2"]["class_type"] = "Primitive"
+    graph["3"] = graph.pop("2")
+    assert run_service.graph_structure(graph) != added
+    del graph["3"]
+    assert run_service.graph_structure(graph) == before
+
+
+def test_graph_structure_ignores_widgets_but_tracks_connections():
+    graph = {"1": {"class_type": "Primitive", "inputs": {"value": 1}}}
+    before = run_service.graph_structure(graph)
+    graph["1"]["inputs"]["value"] = 2
+    assert run_service.graph_structure(graph) == before
+    graph["1"]["inputs"]["value"] = ["2", 0]
+    assert run_service.graph_structure(graph) != before
 
 
 def test_empty_adapter_loaders_come_out_of_a_chain_in_one_pass():

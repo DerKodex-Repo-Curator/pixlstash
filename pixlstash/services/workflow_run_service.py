@@ -1662,12 +1662,14 @@ def graph_structure(graph: dict) -> str:
             str(node.get("class_type")),
             sorted(
                 (name, str(value[0]), value[1])
-                for name, value in node["inputs"].items()
+                for name, value in (
+                    node["inputs"] if isinstance(node.get("inputs"), dict) else {}
+                ).items()
                 if is_link(value)
             ),
         )
         for node_id, node in graph.items()
-        if isinstance(node, dict) and isinstance(node.get("inputs"), dict)
+        if isinstance(node, dict)
     )
     return hashlib.sha256(json.dumps(wiring).encode()).hexdigest()
 
