@@ -1891,6 +1891,57 @@ def _prompt_inputs(graph: dict, detected: WorkflowIO) -> set[tuple[str, str]]:
     return found
 
 
+def run_inputs(graph: dict, object_info: Optional[dict]) -> dict[tuple[str, str], str]:
+    """``{(node id, input): "prompt" | "seed"}``: what a run sets in *graph*.
+
+    The inputs :func:`apply_prompts` and the seed pass write. They belong to
+    the run and to recipes, never to the workflow (#1846).
+    """
+    try:
+        detected = detect_workflow_io(graph)
+    except WorkflowGraphError as exc:
+        logger.info("No prompt inputs read, the graph will not reduce: %s", exc)
+        detected = WorkflowIO()
+    found = {pair: "prompt" for pair in _prompt_inputs(graph, detected)}
+    for target in run_seed_targets(graph, object_info):
+        found[(str(target["node_id"]), str(target["field"]))] = "seed"
+    return found
+
+
+def keep_run_inputs(
+    graph: dict, before: dict, object_info: Optional[dict]
+) -> tuple[list[str], set[tuple[str, str]]]:
+    """Put the prompt and seed *before* holds back into a graph stored over it.
+
+    A whole graph saved over a workflow carries whatever the canvas held, and
+    ComfyUI re-rolls the seed on every queue: taken as sent, each save would
+    be a new version for a seed nobody chose. Only a literal over a literal
+    of the same node: a wire the owner added is an edit and stays.
+
+    Args:
+        graph: The API-format graph being stored, mutated in place.
+        before: The graph it replaces.
+
+    Returns:
+        ``(kinds put back, the run's inputs in graph)``: ``"prompt"`` and
+        ``"seed"`` where one differed, and every ``(node id, input)`` a run
+        sets, for a caller comparing the rest.
+    """
+    found = run_inputs(graph, object_info)
+    kept = set()
+    for (node_id, name), kind in found.items():
+        node, old = graph.get(node_id), before.get(node_id)
+        if not isinstance(old, dict) or old.get("class_type") != node.get("class_type"):
+            continue
+        was = (old.get("inputs") or {}).get(name)
+        now = node["inputs"].get(name)
+        if was is None or is_link(was) or is_link(now) or was == now:
+            continue
+        node["inputs"][name] = was
+        kept.add(kind)
+    return sorted(kept), set(found)
+
+
 def _node_title(node: dict) -> str:
     """The name its author gave a node in ComfyUI, or ``""``."""
     meta = node.get("_meta")

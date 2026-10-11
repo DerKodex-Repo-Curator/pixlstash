@@ -17630,6 +17630,199 @@ def test_a_graph_read_with_the_waiting_changes_clears_them(saving):
     assert _changes(saving, saving.manual)["count"] == 0
 
 
+def _with_steps(env, name, steps=20):
+    """A manual workflow that is CHAIN_DOCUMENT with a step count, and the
+    address of that parameter."""
+    graph = json.loads(json.dumps(CHAIN_DOCUMENT))
+    graph["3"]["inputs"]["steps"] = steps
+    manual = workflows_routes.store_manual_workflow(
+        env.server.hub, name, graph, "import"
+    )
+    values = env.owner.get(f"{API}/workflows/{manual}").json()["card"][
+        "default_recipe"
+    ]["values"]
+    (found,) = [v for v in values if v["input_name"] == "steps"]
+    return manual, {"slot_label": found["slot_label"], "input_name": "steps"}
+
+
+def _opened(env, workflow_id, **params) -> dict:
+    r = env.owner.get(f"{API}/workflows/{workflow_id}/graph", params=params)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_a_parameter_changed_in_a_saved_graph_is_the_workflows_from_then_on(saving):
+    """Ctrl+S in ComfyUI means one thing: the canvas is the workflow.
+
+    Wrong if the next run still uses the value typed in PixlStash (the edit
+    was stored and then spoken over), or if the answer does not name it.
+    """
+    manual, steps = _with_steps(saving, "Steps typed")
+    r = _save(saving, manual, changes={"values": [{**steps, "value": 25}]})
+    assert r.status_code == 200, r.text
+    opened = _opened(saving, manual, all_stages="true")["workflow"]
+    assert opened["3"]["inputs"]["steps"] == 25
+
+    # Saved back as it was opened: nothing new, and the typed value stands.
+    r = _put_graph(saving, manual, json.loads(json.dumps(opened)))
+    assert r.status_code == 200 and r.json()["unchanged"] is True, r.text
+    assert [row[0] for row in _versions_of(saving, manual)] == [1]
+
+    opened["3"]["inputs"]["steps"] = 30
+    r = _put_graph(saving, manual, opened, source="comfyui")
+    assert r.status_code == 200 and r.json()["version"] == 2, r.text
+    (changed,) = r.json()["parameters"]
+    assert (changed["input_name"], changed["was"], changed["now"]) == ("steps", 25, 30)
+    assert _run(saving, workflow_id=manual)["3"]["inputs"]["steps"] == 30
+
+    # A parameter nobody typed is named the same way.
+    plain, _steps = _with_steps(saving, "Steps read")
+    graph = _opened(saving, plain)["workflow"]
+    graph["3"]["inputs"]["steps"] = 12
+    r = _put_graph(saving, plain, graph)
+    assert [(c["was"], c["now"]) for c in r.json()["parameters"]] == [(20, 12)]
+
+
+def test_a_saved_graph_leaves_the_workflow_its_prompt_and_seed(saving):
+    """ComfyUI re-rolls the seed on every queue, so a habitual Ctrl+S would
+    otherwise be a version each time; and a prompt is a run's (#1846)."""
+    graph = json.loads(json.dumps(CHAIN_DOCUMENT))
+    graph["3"]["inputs"]["seed"] = 987654
+    graph["6"]["inputs"]["text"] = "a dog"
+    r = _put_graph(saving, saving.manual, json.loads(json.dumps(graph)))
+    assert r.status_code == 200, r.text
+    assert (r.json()["unchanged"], r.json()["not_saved"]) == (True, ["prompt", "seed"])
+    assert [row[0] for row in _versions_of(saving, saving.manual)] == [1]
+
+    # Beside a real edit they are still not taken.
+    graph["5"]["inputs"]["strength_model"] = 0.9
+    r = _put_graph(saving, saving.manual, graph)
+    assert (r.json()["version"], r.json()["not_saved"]) == (2, ["prompt", "seed"])
+    stored = _versions_of(saving, saving.manual)[-1][2]
+    assert (stored["3"]["inputs"]["seed"], stored["6"]["inputs"]["text"]) == (
+        CHAIN_DOCUMENT["3"]["inputs"]["seed"],
+        "a cat",
+    )
+    assert stored["5"]["inputs"]["strength_model"] == 0.9
+
+
+def test_a_stage_that_waited_switched_off_stays_off_through_comfyui(
+    runnable, monkeypatch
+):
+    """A stage is no part of a graph, so the graph that comes back cannot say
+    it was off. Wrong if the stage is on again and nothing waits."""
+    _upscaled_run(runnable, monkeypatch, object_info=True)
+    plain = workflows_routes._read_object_info
+    monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url, **_: plain(url)
+    )
+    with runnable.server.hub.transaction() as conn:
+        conn.execute(
+            "UPDATE workflow_topology_core SET specials = 'upscale' "
+            "WHERE topology_hash = ?",
+            (RUN_TOPOLOGY,),
+        )
+    _put_changes(runnable, RUN_WF, stages={"upscale": False})
+    opened = _opened(runnable, RUN_WF, waiting="true", all_stages="true")
+    assert opened["waiting_applied"] is True and "5" in opened["workflow"]
+
+    r = _put_graph(runnable, RUN_WF, opened["workflow"], waiting_applied=True)
+    assert r.status_code == 200 and r.json()["new_workflow"] is False, r.text
+    recipe = runnable.owner.get(f"{API}/workflows/{RUN_WF}").json()["card"][
+        "default_recipe"
+    ]
+    assert recipe["stages"] == {"upscale": False}
+    assert _changes(runnable, RUN_WF)["count"] == 0
+    # Off by default, and still in the graph to be switched on again.
+    assert "5" not in _run(runnable, workflow_id=RUN_WF)
+    assert "5" in _run(runnable, workflow_id=RUN_WF, keep_stages=["upscale"])
+
+
+def test_a_graph_stored_as_a_new_workflow_leaves_nothing_waiting_behind(saving):
+    """The checkpoint pick that waited is in the new workflow: the one it was
+    opened from must not still show it unsaved."""
+    _comfyui_lists(saving, "realvisxl.safetensors", "krea.safetensors")
+    address = _model_address(saving, saving.manual)
+    _put_changes(
+        saving,
+        saving.manual,
+        models=[{"address": address, "filename": "krea.safetensors"}],
+    )
+    opened = _opened(saving, saving.manual, waiting="true")
+    assert opened["workflow"]["1"]["inputs"]["ckpt_name"] == "krea.safetensors"
+    r = _put_graph(
+        saving, saving.manual, opened["workflow"], waiting_applied=True, name="On Krea"
+    )
+    assert r.status_code == 200 and r.json()["new_workflow"] is True, r.text
+    assert _changes(saving, saving.manual)["count"] == 0
+
+    # Not read with them applied: what waits is the owner's to keep.
+    _put_changes(
+        saving,
+        saving.manual,
+        models=[{"address": address, "filename": "krea.safetensors"}],
+    )
+    r = _put_graph(saving, saving.manual, opened["workflow"], name="On Krea again")
+    assert r.json()["new_workflow"] is True, r.text
+    assert _changes(saving, saving.manual)["count"] == 1
+
+
+def test_a_shelf_loader_swapped_for_another_model_is_a_new_workflow(saving):
+    """PixlStash's own loader names its model by shelf row id, so the rule
+    read no checkpoint at all and stored the swap as a version."""
+    hub = saving.server.hub
+    other = _h("another-shelf-checkpoint")
+    with hub.transaction() as conn:
+        conn.execute("DELETE FROM model WHERE sha256 = ?", (other,))
+        conn.execute(
+            "INSERT INTO model (file_kind, filename, sha256, provenance) "
+            "VALUES ('checkpoint', 'krea.safetensors', ?, 'scanned')",
+            (other,),
+        )
+    try:
+        ids = {
+            row["filename"]: str(row["id"])
+            for row in hub.fetchall(
+                "SELECT id, filename FROM model WHERE filename IN (?, ?)",
+                (_SHELF_FILENAME, "krea.safetensors"),
+            )
+        }
+
+        def loading(shelf_id):
+            graph = json.loads(json.dumps(CHAIN_DOCUMENT))
+            graph["1"] = {
+                "class_type": "PixlStashCheckpointLoader",
+                "inputs": {"checkpoint_id": shelf_id},
+            }
+            return graph
+
+        manual = workflows_routes.store_manual_workflow(
+            hub, "By shelf id", loading(ids[_SHELF_FILENAME]), "import"
+        )
+        # The same model spelled as a JSON number is the same model.
+        r = _put_graph(saving, manual, loading(int(ids[_SHELF_FILENAME])))
+        assert r.status_code == 200 and r.json()["new_workflow"] is False, r.text
+
+        r = _put_graph(saving, manual, loading(ids["krea.safetensors"]), name="Krea")
+        assert r.status_code == 200, r.text
+        assert r.json()["new_workflow"] is True and "realvisxl" in r.json()["reason"]
+        assert r.json()["workflow_id"] != manual
+    finally:
+        with hub.transaction() as conn:
+            conn.execute("DELETE FROM model WHERE sha256 = ?", (other,))
+
+
+def test_a_run_from_a_recipe_ends_what_an_earlier_run_offered(saving):
+    """The offer is until the next run of that workflow. A recipe's run keeps
+    no changes of its own, and must not leave the Tasks tab offering the ones
+    of the run before it."""
+    recipe_id = _recipe_on(saving, saving.manual, saving.manual)
+    _run(saving, workflow_id=saving.manual, **SKIP_FIVE)
+    assert _changes(saving, saving.manual)["ran"] is not None
+    _run(saving, saved_recipe_id=recipe_id, target=saving.manual)
+    assert _changes(saving, saving.manual)["ran"] is None
+
+
 def test_a_graph_that_replaces_an_installed_checkpoint_is_a_new_workflow(saving):
     """Where Save would be refused: the caller is at no screen that could
     offer Save as new, so the graph is stored and the answer says where."""
@@ -17818,6 +18011,57 @@ def test_the_people_loader_never_comes_back_into_a_workflow(a_persons_lora):
     kept = _versions_of(env, env.manual)[-1][2]["9"]["inputs"]
     assert (kept["adapter_sha256"], kept["strength_model"]) == (STYLE_DIGEST, 0.4)
     assert kept["adapter_sha256_2"] == ""
+
+
+def test_a_persons_row_is_left_out_of_every_read_however_the_graph_came_in(
+    a_persons_lora,
+):
+    """A graph imported as a new workflow is stored as sent, so the read has
+    to hold rule 4 per row: the person's row beside a style LoRA came back on
+    Open and on Run."""
+    env = a_persons_lora
+    info = json.loads(json.dumps(CHAIN_OBJECT_INFO))
+    info["PixlStashMultiAdapterLoader"] = {
+        "input": {"required": {"model": ["MODEL", {}], "clip": ["CLIP", {}]}},
+        "output": ["MODEL", "CLIP", "STRING"],
+    }
+    env.monkeypatch.setattr(
+        workflows_routes,
+        "_read_object_info",
+        lambda url, **_: (json.loads(json.dumps(info)), None),
+    )
+    with env.server.hub.transaction() as conn:
+        conn.execute("DELETE FROM model WHERE sha256 = ?", (STYLE_DIGEST,))
+        conn.execute(
+            "INSERT INTO model (file_kind, kind, filename, sha256, provenance) "
+            "VALUES ('adapter', 'unknown', 'style.safetensors', ?, 'scanned')",
+            (STYLE_DIGEST,),
+        )
+    try:
+        r = env.owner.post(
+            f"{API}/comfyui/workflows/import",
+            json={
+                "name": "People and a style",
+                "workflow": _with_people_loader(
+                    (RUN_ADAPTER_DIGEST, 0.8), (STYLE_DIGEST, 0.4)
+                ),
+            },
+        )
+        assert r.status_code == 200, r.text
+        landed = r.json()["workflow_id"]
+        for graph in (
+            _opened(env, landed)["workflow"],
+            _run(env, workflow_id=landed),
+        ):
+            rows = graph["9"]["inputs"]
+            assert RUN_ADAPTER_DIGEST not in rows.values(), rows
+            assert (rows["adapter_sha256"], rows["strength_model"]) == (
+                STYLE_DIGEST,
+                0.4,
+            )
+    finally:
+        with env.server.hub.transaction() as conn:
+            conn.execute("DELETE FROM model WHERE sha256 = ?", (STYLE_DIGEST,))
 
 
 def test_a_graph_whose_persons_lora_cannot_be_taken_out_is_not_stored(a_persons_lora):

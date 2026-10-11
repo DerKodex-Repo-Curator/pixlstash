@@ -2934,7 +2934,9 @@ recipe, since the Run popup sends every parameter it shows; LoRA slots and
 removals as sent. Until the next run of that workflow, a save, or the
 workflow getting another version (the read then answers `ran: null`). Prompt,
 seed, count, the pictures put in and the people picked (`add_loras`) are the
-run's and are never kept.
+run's and are never kept. A run from pictures or a saved recipe is a recipe
+laid over the workflow, not a set of changes to it: it keeps none, and being
+the next run of that workflow it ends what an earlier run offered.
 
 **Versions.** `workflow_version.source` is what the version menu's words are
 made from (`workflow_versions.reason`), so no column was added: `models` and
@@ -2966,8 +2968,42 @@ graph cannot be mis-applied, and the version before is one step back. And
 without it they are kept, stale. A graph that is the workflow's current one
 stores nothing (`unchanged`).
 
+**The canvas is the workflow, less what belongs to a run.** The graph that
+comes back holds whatever the canvas held, so the write decides what of it is
+the workflow's:
+
+- **Prompt and seed are not taken** (`workflow_run_service.keep_run_inputs`):
+  the inputs a run writes (`run_inputs`) keep the stored graph's value, a
+  literal over a literal of the same node, and the answer says which differed
+  (`not_saved`). ComfyUI re-rolls the seed on every queue, so taken as sent
+  every Ctrl+S would be a version; a graph that differs by nothing else is
+  `unchanged`. A graph stored as a new workflow is taken as sent.
+- **Parameters are taken, also over a value the owner typed.** `GET …/graph`
+  writes the typed parameters into the graph it hands out, so the comparison
+  is against that (`unchanged` also when the graph is the stored one with
+  them applied), and a parameter the graph holds another value for is named
+  in the answer (`parameters`: `{label, slot_label, input_name, was, now}`,
+  `_parameters_a_graph_changes`). Where the owner had typed one, its row is
+  dropped with the model and LoRA rows the graph speaks for
+  (`_superseded_defaults`): left in, the row would run over the edit just
+  saved. Like those rows it does not come back when the owner goes back a
+  version; the earlier graph's own value does.
+- **Stages are written beside the graph**, every one, as a Save that makes a
+  version writes them, with the waiting set's over them when the graph was
+  read with it applied: a stage is no part of a graph, so one that waited
+  switched off would otherwise be on again with nothing left waiting. A graph
+  stored as a new workflow gets them as rows of its own, and with
+  `waiting_applied` leaves nothing waiting on the workflow it was opened from.
+- **A shelf loader's model is compared as the file its row names**
+  (`shelf_filenames`), so rule 2 reads a `checkpoint_id` swap as the
+  checkpoint change it is, and the same model by id and by name as no change.
+
 **A person's LoRA is held out at every write (rule 4).** Reads already go
-without one (`_leave_out_character_loras`, best effort). A write may not be
+without one (`_leave_out_character_loras`, best effort), per row too: a
+digest row holding a person's LoRA beside another LoRA is emptied as a save
+empties it, which is what holds the rule for a graph imported as a new
+workflow, stored as sent (an editor document cannot be stripped here;
+taking the loader off before Export is #1852's). A write may not be
 best effort: `_left_out_people` runs `workflow_run_service.take_out_person_loras`
 on the graph about to be stored, by Save, Save as new and the whole-graph
 write alike, and a loader that cannot be taken out refuses the write (409)

@@ -164,7 +164,9 @@ whether a newer version was replaced. Two things the answer reports instead \
 of doing: a graph that replaces a checkpoint this machine has is stored as a \
 new workflow (new_workflow), and a LoRA attached to a person is left out of \
 the stored graph (left_out), since who a picture is of belongs to a run or a \
-recipe; run_workflow's add_loras names a person. A different prompt, \
+recipe; run_workflow's add_loras names a person. A prompt or seed in a graph \
+saved over a workflow is not stored (not_saved); a changed parameter is, and \
+the answer lists it (parameters). A different prompt, \
 seed, LoRA or value is not a graph edit: pass it to preflight_workflow and \
 run_workflow instead of re-importing, or every tweak becomes a new graph.
 

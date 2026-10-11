@@ -109,6 +109,7 @@ from pixlstash.routes._helpers import require_hub
 from pixlstash.services.a1111_recipe import reduce_a1111
 from pixlstash.services.comfyui_recipe_service import (
     CLIP_TYPE_BY_FAMILY,
+    LORA_DIGEST_FIELD_RE,
     LORA_FILENAME_FIELD_RE,
     MAX_SEED_64,
     PIXLSTASH_ADAPTER_LOADER,
@@ -155,6 +156,7 @@ from pixlstash.services import workflow_run_service as run_service
 from pixlstash.services.workflow_card_service import (
     BASE_MODEL_KINDS,
     BEST_SCORE,
+    Default,
     EDITED,
     LORA_OFF,
     SHELF_MODEL_GONE,
@@ -1793,6 +1795,22 @@ class WorkflowGraphSaved(BaseModel):
         description=(
             "LoRAs left out because they are attached to a person: "
             "`{node_id, class_type, field, file, character_ids}`."
+        ),
+    )
+    parameters: list[dict] = Field(
+        default_factory=list,
+        description=(
+            "The workflow's parameters the graph changed, each "
+            "`{label, slot_label, input_name, was, now}`. The graph's value "
+            "is the workflow's from here on, also where the owner had typed "
+            "another."
+        ),
+    )
+    not_saved: list[str] = Field(
+        default_factory=list,
+        description=(
+            "`prompt` and `seed` where the graph held another than the "
+            "workflow's: they belong to a run, and the workflow keeps its own."
         ),
     )
 
@@ -5222,12 +5240,40 @@ def create_router(server) -> APIRouter:
                 recipe.workflow_id,
                 entry.get("node_id"),
             )
+        # A digest row beside another LoRA (the multi-adapter loader) is not
+        # the whole node: the row is emptied, as a save empties it.
+        rows = [
+            (node_id, slot_field)
+            for node_id, slot_field in slots
+            if LORA_DIGEST_FIELD_RE.match(slot_field)
+            and isinstance(
+                ((graph.get(node_id) or {}).get("inputs") or {}).get(slot_field), str
+            )
+            and graph[node_id]["inputs"][slot_field]
+        ]
+        emptied = (
+            run_service.take_out_person_loras(graph, rows, object_info)[0]
+            if rows
+            else []
+        )
+        done = {(entry["node_id"], entry["field"]) for entry in emptied}
+        for entry in emptied:
+            logger.info(
+                "[workflows] Workflow %s runs without the character LoRA in "
+                "row %s of node %s.",
+                recipe.workflow_id,
+                entry["field"],
+                entry["node_id"],
+            )
         for reason in left_in:
+            held = reason.as_dict()
+            if (str(held.get("node_id")), str(held.get("field"))) in done:
+                continue
             logger.info(
                 "[workflows] Workflow %s keeps a character LoRA that cannot be "
                 "bypassed: %s",
                 recipe.workflow_id,
-                reason.as_dict(),
+                held,
             )
 
     def _lora_person(graph: dict, object_info: dict | None) -> int | None:
@@ -6786,7 +6832,7 @@ def create_router(server) -> APIRouter:
                 prompts=prompts,
                 error=str(getattr(exc, "detail", None) or exc),
             )
-        _keep_run_changes(asked)
+        _keep_run_changes(asked, groups)
         return RunResult(
             status="success", runs=len(prompts), groups=groups, prompts=prompts
         )
@@ -9145,7 +9191,7 @@ def create_router(server) -> APIRouter:
             values=changes.values,
         )
 
-    def _keep_run_changes(asked: RunRequest) -> None:
+    def _keep_run_changes(asked: RunRequest, groups: list[RunGroup]) -> None:
         """Keep what a run of a workflow changed, so it can still be saved.
 
         Until the next run of that workflow, or a save: a run that changed
@@ -9154,10 +9200,24 @@ def create_router(server) -> APIRouter:
         value that is the default is not a change. Prompt, seed, count, the
         pictures put in and the people picked (``add_loras``) are the run's
         and are never kept. Never fails the run, which is queued by now.
+
+        A run from pictures or a saved recipe is a recipe laid over the
+        workflow, not a set of changes to it: it keeps none, and it is still
+        the next run of each workflow in *groups*, so what an earlier run
+        kept for one goes.
         """
-        if asked.workflow_id is None:
-            return
         hub = _hub()
+        if asked.workflow_id is None:
+            for workflow_id in sorted({g.workflow_id for g in groups if g.workflow_id}):
+                try:
+                    write_changes(hub, workflow_id, RAN, None)
+                except Exception:
+                    logger.exception(
+                        "[workflows] What an earlier run of %s changed could "
+                        "not be cleared, so the Tasks tab may still offer it.",
+                        workflow_id,
+                    )
+            return
         try:
             recipe = _defaults(hub, asked.workflow_id)
             values = {
@@ -9996,6 +10056,54 @@ def create_router(server) -> APIRouter:
                 ):
                     inputs[name] = kept[name]
 
+    def _parameters_a_graph_changes(
+        recipe: DefaultRecipe | None, graph: dict, run_only: set[tuple[str, str]]
+    ) -> list[tuple[Default, object]]:
+        """``[(parameter, the value graph holds)]`` where that is another.
+
+        Against the default recipe, which is what the graph was opened with:
+        the value typed for a parameter, else the one read for it. Addressed
+        as a run addresses them (``_apply_addressed``). A wired input holds
+        no value, and *run_only* (prompt, seed) is no parameter of a workflow.
+        """
+        if recipe is None or not recipe.values:
+            return []
+        try:
+            labels, core = _graph_labels(graph, "parameters")
+        except HTTPException as exc:
+            logger.warning(
+                "[workflows] The parameters a graph saved over workflow %s "
+                "changes cannot be read, so the ones typed for it stand: %s",
+                recipe.workflow_id,
+                exc.detail,
+            )
+            return []
+        holds: dict[tuple[str, str], list] = {}
+        for node_id, node in graph.items():
+            inputs = node.get("inputs") if isinstance(node, dict) else None
+            if not isinstance(inputs, dict):
+                continue
+            names = [labels.get(node_id)]
+            if node_id in core:
+                names.append(CORE_ADDRESS_PREFIX + core[node_id])
+            for name, value in inputs.items():
+                if (
+                    isinstance(value, (bool, int, float, str))
+                    and (str(node_id), name) not in run_only
+                ):
+                    for label in names:
+                        holds.setdefault((label, name), []).append(value)
+        changed = []
+        for default in recipe.values:
+            other = [
+                value
+                for value in holds.get((default.slot_label, default.input_name), [])
+                if value != default.value
+            ]
+            if other:
+                changed.append((default, other[0]))
+        return changed
+
     def _base_model_a_graph_drops(
         hub, before: dict, after: dict, object_info
     ) -> str | None:
@@ -10010,13 +10118,28 @@ def create_router(server) -> APIRouter:
             # Of the loaders an output reads, where ComfyUI says which those
             # are: one left wired into nothing loads no model.
             live = live_node_ids(graph, object_info) if object_info else None
-            return {
-                normalized_filename(value): (value, widget)
-                for node_id, _cls, widget, value in iter_model_fields_api(graph)
+            loaded = [
+                (widget, value)
+                for node_id, _cls, widget, value in iter_model_fields_api(
+                    graph, shelf_ids_as_text=True
+                )
                 if slot_kind(widget) in BASE_MODEL_KINDS
-                and isinstance(value, str)
                 and (live is None or str(node_id) in live)
-            }
+            ]
+            # A shelf loader holds a row id: compared as the file it names,
+            # so the same model by id and by name is one model. An id the
+            # shelf cannot name loads nothing this machine has.
+            shelf = shelf_filenames(
+                hub, [value for widget, value in loaded if widget == SHELF_ID_FIELD]
+            )
+            found = {}
+            for widget, value in loaded:
+                if widget == SHELF_ID_FIELD:
+                    value = shelf.get(value)
+                    if not value or value == SHELF_MODEL_GONE:
+                        continue
+                found[normalized_filename(value)] = (value, widget)
+            return found
 
         kept = base_files(after)
         for name, (value, widget) in sorted(base_files(before).items()):
@@ -10043,7 +10166,10 @@ def create_router(server) -> APIRouter:
             "A LoRA attached to a person is left out and named in `left_out`; "
             "a row of the multi-adapter loader holding one is emptied, and a "
             "loader left with no adapter is taken out. A graph that is then "
-            "the workflow's current one stores nothing (`unchanged`)."
+            "the workflow's current one stores nothing (`unchanged`). The "
+            "graph's prompt and seed are not stored, since they belong to a "
+            "run (`not_saved`); a parameter it changes is, also over a value "
+            "typed in PixlStash, and is listed in `parameters`."
         ),
         response_model=WorkflowGraphSaved,
         responses={
@@ -10079,14 +10205,61 @@ def create_router(server) -> APIRouter:
         # from ComfyUI's own page arrives often.
         object_info = _owner_object_info()
         before = _card_source(card, workflow_id=workflow_id, object_info=object_info)
+        recipe = _defaults(hub, workflow_id)
+        # What waited, where the graph was read with it applied: its stages
+        # are no part of a graph, so they are written beside it as Save does.
+        held = (
+            _stored_changes(hub, workflow_id)[0] if payload.waiting_applied else None
+        ) or WorkflowChanges()
+        stages = dict(recipe.stages) if recipe else {}
+        unknown = sorted(set(held.stages) - set(stages))
+        if unknown:
+            logger.info(
+                "[workflows] Workflow %s has no %s stage, so what waited for "
+                "it is dropped with the rest.",
+                workflow_id,
+                ", ".join(unknown),
+            )
+        waited = WorkflowChanges(
+            stages={s: on for s, on in held.stages.items() if s in stages}
+        )
+        not_saved: list[str] = []
+        changed: list[tuple[Default, object]] = []
+        unchanged = False
         try:
             # The graph alone: an envelope around it is not part of a workflow.
             graph = deepcopy(api_graph(payload.workflow))
             _keep_stored_secrets(graph, before.graph)
             left_out = _left_out_people(hub, graph, object_info)
-            unchanged = workflow_inbox.content_hash(
-                graph
-            ) == workflow_inbox.content_hash(before.graph)
+            replaced = _base_model_a_graph_drops(hub, before.graph, graph, object_info)
+            if replaced is None:
+                # A graph stored as a new workflow is taken as sent; one saved
+                # over this workflow leaves it the prompt and seed it had.
+                not_saved, run_only = run_service.keep_run_inputs(
+                    graph, before.graph, object_info
+                )
+                # As it was opened: the parameters the owner typed are rows
+                # beside the stored graph, and Open writes them into it.
+                opened = deepcopy(before.graph)
+                _apply_addressed(
+                    opened,
+                    [
+                        RunValue(
+                            slot_label=d.slot_label,
+                            input_name=d.input_name,
+                            value=d.value,
+                        )
+                        for d in (recipe.values if recipe else [])
+                        if d.provenance == EDITED
+                    ],
+                )
+                sent = workflow_inbox.content_hash(graph)
+                unchanged = sent in (
+                    workflow_inbox.content_hash(before.graph),
+                    workflow_inbox.content_hash(opened),
+                )
+                if not unchanged:
+                    changed = _parameters_a_graph_changes(recipe, graph, run_only)
         except RecursionError as exc:
             logger.warning(
                 "A graph sent to save over workflow %s nests too deeply to read: %s",
@@ -10099,15 +10272,23 @@ def create_router(server) -> APIRouter:
             ) from exc
         if unchanged:
             if payload.waiting_applied:
-                write_changes(hub, workflow_id, WAITING, None)
+                with hub.transaction() as conn:
+                    write_saved_defaults(
+                        conn, workflow_id, [], _default_rows(waited, stages, False)
+                    )
+                    conn.execute(
+                        "DELETE FROM workflow_change WHERE workflow_id = ? "
+                        "AND kind = ?",
+                        (workflow_id, WAITING),
+                    )
                 _announce(request, [workflow_id], "changed")
             return WorkflowGraphSaved(
                 workflow_id=workflow_id,
                 version=before.workflow_version,
                 unchanged=True,
                 left_out=left_out,
+                not_saved=not_saved,
             )
-        replaced = _base_model_a_graph_drops(hub, before.graph, graph, object_info)
         if replaced is not None:
             shown = _display_names(
                 read_grid(hub, server.vault, manual_models=_manual_models).figures
@@ -10122,7 +10303,21 @@ def create_router(server) -> APIRouter:
                 workflow,
                 card,
             )
+            # Its stages are defaults of its own, as after Save as new, and
+            # what waited went into it: nothing is left waiting on this one.
+            with hub.transaction() as conn:
+                write_saved_defaults(
+                    conn, landed, [], _default_rows(waited, stages, True)
+                )
+                if payload.waiting_applied:
+                    conn.execute(
+                        "DELETE FROM workflow_change WHERE workflow_id = ? "
+                        "AND kind = ?",
+                        (workflow_id, WAITING),
+                    )
             _announce(request, [landed], "imported")
+            if payload.waiting_applied:
+                _announce(request, [workflow_id], "changed")
             return WorkflowGraphSaved(
                 workflow_id=landed,
                 name=name,
@@ -10136,10 +10331,34 @@ def create_router(server) -> APIRouter:
                 left_out=left_out,
             )
 
-        superseded = _superseded_defaults(hub, workflow_id, graph)
+        # The graph is the workflow from here on: a parameter the owner had
+        # typed that it now holds another value for no longer speaks over it.
+        superseded = sorted(
+            {
+                *_superseded_defaults(hub, workflow_id, graph),
+                *(
+                    f"{d.slot_label}{OVERRIDE_ADDRESS_SEPARATOR}{d.input_name}"
+                    for d, _now in changed
+                    if d.provenance == EDITED
+                ),
+            }
+        )
+        # Every stage's answer is fixed, as a Save that makes a version fixes
+        # it: until then it may be a vote of the pictures.
+        rows = _default_rows(waited, stages, True)
+        for d, now in changed:
+            logger.info(
+                "[workflows] Workflow %s: the graph saved over it changes %s "
+                "from %r to %r%s.",
+                workflow_id,
+                d.label,
+                d.value,
+                now,
+                ", over the value typed for it" if d.provenance == EDITED else "",
+            )
 
         def also(conn) -> None:
-            write_saved_defaults(conn, workflow_id, superseded, [])
+            write_saved_defaults(conn, workflow_id, superseded, rows)
             if payload.waiting_applied:
                 clear_changes(conn, workflow_id)
             else:
@@ -10170,6 +10389,17 @@ def create_router(server) -> APIRouter:
                 and payload.read_version != before.workflow_version
             ),
             left_out=left_out,
+            parameters=[
+                {
+                    "label": d.label,
+                    "slot_label": d.slot_label,
+                    "input_name": d.input_name,
+                    "was": d.value,
+                    "now": now,
+                }
+                for d, now in changed
+            ],
+            not_saved=not_saved,
         )
 
     # ── Who fits a workflow ─────────────────────────────────────────────────
