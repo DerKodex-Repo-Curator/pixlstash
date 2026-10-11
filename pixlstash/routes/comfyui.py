@@ -7,12 +7,13 @@ import os
 import time
 import uuid
 from collections import Counter
+from copy import deepcopy
 from urllib.parse import quote
 
 import websockets
 from fastapi import APIRouter, Body, HTTPException, Query, Request, WebSocket
 from fastapi.websockets import WebSocketDisconnect
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from send2trash import TrashPermissionError, send2trash
 
 from typing import Optional
@@ -69,8 +70,11 @@ from pixlstash.services.comfyui_ui_graph import (
     is_ui_graph,
 )
 from pixlstash.services.model_shelf_service import (
+    adapter_digest_index,
+    fetch_character_names,
     fetch_locations,
     fetch_model_by_hash,
+    lora_owners,
 )
 from pixlstash.services.picture_recipe_service import (
     describe_recipe,
@@ -89,8 +93,13 @@ from pixlstash.services.workflow_events import announce_changed_workflows
 from pixlstash.services.workflow_inbox import workflow_user_dir
 from pixlstash.services.workflow_hash import (
     WorkflowGraphError,
+    normalized_filename,
     topology_hash as api_topology_hash,
     ui_topology_hash,
+)
+from pixlstash.services.workflow_run_service import (
+    take_out_empty_adapter_loaders,
+    take_out_person_loras,
 )
 from pixlstash.services.workflow_io import (
     api_graph,
@@ -106,7 +115,9 @@ from pixlstash.utils.workflow_ids import MANUAL_PREFIX
 # stay thin and delegate to it. See pixlstash/services/comfyui_service.py.
 from pixlstash.services.comfyui_service import (
     _comfyui_abort,
-    comfyui_can_open_workflows,
+    PACK_OPENS_WORKFLOWS,
+    PACK_SAVES_BACK,
+    comfyui_pixlstash_scripts,
     library_ids_named,
     probe_comfyui,
     pixlstash_node_refusals,
@@ -591,6 +602,124 @@ MAX_RUNS_PER_REQUEST = 200
 # not place, which on this shelf is usually an adapter in a format it has not
 # been taught. Everything else it holds is refused by name (#1310).
 LOADABLE_ADAPTER_FILE_KINDS = frozenset({FILE_ADAPTER, FILE_UNKNOWN})
+
+
+def slot_digests(slots: list[dict], shelf_index) -> dict:
+    """``{(node_id, field): sha256 or None}``: which shelf LoRA each slot loads.
+
+    A digest slot names its LoRA exactly, and counts when the shelf holds
+    that digest. A filename slot is matched on its case-folded basename,
+    and a name two shelf LoRAs share names neither - the rule
+    ``resolveRecipeLoras`` and ``_resolve_against_shelf`` already apply.
+    """
+    by_name, digests = shelf_index or ({}, set())
+    answer: dict[tuple[str, str], str | None] = {}
+    for slot in slots:
+        value = str(slot.get("value") or "")
+        if slot.get("by") == "digest":
+            digest = value.strip().lower()
+            found = digest if digest in digests else None
+        else:
+            matched = by_name.get(normalized_filename(value.strip()), set())
+            found = next(iter(matched)) if len(matched) == 1 else None
+        answer[(str(slot.get("node_id")), str(slot.get("field")))] = found
+    return answer
+
+
+def people_loras_in(hub, vault, graph: dict) -> list[dict]:
+    """Every LoRA slot of an API *graph* holding a LoRA attached to a person.
+
+    Rule 4 of #1846's one question, for a graph that is being stored or
+    exported: ``[{node_id, class_type, field, sha256, character_ids, lora,
+    people}]``,
+    ``lora`` and ``people`` being names for the sentence that says a LoRA was
+    left out (the shelf's name for it, else its file's). A digest row names
+    its LoRA whether or not the shelf still lists it: an attachment outlives
+    a shelf row.
+    """
+    owners = lora_owners(vault)
+    if not owners:
+        return []
+    targets = detect_lora_targets(graph)
+    digests = slot_digests(targets, adapter_digest_index(hub))
+    # (digest, the file the slot names when it names one)
+    held: dict[tuple[str, str], tuple[str, str]] = {}
+    for target in targets:
+        slot = (str(target["node_id"]), str(target["field"]))
+        value = str(target.get("value") or "")
+        by_digest = target.get("by") == "digest"
+        digest = digests.get(slot) or (value.strip().lower() if by_digest else None)
+        if digest in owners:
+            held[slot] = (digest, "" if by_digest else value)
+    if not held:
+        return []
+    wanted = sorted({digest for digest, _ in held.values()})
+    shelf = {
+        str(row["sha256"]).lower(): row
+        for row in hub.fetchall(
+            "SELECT sha256, filename, display_name FROM model WHERE "
+            f"lower(sha256) IN ({','.join('?' * len(wanted))})",
+            tuple(wanted),
+        )
+    }
+    names = fetch_character_names(vault)
+    found = []
+    for (node_id, slot_field), (digest, named) in sorted(held.items()):
+        row = shelf.get(digest)
+        file = (row["filename"] if row else None) or named
+        found.append(
+            {
+                "node_id": node_id,
+                "class_type": (graph.get(node_id) or {}).get("class_type"),
+                "field": slot_field,
+                "sha256": digest,
+                "character_ids": sorted(owners[digest]),
+                "lora": (row["display_name"] if row else None)
+                or os.path.splitext(os.path.basename(file))[0]
+                or digest[:12],
+                "people": [
+                    names[cid] for cid in sorted(owners[digest]) if names.get(cid)
+                ],
+            }
+        )
+    return found
+
+
+def without_peoples_picks(editor: dict, people: set[str]) -> dict:
+    """An editor document with no person's LoRA named in it by digest.
+
+    *people* is every digest attached to a person. An editor document names
+    its widgets by position, so this goes by value: a digest is blanked
+    wherever the document holds it (a row of a loader, a note quoting it), and
+    the entry a PixlStash loader records beside a pick
+    (``properties.pixlstash_models``: the digest with its file and display
+    name) goes whole. Nodes the graph does not run (bypassed, muted) are in
+    the document like any other, so they are covered. A copy; *editor* is not
+    changed. A person's LoRA named by FILE has no empty value: that is the
+    caller's to refuse.
+    """
+    if not people:
+        return editor
+
+    def clean(value, key=None):
+        if isinstance(value, str):
+            return "" if value.strip().lower() in people else value
+        if isinstance(value, list):
+            if key == "pixlstash_models":
+                value = [
+                    entry
+                    for entry in value
+                    if not (
+                        isinstance(entry, dict)
+                        and str(entry.get("sha256") or "").strip().lower() in people
+                    )
+                ]
+            return [clean(item) for item in value]
+        if isinstance(value, dict):
+            return {name: clean(item, name) for name, item in value.items()}
+        return value
+
+    return clean(editor)
 
 
 def _shelf_adapter(hub, sha256) -> dict:
@@ -1501,6 +1630,10 @@ class ComfyUIPixlstashNodeResponse(BaseModel):
     """Whether the owner's ComfyUI can open a PixlStash workflow link."""
 
     can_open_workflows: Optional[bool] = None
+    # Whether a workflow opened there saves back to PixlStash (#1852): the
+    # pack's `save_workflow.js` is loaded. False for an older pack, which
+    # opens a copy; null when ComfyUI cannot be asked.
+    saves_back: Optional[bool] = None
 
 
 class ComfyUIProbeRequest(BaseModel):
@@ -1600,6 +1733,12 @@ class ComfyUIWorkflowConvertResponse(BaseModel):
     matched: bool
     # That manual workflow (the first, where several matched).
     workflow_id: Optional[str] = None
+    # LoRAs attached to a person that the graph loads (rule 4 of #1846): each
+    # `{node_id, class_type, field, sha256, character_ids, lora, people}`.
+    # They are stored
+    # in the document as sent and left out of every read of the workflow, so
+    # Run, Open in ComfyUI and Export go without them; the node says so.
+    left_out: list[dict] = Field(default_factory=list)
 
 
 class ComfyUIRecipeModelSlot(BaseModel):
@@ -2050,7 +2189,13 @@ def create_router(server) -> APIRouter:
     )
     def get_comfyui_pixlstash_node(request: Request):
         comfyui_url = _comfyui_url(server.auth.get_user_for_request(request))
-        return {"can_open_workflows": comfyui_can_open_workflows(comfyui_url)}
+        scripts = comfyui_pixlstash_scripts(comfyui_url)
+        if scripts is None:
+            return {"can_open_workflows": None, "saves_back": None}
+        return {
+            "can_open_workflows": PACK_OPENS_WORKFLOWS in scripts,
+            "saves_back": PACK_SAVES_BACK in scripts,
+        }
 
     @router.get(
         "/comfyui/link",
@@ -2289,8 +2434,11 @@ def create_router(server) -> APIRouter:
             "document is that editor workflow. A workflow not stored yet is "
             "stored first, as an import would. Such a workflow then runs and "
             "takes parameters from the API graph. Sent by the "
-            "ComfyUI-PixlStash node's *Convert for PixlStash* command, one "
-            "workflow at a time."
+            "ComfyUI-PixlStash node's *Export to PixlStash* command, one "
+            "workflow at a time. It is never a version of another workflow. "
+            "A LoRA attached to a person is no part of a workflow: it is "
+            "taken out of the graph that is stored, the loader for picking "
+            "people comes off, and `left_out` names each one and whose it is."
         ),
         response_model=ComfyUIWorkflowConvertResponse,
         responses={
@@ -2320,9 +2468,41 @@ def create_router(server) -> APIRouter:
             )
         hub = require_hub(server, "The workflow library is not open.")
         name = _stem(payload.get("name") or "workflow")
+        # Rule 4 of #1846, as for a graph saved over a workflow: whose LoRAs
+        # the graph loads is said, and the loader for picking people comes
+        # off where nobody is left in it.
         try:
-            migrated, _ = workflow_bindings.migrate_placeholders(workflow)
+            # Before anything walks it: the cap is what bounds the work.
             _within_the_cap(output)
+            # Rule 4 of #1846, as for a graph saved over a workflow: a
+            # person's LoRA is taken out of the graph that is stored, row by
+            # row, and the loader for picking people comes off with nobody
+            # left in it. Best effort where the save refuses: one that cannot
+            # be taken out (ComfyUI not answering for the loader's wiring) is
+            # stored as sent, named like the rest, and left out by every read.
+            left_out = people_loras_in(hub, server.vault, api_graph(output))
+            output = deepcopy(output)
+            if left_out:
+                user = server.auth.get_user_for_request(request)
+                object_info = _read_object_info(_comfyui_url(user), cached=True)[0]
+                _taken, kept_in = take_out_person_loras(
+                    api_graph(output),
+                    [(entry["node_id"], entry["field"]) for entry in left_out],
+                    object_info,
+                )
+                for entry in kept_in:
+                    logger.info(
+                        "An exported workflow keeps a person's LoRA in node %s "
+                        "of its stored graph; reads leave it out: %s",
+                        entry.get("node_id"),
+                        entry.get("message"),
+                    )
+                # The editor document goes without the picks too.
+                workflow = without_peoples_picks(
+                    workflow, set(lora_owners(server.vault))
+                )
+            take_out_empty_adapter_loaders(api_graph(output))
+            migrated, _ = workflow_bindings.migrate_placeholders(workflow)
             canonical = workflow_bindings.canonical(migrated)
             matched = manual_documents_holding(hub, canonical)
             if matched:
@@ -2354,7 +2534,12 @@ def create_router(server) -> APIRouter:
             "imported",
             origin_client_id=getattr(request.state, "origin_client_id", None),
         )
-        return {"name": name, "matched": bool(matched), "workflow_id": workflow_id}
+        return {
+            "name": name,
+            "matched": bool(matched),
+            "workflow_id": workflow_id,
+            "left_out": left_out,
+        }
 
     @router.get(
         "/comfyui/pictures/{picture_id}/workflow",

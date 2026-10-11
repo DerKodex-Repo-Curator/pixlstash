@@ -43,8 +43,11 @@ import threading
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field as dataclass_field
+from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Annotated, Literal, get_args
+
+from sqlalchemy.exc import SQLAlchemyError
 
 from fastapi import APIRouter, Body, HTTPException, Path, Query, Request, Response
 from pydantic import (
@@ -113,6 +116,7 @@ from pixlstash.services.comfyui_recipe_service import (
     LORA_FILENAME_FIELD_RE,
     MAX_SEED_64,
     PIXLSTASH_ADAPTER_LOADER,
+    PIXLSTASH_MULTI_ADAPTER_LOADER,
     apply_adapter,
     apply_filename_swap,
     apply_loader_rewrites,
@@ -194,8 +198,12 @@ from pixlstash.routes.comfyui import (
     _read_object_info,
     _resolve_workflow_path,
     _shelf_adapter,
+    people_loras_in,
+    without_peoples_picks,
+    slot_digests as _slot_digests,
     WorkflowChanged,
     WorkflowFileTooLarge,
+    _within_the_cap,
     runnable_document,
     store_manual_workflow,
     store_over_workflow,
@@ -274,7 +282,7 @@ from pixlstash.utils.adapter_header import (
 )
 from pixlstash.utils.image_processing.image_utils import ImageUtils
 from pixlstash.utils.known_base_models import family_of, modality_of
-from pixlstash.utils.comfyui_utilities import NotAWorkflowError
+from pixlstash.utils.comfyui_utilities import NotAWorkflowError, check_comfy_workflow
 from pixlstash.hub.workflow_origin import FILE_ORIGIN, INBOX_ORIGIN
 from pixlstash.utils.sql_chunking import chunked
 from pixlstash.utils.workflow_ids import MANUAL_PREFIX, WORKFLOW_ID_PATTERN
@@ -1719,6 +1727,15 @@ class WorkflowVersionRow(BaseModel):
 
     version: int
     created_at: str
+    source: str | None = Field(
+        None,
+        description=(
+            "How the version arrived, which `reason` puts in words: `comfyui` "
+            "for one saved from ComfyUI's canvas (and only that; `pull` is a "
+            "file the removed pull read), `mcp`, `models`, `loras`, `run`, "
+            "`revert:<n>`, or the workflow's origin for version 1."
+        ),
+    )
     reason: str | None = Field(
         None,
         description=(
@@ -1748,6 +1765,30 @@ class WorkflowGraphSave(BaseModel):
     """``PUT /workflows/{workflow_id}/graph``: a whole graph saved over a workflow."""
 
     workflow: dict = Field(description="The complete ComfyUI API-format graph.")
+    editor: dict | None = Field(
+        None,
+        description=(
+            "The editor document `workflow` was converted from, as ComfyUI's "
+            "`graphToPrompt` hands the two over. Kept as the workflow's "
+            "layout and opened again by `GET …/graph`. It is never a "
+            "version: the same graph with another layout stores nothing "
+            "but the layout."
+        ),
+    )
+    opening: str | None = Field(
+        None,
+        pattern=r"^[0-9a-f-]{8,64}$",
+        description=(
+            "Which opening in ComfyUI the save comes from: any id the caller "
+            "made when it opened the workflow and sends with every save of "
+            "that opening. The version a save supersedes is taken away when "
+            "it was saved from the same opening and nothing was made on it "
+            "(no picture ran it, no recipe was saved while it was current), "
+            "so an afternoon of Ctrl+S is one version and the one before the "
+            "opening is one step back. Without it every changed save is a "
+            "version."
+        ),
+    )
     read_version: int | None = Field(
         None,
         description=(
@@ -1764,7 +1805,11 @@ class WorkflowGraphSave(BaseModel):
         ),
     )
     source: Literal["comfyui", "mcp"] = Field(
-        "comfyui", description="Who saved it, for the version menu."
+        "comfyui",
+        description=(
+            "Who saved it, for the version menu. A key bound to ComfyUI's "
+            "address always saves as `comfyui`, whatever it sends."
+        ),
     )
     name: str | None = Field(
         None,
@@ -1806,7 +1851,8 @@ class WorkflowGraphSaved(BaseModel):
         default_factory=list,
         description=(
             "LoRAs left out because they are attached to a person: "
-            "`{node_id, class_type, field, file, character_ids}`."
+            "`{node_id, class_type, field, file, sha256, character_ids, "
+            "lora, people}`, the last two being names to show."
         ),
     )
     parameters: list[dict] = Field(
@@ -1858,6 +1904,12 @@ class WorkflowPeople(BaseModel):
     people: list[FitPerson] = Field(default_factory=list)
     clash: int = 0
     unknown: int = 0
+    note: str | None = Field(
+        None,
+        description=(
+            "Why nobody is offered, in the Run popup's words. Null when somebody is."
+        ),
+    )
 
 
 class RunPictureInput(ParameterAddress):
@@ -2044,6 +2096,41 @@ class WorkflowExport(BaseModel):
     )
 
 
+# How deep an editor document kept as a layout may nest. ComfyUI's own are a
+# handful of levels; the layout is handed back in a response, which a document
+# nested in the hundreds cannot be serialised into.
+MAX_LAYOUT_DEPTH = 64
+
+
+class PeopleLoaderPlace(BaseModel):
+    """Where ComfyUI-PixlStash puts its multi-adapter loader on an opened canvas.
+
+    The place a run from PixlStash splices a person's LoRA
+    (``plan_lora_insertion``): straight after the model source, every reader
+    of that MODEL (and CLIP) output reading the loader's instead. So what is
+    tried on somebody in ComfyUI is what a run of them would do.
+    """
+
+    model: dict | None = Field(
+        None, description="`{node_id, output}`: the MODEL output it reads."
+    )
+    clip: dict | None = Field(
+        None, description="`{node_id, output}` of the CLIP it reads, if any."
+    )
+    rewires: list[dict] = Field(
+        default_factory=list,
+        description="`{node_id, field, type}`: each input that reads it instead.",
+    )
+    reason: str | None = Field(
+        None,
+        description=(
+            "Why no loader can be placed (two model sources, a text encoder "
+            "that reads the model), in the Run popup's words. `model` is then "
+            "null."
+        ),
+    )
+
+
 class WorkflowRunnableGraph(BaseModel):
     """``GET /workflows/{workflow_id}/graph``: the graph as it runs, for this owner's ComfyUI.
 
@@ -2081,6 +2168,25 @@ class WorkflowRunnableGraph(BaseModel):
     waiting_applied: bool = Field(
         False,
         description="The graph has the workflow's waiting changes applied.",
+    )
+    editor: dict | None = Field(
+        None,
+        description=(
+            "The editor document the workflow was last saved from ComfyUI "
+            "with: its layout (positions, groups, notes). Sent only while "
+            "`workflow` is still wired as it was then, so it differs from "
+            "`workflow` in widget values at most; `workflow` holds the values "
+            "to open with. Null for a workflow never saved from ComfyUI, or "
+            "rewired since: that one opens from `workflow`, auto-arranged."
+        ),
+    )
+    people_loader: PeopleLoaderPlace | None = Field(
+        None,
+        description=(
+            "Where the loader for picking people goes on the canvas. Null "
+            "when no person has a LoRA the Run popup would count for this "
+            "workflow, so no loader is put on."
+        ),
     )
 
 
@@ -5318,27 +5424,6 @@ def create_router(server) -> APIRouter:
             return None
         return next(iter(people), None)
 
-    def _slot_digests(slots: list[dict], shelf_index) -> dict:
-        """``{(node_id, field): sha256 or None}``: which shelf LoRA each slot loads.
-
-        A digest slot names its LoRA exactly, and counts when the shelf holds
-        that digest. A filename slot is matched on its case-folded basename,
-        and a name two shelf LoRAs share names neither - the rule
-        ``resolveRecipeLoras`` and ``_resolve_against_shelf`` already apply.
-        """
-        by_name, digests = shelf_index or ({}, set())
-        answer: dict[tuple[str, str], str | None] = {}
-        for slot in slots:
-            value = str(slot.get("value") or "")
-            if slot.get("by") == "digest":
-                digest = value.strip().lower()
-                found = digest if digest in digests else None
-            else:
-                matched = by_name.get(normalized_filename(value.strip()), set())
-                found = next(iter(matched)) if len(matched) == 1 else None
-            answer[(str(slot.get("node_id")), str(slot.get("field")))] = found
-        return answer
-
     def _card_inputs(
         hub,
         workflow_id: str | None,
@@ -7324,6 +7409,159 @@ def create_router(server) -> APIRouter:
             source=source.origin,
         )
 
+    def _opening_graph(request: Request, workflow, *, waiting: bool, all_stages: bool):
+        """The graph *Open in ComfyUI* answers for *workflow*, and what it was
+        built from: ``(graph, source, card, waiting_applied, object_info)``.
+
+        ``GET …/graph``'s whole reading, apart from the route so a save from
+        ComfyUI can ask what the workflow will open as next
+        (:func:`_keep_layout`). Raises the route's own 409s.
+        """
+        hub = _hub()
+        unsaved = WorkflowChanges()
+        if waiting:
+            held, base, _ = _stored_changes(hub, workflow.workflow_id)
+            if held is not None and base == workflow_versions.current_version(
+                hub, workflow.workflow_id
+            ):
+                unsaved = held
+            elif held is not None:
+                # Save's own rule (`_CHANGED_SINCE`): applied here they would
+                # come back in a graph saved over the workflow, and be cleared.
+                logger.info(
+                    "[workflows] Workflow %s has changed since its waiting "
+                    "changes were made, so its graph opens without them.",
+                    workflow.workflow_id,
+                )
+        asked = _run_with(workflow.workflow_id, unsaved)
+        if all_stages:
+            asked = asked.model_copy(
+                update={"skip_stages": [], "keep_stages": list(get_args(Stage))}
+            )
+        # Run's own plan, so what opens is what Run would submit (#1623 left a
+        # workflow several graphs; this is the one Run picks).
+        # `RecursionError` for `_card_source`'s reason: the source graph came
+        # out of a picture from somewhere else, so its depth is not ours to trust.
+        try:
+            plan = _plan(request, asked, opening=True)
+        except RecursionError as exc:
+            logger.warning(
+                "Workflow %s has a source graph too deeply nested to read: %s",
+                workflow.workflow_id,
+                exc,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "PixlStash cannot read this workflow: its graph is nested "
+                    "too deeply to walk."
+                ),
+            ) from exc
+        if not plan.built:
+            reasons = [r for group in plan.groups for r in group.reasons]
+            logger.info(
+                "[workflows] Nothing to open for %s: no graph was built (%s).",
+                workflow.workflow_id,
+                [r["code"] for r in reasons],
+            )
+            first = reasons[0] if reasons else None
+            raise HTTPException(status_code=409, detail=_no_graph_sentence(first))
+        # One entry: a body naming a `workflow_id` resolves to exactly one
+        # group (`_groups_for`), the workflow's base card, so there is no
+        # second graph for Run to have preferred.
+        graph, source, card, swapped = plan.built[0]
+        if swapped:
+            # What ComfyUI opens is what it runs: its pictures card here too.
+            _record_loader_swaps(card, graph, swapped)
+        # The seed is a parameter like any other, and the default recipe's is
+        # already applied. A stored recipe keeps none by design, and
+        # `resolve_references` stands a 0 in for each null it had: those get a
+        # fresh seed, or every queue of the graph would make the same picture.
+        # ponytail: a default recipe seed of exactly 0 is re-rolled with them.
+        if source.seedless:
+            placeholders = [
+                target
+                for target in run_service.run_seed_targets(graph, plan.object_info)
+                if ((graph.get(target["node_id"]) or {}).get("inputs") or {}).get(
+                    target["field"]
+                )
+                == 0
+            ]
+            apply_seeds(graph, placeholders, None)
+        # Otherwise unscrubbed, for Duplicate's reason: it stays with the owner
+        # and is meant to RUN. But it travels over the network into ComfyUI's
+        # page, whose own save and share would keep a key, so credentials go.
+        # ponytail: top-level widgets only; export's nested walk if one hides.
+        for node in graph.values():
+            inputs = node.get("inputs") if isinstance(node, dict) else None
+            if not isinstance(inputs, dict):
+                continue
+            for name, value in inputs.items():
+                if isinstance(value, str) and SECRET_FIELD_RE.search(name):
+                    inputs[name] = ""
+        return graph, source, card, unsaved.count() > 0, plan.object_info
+
+    def _who_fits(hub, workflow_id: str) -> dict | None:
+        """``people_who_fit`` for *workflow_id*'s checkpoint; ``None`` for no
+        such workflow. The one read behind the people route and the loader."""
+        figure = read_grid(hub, server.vault, manual_models=_manual_models).figure(
+            workflow_id
+        )
+        if figure is None:
+            return None
+        checkpoint = next(iter(_base_model_slots(figure.models)), None)
+        return people_who_fit(
+            hub,
+            server.vault,
+            checkpoint.base_model_family if checkpoint is not None else None,
+        )
+
+    def _people_loader_place(
+        workflow_id: str, graph: dict, object_info: dict | None
+    ) -> PeopleLoaderPlace | None:
+        """Where the people loader goes in *graph*, or ``None`` for no loader.
+
+        ``None`` where the Run popup shows no *Person* field: nobody has a
+        LoRA it would count for this workflow, fitting or not. Otherwise the
+        splice a run makes for a person (``plan_lora_insertion``), or the
+        reason it gives when the graph cannot be spliced.
+        """
+        fits = _who_fits(_hub(), workflow_id)
+        if not fits or not (fits["people"] or fits["clash"] or fits["unknown"]):
+            return None
+        if object_info is None:
+            return PeopleLoaderPlace(
+                reason=(
+                    "PixlStash could not reach ComfyUI, so it cannot tell where "
+                    "the loader for people goes."
+                )
+            )
+        try:
+            place = plan_lora_insertion(graph, object_info)
+        except LookupError as exc:
+            logger.info(
+                "[workflows] Workflow %s opens without a loader for people: %s",
+                workflow_id,
+                exc,
+            )
+            return PeopleLoaderPlace(reason=str(exc))
+
+        def at(source: dict | None) -> dict | None:
+            return (
+                {"node_id": source["node_id"], "output": source["output"]}
+                if source
+                else None
+            )
+
+        return PeopleLoaderPlace(
+            model=at(place["model"]),
+            clip=at(place["clip"]),
+            rewires=[
+                {key: rewire[key] for key in ("node_id", "field", "type")}
+                for rewire in place["rewires"]
+            ],
+        )
+
     @router.get(
         "/workflows/{workflow_id}/graph",
         summary="A workflow's runnable graph",
@@ -7382,87 +7620,9 @@ def create_router(server) -> APIRouter:
         server.auth.ensure_secure_when_required(request)
         hub = _hub()
         workflow, _ = _require_base(hub, workflow_id)
-        unsaved = WorkflowChanges()
-        if waiting:
-            held, base, _ = _stored_changes(hub, workflow.workflow_id)
-            if held is not None and base == workflow_versions.current_version(
-                hub, workflow.workflow_id
-            ):
-                unsaved = held
-            elif held is not None:
-                # Save's own rule (`_CHANGED_SINCE`): applied here they would
-                # come back in a graph saved over the workflow, and be cleared.
-                logger.info(
-                    "[workflows] Workflow %s has changed since its waiting "
-                    "changes were made, so its graph opens without them.",
-                    workflow.workflow_id,
-                )
-        asked = _run_with(workflow.workflow_id, unsaved)
-        if all_stages:
-            asked = asked.model_copy(
-                update={"skip_stages": [], "keep_stages": list(get_args(Stage))}
-            )
-        # Run's own plan, so what opens is what Run would submit (#1623 left a
-        # workflow several graphs; this is the one Run picks).
-        # `RecursionError` for `_card_source`'s reason: the source graph came
-        # out of a picture from somewhere else, so its depth is not ours to trust.
-        try:
-            plan = _plan(request, asked, opening=True)
-        except RecursionError as exc:
-            logger.warning(
-                "Workflow %s has a source graph too deeply nested to read: %s",
-                workflow_id,
-                exc,
-            )
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "PixlStash cannot read this workflow: its graph is nested "
-                    "too deeply to walk."
-                ),
-            ) from exc
-        if not plan.built:
-            reasons = [r for group in plan.groups for r in group.reasons]
-            logger.info(
-                "[workflows] Nothing to open for %s: no graph was built (%s).",
-                workflow_id,
-                [r["code"] for r in reasons],
-            )
-            first = reasons[0] if reasons else None
-            raise HTTPException(status_code=409, detail=_no_graph_sentence(first))
-        # One entry: a body naming a `workflow_id` resolves to exactly one
-        # group (`_groups_for`), the workflow's base card, so there is no
-        # second graph for Run to have preferred.
-        graph, source, card, swapped = plan.built[0]
-        if swapped:
-            # What ComfyUI opens is what it runs: its pictures card here too.
-            _record_loader_swaps(card, graph, swapped)
-        # The seed is a parameter like any other, and the default recipe's is
-        # already applied. A stored recipe keeps none by design, and
-        # `resolve_references` stands a 0 in for each null it had: those get a
-        # fresh seed, or every queue of the graph would make the same picture.
-        # ponytail: a default recipe seed of exactly 0 is re-rolled with them.
-        if source.seedless:
-            placeholders = [
-                target
-                for target in run_service.run_seed_targets(graph, plan.object_info)
-                if ((graph.get(target["node_id"]) or {}).get("inputs") or {}).get(
-                    target["field"]
-                )
-                == 0
-            ]
-            apply_seeds(graph, placeholders, None)
-        # Otherwise unscrubbed, for Duplicate's reason: it stays with the owner
-        # and is meant to RUN. But it travels over the network into ComfyUI's
-        # page, whose own save and share would keep a key, so credentials go.
-        # ponytail: top-level widgets only; export's nested walk if one hides.
-        for node in graph.values():
-            inputs = node.get("inputs") if isinstance(node, dict) else None
-            if not isinstance(inputs, dict):
-                continue
-            for name, value in inputs.items():
-                if isinstance(value, str) and SECRET_FIELD_RE.search(name):
-                    inputs[name] = ""
+        graph, source, card, waiting_applied, object_info = _opening_graph(
+            request, workflow, waiting=waiting, all_stages=all_stages
+        )
         return WorkflowRunnableGraph(
             name=_file_stem(card, workflow.name),
             workflow=graph,
@@ -7470,7 +7630,15 @@ def create_router(server) -> APIRouter:
             seedless=False,
             forgotten=source.forgotten,
             version=source.workflow_version,
-            waiting_applied=unsaved.count() > 0,
+            waiting_applied=waiting_applied,
+            # A layout only over the wiring it was saved with: its values are
+            # `workflow`'s to give, its connections are not.
+            editor=workflow_versions.layout_for(
+                hub, workflow.workflow_id, run_service.graph_structure(graph)
+            ),
+            people_loader=_people_loader_place(
+                workflow.workflow_id, graph, object_info
+            ),
         )
 
     @router.post(
@@ -9545,23 +9713,10 @@ def create_router(server) -> APIRouter:
         refuses the write with the reason, never stores it. Returns what was
         left out, each with whose it is.
         """
-        owners = lora_owners(server.vault)
-        if not owners:
-            return []
-        targets = detect_lora_targets(graph)
-        digests = _slot_digests(targets, adapter_digest_index(hub))
-        held: dict[tuple[str, str], str] = {}
-        for target in targets:
-            slot = (str(target["node_id"]), str(target["field"]))
-            # A digest row names its LoRA whether or not the shelf still
-            # lists it; an attachment outlives a shelf row.
-            digest = digests.get(slot) or (
-                str(target.get("value") or "").strip().lower()
-                if target.get("by") == "digest"
-                else None
-            )
-            if digest in owners:
-                held[slot] = digest
+        held = {
+            (entry["node_id"], entry["field"]): entry
+            for entry in people_loras_in(hub, server.vault, graph)
+        }
         if not held:
             return []
         taken, refused = run_service.take_out_person_loras(
@@ -9577,14 +9732,7 @@ def create_router(server) -> APIRouter:
                 ),
             )
         return [
-            {
-                **entry,
-                "sha256": held[(entry["node_id"], entry["field"])],
-                "character_ids": sorted(
-                    owners[held[(entry["node_id"], entry["field"])]]
-                ),
-            }
-            for entry in taken
+            {**entry, **held[(entry["node_id"], entry["field"])]} for entry in taken
         ]
 
     def _refuse_unapplied(
@@ -9999,6 +10147,7 @@ def create_router(server) -> APIRouter:
                 WorkflowVersionRow(
                     version=row["version"],
                     created_at=row["created_at"],
+                    source=row["source"],
                     reason=row["reason"],
                     current=row["version"] == current,
                 )
@@ -10168,6 +10317,222 @@ def create_router(server) -> APIRouter:
                 return value
         return None
 
+    def _layout_nodes(editor: dict):
+        """Every node of an editor document, those inside its subgraphs too."""
+        definitions = editor.get("definitions")
+        subgraphs = (
+            definitions.get("subgraphs") if isinstance(definitions, dict) else []
+        )
+        for holder in [editor, *(subgraphs if isinstance(subgraphs, list) else [])]:
+            nodes = holder.get("nodes") if isinstance(holder, dict) else None
+            for node in nodes if isinstance(nodes, list) else []:
+                if isinstance(node, dict):
+                    yield node
+
+    def _widget_strings(node: dict):
+        """The strings among an editor node's widget values, list or object."""
+        values = node.get("widgets_values")
+        if isinstance(values, dict):
+            values = list(values.values())
+        return (
+            [v for v in values if isinstance(v, str)]
+            if isinstance(values, list)
+            else []
+        )
+
+    def _layout_to_keep(
+        workflow_id: str,
+        editor: dict,
+        graph: dict,
+        left_out: list[dict],
+    ) -> tuple[dict, str] | None:
+        """``(document, structure)`` to keep as *workflow_id*'s layout, or
+        ``None`` (logged) when *editor* may not be kept.
+
+        **Nothing a workflow may not hold stays in it** (rule 4 of #1846), by
+        value, since an editor document names its widgets by position only:
+
+        * a person's LoRA by digest is blanked wherever the document holds
+          it, and the names the PixlStash loaders record beside a pick
+          (``properties.pixlstash_models``) go with it. Every person's, not
+          only those the graph loads: a bypassed node is in the document and
+          not in the graph;
+        * a person's LoRA by file name has no empty value, so a document
+          naming one in any node's widgets is not kept at all, and neither
+          is one whose graph loaded one in an ordinary loader;
+        * a credential the graph holds is blanked on the node that holds it.
+
+        ponytail: a credential on a node the graph does not run (bypassed) is
+        not in the graph to be found, and stays, as it does in a stored graph;
+        name the editor's widgets from ``object_info`` if that has to close.
+        """
+        hub = _hub()
+        ordinary = [
+            entry
+            for entry in left_out
+            if entry.get("class_type") != PIXLSTASH_MULTI_ADAPTER_LOADER
+        ]
+        if ordinary:
+            logger.info(
+                "[workflows] Workflow %s keeps no ComfyUI layout: node %s on "
+                "the canvas holds a person's LoRA.",
+                workflow_id,
+                ordinary[0].get("node_id"),
+            )
+            return None
+        people = set(lora_owners(server.vault))
+        by_name = adapter_digest_index(hub)[0] if people else {}
+        # A node inside a subgraph runs as "<instance>:<id>".
+        secrets: dict[str, set[str]] = {}
+        for node_id, node in graph.items():
+            inputs = node.get("inputs") if isinstance(node, dict) else None
+            for name, value in (inputs if isinstance(inputs, dict) else {}).items():
+                if isinstance(value, str) and value and SECRET_FIELD_RE.search(name):
+                    secrets.setdefault(str(node_id).rsplit(":", 1)[-1], set()).add(
+                        value
+                    )
+
+        editor = deepcopy(editor)
+        for node in _layout_nodes(editor):
+            named = [
+                value
+                for value in _widget_strings(node)
+                if by_name.get(normalized_filename(value.strip()), set()) & people
+            ]
+            if named:
+                logger.info(
+                    "[workflows] Workflow %s keeps no ComfyUI layout: node %s "
+                    "on the canvas names a person's LoRA.",
+                    workflow_id,
+                    node.get("id"),
+                )
+                return None
+            held = secrets.get(str(node.get("id")))
+            values = node.get("widgets_values")
+            if held and isinstance(values, list):
+                node["widgets_values"] = [
+                    "" if isinstance(value, str) and value in held else value
+                    for value in values
+                ]
+            elif held and isinstance(values, dict):
+                node["widgets_values"] = {
+                    key: "" if isinstance(value, str) and value in held else value
+                    for key, value in values.items()
+                }
+        return without_peoples_picks(editor, people), run_service.graph_structure(graph)
+
+    def _keep_layout(
+        workflow_id: str,
+        editor: dict | None,
+        graph: dict,
+        left_out: list[dict],
+    ) -> None:
+        """Keep *editor* as the layout *workflow_id* opens with in ComfyUI.
+
+        Called once *graph*, which *editor* arrived with, is the workflow's.
+        The layout is kept beside the wiring of that graph, as it is stored,
+        and ``GET …/graph`` hands it out only while what it answers is wired
+        the same: not once the workflow is rewired, and not while changes
+        that rewire it wait unsaved. **That is the cheap half.** The two
+        documents arrive side by side on the caller's word, so nothing here
+        proves the layout is of the graph; the node that opens it converts it
+        on the canvas and uses it only when it comes out as the graph
+        PixlStash sent (``open_workflow.js``).
+
+        **Never an error**: the graph is saved by now, so a layout that cannot
+        be kept, for any reason, is dropped and logged, and the workflow opens
+        auto-arranged.
+        """
+        if editor is None:
+            # No layout came (the MCP server sends none): the one kept still
+            # opens while the wiring is the same.
+            return
+        try:
+            kept = _layout_to_keep(workflow_id, editor, graph, left_out)
+        except (
+            HTTPException,
+            RecursionError,
+            LookupError,
+            TypeError,
+            ValueError,
+            sqlite3.Error,
+        ) as exc:
+            logger.warning(
+                "[workflows] Workflow %s keeps no ComfyUI layout: it could "
+                "not be read to keep (%s: %s).",
+                workflow_id,
+                type(exc).__name__,
+                getattr(exc, "detail", None) or exc,
+            )
+            kept = None
+        try:
+            with _hub().transaction() as conn:
+                if kept is None:
+                    workflow_versions.drop_layout(conn, workflow_id)
+                else:
+                    workflow_versions.write_layout(conn, workflow_id, *kept)
+        except sqlite3.Error as exc:
+            logger.error(
+                "[workflows] The ComfyUI layout of workflow %s could not be "
+                "written, so it opens as it did before this save: %s",
+                workflow_id,
+                exc,
+            )
+
+    def _superseded_by_the_same_opening(
+        hub, workflow_id: str, version: int | None, opening: str | None, source: str
+    ) -> int | None:
+        """*version* when the save about to be stored may take it away, else ``None``.
+
+        It may when *version*, the workflow's current one, was saved from
+        ComfyUI in the same *opening* as this save and nothing was made on it
+        (``saved_recipe_service.made_on_version``). Whether anything was is
+        read from the vault before the hub write; a read that fails keeps the
+        version, since keeping one too many costs nothing and losing one a
+        recipe runs on changes what that recipe makes (rule 8 of #1846).
+        """
+        if not opening or version is None or source != workflow_versions.FROM_COMFYUI:
+            return None
+        row = hub.fetchone(
+            "SELECT opening, created_at FROM workflow_version "
+            "WHERE workflow_id = ? AND version = ?",
+            (workflow_id, version),
+        )
+        # Only a version saved from ComfyUI carries an opening at all.
+        if row is None or row["opening"] != opening:
+            return None
+        try:
+            made = saved_recipe_service.made_on_version(
+                server.vault,
+                workflow_id,
+                version,
+                datetime.fromisoformat(row["created_at"]),
+            )
+        except (ValueError, TypeError, SQLAlchemyError) as exc:
+            logger.warning(
+                "[workflows] Could not tell whether anything was made on "
+                "version %s of %s, so it is kept beside the save that "
+                "supersedes it: %s",
+                version,
+                workflow_id,
+                exc,
+            )
+            return None
+        return None if made else version
+
+    def _nests_deeper_than(value, limit: int) -> bool:
+        """Whether a JSON *value* nests objects and lists past *limit* levels."""
+        pending = [(value, 1)]
+        while pending:
+            item, depth = pending.pop()
+            if not isinstance(item, (dict, list)):
+                continue
+            if depth > limit:
+                return True
+            children = item.values() if isinstance(item, dict) else item
+            pending.extend((child, depth + 1) for child in children)
+        return False
+
     @router.put(
         "/workflows/{workflow_id}/graph",
         summary="Save a whole graph over a workflow",
@@ -10190,7 +10555,11 @@ def create_router(server) -> APIRouter:
             "the workflow's current one stores nothing (`unchanged`). The "
             "graph's prompt and seed are not stored, since they belong to a "
             "run (`not_saved`); a parameter it changes is, also over a value "
-            "typed in PixlStash, and is listed in `parameters`."
+            "typed in PixlStash, and is listed in `parameters`. `editor`, the "
+            "document ComfyUI converted the graph from, is kept as the "
+            "workflow's layout and never makes a version. Versions saved from "
+            "ComfyUI are counted apart from the owner's own, so they prune "
+            "only each other."
         ),
         response_model=WorkflowGraphSaved,
         responses={
@@ -10222,6 +10591,39 @@ def create_router(server) -> APIRouter:
                     "ComfyUI submits, not its editor document."
                 ),
             )
+        # Refused before anything walks them: this write is reachable from
+        # ComfyUI's port with the key ComfyUI holds.
+        try:
+            _within_the_cap(payload.workflow)
+        except RecursionError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="PixlStash cannot read that graph: it is nested too deeply.",
+            ) from exc
+        except WorkflowFileTooLarge as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        if payload.editor is not None:
+            try:
+                if _nests_deeper_than(payload.editor, MAX_LAYOUT_DEPTH):
+                    raise NotAWorkflowError("it nests too deeply")
+                if api_graph(payload.editor) is not None:
+                    raise NotAWorkflowError("it is an API-format graph")
+                check_comfy_workflow(payload.editor)
+                _within_the_cap(payload.editor)
+            except NotAWorkflowError as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"`editor` is not a ComfyUI editor document: {exc}",
+                ) from exc
+            except WorkflowFileTooLarge as exc:
+                raise HTTPException(status_code=413, detail=str(exc)) from exc
+        # Who saved it is not the caller's to say where the key says it: the
+        # key ComfyUI holds is bound to ComfyUI's address (#1810), and what it
+        # saves is counted, and shown, as saved from ComfyUI.
+        bound = getattr(
+            getattr(request.state, "matched_token", None), "bound_address", None
+        )
+        source = "comfyui" if bound is not None else payload.source
         # Cached: only a bypass and the installed check ask it, and a save
         # from ComfyUI's own page arrives often.
         object_info = _owner_object_info()
@@ -10252,6 +10654,9 @@ def create_router(server) -> APIRouter:
             graph = deepcopy(api_graph(payload.workflow))
             _keep_stored_secrets(graph, before.graph)
             left_out = _left_out_people(hub, graph, object_info)
+            # The loader for picking people, with nobody picked or its people
+            # just emptied: off again, so it never comes back in a workflow.
+            run_service.take_out_empty_adapter_loaders(graph)
             replaced = _base_model_a_graph_drops(hub, before.graph, graph, object_info)
             if replaced is None:
                 # A graph stored as a new workflow is taken as sent; one saved
@@ -10303,6 +10708,8 @@ def create_router(server) -> APIRouter:
                         (workflow_id, WAITING),
                     )
                 _announce(request, [workflow_id], "changed")
+            # The same graph laid out another way: the layout, and no version.
+            _keep_layout(workflow_id, payload.editor, graph, left_out)
             return WorkflowGraphSaved(
                 workflow_id=workflow_id,
                 version=before.workflow_version,
@@ -10339,6 +10746,8 @@ def create_router(server) -> APIRouter:
             _announce(request, [landed], "imported")
             if payload.waiting_applied:
                 _announce(request, [workflow_id], "changed")
+            # The canvas is the new workflow's from here on, and so its layout.
+            _keep_layout(landed, payload.editor, graph, left_out)
             return WorkflowGraphSaved(
                 workflow_id=landed,
                 name=name,
@@ -10378,7 +10787,28 @@ def create_router(server) -> APIRouter:
                 ", over the value typed for it" if d.provenance == EDITED else "",
             )
 
+        # Saves of one opening in ComfyUI are one version: the version this
+        # one supersedes goes, where it was saved from the same opening and
+        # nothing was made on it. Never rewritten in place: a version's number
+        # is what every "changed since" check here compares.
+        superseded_version = _superseded_by_the_same_opening(
+            hub, workflow_id, before.workflow_version, payload.opening, source
+        )
+
         def also(conn) -> None:
+            if payload.opening and source == workflow_versions.FROM_COMFYUI:
+                conn.execute(
+                    "UPDATE workflow_version SET opening = ? WHERE workflow_id = ? "
+                    "AND version = (SELECT MAX(version) FROM workflow_version "
+                    "WHERE workflow_id = ?)",
+                    (payload.opening, workflow_id, workflow_id),
+                )
+            if superseded_version is not None:
+                conn.execute(
+                    "DELETE FROM workflow_version WHERE workflow_id = ? "
+                    "AND version = ? AND version > 1",
+                    (workflow_id, superseded_version),
+                )
             write_saved_defaults(conn, workflow_id, superseded, rows)
             if payload.waiting_applied:
                 clear_changes(conn, workflow_id)
@@ -10395,13 +10825,14 @@ def create_router(server) -> APIRouter:
             workflow,
             graph,
             before.bindings,
-            payload.source,
+            source,
             before.workflow_version,
             original=before.graph,
             also=also,
             changed="This workflow got a newer version while the graph was being stored.",
         )
         _announce(request, [workflow_id], "changed")
+        _keep_layout(workflow_id, payload.editor, graph, left_out)
         return WorkflowGraphSaved(
             workflow_id=workflow_id,
             version=version,
@@ -10441,22 +10872,11 @@ def create_router(server) -> APIRouter:
     )
     def workflow_people(request: Request, workflow_id: str):
         server.auth.ensure_secure_when_required(request)
-        hub = _hub()
         workflow_id = _workflow_id(workflow_id)
-        figure = read_grid(hub, server.vault, manual_models=_manual_models).figure(
-            workflow_id
-        )
-        if figure is None:
+        fits = _who_fits(_hub(), workflow_id)
+        if fits is None:
             raise HTTPException(status_code=404, detail="Unknown workflow.")
-        checkpoint = next(iter(_base_model_slots(figure.models)), None)
-        return WorkflowPeople(
-            workflow_id=workflow_id,
-            **people_who_fit(
-                hub,
-                server.vault,
-                checkpoint.base_model_family if checkpoint is not None else None,
-            ),
-        )
+        return WorkflowPeople(workflow_id=workflow_id, **fits)
 
     @router.post(
         "/recipes/{recipe_id}/extract-workflow",

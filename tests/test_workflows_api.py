@@ -1495,25 +1495,44 @@ def test_the_node_check_is_owner_only(workflow_env, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "answer, expected",
+    "answer, expected, saves_back",
     [
-        (["/extensions/ComfyUI-PixlStash/open_workflow.js"], True),
-        (["/extensions/comfyui-pixlstash/js/open_workflow.js"], True),
+        (["/extensions/ComfyUI-PixlStash/open_workflow.js"], True, False),
+        (["/extensions/comfyui-pixlstash/js/open_workflow.js"], True, False),
         # The pack from before Open in ComfyUI, and another pack's same name.
-        (["/extensions/ComfyUI-PixlStash/picker.js"], False),
-        (["/extensions/other-pack/open_workflow.js"], False),
-        (requests.ConnectionError("refused"), None),
-        ({"not": "a list"}, None),
+        (["/extensions/ComfyUI-PixlStash/picker.js"], False, False),
+        (["/extensions/other-pack/open_workflow.js"], False, False),
+        (requests.ConnectionError("refused"), None, None),
+        ({"not": "a list"}, None, None),
+        # A pack that saves an opened workflow back (#1852), and another
+        # pack's script of the same name.
+        (
+            [
+                "/extensions/ComfyUI-PixlStash/open_workflow.js",
+                "/extensions/ComfyUI-PixlStash/save_workflow.js",
+            ],
+            True,
+            True,
+        ),
+        (
+            [
+                "/extensions/ComfyUI-PixlStash/open_workflow.js",
+                "/extensions/other-pack/save_workflow.js",
+            ],
+            True,
+            False,
+        ),
     ],
 )
 def test_the_node_check_reads_comfyuis_extensions(
-    workflow_env, monkeypatch, answer, expected
+    workflow_env, monkeypatch, answer, expected, saves_back
 ):
-    """Only the node's own open_workflow.js counts; unreachable is ``null``."""
+    """Only the node's own scripts count; unreachable is ``null``. An older
+    node opens a workflow and does not save it back, and the app says so."""
     _extensions_answer(monkeypatch, answer)
     r = workflow_env.owner.get(f"{API}/comfyui/pixlstash-node")
     assert r.status_code == 200, r.text
-    assert r.json() == {"can_open_workflows": expected}
+    assert r.json() == {"can_open_workflows": expected, "saves_back": saves_back}
 
 
 def _system_stats_answer(monkeypatch, answer) -> list[str]:
@@ -4217,7 +4236,12 @@ def test_a_converted_editor_file_runs_from_the_graph_stored_beside_it(
     r = _convert(owner)
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body == {"name": "editor", "matched": True, "workflow_id": converting.manual}
+    assert body == {
+        "name": "editor",
+        "matched": True,
+        "workflow_id": converting.manual,
+        "left_out": [],
+    }
     # Stored on the workflow's own row, and nothing written to any folder.
     assert _api_document(workflow_env.server.hub, converting.manual) == (
         _EDITOR_CONVERTED
@@ -18259,3 +18283,514 @@ def test_the_people_a_workflow_offers_are_those_with_a_lora_for_its_base_model(
         [],
         1,
     )
+
+
+# --- the ComfyUI round trip: the people loader and the layout (#1852) -------
+
+
+def _editor(moved=0, **extra):
+    """An editor document for CHAIN_DOCUMENT: what the layout store reads."""
+    return {
+        "last_node_id": 9,
+        "last_link_id": 0,
+        "nodes": [
+            {"id": 3, "type": "KSampler", "pos": [100 + moved, 40]},
+            *extra.pop("nodes", []),
+        ],
+        "links": [],
+        "extra": {"pixlstash_workflow_id": "manual:" + "0" * 32},
+        **extra,
+    }
+
+
+def test_the_people_loader_with_nobody_picked_never_comes_back(saving):
+    """PixlStash puts the loader on the canvas empty, so a workflow opened and
+    saved untouched arrives with it wired in after the checkpoint.
+
+    Wrong if that is a version, or if node 9 is in any stored graph.
+    """
+    graph = _with_people_loader()
+    r = _put_graph(saving, saving.manual, graph)
+    assert r.status_code == 200, r.text
+    assert (r.json()["unchanged"], r.json()["left_out"]) == (True, [])
+    assert len(_versions_of(saving, saving.manual)) == 1
+
+    # Beside a real change it still comes off, and what read it reads the
+    # checkpoint again.
+    graph["5"]["inputs"]["strength_model"] = 0.3
+    r = _put_graph(saving, saving.manual, graph)
+    assert r.status_code == 200 and r.json()["version"] == 2, r.text
+    stored = _versions_of(saving, saving.manual)[-1][2]
+    assert "9" not in stored
+    assert stored["2"]["inputs"]["model"] == ["1", 0]
+    assert stored["2"]["inputs"]["clip"] == ["1", 1]
+
+
+def test_a_layout_saved_from_comfyui_opens_again_and_is_never_a_version(saving):
+    """Both documents arrive, and the editor one is the layout: handed back by
+    Open while the workflow is wired as it was, and no version by itself.
+
+    Wrong if moving nodes makes a version, if a layout opens over a graph
+    rewired since, or if an API graph is taken for a layout.
+    """
+    graph = json.loads(json.dumps(CHAIN_DOCUMENT))
+    graph["5"]["inputs"]["strength_model"] = 0.7
+    r = _put_graph(saving, saving.manual, graph, editor=_editor())
+    assert r.status_code == 200 and r.json()["version"] == 2, r.text
+    opened = _opened(saving, saving.manual, all_stages="true")
+    assert opened["editor"]["nodes"][0]["pos"] == [100, 40]
+
+    # The same graph, nodes moved: the layout is replaced and nothing else.
+    r = _put_graph(saving, saving.manual, graph, editor=_editor(moved=500))
+    assert r.status_code == 200 and r.json()["unchanged"] is True, r.text
+    assert len(_versions_of(saving, saving.manual)) == 2
+    opened = _opened(saving, saving.manual, all_stages="true")
+    assert opened["editor"]["nodes"][0]["pos"] == [600, 40]
+
+    # A save with no layout (the MCP server's) keeps the one there is, and a
+    # value changed in PixlStash does not take it away: `workflow` has it.
+    graph["5"]["inputs"]["strength_model"] = 0.6
+    r = _put_graph(saving, saving.manual, graph, source="mcp")
+    assert r.status_code == 200 and r.json()["version"] == 3, r.text
+    opened = _opened(saving, saving.manual, all_stages="true")
+    assert opened["editor"]["nodes"][0]["pos"] == [600, 40]
+    assert opened["workflow"]["5"]["inputs"]["strength_model"] == 0.6
+
+    # Rewired in PixlStash (a loader removed): the layout no longer fits, and
+    # the workflow opens auto-arranged.
+    _put_changes(saving, saving.manual, **SKIP_FIVE)
+    r = _save(saving, saving.manual)
+    assert r.status_code == 200, r.text
+    assert _opened(saving, saving.manual, all_stages="true")["editor"] is None
+
+    # A refused layout refuses the save: nothing of it is stored.
+    before = _versions_of(saving, saving.manual)
+    graph["5"]["inputs"]["strength_model"] = 0.1
+    nested = _editor()
+    for _ in range(workflows_routes.MAX_LAYOUT_DEPTH + 1):
+        nested = {**_editor(), "extra": {"deeper": nested}}
+    for bad in (graph, {"nodes": [], "links": []}, nested):
+        r = _put_graph(saving, saving.manual, graph, editor=bad)
+        assert r.status_code == 422, r.text
+    saving.monkeypatch.setattr(comfyui_module, "MAX_WORKFLOW_FILE_BYTES", 2000)
+    wide = _editor(nodes=[{"id": 50, "type": "Note", "widgets_values": ["x" * 3000]}])
+    r = _put_graph(saving, saving.manual, graph, editor=wide)
+    assert r.status_code == 413, r.text
+    assert _versions_of(saving, saving.manual) == before
+    assert _opened(saving, saving.manual, all_stages="true")["editor"] is None
+
+
+def test_a_layout_never_holds_what_a_workflow_may_not(a_persons_lora):
+    """Rule 4 for the layout too: the people picked in the loader are not in
+    it, and a canvas with a person's LoRA in an ordinary loader keeps none.
+
+    Wrong if the person's digest is in the stored layout, or if Open hands
+    back a layout that still has the person's loader on it.
+    """
+    env = a_persons_lora
+    # Loader 2 is the person's: a stored version goes without it.
+    r = _put_graph(env, env.manual, json.loads(json.dumps(CHAIN_DOCUMENT)))
+    assert r.status_code == 200 and r.json()["version"] == 2, r.text
+    (left,) = r.json()["left_out"]
+    # Named for the toast that says whose it is: the file's name, no extension.
+    assert (left["lora"], left["people"]) == (
+        os.path.splitext(RUN_ADAPTER_FILENAME)[0],
+        ["Workflow Character"],
+    )
+    current = _versions_of(env, env.manual)[-1][2]
+    current.pop("pixlstash_bindings", None)
+    info = json.loads(json.dumps(CHAIN_OBJECT_INFO))
+    info["PixlStashMultiAdapterLoader"] = {
+        "input": {"required": {"model": ["MODEL", {}], "clip": ["CLIP", {}]}},
+        "output": ["MODEL", "CLIP", "STRING"],
+    }
+    env.monkeypatch.setattr(
+        workflows_routes,
+        "_read_object_info",
+        lambda url, **_: (json.loads(json.dumps(info)), None),
+    )
+    picked = json.loads(json.dumps(current))
+    picked["9"] = {
+        "class_type": "PixlStashMultiAdapterLoader",
+        "inputs": {
+            "model": ["1", 0],
+            "clip": ["1", 1],
+            "adapter_sha256": RUN_ADAPTER_DIGEST,
+            "strength_model": 0.8,
+        },
+    }
+    picked["5"]["inputs"]["model"] = ["9", 0]
+    picked["5"]["inputs"]["clip"] = ["9", 1]
+    # As the node writes it: the digest in its row, and the pick's names
+    # recorded beside it. A second loader is bypassed, so it is on the canvas
+    # and in no graph; a note quotes the digest.
+    recorded = {
+        "input": "adapter_sha256",
+        "sha256": RUN_ADAPTER_DIGEST,
+        "filename": RUN_ADAPTER_FILENAME,
+        "display_name": "Anna v2",
+    }
+    style = {"input": "adapter_sha256_2", "sha256": STYLE_DIGEST, "filename": "s"}
+    loader = {
+        "id": 9,
+        "type": "PixlStashMultiAdapterLoader",
+        "widgets_values": ["People who fit", RUN_ADAPTER_DIGEST.upper(), 0.8, 1],
+        "properties": {"pixlstash_models": [recorded, style]},
+    }
+    bypassed = {
+        "id": 11,
+        "type": "PixlStashMultiAdapterLoader",
+        "mode": 4,
+        "widgets_values": {"adapter_sha256": f" {RUN_ADAPTER_DIGEST} "},
+    }
+    note = {"id": 12, "type": "Note", "widgets_values": [RUN_ADAPTER_DIGEST]}
+    r = _put_graph(
+        env, env.manual, picked, editor=_editor(nodes=[loader, bypassed, note])
+    )
+    assert r.status_code == 200 and r.json()["unchanged"] is True, r.text
+    kept = _opened(env, env.manual, all_stages="true")["editor"]
+    assert kept["nodes"][1]["widgets_values"] == ["People who fit", "", 0.8, 1]
+    # The style LoRA's name is the owner's to keep; the person's is not.
+    assert kept["nodes"][1]["properties"]["pixlstash_models"] == [style]
+    assert kept["nodes"][2]["widgets_values"] == {"adapter_sha256": ""}
+    stored = json.dumps(kept).lower()
+    assert RUN_ADAPTER_DIGEST not in stored and "anna v2" not in stored
+
+    # By file name there is no empty value: a canvas naming the person's LoRA
+    # in a loader the graph does not run keeps no layout.
+    named = {
+        "id": 13,
+        "type": "LoraLoader",
+        "mode": 4,
+        "widgets_values": [f"people/{RUN_ADAPTER_FILENAME.upper()}", 1, 1],
+    }
+    r = _put_graph(env, env.manual, picked, editor=_editor(nodes=[named]))
+    assert r.status_code == 200 and r.json()["unchanged"] is True, r.text
+    assert _opened(env, env.manual, all_stages="true")["editor"] is None
+    r = _put_graph(env, env.manual, picked, editor=_editor(nodes=[loader]))
+    assert _opened(env, env.manual, all_stages="true")["editor"] is not None
+
+    # The person's LoRA back in an ordinary loader: no layout is kept.
+    r = _put_graph(
+        env, env.manual, json.loads(json.dumps(CHAIN_DOCUMENT)), editor=_editor()
+    )
+    assert r.status_code == 200 and r.json()["left_out"], r.text
+    assert _opened(env, env.manual, all_stages="true")["editor"] is None
+
+
+def test_a_layout_holds_no_credential_the_graph_holds(saving):
+    """`GET …/graph` blanks every credential before the graph leaves, and the
+    layout leaves with it: a key typed on the canvas is not handed back out.
+
+    Wrong if the key is in the layout Open answers.
+    """
+    graph = json.loads(json.dumps(CHAIN_DOCUMENT))
+    graph["8"] = {"class_type": "HostedCaption", "inputs": {"api_key": "example-key"}}
+    keyed = {"id": 8, "type": "HostedCaption", "widgets_values": ["example-key", 3]}
+    r = _put_graph(saving, saving.manual, graph, editor=_editor(nodes=[keyed]))
+    assert r.status_code == 200 and r.json()["version"] == 2, r.text
+    opened = _opened(saving, saving.manual, all_stages="true")
+    assert opened["editor"]["nodes"][1]["widgets_values"] == ["", 3]
+    assert "example-key" not in json.dumps(opened)
+
+
+def test_open_says_where_the_people_loader_goes(a_persons_lora):
+    """Where a run splices a person's LoRA: straight after the model source.
+
+    Wrong if a loader is placed for a library where nobody has a LoRA, or if
+    the place is anywhere but after node 1.
+    """
+    env = a_persons_lora
+    place = _opened(env, env.manual)["people_loader"]
+    assert (place["model"], place["clip"], place["reason"]) == (
+        {"node_id": "1", "output": 0},
+        {"node_id": "1", "output": 1},
+        None,
+    )
+    # Loader 2 holds the person's LoRA, so the graph opens without it and
+    # loader 5 is what reads the checkpoint.
+    assert sorted((r["node_id"], r["field"]) for r in place["rewires"]) == [
+        ("5", "clip"),
+        ("5", "model"),
+    ]
+    note = env.owner.get(f"{API}/workflows/{env.manual}/people").json()["note"]
+    assert note.startswith("This workflow's base model is not known")
+
+
+def test_no_people_loader_where_nobody_has_a_lora(saving):
+    assert _opened(saving, saving.manual)["people_loader"] is None
+
+
+def test_an_export_from_comfyui_goes_without_a_persons_lora(a_persons_lora):
+    """Rule 4 for *Export to PixlStash*: a person's LoRA is taken out of the
+    graph that is stored, the loader for people comes off, the editor document
+    keeps no pick, and the answer names what was left out.
+
+    Wrong if the stored graph loads the person's LoRA, if the stored document
+    holds its digest, or if the answer names nobody.
+    """
+    env = a_persons_lora
+    info = json.loads(json.dumps(CHAIN_OBJECT_INFO))
+    env.monkeypatch.setattr(
+        comfyui_module, "_read_object_info", lambda url, **_: (info, None)
+    )
+    picked = {
+        "id": 9,
+        "type": "PixlStashMultiAdapterLoader",
+        "widgets_values": ["People who fit", RUN_ADAPTER_DIGEST, 0.8, 1],
+        "properties": {
+            "pixlstash_models": [{"sha256": RUN_ADAPTER_DIGEST, "filename": "x"}]
+        },
+    }
+
+    def export(name):
+        r = env.owner.post(
+            f"{API}/comfyui/workflows/convert",
+            json={
+                "name": name,
+                "workflow": _editor(moved=len(name), nodes=[picked]),
+                "output": _with_people_loader((RUN_ADAPTER_DIGEST, 0.8)),
+            },
+        )
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    body = export("exported")
+    assert body["matched"] is False
+    # Loader 2 holds the person's LoRA by name, the people loader by digest.
+    assert [(left["node_id"], left["people"]) for left in body["left_out"]] == [
+        ("2", ["Workflow Character"]),
+        ("9", ["Workflow Character"]),
+    ]
+    stored = _api_document(env.server.hub, body["workflow_id"])
+    assert "9" not in stored and "2" not in stored
+    assert stored["5"]["inputs"]["model"] == ["1", 0]
+    (document,) = env.server.hub.fetchone(
+        "SELECT document FROM workflow_document WHERE workflow_id = ?",
+        (body["workflow_id"],),
+    )
+    assert RUN_ADAPTER_DIGEST not in document.lower()
+    opened = _opened(env, body["workflow_id"])["workflow"]
+    assert "2" not in opened and "9" not in opened
+
+    # ComfyUI not answering: the ordinary loader cannot be rewired here, so
+    # it is stored as sent, still named, and every read goes without it.
+    env.monkeypatch.setattr(
+        comfyui_module, "_read_object_info", lambda url, **_: (None, "down")
+    )
+    body = export("exported while ComfyUI was down")
+    assert [left["node_id"] for left in body["left_out"]] == ["2", "9"]
+    stored = _api_document(env.server.hub, body["workflow_id"])
+    assert "2" in stored and "9" not in stored
+
+
+def test_a_layout_that_cannot_be_kept_never_fails_the_save(saving):
+    """The graph is stored by the time the layout is looked at, so a layout
+    that cannot be kept is dropped and said in the log, never a 500.
+
+    Wrong if the save answers an error, or if the version is not there.
+    """
+    graph = json.loads(json.dumps(CHAIN_DOCUMENT))
+    graph["5"]["inputs"]["strength_model"] = 0.7
+    r = _put_graph(saving, saving.manual, graph, editor=_editor())
+    assert r.status_code == 200, r.text
+
+    def broken(*args, **kwargs):
+        raise TypeError("this layout will not read")
+
+    saving.monkeypatch.setattr(workflows_routes.run_service, "graph_structure", broken)
+    graph["5"]["inputs"]["strength_model"] = 0.6
+    r = _put_graph(saving, saving.manual, graph, editor=_editor(moved=3))
+    assert r.status_code == 200 and r.json()["version"] == 3, r.text
+    saving.monkeypatch.undo()
+    assert (
+        saving.server.hub.fetchall(
+            "SELECT 1 FROM workflow_layout WHERE workflow_id = ?", (saving.manual,)
+        )
+        == []
+    )
+
+
+def test_the_key_comfyui_holds_always_saves_as_comfyui(saving):
+    """Who saved a version is what its history is counted and shown by, so it
+    is not the caller's to say where the key says it: the key PixlStash hands
+    ComfyUI is bound to ComfyUI's address.
+
+    Wrong if a version that key saved reads `mcp`: it would be counted with
+    the owner's own versions and pass the Workflow tab's line by.
+    """
+    r = saving.owner.post(
+        f"{API}/users/me/token", json={"description": "link", "scope": "ALL"}
+    )
+    assert r.status_code == 200, r.text
+    token, token_id = r.json()["token"], r.json()["token_id"]
+
+    def bind(session):
+        session.exec(
+            update(UserToken)
+            .where(UserToken.id == token_id)
+            .values(bound_address="testclient")
+        )
+        session.commit()
+
+    saving.server.auth._db.run_task(bind, priority=DBPriority.IMMEDIATE)
+    saving.server.auth._flush_token_cache()
+    try:
+        r = _bearer(saving.server, token).put(
+            f"{API}/workflows/{saving.manual}/graph",
+            json={"workflow": _without_five(), "source": "mcp"},
+        )
+        assert r.status_code == 200 and r.json()["version"] == 2, r.text
+        assert _versions_of(saving, saving.manual)[-1][1] == "comfyui"
+        # The owner's own session says who it is for itself.
+        r = _put_graph(
+            saving, saving.manual, json.loads(json.dumps(CHAIN_DOCUMENT)), source="mcp"
+        )
+        assert r.status_code == 200, r.text
+        assert _versions_of(saving, saving.manual)[-1][1] == "mcp"
+    finally:
+        saving.owner.delete(f"{API}/users/me/token/{token_id}")
+
+
+def test_empty_adapter_loaders_come_out_of_a_chain_in_one_pass():
+    """A loader reading another empty loader reads what that one read, an
+    output that carried nothing leaves no input behind, and a ring of them
+    feeds nothing. Linear in the graph: it runs on a body from ComfyUI's port.
+    """
+    loader = "PixlStashMultiAdapterLoader"
+    graph = {
+        "1": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+        "8": {"class_type": loader, "inputs": {"model": ["1", 0], "clip": ["1", 1]}},
+        "9": {
+            "class_type": loader,
+            "inputs": {"model": ["8", 0], "clip": ["8", 1], "adapter_sha256": ""},
+        },
+        "3": {"class_type": "KSampler", "inputs": {"model": ["9", 0]}},
+        "6": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"clip": ["9", 1], "text": ["9", 2], "other": ["8", 7]},
+        },
+    }
+    assert run_service.take_out_empty_adapter_loaders(graph) == ["8", "9"]
+    assert graph["3"]["inputs"] == {"model": ["1", 0]}
+    assert graph["6"]["inputs"] == {"clip": ["1", 1], "text": ""}
+
+    ring = {
+        "8": {"class_type": loader, "inputs": {"model": ["9", 0]}},
+        "9": {"class_type": loader, "inputs": {"model": ["8", 0]}},
+        "3": {"class_type": "KSampler", "inputs": {"model": ["9", 0], "steps": 2}},
+    }
+    run_service.take_out_empty_adapter_loaders(ring)
+    assert ring == {"3": {"class_type": "KSampler", "inputs": {"steps": 2}}}
+
+    kept = _with_people_loader(("a" * 64, 0.8))
+    assert run_service.take_out_empty_adapter_loaders(kept) == []
+    assert "9" in kept
+
+    count = 20000
+    chain = {
+        str(n): {"class_type": loader, "inputs": {"model": [str(n - 1), 0]}}
+        for n in range(1, count)
+    }
+    chain[str(count)] = {"class_type": "KSampler", "inputs": {"model": ["0", 0]}}
+    chain[str(count)]["inputs"]["model"] = [str(count - 1), 0]
+    started = time.monotonic()
+    run_service.take_out_empty_adapter_loaders(chain)
+    # Seconds if it walks the graph once per loader; hundredths in one pass.
+    assert time.monotonic() - started < 1.0
+    assert list(chain) == [str(count)]
+
+
+def _strength(value):
+    graph = json.loads(json.dumps(CHAIN_DOCUMENT))
+    graph["5"]["inputs"]["strength_model"] = value
+    return graph
+
+
+def test_saves_of_one_opening_in_comfyui_are_one_version(saving):
+    """Ctrl+S is pressed often, and autosave presses it for you: the saves of
+    one opening are one version, so the version from before the opening is one
+    step back. A version something was made on stays, whoever supersedes it.
+
+    Wrong if a version a recipe was saved on, or a picture ran, is gone (the
+    recipe would run another graph, rule 8), if an opening takes away another
+    opening's version or the owner's own, or if version numbers are reused.
+    """
+    env, first, second = saving, "a" * 32, "b" * 32
+
+    def kept():
+        return [(v, source) for v, source, _ in _versions_of(env, env.manual)]
+
+    def save(value, **extra):
+        r = _put_graph(env, env.manual, _strength(value), **extra)
+        assert r.status_code == 200, r.text
+        return r.json()["version"]
+
+    assert save(0.71, opening=first) == 2
+    # What the Workflow tab's "Saved from ComfyUI" line reads: the newest
+    # version's source, as it is, beside the words for it.
+    newest = env.owner.get(f"{API}/workflows/{env.manual}/versions").json()["versions"][
+        0
+    ]
+    assert (newest["version"], newest["source"], newest["reason"]) == (
+        2,
+        "comfyui",
+        "from ComfyUI",
+    )
+    # The same opening again: version 2 is superseded and goes; 3 is new.
+    assert save(0.72, opening=first) == 3
+    assert kept() == [(1, "import"), (3, "comfyui")]
+    # Another opening starts the next version and leaves the one before.
+    assert save(0.73, opening=second) == 4
+    assert kept() == [(1, "import"), (3, "comfyui"), (4, "comfyui")]
+
+    # A recipe saved while version 4 is current runs on version 4: it stays.
+    def add_recipe(session):
+        recipe = SavedRecipe(name="kept look", workflow_key="k", workflow_id=env.manual)
+        session.add(recipe)
+        session.commit()
+        return recipe.id
+
+    def run_on(version):
+        def write(session):
+            session.exec(
+                update(Picture)
+                .where(Picture.id == env.picture_id)
+                .values(
+                    run_workflow_id=env.manual if version else None,
+                    run_workflow_version=version,
+                )
+            )
+            session.commit()
+
+        env.server.vault.db.run_task(write, priority=DBPriority.IMMEDIATE)
+
+    recipe_id = env.server.vault.db.run_task(add_recipe, priority=DBPriority.IMMEDIATE)
+    try:
+        assert save(0.74, opening=second) == 5
+        assert [v for v, _ in kept()] == [1, 3, 4, 5]
+        # And so does a version a picture ran.
+        run_on(5)
+        assert save(0.75, opening=second) == 6
+        assert [v for v, _ in kept()] == [1, 3, 4, 5, 6]
+        # Nothing made on 6: the next save of the opening takes it.
+        assert save(0.76, opening=second) == 7
+        assert [v for v, _ in kept()] == [1, 3, 4, 5, 7]
+    finally:
+        run_on(None)
+
+        def drop(session):
+            session.exec(delete(SavedRecipe).where(SavedRecipe.id == recipe_id))
+            session.commit()
+
+        env.server.vault.db.run_task(drop, priority=DBPriority.IMMEDIATE)
+
+    # A save that names no opening supersedes nothing, and neither does one
+    # over a version the owner saved: only ComfyUI's own saves are taken.
+    assert save(0.77) == 8
+    assert save(0.78, source="mcp", opening=second) == 9
+    assert save(0.79, opening=second) == 10
+    assert [v for v, _ in kept()] == [1, 3, 4, 5, 7, 8, 9, 10]
+
+    r = _put_graph(env, env.manual, _strength(0.8), opening="../not an id")
+    assert r.status_code == 422, r.text

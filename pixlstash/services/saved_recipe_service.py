@@ -675,6 +675,47 @@ def read_in_session(session: Session, recipe_id: int) -> Optional[SavedRecipe]:
     return session.get(SavedRecipe, recipe_id)
 
 
+def made_on_version(vault, workflow_id: str, version: int, since: datetime) -> bool:
+    """Whether anything was made on *version* of *workflow_id*, current since *since*.
+
+    A picture that ran it (``Picture.run_workflow_version``), or a recipe saved
+    while it was the workflow's graph: a saved recipe runs on the version that
+    was current when it was saved (rule 8 of #1846), so such a version must
+    stay. What a save from ComfyUI asks before it takes away the version it
+    supersedes (#1852).
+
+    ponytail: the active library only. Another library sharing this hub may
+    hold a recipe saved on the version; its recipe then runs the nearest kept
+    version before it, as after any pruning. Ask every library if that bites.
+    """
+    if since.tzinfo is None:
+        # The vault's datetime columns take aware values only.
+        since = since.replace(tzinfo=timezone.utc)
+
+    def read(session: Session) -> bool:
+        ran = session.exec(
+            select(Picture.id)
+            .where(
+                Picture.run_workflow_id == workflow_id,
+                Picture.run_workflow_version == version,
+            )
+            .limit(1)
+        ).first()
+        if ran is not None:
+            return True
+        saved = session.exec(
+            select(SavedRecipe.id)
+            .where(
+                SavedRecipe.workflow_id == workflow_id,
+                SavedRecipe.created_at >= since,
+            )
+            .limit(1)
+        ).first()
+        return saved is not None
+
+    return vault.db.run_immediate_read_task(read)
+
+
 def read_recipe(vault, recipe_id: int) -> Optional[SavedRecipe]:
     """One saved recipe by id, for a run that starts from it (B7)."""
     return vault.db.run_immediate_read_task(read_in_session, recipe_id)

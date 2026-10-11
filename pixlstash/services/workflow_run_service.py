@@ -21,6 +21,7 @@ rather than in a caller.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import re
@@ -1565,6 +1566,110 @@ def take_out_person_loras(
             continue
         taken += entries
     return taken, refused
+
+
+def take_out_empty_adapter_loaders(graph: dict) -> list[str]:
+    """Take every multi-adapter loader holding no adapter out of *graph*, in place.
+
+    The loader PixlStash puts on ComfyUI's canvas for picking people (#1852)
+    arrives in a graph saved back with nobody picked, or with its people's
+    rows just emptied (:func:`take_out_person_loras`). With every row empty it
+    passes MODEL and CLIP straight through, so its readers are wired to what
+    it read and the node goes: the workflow is stored as it was before the
+    loader was put on. ``trigger_words`` of no adapter is the empty string.
+
+    Wired by hand, not through :func:`bypass_node`: the node's three outputs
+    are this code's own contract with the pack, and ComfyUI need not answer.
+
+    Returns:
+        The ids of the nodes taken out.
+    """
+    # Output index -> what stands in for it, per loader taken out: MODEL,
+    # CLIP, and `trigger_words` of no adapter.
+    through: dict[str, dict[int, Any]] = {}
+    for node_id, node in graph.items():
+        if (
+            not isinstance(node, dict)
+            or node.get("class_type") != PIXLSTASH_MULTI_ADAPTER_LOADER
+        ):
+            continue
+        inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+        if any(
+            LORA_DIGEST_FIELD_RE.match(name) and (is_link(value) or value)
+            for name, value in inputs.items()
+        ):
+            continue
+        through[str(node_id)] = {0: inputs.get("model"), 1: inputs.get("clip"), 2: ""}
+    if not through:
+        return []
+
+    gone = object()
+    settled: dict[tuple[str, Any], Any] = {}
+
+    def stand_in(link: list) -> Any:
+        """What a reader of *link* reads once the loaders are out: followed
+        through a chain of them, each step once however many read it."""
+        walked: dict[tuple[str, Any], None] = {}
+        value: Any = link
+        while is_link(value) and str(value[0]) in through:
+            step = (str(value[0]), value[1])
+            if step in settled:
+                value = settled[step]
+                break
+            if step in walked:
+                # Empty loaders reading each other: nothing feeds the ring.
+                value = gone
+                break
+            walked[step] = None
+            value = through[step[0]].get(step[1])
+            if value is None:
+                # No CLIP was wired in, so the output carried nothing.
+                value = gone
+        for step in walked:
+            settled[step] = value
+        return value
+
+    # One pass over the readers, so a graph of nothing but loaders costs its
+    # size and not its square: the write is reachable from ComfyUI's port.
+    for node_id, node in graph.items():
+        read = node.get("inputs") if isinstance(node, dict) else None
+        if str(node_id) in through or not isinstance(read, dict):
+            continue
+        for name, value in list(read.items()):
+            if not is_link(value) or str(value[0]) not in through:
+                continue
+            found = stand_in(value)
+            if found is gone:
+                del read[name]
+            else:
+                read[name] = deepcopy(found)
+    for node_id in [key for key in graph if str(key) in through]:
+        del graph[node_id]
+    return sorted(through)
+
+
+def graph_structure(graph: dict) -> str:
+    """A digest of how an API-format *graph* is wired, whatever its values.
+
+    Each node's id and class and every connection it reads. Two graphs with
+    one structure differ only in widget values, so an editor document laid
+    out for one fits the other once those values are written over it; that is
+    what decides whether a ComfyUI layout may open (#1852).
+    """
+    wiring = sorted(
+        (
+            str(node_id),
+            str(node.get("class_type")),
+            sorted(
+                (name, str(value[0]), value[1])
+                for name, value in node["inputs"].items()
+                if is_link(value)
+            ),
+        )
+        for node_id, node in graph.items()
+        if isinstance(node, dict) and isinstance(node.get("inputs"), dict)
+    )
+    return hashlib.sha256(json.dumps(wiring).encode()).hexdigest()
 
 
 def _close_adapter_rows(inputs: dict) -> None:

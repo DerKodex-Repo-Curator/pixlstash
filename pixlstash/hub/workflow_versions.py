@@ -40,6 +40,16 @@ logger = get_logger(__name__)
 # ``MAX_VERSIONS - 1``, so history is bounded.
 MAX_VERSIONS = 50
 
+# ``source`` of a graph saved over a workflow from ComfyUI's canvas (#1852).
+FROM_COMFYUI = "comfyui"
+
+# The most versions saved from ComfyUI one workflow keeps, counted apart from
+# the rest. Ctrl+S there is pressed often and is sent by whoever can reach
+# ComfyUI, so those saves prune only each other: they can never push a version
+# the owner saved in PixlStash out of its :data:`MAX_VERSIONS`. As many as the
+# rest keep, so an owner who edits in ComfyUI has the history they had.
+MAX_COMFYUI_VERSIONS = MAX_VERSIONS - 1
+
 # ``source`` of an automatic workflow's version 1: the graph its pictures held
 # when the owner first saved over it.
 FROM_PICTURES = "pictures"
@@ -174,7 +184,8 @@ def append_version(
     Stamped with the workflow's id like every stored document, and copied onto
     ``workflow_document`` with its conversion cleared: the conversion was of the
     version before. Past :data:`MAX_VERSIONS`, the oldest versions after
-    version 1 are deleted in the same transaction.
+    version 1 are deleted in the same transaction; versions saved from ComfyUI
+    are counted apart, against :data:`MAX_COMFYUI_VERSIONS`.
 
     Raises:
         LookupError: No manual workflow *workflow_id*.
@@ -205,10 +216,21 @@ def append_version(
         "WHERE workflow_id = ?",
         (stored, api_document, workflow_id),
     )
+    # Version 1 and the newest of the new version's own kind: a save from
+    # ComfyUI prunes only saves from ComfyUI, and any other only the others.
+    from_comfyui = source == FROM_COMFYUI
     pruned = conn.execute(
-        "DELETE FROM workflow_version WHERE workflow_id = ? AND version > 1 "
-        "AND version <= ?",
-        (workflow_id, version - (MAX_VERSIONS - 1)),
+        "DELETE FROM workflow_version WHERE workflow_id = ? AND version IN ("
+        "SELECT version FROM workflow_version WHERE workflow_id = ? "
+        "AND version > 1 AND (source = ?) = ? "
+        "ORDER BY version DESC LIMIT -1 OFFSET ?)",
+        (
+            workflow_id,
+            workflow_id,
+            FROM_COMFYUI,
+            from_comfyui,
+            MAX_COMFYUI_VERSIONS if from_comfyui else MAX_VERSIONS - 1,
+        ),
     ).rowcount
     logger.info(
         "Manual workflow %s is now at version %d (%s)%s.",
@@ -474,8 +496,9 @@ def version_at(hub: HubDatabase, workflow_id: str, when: datetime) -> Optional[i
     #1846). The newest kept version stored at or before *when*; a workflow
     saved over for the first time since then answers its oldest kept version,
     which for an automatic one is the graph read off its pictures. A version
-    since pruned (a workflow keeps version 1 and the newest 49) answers the
-    nearest kept one before it. A naive *when* is read as UTC.
+    since pruned (a workflow keeps version 1 and the newest 49 of each kind,
+    and the saves of one opening in ComfyUI as one) answers the nearest kept
+    one before it. A naive *when* is read as UTC.
     """
     if when.tzinfo is None:
         when = when.replace(tzinfo=timezone.utc)
@@ -538,3 +561,53 @@ def automatic_version_facts(hub: HubDatabase) -> dict[str, tuple[int, int, str]]
             (f"{AUTO_PREFIX}%",),
         )
     }
+
+
+# ── The layout a workflow was left with in ComfyUI (#1852) ──────────────────
+# A graph saved from ComfyUI's canvas arrives with the editor document it was
+# converted from: node positions, groups and notes, which the runnable graph
+# has none of. One is kept per workflow, beside its versions, with
+# ``structure``: the wiring of the graph it arrived with. It is handed back
+# only while what opens still has that wiring. That keeps a stale layout off
+# the wire; what binds a layout to a graph is the node that opens it, which
+# converts it on the canvas and uses it only when it is the graph it was sent.
+
+
+def write_layout(
+    conn: sqlite3.Connection, workflow_id: str, document: dict, structure: str
+) -> None:
+    """Keep *document* as *workflow_id*'s layout, replacing the one before."""
+    conn.execute(
+        "INSERT INTO workflow_layout (workflow_id, document, structure, saved_at) "
+        "VALUES (?, ?, ?, ?) ON CONFLICT(workflow_id) DO UPDATE SET "
+        "document = excluded.document, structure = excluded.structure, "
+        "saved_at = excluded.saved_at",
+        (workflow_id, json.dumps(document), structure, _now()),
+    )
+
+
+def drop_layout(conn: sqlite3.Connection, workflow_id: str) -> None:
+    """Forget *workflow_id*'s layout: it opens auto-arranged until saved again."""
+    conn.execute("DELETE FROM workflow_layout WHERE workflow_id = ?", (workflow_id,))
+
+
+def layout_for(hub: HubDatabase, workflow_id: str, structure: str) -> Optional[dict]:
+    """*workflow_id*'s layout when it was saved over a graph wired as
+    *structure*, else ``None`` (also for one that will not read, logged)."""
+    row = hub.fetchone(
+        "SELECT document, structure FROM workflow_layout WHERE workflow_id = ?",
+        (workflow_id,),
+    )
+    if row is None or row["structure"] != structure:
+        return None
+    try:
+        document = json.loads(row["document"])
+    except (ValueError, TypeError, RecursionError) as exc:
+        logger.warning(
+            "Workflow %s: its ComfyUI layout will not read, so it opens "
+            "auto-arranged: %s",
+            workflow_id,
+            exc,
+        )
+        return None
+    return document if isinstance(document, dict) else None

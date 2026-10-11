@@ -1758,12 +1758,10 @@ def _comfyui_abort(base_url: str) -> dict:
     return result
 
 
-def comfyui_can_open_workflows(base_url: str) -> bool | None:
-    """Whether ComfyUI can open a ``?pixlstash_workflow=<key>`` link.
+def comfyui_pixlstash_scripts(base_url: str) -> set[str] | None:
+    """The file names of the scripts the ComfyUI-PixlStash node hands the browser.
 
-    Only the ComfyUI-PixlStash node's ``open_workflow.js`` reads that
-    parameter; without it ComfyUI opens on whatever it had last. ComfyUI's
-    ``GET /extensions`` lists every script it hands the browser. ``None`` when
+    ComfyUI's ``GET /extensions`` lists every script it serves. ``None`` when
     ComfyUI cannot be asked.
 
     ponytail: matches the pack by a "pixlstash" folder name, which holds for the
@@ -1783,12 +1781,29 @@ def comfyui_can_open_workflows(base_url: str) -> bool | None:
             type(scripts).__name__,
         )
         return None
-    return any(
-        isinstance(script, str)
-        and "pixlstash" in script.lower()
-        and script.endswith("/open_workflow.js")
+    return {
+        script.rsplit("/", 1)[-1]
         for script in scripts
-    )
+        if isinstance(script, str) and "pixlstash" in script.lower()
+    }
+
+
+# The pack's scripts PixlStash asks ComfyUI for: the one that reads a
+# ``?pixlstash_workflow=<key>`` link, and the one that saves a workflow opened
+# that way back to PixlStash (#1852; a pack from before it opens a copy).
+PACK_OPENS_WORKFLOWS = "open_workflow.js"
+PACK_SAVES_BACK = "save_workflow.js"
+
+
+def comfyui_can_open_workflows(base_url: str) -> bool | None:
+    """Whether ComfyUI can open a ``?pixlstash_workflow=<key>`` link.
+
+    Only the ComfyUI-PixlStash node's ``open_workflow.js`` reads that
+    parameter; without it ComfyUI opens on whatever it had last. ``None`` when
+    ComfyUI cannot be asked.
+    """
+    scripts = comfyui_pixlstash_scripts(base_url)
+    return None if scripts is None else PACK_OPENS_WORKFLOWS in scripts
 
 
 def normalize_comfyui_url(url: str) -> str:
