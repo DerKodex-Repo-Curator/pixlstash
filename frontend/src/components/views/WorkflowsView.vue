@@ -122,11 +122,7 @@
          ignored them. -->
     <p v-if="linkMissed" class="wfv-note">
       That workflow is not in this grid.
-      <template v-if="withheld"
-        >{{ withheld }} {{ withheld === 1 ? "is" : "are" }} being left out:
-        {{ withheldHidden }} hidden and {{ withheldOneOffs }} counted as
-        one-offs.</template
-      >
+      <template v-if="withheldNames">Left out: {{ withheldNames }}.</template>
     </p>
 
     <!-- A deep link whose card the payload holds and a filter hides.
@@ -168,10 +164,9 @@
           <img src="/Empty.png" alt="" />
         </div>
         <h2 class="wfv-empty__title">Nothing found yet</h2>
-        <p v-if="withheld" class="wfv-empty__lead">
+        <p v-if="withheldNames" class="wfv-empty__lead">
           Every workflow this library has is being left out of the grid:
-          {{ withheldHidden }} hidden and {{ withheldOneOffs }} counted as
-          one-offs. Nothing has been lost.
+          {{ withheldNames }}. Nothing has been lost.
         </p>
         <p v-else class="wfv-empty__lead">
           A workflow arrives with the pictures it made, or as a file of its own.
@@ -473,29 +468,33 @@ const filteredOut = computed(
 );
 
 /**
- * How many workflows the grid HAS but is not drawing.
+ * What the grid HAS but is not drawing, in words: "hidden workflows and 12
+ * one-offs", or "" when nothing is left out.
  *
- * "Nothing found yet" over a subtitle reading "40 hidden · 12 one-offs" is a
- * screen arguing with itself, so the empty state says which of the two it is
- * in. Show — the control that would let somebody act on it — needs the write
- * routes that are not in `develop` yet, so for now this is a sentence rather
- * than a way back in.
+ * "Nothing found yet" over a library whose every workflow is hidden is a
+ * screen arguing with itself, so the empty state says which it is in.
+ *
+ * **Hidden workflows are named and never counted.** Somebody hid them to stop
+ * looking at them, and a running total on the toolbar keeps them in view; the
+ * Filters menu's Hidden row is the way back to them.
  */
-const withheldHidden = computed(() =>
-  store.filters.showHidden ? 0 : store.hidden,
-);
-const withheldOneOffs = computed(() =>
-  store.filters.hideOneOffs ? store.oneOffs : 0,
-);
-const withheld = computed(() => withheldHidden.value + withheldOneOffs.value);
+const withheldOneOffs = computed(() => {
+  const n = store.filters.hideOneOffs ? store.oneOffs : 0;
+  if (!n) return "";
+  return n === 1 ? "1 one-off" : `${n} one-offs`;
+});
+const withheldNames = computed(() => {
+  const parts = [];
+  if (store.hidden && !store.filters.showHidden) parts.push("hidden workflows");
+  if (withheldOneOffs.value) parts.push(withheldOneOffs.value);
+  return parts.join(" and ");
+});
 
 const subtitle = computed(() => {
   const count = store.sortedCards.length;
   const parts = [count === 1 ? "1 workflow" : `${count} workflows`];
-  // Only what is still being LEFT OUT. A filter that let the hidden ones in
-  // makes "40 hidden" a caption for cards the reader is looking at.
-  if (withheldHidden.value) parts.push(`${withheldHidden.value} hidden`);
-  if (withheldOneOffs.value) parts.push(`${withheldOneOffs.value} one-offs`);
+  // Only what is still being LEFT OUT, and one-offs alone: see `withheldNames`.
+  if (withheldOneOffs.value) parts.push(withheldOneOffs.value);
   return parts.join(" · ");
 });
 
@@ -645,8 +644,8 @@ const watchedPath = computed(
 //
 // So a miss SAYS SO rather than doing nothing. Dropping the reader at the top
 // of a grid that does not contain what they clicked, with no word about it, is
-// the silent failure this screen must not have; the subtitle already counts
-// what is being withheld, so the sentence has something true to point at. F7
+// the silent failure this screen must not have; `withheldNames` says what is
+// being left out, so the sentence has something true to point at. F7
 // replaces this link with the card's own *Show all N pictures* chip.
 //
 // Honoured once per value rather than on every `cards` change, because the
@@ -691,9 +690,8 @@ function linkVerdict(matches) {
     linkMissed.value = false;
     return null;
   }
-  const plural = withheld.value === 1 ? "is" : "are";
-  announcement.value = withheld.value
-    ? `That workflow is not in the grid. ${withheld.value} ${plural} being left out: ${withheldHidden.value} hidden and ${withheldOneOffs.value} counted as one-offs.`
+  announcement.value = withheldNames.value
+    ? `That workflow is not in the grid. Left out: ${withheldNames.value}.`
     : "That workflow is not in the grid.";
   linkMissed.value = true;
   linkFiltered.value = false;

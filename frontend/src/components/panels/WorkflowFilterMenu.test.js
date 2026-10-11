@@ -117,7 +117,8 @@ async function optionLabels(wrapper, kind) {
     .findAll(".optrow")
     .map((row) => [
       row.attributes("aria-label") ?? row.find(".optrow__label").text(),
-      row.find(".fm-n").text(),
+      // A row with no count draws no count element at all.
+      row.find(".fm-n").exists() ? row.find(".fm-n").text() : null,
     ]);
 }
 
@@ -201,7 +202,7 @@ describe("the Workflows filter menu", () => {
     expect(wrapper.find(".fm-sub").exists()).toBe(false);
   });
 
-  it("labels the two server-side flags with the counts the payload sent", async () => {
+  it("counts the one-offs the payload sent, and never the hidden workflows", async () => {
     const { wrapper } = await mountMenu();
     expect(await optionLabels(wrapper, "hideOneOffs")).toEqual([
       ["Hide", "7"],
@@ -209,8 +210,8 @@ describe("the Workflows filter menu", () => {
     ]);
     expect(await chosen(wrapper, "hideOneOffs")).toBe("Hide");
     expect(await optionLabels(wrapper, "showHidden")).toEqual([
-      ["Hide", "4"],
-      ["Show", "4"],
+      ["Hide", null],
+      ["Show", null],
     ]);
     expect(await chosen(wrapper, "showHidden")).toBe("Hide");
   });

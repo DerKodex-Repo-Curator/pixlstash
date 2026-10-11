@@ -19058,6 +19058,101 @@ def test_the_preflight_names_a_missing_replacement_and_never_its_original(replac
     ]
 
 
+def test_a_text_encoders_replacement_is_not_a_vision_loaders(chained):
+    """What a run changed is compared through the owner's replacements, and a
+    text encoder's replacement is for text-encoder loaders only (#1875).
+
+    A vision loader's `clip_name` is an image encoder. Here it names a file
+    called what the replaced text encoder is called, so a run that loads a
+    file of the replacement's name there has changed the vision model. Wrong
+    if that run keeps nothing, or if the same file at the text encoder's
+    loader keeps something.
+    """
+    was, now = "test-shared-encoder.safetensors", "test-encoder-fp8.safetensors"
+    document = json.loads(json.dumps(CHAIN_DOCUMENT))
+    document["7"] = {"class_type": "CLIPLoader", "inputs": {"clip_name": was}}
+    document["8"] = {"class_type": "CLIPVisionLoader", "inputs": {"clip_name": was}}
+    document["9"] = {
+        "class_type": "CLIPVisionEncode",
+        "inputs": {"clip_vision": ["8", 0]},
+    }
+    document["10"] = {
+        "class_type": "unCLIPConditioning",
+        "inputs": {"conditioning": ["6", 0], "clip_vision_output": ["9", 0]},
+    }
+    document["6"]["inputs"]["clip"] = ["7", 0]
+    document["3"]["inputs"]["positive"] = ["10", 0]
+    info = json.loads(json.dumps(CHAIN_OBJECT_INFO))
+    for cls, output in (("CLIPLoader", "CLIP"), ("CLIPVisionLoader", "CLIP_VISION")):
+        info[cls] = {
+            "input": {"required": {"clip_name": [[was, now], {}]}},
+            "output": [output],
+        }
+    info["CLIPVisionEncode"] = {
+        "input": {"required": {"clip_vision": ["CLIP_VISION", {}]}},
+        "output": ["CLIP_VISION_OUTPUT"],
+    }
+    info["unCLIPConditioning"] = {
+        "input": {
+            "required": {
+                "conditioning": ["CONDITIONING", {}],
+                "clip_vision_output": ["CLIP_VISION_OUTPUT", {}],
+            }
+        },
+        "output": ["CONDITIONING"],
+    }
+    chained.monkeypatch.setattr(
+        workflows_routes,
+        "_load_embedded_api_prompt",
+        lambda server, pid, object_info=None: (json.loads(json.dumps(document)), []),
+    )
+    chained.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url, **_: (info, None)
+    )
+    labels = topology_node_labels(structural_document(document))
+    text, vision = (f"{labels[node]}/clip_name" for node in ("7", "8"))
+    hub = chained.server.hub
+    with hub.transaction() as conn:
+        conn.execute(
+            "INSERT INTO workflow_model_fix (topology_hash, slot_label, was_norm, "
+            "now_norm, was_name, now_name, slot_kind) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'text_encoder')",
+            (RUN_TOPOLOGY, labels["7"], was, now, was, now),
+        )
+    try:
+
+        def ran(address: str, filename: str) -> tuple[str, str, dict | None]:
+            graph = _run(
+                chained,
+                workflow_id=RUN_WF,
+                models=[{"address": address, "filename": filename}],
+            )
+            loads = (
+                graph["7"]["inputs"]["clip_name"],
+                graph["8"]["inputs"]["clip_name"],
+            )
+            return (*loads, _changes(chained, RUN_WF)["ran"])
+
+        def changed_the_vision_model() -> None:
+            *loads, kept = ran(vision, now)
+            assert loads == [now, now]
+            assert kept is not None, "a vision model changed and nothing was kept"
+            assert kept["models"] == [
+                {"address": vision, "filename": now, "sha256": None}
+            ]
+
+        # Each run that changed nothing follows one that did, so "nothing
+        # kept" is that run's answer and not an offer nobody ever wrote. The
+        # text encoder loads its replacement whichever name the run says, and
+        # the vision loader keeps a file no replacement was made for.
+        for address, own in ((text, was), (text, now), (vision, was)):
+            changed_the_vision_model()
+            assert ran(address, own) == (now, was, None), (address, own)
+    finally:
+        with hub.transaction() as conn:
+            conn.execute("DELETE FROM workflow_model_fix")
+
+
 def test_a_model_pick_wins_over_an_earlier_replacement_at_its_loader(replaced):
     """A `models` change at a loader that holds a model fix (#1850 W5).
 

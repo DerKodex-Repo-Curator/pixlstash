@@ -261,13 +261,11 @@
         </template>
       </div>
 
-      <!-- Hidden sets are out of the grid, not gone: say how many, and let
-           them be drawn again so one can be shown. Derived and hand-made alike. -->
+      <!-- Hidden sets are out of the grid, not gone: say so, without a count,
+           and let them be drawn again so one can be shown. Derived and
+           hand-made alike. -->
       <p v-if="store.hiddenSetCount" class="msg__hidden">
-        <span class="num"
-          >{{ store.hiddenSetCount.toLocaleString() }} hidden
-          {{ store.hiddenSetCount === 1 ? "set" : "sets" }}</span
-        >
+        <span>Some sets are hidden.</span>
         <AppButton
           variant="ghost"
           size="sm"

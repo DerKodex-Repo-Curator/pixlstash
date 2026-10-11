@@ -416,6 +416,18 @@ describe("the empty state", () => {
     expect(wrapper.find(".wfv-empty__path").exists()).toBe(false);
   });
 
+  it("says a library is empty because of what is left out, without counting the hidden", async () => {
+    listWorkflowCards.mockResolvedValue({ cards: [], one_offs: 1, hidden: 37 });
+    const wrapper = mountView();
+    await flush();
+    const lead = wrapper.find(".wfv-empty__lead").text().replace(/\s+/g, " ");
+    expect(lead).toContain(
+      "left out of the grid: hidden workflows and 1 one-off. Nothing has been lost.",
+    );
+    expect(lead).not.toMatch(/37|38/);
+    expect(wrapper.find(".wfv-sub").text()).not.toContain("hidden");
+  });
+
   it("names the watched folder by its host path and opens it", async () => {
     listWorkflowCards.mockResolvedValue({ cards: [], one_offs: 0, hidden: 0 });
     listImportFolders.mockResolvedValue({
@@ -556,26 +568,51 @@ describe("arriving on ?topology=", () => {
     const wrapper = await grid();
 
     const note = wrapper.find(".wfv-note").text();
-    expect(note).toContain("52 are being left out");
-    expect(note).toContain("40 hidden");
-    expect(note).toContain("12 counted as one-offs");
+    expect(note).toContain("Left out: hidden workflows and 12 one-offs.");
+    // Hidden workflows are named, never counted: not alone, not in a total.
+    expect(note).not.toMatch(/40|52/);
+    // The live region is built from the same parts and says it too.
+    const said = wrapper.find('[role="status"]').text();
+    expect(said).toContain("Left out: hidden workflows and 12 one-offs.");
+    expect(said).not.toMatch(/40|52/);
   });
 
-  // `withheld` is a count, and 1 is the common shape of a small library.
-  it('says "1 is being left out", not "1 are"', async () => {
+  it("names hidden workflows alone when no one-off is left out", async () => {
     listWorkflowCards.mockImplementation(() =>
       Promise.resolve({ cards: [...CARDS], one_offs: 0, hidden: 1 }),
     );
     route.query = { topology: "topology-nothing" };
     const wrapper = await grid();
 
-    const note = wrapper.find(".wfv-note").text();
-    expect(note).toContain("1 is being left out");
-    expect(note).not.toContain("1 are being left out");
-    // The live region is built from the same parts and says it too.
-    expect(wrapper.find('[role="status"]').text()).toContain(
-      "1 is being left out",
+    expect(wrapper.find(".wfv-note").text()).toContain(
+      "Left out: hidden workflows.",
     );
+  });
+
+  // Shown is not left out: with the hidden cards drawn, a miss is not theirs.
+  it("does not name hidden workflows while they are being shown", async () => {
+    listWorkflowCards.mockImplementation(() =>
+      Promise.resolve({ cards: [...CARDS], one_offs: 1, hidden: 40 }),
+    );
+    route.query = { topology: "topology-nothing" };
+    const wrapper = await grid();
+    useWorkflowsStore().setFilters({ showHidden: true });
+    await flush();
+
+    expect(wrapper.find(".wfv-note").text()).toContain("Left out: 1 one-off.");
+    expect(wrapper.find(".wfv-sub").text()).toBe("6 workflows · 1 one-off");
+  });
+
+  it("says nothing is left out when nothing is", async () => {
+    listWorkflowCards.mockImplementation(() =>
+      Promise.resolve({ cards: [...CARDS], one_offs: 0, hidden: 0 }),
+    );
+    route.query = { topology: "topology-nothing" };
+    const wrapper = await grid();
+
+    const note = wrapper.find(".wfv-note").text();
+    expect(note).toContain("That workflow is not in this grid.");
+    expect(note).not.toContain("Left out");
   });
 
   it("says nothing while the cards are still on the wire", async () => {
@@ -1039,7 +1076,7 @@ describe("WorkflowsView filters", () => {
     expect(wrapper.findAll(".filter-chip")).toHaveLength(2);
   });
 
-  it("says which of the two counts is still being withheld", async () => {
+  it("counts the one-offs left out and never the hidden workflows", async () => {
     // On the payload, not on the store: ticking a checkbox re-reads the grid,
     // and a count written straight onto the store is overwritten by the
     // answer - which would make this pass for the wrong reason.
@@ -1050,15 +1087,13 @@ describe("WorkflowsView filters", () => {
     const store = useWorkflowsStore();
     await store.fetchCards();
     await flush();
-    expect(wrapper.find(".wfv-sub").text()).toBe(
-      "6 workflows · 4 hidden · 7 one-offs",
-    );
+    expect(wrapper.find(".wfv-sub").text()).toBe("6 workflows · 7 one-offs");
 
     // Shown is not withheld: the subtitle must stop counting what the reader
     // is now looking at, or it captions the grid with its own contents.
-    store.setFilters({ showHidden: true });
+    store.setFilters({ hideOneOffs: false });
     await flush();
-    expect(wrapper.find(".wfv-sub").text()).toBe("6 workflows · 7 one-offs");
+    expect(wrapper.find(".wfv-sub").text()).toBe("6 workflows");
   });
 
   it("filters by origin: each option keeps only its own cards", async () => {
