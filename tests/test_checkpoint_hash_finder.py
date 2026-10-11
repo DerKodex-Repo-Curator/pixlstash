@@ -254,6 +254,28 @@ class TestCollisionIsAMerge:
             )
         } == {("both", survivor), ("second", survivor)}
 
+    def test_the_merge_carries_a_librarys_hide_to_the_survivor(self, hub, tmp_path):
+        """A library that hid either row hid these bytes, whichever row is kept."""
+        first = write_model(tmp_path / "one" / "a.safetensors")
+        second = write_model(tmp_path / "two" / "b.safetensors")
+        first_id = register(hub, first)
+        second_id = register(hub, second)
+        with hub.transaction() as conn:
+            conn.executemany(
+                "INSERT INTO model_hidden (library_uuid, model_id) VALUES (?, ?)",
+                [("hid-first", first_id), ("hid-second", second_id)],
+            )
+
+        CheckpointHashTask(
+            hub, [(first_id, str(first)), (second_id, str(second))]
+        ).run()
+
+        survivor = rows(hub)[0]["id"]
+        assert {
+            (row["library_uuid"], row["model_id"])
+            for row in hub.fetchall("SELECT library_uuid, model_id FROM model_hidden")
+        } == {("hid-first", survivor), ("hid-second", survivor)}
+
     def test_the_merge_keeps_the_header_facts_only_the_dropped_row_has(
         self, hub, tmp_path
     ):

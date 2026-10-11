@@ -183,6 +183,7 @@ from pixlstash.services.model_shelf_service import (
     adapter_digest_index,
     character_lora_hashes,
     families_clash,
+    hidden_model_ids,
     known_base_model,
     lora_owners,
     lora_people,
@@ -8358,6 +8359,10 @@ def create_router(server) -> APIRouter:
             dry_run=False, name=name, workflow_id=landed, changes=plan["changes"]
         )
 
+    def _hidden_models() -> set[int]:
+        """The models the active library hides: never offered as a choice."""
+        return set(hidden_model_ids(_hub(), _library_uuid()))
+
     def _swap_models(hub) -> dict[int, SwapModel]:
         """Every shelf row a clone could load, by id. Engines are PixlStash's own."""
         return {
@@ -8583,6 +8588,8 @@ def create_router(server) -> APIRouter:
             )
         kind = kinds.pop()
         base_model = None
+        # A replacement is offered, so a model this library hides is not one.
+        hidden = _hidden_models()
         # `wider`: the checkpoints of another base model, offered only when
         # none in `candidates` can be loaded.
         candidates, wider = [], []
@@ -8594,6 +8601,7 @@ def create_router(server) -> APIRouter:
                     for m in models.values()
                     if m.file_kind == FILE_CHECKPOINT
                     and normalized_filename(m.filename) != wanted
+                    and m.id not in hidden
                 ),
                 key=lambda m: (m.display_name or m.filename).lower(),
             )
@@ -8630,6 +8638,7 @@ def create_router(server) -> APIRouter:
                     via=entry["via"],
                 )
                 for entry in propose_companions(_hub(), base.id, index)[kind]
+                if entry["id"] not in hidden
             ]
         candidates = [
             c for c in candidates if normalized_filename(c.filename) != wanted
@@ -8744,9 +8753,16 @@ def create_router(server) -> APIRouter:
         index = recipe_asset_index(hub)
         found = _swap_slots(source.graph, models, index)
 
+        # `models` stays whole: it also names what the graph already loads.
+        hidden = _hidden_models()
+
         def of_kind(kind: str) -> list[SwapModel]:
             return sorted(
-                (m for m in models.values() if m.file_kind == kind),
+                (
+                    m
+                    for m in models.values()
+                    if m.file_kind == kind and m.id not in hidden
+                ),
                 key=lambda m: (m.display_name or m.filename).lower(),
             )
 
@@ -8785,7 +8801,9 @@ def create_router(server) -> APIRouter:
         options.checkpoint_family = family_of(chosen.base_model)
         options.checkpoint_modality = modality_of(chosen.base_model)
         options.proposals = {
-            kind: [SwapProposal(**entry) for entry in entries]
+            kind: [
+                SwapProposal(**entry) for entry in entries if entry["id"] not in hidden
+            ]
             for kind, entries in propose_companions(hub, checkpoint_id, index).items()
         }
         # Only where both sides fold to a known family and differ in family

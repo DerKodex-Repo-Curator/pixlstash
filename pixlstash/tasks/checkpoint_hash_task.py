@@ -221,6 +221,14 @@ class CheckpointHashTask(BaseTask):
         conn.execute(
             "DELETE FROM comfyui_history_model WHERE model_id = ?", (doomed["id"],)
         )
+        # A library that hid the doomed row hid these bytes, which the survivor
+        # now is.
+        conn.execute(
+            "INSERT OR IGNORE INTO model_hidden (library_uuid, model_id) "
+            "SELECT library_uuid, ? FROM model_hidden WHERE model_id = ?",
+            (survivor["id"], doomed["id"]),
+        )
+        conn.execute("DELETE FROM model_hidden WHERE model_id = ?", (doomed["id"],))
         conn.execute("DELETE FROM model WHERE id = ?", (doomed["id"],))
         # A duplicate can be one file of a run, and the row that loses the merge
         # leaves it without asking the stack module - the same hole Forget and

@@ -519,6 +519,10 @@ class TestForget:
                     "VALUES (?, 'set-key')",
                     (library.uuid,),
                 )
+                conn.execute(
+                    "INSERT INTO model_hidden (library_uuid, model_id) VALUES (?, 1)",
+                    (library.uuid,),
+                )
 
         registry.forget(gone.id)
 
@@ -528,6 +532,7 @@ class TestForget:
             "workflow_picture_input",
             "workflow_group_hidden",
             "workflow_set_hidden",
+            "model_hidden",
         ):
             rows = hub.connection.execute(
                 f"SELECT library_uuid FROM {table}"
