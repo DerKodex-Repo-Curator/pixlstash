@@ -1506,7 +1506,7 @@ ROUTE_POLICIES: dict[tuple[str, str], RoutePolicy] = {
     ),
     ("POST", "/api/v1/comfyui/link"): RoutePolicy(
         _LOCAL,
-        justification="Mints a full-access token and has this server push it to whatever answers at the saved ComfyUI address on its own network: the server's network position is the authority, so a local owner only (§16.3, #1810)",
+        justification="Mints a ComfyUI-scope token and has this server push it to whatever answers at the saved ComfyUI address on its own network: the server's network position is the authority, so a local owner only (§16.3, #1810)",
     ),
     ("DELETE", "/api/v1/comfyui/link"): RoutePolicy(
         _LOCAL,

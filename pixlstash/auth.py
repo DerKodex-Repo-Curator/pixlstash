@@ -19,6 +19,7 @@ from passlib.hash import bcrypt
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import or_
 from sqlmodel import Session, select
+from starlette.routing import compile_path
 
 from pixlstash.database import DBPriority, VaultDatabase
 from pixlstash.db_models import Character, PictureSet, Project, User, UserToken
@@ -90,6 +91,81 @@ RESTORE_ADMISSION_PREFIXES: tuple[str, ...] = (*AUTH_API_PREFIXES, "/share/")
 # is named here so the shape the ``*_SCOPED`` route policies exist for keeps its
 # write-ness deliberately rather than by the old ``!= "READ"`` accident.
 WRITE_ENABLED_SCOPES: frozenset[str] = frozenset({"WRITE"})
+
+# The scope of the ComfyUI link key (#1811): the owner's access on the routes
+# in ``COMFYUI_SCOPE_ROUTES`` and no access to anything else. ComfyUI serves
+# its settings, key included, to anyone who can reach it, so the key is worth
+# only what the ComfyUI-PixlStash nodes call.
+COMFYUI_SCOPE = "COMFYUI"
+COMFYUI_SCOPE_REFUSAL = "This key only works for what ComfyUI's PixlStash nodes do."
+
+# Every route the ComfyUI-PixlStash pack calls, as ``(method, template)`` keys
+# of ``authz/registry.py::ROUTE_POLICIES``, and nothing else. ``GET /version``
+# is public and needs no entry. A route the pack starts calling is added here;
+# ``tests/test_architecture_guardrails.py::
+# test_the_comfyui_scope_admits_every_route_the_pack_calls`` fails until it is.
+#
+# Two places read it. The authz gate admits by the matched route's identity,
+# which is exact. The middleware below matches the path's shape before
+# routing, which is looser (``/pictures/{id}/{field}`` has the shape of
+# ``/pictures/import/status``) and is the layer that survives
+# ``AUTHZ_GATE_ENFORCING = False``.
+COMFYUI_SCOPE_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        # The pickers, through the pack's proxy.
+        ("GET", "/api/v1/projects"),
+        ("GET", "/api/v1/picture_sets"),
+        ("GET", "/api/v1/characters"),
+        ("GET", "/api/v1/sort_mechanisms"),
+        ("GET", "/api/v1/pictures"),
+        ("GET", "/api/v1/pictures/thumbnails/{id}.webp"),
+        ("GET", "/api/v1/picture_sets/{id}/thumbnail"),
+        # A character's thumbnail is served by the field route.
+        ("GET", "/api/v1/characters/{id}/{field}"),
+        # The model shelf: lists, one record, its icon, and the file itself
+        # when ComfyUI does not have it (still local-owner-only).
+        ("GET", "/api/v1/adapters"),
+        ("GET", "/api/v1/adapters/{sha256}"),
+        ("GET", "/api/v1/adapters/{sha256}/file"),
+        ("GET", "/api/v1/checkpoints"),
+        ("GET", "/api/v1/models/workflow-sets"),
+        ("GET", "/api/v1/model-icons/{sha256}"),
+        # Open in ComfyUI, and Convert for PixlStash.
+        ("GET", "/api/v1/workflows/{workflow_id}/graph"),
+        ("POST", "/api/v1/comfyui/workflows/convert"),
+        # The loader and search nodes.
+        ("GET", "/api/v1/pictures/search"),
+        ("GET", "/api/v1/pictures/{id}/metadata"),
+        ("GET", "/api/v1/pictures/{id}.{ext}"),
+        ("GET", "/api/v1/picture_sets/{id}/members"),
+        ("GET", "/api/v1/characters/{id}/reference_pictures"),
+        ("POST", "/api/v1/pictures/likeness-search"),
+        ("POST", "/api/v1/pictures/face-search"),
+        ("POST", "/api/v1/pictures/score_character_likeness"),
+        # The saver: import, then file the picture in a set or on a character.
+        ("POST", "/api/v1/pictures/import"),
+        ("GET", "/api/v1/pictures/import/status"),
+        ("POST", "/api/v1/picture_sets/{id}/members"),
+        ("POST", "/api/v1/characters/{character_id}/faces"),
+    }
+)
+_COMFYUI_SCOPE_SHAPES: tuple[tuple[str, re.Pattern], ...] = tuple(
+    (method, compile_path(template)[0])
+    for method, template in sorted(COMFYUI_SCOPE_ROUTES)
+)
+
+
+def comfyui_scope_admits(method: str, path: str) -> bool:
+    """Whether *path* has the shape of a route the ComfyUI scope admits.
+
+    The middleware's check, made before routing. The authz gate then admits
+    or refuses the route the request actually matched.
+    """
+    return any(
+        method == admitted and shape.match(path)
+        for admitted, shape in _COMFYUI_SCOPE_SHAPES
+    )
+
 
 # POST paths that are semantically read-only (large request bodies preclude GET).
 # These are exempted from the "block non-GET for READ tokens" check.
@@ -432,15 +508,17 @@ def token_may_cover_every_library(token: UserToken) -> bool:
 
     Two kinds never are. A share link names a resource, and its ids mean a
     different set, character or project in the next library. A source-bound
-    token (``bound_address`` set, today the ComfyUI link key) was handed to
-    one integration for the library it was linked in, and anything on that
-    machine can use it; narrowing it further is #1811, so it is not widened
-    here either.
+    token (``bound_address`` set) with full access is a ComfyUI link key from
+    before #1811: anything on that machine can use it, so it is not widened.
+    The link key since then carries :data:`COMFYUI_SCOPE`, reaches only what
+    the nodes call, and may be.
 
     The single spelling of that rule: what may be set, what is honoured, what
     the refusal tells the caller and what the token list reports all ask it.
     """
-    return token.resource_type is None and getattr(token, "bound_address", None) is None
+    if token.resource_type is not None:
+        return False
+    return getattr(token, "bound_address", None) is None or token.scope == COMFYUI_SCOPE
 
 
 def token_follows_active_library(token: UserToken) -> bool:
@@ -1840,6 +1918,9 @@ class AuthService:
         if matched is not None:
             if not token_covers_library(matched, self.active_library_uuid()):
                 return None
+            if matched.scope == COMFYUI_SCOPE:
+                # No WebSocket is among the routes the scope admits.
+                return None
             if self.source_refusal(
                 matched,
                 self._get_real_client_ip_ws(websocket),
@@ -2049,8 +2130,15 @@ class AuthService:
             )
         self._refuse_bound_token(request, "create tokens")
 
-        if scope not in ("ALL", "READ"):
-            raise HTTPException(status_code=400, detail="scope must be 'ALL' or 'READ'")
+        if scope not in ("ALL", "READ", COMFYUI_SCOPE):
+            raise HTTPException(
+                status_code=400, detail="scope must be 'ALL', 'READ' or 'COMFYUI'"
+            )
+        if scope == COMFYUI_SCOPE and resource_type is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="A ComfyUI token cannot be restricted to a resource.",
+            )
         # A resource-scoped token must be READ. An ALL-scope token carrying a
         # resource_type is the F1/F3 footgun: the auth middleware only builds
         # ``request.state.token_scope`` for non-ALL scopes, so such a token would
@@ -2331,11 +2419,11 @@ class AuthService:
         which is the one the owner is looking at when they say "only this
         library".
 
-        Only a token that names no resource and is not bound to an address
-        can be widened (:func:`token_may_cover_every_library`). A share link's
+        Only a token that names no resource can be widened
+        (:func:`token_may_cover_every_library`). A share link's
         ``resource_id`` means a different set, character or project in every
-        other library, so widening one would serve somebody else's pictures;
-        the ComfyUI link key stays with the library it was linked in.
+        other library, so widening one would serve somebody else's pictures.
+        The ComfyUI link key can be: it reaches only what the nodes call.
 
         Where it may be called from is the authz gate's business
         (``LOCAL_OWNER_ONLY``: an unscoped owner on the local network). What
@@ -2364,8 +2452,8 @@ class AuthService:
                 raise HTTPException(
                     status_code=400,
                     detail=(
-                        "The ComfyUI link key works in the library it was "
-                        "linked in and cannot cover other libraries."
+                        "This ComfyUI link key has full access and cannot "
+                        "cover other libraries. Link ComfyUI again first."
                     ),
                 )
             token.all_libraries = all_libraries
@@ -2906,10 +2994,13 @@ class AuthService:
                     user = self.get_user()
                     user_id = user.id if user else None
                     if user_id:
-                        # Block ALL-scope tokens from non-local IPs when require_local_for_write is enabled.
-                        if matched_token.scope == "ALL" and self._server_config.get(
-                            "require_local_for_write", True
-                        ):
+                        # Block tokens that can write (ALL, and the ComfyUI
+                        # scope's saver) from non-local IPs when
+                        # require_local_for_write is enabled.
+                        if matched_token.scope in (
+                            "ALL",
+                            COMFYUI_SCOPE,
+                        ) and self._server_config.get("require_local_for_write", True):
                             client_ip = self._get_real_client_ip(request)
                             if not is_local_ip(client_ip):
                                 return JSONResponse(
@@ -3044,7 +3135,20 @@ class AuthService:
             # write-enabled. Fail closed: an unrecognised scope is read-only.
             # Paths in READ_SAFE_POST_PATHS use POST for body size but are semantically read-only.
             token_scope = getattr(request.state, "token_scope", None)
-            if token_scope is not None:
+            if token_scope is not None and token_scope.scope == COMFYUI_SCOPE:
+                # The ComfyUI key: its own routes and nothing else, whatever
+                # the method. The gate checks the route this resolves to.
+                if not comfyui_scope_admits(request.method, request.url.path):
+                    self._logger.info(
+                        "Refused ComfyUI key %s for %s %s: not a route its scope admits.",
+                        getattr(request.state, "token_public_id", None),
+                        request.method,
+                        request.url.path,
+                    )
+                    return JSONResponse(
+                        status_code=403, content={"detail": COMFYUI_SCOPE_REFUSAL}
+                    )
+            elif token_scope is not None:
                 if token_scope.scope != "READ":
                     # ``READ`` is the only scope ``create_token`` will mint that
                     # reaches here, so anything else is a misconfigured row or a

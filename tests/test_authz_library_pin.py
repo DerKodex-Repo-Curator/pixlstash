@@ -22,6 +22,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlmodel import Session, delete, select
 
+from pixlstash.auth import COMFYUI_SCOPE, COMFYUI_SCOPE_REFUSAL
 from pixlstash.authz.policy import AccessPolicy, LibraryAccessMode, RoutePolicy
 from pixlstash.authz.registry import ROUTE_POLICIES
 from pixlstash.db_models import User, UserToken
@@ -636,6 +637,39 @@ class TestATokenThatCoversEveryLibrary:
         # The same row with no address is an ordinary token: the flag counts.
         _write(bound_address=None)
         assert client.get(f"{API}/pictures", headers=bearer).status_code == 200
+
+    def test_a_comfyui_link_key_can_be_widened_and_stays_a_comfyui_key(
+        self, server, other_library
+    ):
+        """#1811: the link key reaches only what the nodes call, so the owner
+        may let it follow the open library. Widening changes which library,
+        never which routes."""
+        owner = _owner_client(server)
+        token = _mint(owner, scope=COMFYUI_SCOPE)
+        bearer = {"Authorization": f"Bearer {token}"}
+        row = _token_row(server)
+
+        def _bind(session: Session):
+            session.get(UserToken, row.id).bound_address = "testclient"
+            session.commit()
+
+        server.hub_engine.run_task(_bind)
+        _restamp_tokens(server, other_library)
+        client = TestClient(server.api)
+        pinned = client.get(f"{API}/pictures", headers=bearer)
+        assert pinned.status_code == 403
+        assert "different library" in pinned.json()["detail"]
+
+        widened = _cover(owner, row.id, True)
+        assert widened.status_code == 200, widened.text
+        assert client.get(f"{API}/pictures", headers=bearer).status_code == 200
+        listed = owner.get(f"{API}/users/me/token").json()
+        assert [(r["scope"], r["all_libraries"]) for r in listed] == [
+            (COMFYUI_SCOPE, True)
+        ]
+        refused = client.get(f"{API}/users/me/token", headers=bearer)
+        assert refused.status_code == 403
+        assert refused.json()["detail"] == COMFYUI_SCOPE_REFUSAL
 
     def test_only_the_owner_on_the_local_network_may_set_it(self, server):
         owner = _owner_client(server)

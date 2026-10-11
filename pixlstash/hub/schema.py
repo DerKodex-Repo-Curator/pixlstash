@@ -1922,6 +1922,13 @@ def _apply_v2(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE usertoken ADD COLUMN all_libraries INTEGER NOT NULL DEFAULT 0"
         )
+    # Only the ComfyUI link sets ``bound_address``, and before #1811 it minted
+    # a full-access key. Narrow those to the ComfyUI scope (``auth.COMFYUI_SCOPE``)
+    # so an existing link is held to the nodes' routes without linking again.
+    conn.execute(
+        "UPDATE usertoken SET scope = 'COMFYUI' "
+        "WHERE bound_address IS NOT NULL AND scope = 'ALL'"
+    )
 
     # Rows from the earliest feature-lane v1 may predate the column entirely.
     # Backfill in Python so every library gets a distinct cryptographic value;
