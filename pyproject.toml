@@ -38,6 +38,9 @@ dependencies = [
     "fastapi>=0.138.0",
     "uvicorn>=0.41.0",
     "uvicorn[standard]>=0.41.0",
+    # Already installed by uvicorn[standard], which accepts older ones: the
+    # ComfyUI progress listener needs the sync client, added in 11.0.
+    "websockets>=11.0",
     "numpy>=2.4.3",
     "pillow>=12.3.0",
     "opencv-python>=4.13.0.92",

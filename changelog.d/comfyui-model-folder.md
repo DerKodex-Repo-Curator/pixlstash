@@ -4,13 +4,16 @@
 - Settings finds a ComfyUI running on this computer and connects it in one
   click. An address you type is checked before it is saved, so a wrong port
   says so straight away instead of failing at the first run.
-- Link ComfyUI from Settings: PixlStash gives ComfyUI's PixlStash nodes a
-  full-access key, so they can load and save pictures with no token to copy.
+- Link ComfyUI from Settings: PixlStash gives ComfyUI's PixlStash nodes a key
+  of their own, so they can load and save pictures with no token to copy.
   This works for a ComfyUI on this computer, or on your local network when
-  PixlStash's remote access is on with HTTPS. The key only works from
+  PixlStash's remote access is on with HTTPS. The key does only what the nodes
+  need: it cannot delete, change settings or make tokens. It only works from
   ComfyUI's own address, linking is done from this computer or your local
   network, and Settings warns, with what to do about it, when other computers
-  can reach that ComfyUI and so use PixlStash through it.
+  can reach that ComfyUI and so use PixlStash through it. With more than one
+  library, *Use in every library* sets whether ComfyUI follows you when you
+  switch.
 - PixlStash now ships the ComfyUI-PixlStash nodes and installs them into a
   ComfyUI on this computer from the Connect dialog, replacing an older copy
   (it goes to the trash) and restarting ComfyUI through ComfyUI-Manager.

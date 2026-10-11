@@ -348,15 +348,6 @@
       </template>
     </AppDialog>
 
-    <!-- The grid is unmounted here, and with it the grid's runner, so a run
-         started from the Workflow tab needs one of its own to show up in the
-         task manager. No overlay or picture grid to refresh on this view. -->
-    <ComfyUiRunner
-      ref="comfyuiRunner"
-      :wsPluginProgress="wsStore.wsPluginProgress"
-      :getPictureStackId="() => null"
-      :selectNewestStackMember="() => null"
-    />
   </div>
 </template>
 
@@ -390,7 +381,6 @@ import { useFilterStore } from "../../stores/useFilterStore";
 import { useNoticeStore } from "../../stores/useNoticeStore";
 import { useRunDialogStore } from "../../stores/useRunDialogStore";
 import { useSidebarStore } from "../../stores/useSidebarStore";
-import { useWsStore } from "../../stores/useWsStore";
 import {
   SORT_KEYS,
   SORT_LABELS,
@@ -404,7 +394,6 @@ import TbGlobalActions from "../panels/TbGlobalActions.vue";
 import WorkflowFilterMenu from "../panels/WorkflowFilterMenu.vue";
 import WorkflowRecipesTab from "../panels/WorkflowRecipesTab.vue";
 import WorkflowSelectionBar from "../panels/WorkflowSelectionBar.vue";
-import ComfyUiRunner from "../io/ComfyUiRunner.vue";
 import AppBarButton from "../widgets/AppBarButton.vue";
 import AppButton from "../widgets/AppButton.vue";
 import AppDialog from "../widgets/AppDialog.vue";
@@ -439,7 +428,6 @@ const store = useWorkflowsStore();
 const filterStore = useFilterStore();
 const notices = useNoticeStore();
 const runDialog = useRunDialogStore();
-const wsStore = useWsStore();
 const sidebarStore = useSidebarStore();
 const router = useRouter();
 const route = useRoute();
@@ -579,14 +567,6 @@ onBeforeUnmount(() => {
   observer?.disconnect();
   observer = null;
 });
-
-// The Run popup hands a started run's prompts to whichever runner is attached;
-// the grid attaches its own, and this is the one for the Workflows view.
-const comfyuiRunner = ref(null);
-const detachWorkflowRunner = runDialog.attachRunner((payload) =>
-  comfyuiRunner.value?.handleComfyuiRun(payload),
-);
-onBeforeUnmount(detachWorkflowRunner);
 
 /**
  * Where the reader was before they opened a picture, claimed once at SETUP.

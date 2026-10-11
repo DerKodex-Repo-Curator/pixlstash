@@ -7,8 +7,8 @@
 // themselves are mounted once, in App.vue.
 //
 // The grid still owns the live selection's view context (where a run's output
-// is filed) and feeds it in. The ComfyUI progress runner is attached by
-// whichever view is mounted: the grid's, or the Workflows view's.
+// is filed) and feeds it in. A run itself belongs to no view: the backend
+// follows it and the Tasks tab reads it from the poll (`useTasksStore`).
 
 import { defineStore } from "pinia";
 import { onScopeDispose, ref } from "vue";
@@ -54,7 +54,7 @@ export const useRunDialogStore = defineStore("runDialog", () => {
    * one gesture.
    */
   const makeMore = ref(null);
-  /** `{client_id, set_id, project_id, character_id}` from ImageGrid. */
+  /** `{set_id, project_id, character_id}` from ImageGrid. */
   const context = ref({});
   /**
    * The last pin list the popup wrote, as `{workflowId, pins}`: "Set each
@@ -72,9 +72,9 @@ export const useRunDialogStore = defineStore("runDialog", () => {
    * The run of each workflow that last ended without a picture, by workflow
    * id: `{promptId, message, stopped}`. `message` is the backend's sentence
    * (the node that failed and why) and `stopped` marks a run somebody
-   * interrupted. Here rather than in a progress runner because a runner dies
-   * with its view, and the card and the Workflow tab must still say so when
-   * the owner comes back. Kept until dismissed or the workflow runs again.
+   * interrupted. Here rather than in a view, because the card and the
+   * Workflow tab must still say so when the owner comes back. Kept until
+   * dismissed or the workflow runs again.
    */
   const failures = ref({});
   /**
@@ -101,15 +101,12 @@ export const useRunDialogStore = defineStore("runDialog", () => {
     return session;
   }
 
-  let runner = null;
   /**
-   * Whether a progress runner is mounted to follow a run.
-   *
-   * The grid attaches one, and so does the Workflows view (`App.vue` mounts
-   * `ImageGrid` under `v-else`, so the grid's is gone there). Only the grid's
-   * comes with a `client_id` in `context`.
+   * The last run a popup started, `{prompts, pictureIds, pictureId}`, for the
+   * grid to read: it shows the run's progress in the lightbox and moves the
+   * lightbox on to the new picture. Nothing else follows a run from here.
    */
-  const hasRunner = ref(false);
+  const startedRun = ref(null);
 
   /** Bumped per `openRun`: App.vue keys the popup on it, so each opens fresh. */
   const runOpened = ref(0);
@@ -128,22 +125,6 @@ export const useRunDialogStore = defineStore("runDialog", () => {
   function close() {
     source.value = null;
     makeMore.value = null;
-  }
-
-  /**
-   * Register a progress runner (the grid's or the Workflows view's). Returns
-   * the function that detaches it, which only detaches this one, so a late
-   * teardown does not unhook the runner that replaced it.
-   */
-  function attachRunner(handler) {
-    runner = handler;
-    hasRunner.value = true;
-    return () => {
-      if (runner === handler) {
-        runner = null;
-        hasRunner.value = false;
-      }
-    };
   }
 
   /** A run of this workflow ended without a picture (`plugin_progress`). */
@@ -208,7 +189,7 @@ export const useRunDialogStore = defineStore("runDialog", () => {
     failures.value = next;
   }
 
-  /** Hand a started run's prompts to the runner, for progress. */
+  /** A popup started these runs. */
   function started(prompts, pictureIds = []) {
     // Running a workflow again takes its last failure down. Not a failure OF
     // one of these prompts: a run can fail before `/workflows/run` answers.
@@ -219,11 +200,11 @@ export const useRunDialogStore = defineStore("runDialog", () => {
         dismissFailure(prompt.workflow_id);
       }
     }
-    runner?.({
+    startedRun.value = {
       prompts,
       pictureIds,
       pictureId: pictureIds.length === 1 ? pictureIds[0] : null,
-    });
+    };
   }
 
   // A source names pictures and cards of the library the session could see.
@@ -232,6 +213,7 @@ export const useRunDialogStore = defineStore("runDialog", () => {
     context.value = {};
     pinsWritten.value = null;
     editRun.value = null;
+    startedRun.value = null;
     failures.value = {};
     ranChanges.value = {};
     saved.value = null;
@@ -255,11 +237,10 @@ export const useRunDialogStore = defineStore("runDialog", () => {
     runFailed,
     dismissFailure,
     sessionEpoch,
-    hasRunner,
+    startedRun,
     openRun,
     openMakeMore,
     close,
-    attachRunner,
     started,
   };
 });

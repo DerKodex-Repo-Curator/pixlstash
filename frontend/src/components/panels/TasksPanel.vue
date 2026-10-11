@@ -17,17 +17,17 @@
   </div>
   <div v-if="tasksStore.activeEntries.length" class="tm-worker-list">
     <template v-for="entry in tasksStore.activeEntries" :key="entry.key">
-      <!-- ComfyUI run: frontend-driven, shows a progress bar + abort -->
+      <!-- ComfyUI runs in flight, as the backend reports them: a progress
+           bar + abort, which stops them all -->
       <div v-if="entry.kind === 'comfyui'" class="tm-worker-row">
         <div class="tm-worker-row-top">
           <span class="tm-status-dot tm-status-dot--running"></span>
           <span class="tm-worker-label">{{ entry.run.label }}</span>
           <button
-            v-if="entry.run.status !== 'completed'"
             class="tm-comfy-abort"
             type="button"
             aria-label="Abort ComfyUI run"
-            @click="tasksStore.abortComfyuiRun(entry.key)"
+            @click="tasksStore.abortComfyuiRuns()"
           >
             <Tooltip
               text="Abort ComfyUI run"

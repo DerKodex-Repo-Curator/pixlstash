@@ -96,6 +96,26 @@
           @open="reopenVersions"
           @go-back="goBack"
         />
+        <!-- The newest version is one ComfyUI saved (#1852): said, with the
+             way back beside it, and nothing to answer. An inline button in a
+             line of secondary text, as "N pictures" above is. -->
+        <p
+          v-if="fromComfyui"
+          class="wftab-sublabel"
+          data-testid="wftab-from-comfyui"
+        >
+          Saved from ComfyUI {{ fromComfyui.when }} ·
+          <button
+            class="wftab-pictures"
+            type="button"
+            data-testid="wftab-go-back"
+            :aria-label="`Go back to version ${fromComfyui.back}`"
+            :disabled="busy === 'version'"
+            @click="goBack({ version: fromComfyui.back })"
+          >
+            Go back
+          </button>
+        </p>
       </div>
 
       <!-- Going back was refused: said under the control that asked, in the
@@ -955,13 +975,15 @@
              ComfyUI opens on whatever it had last. It opens what Run… runs
              (`runTarget`), and is refused rather than hidden otherwise, for
              Run…'s reason or a ComfyUI without the node. The tooltip is its
-             accessible name. What opens is the SAVED graph: the node does not
-             ask for the unsaved one yet, and while changes wait the line
-             below says so rather than let the button imply otherwise. -->
+             accessible name. What opens has the changes waiting here in it,
+             and what ComfyUI saves from there comes back as this workflow's
+             next version, those changes with it (#1852). With nodes from
+             before that, what opens is a copy of the SAVED graph and the
+             name says so. While changes wait, the line below says which. -->
         <AppButton
           v-if="canOpenComfyui"
           icon-only
-          tooltip="Open in ComfyUI"
+          :tooltip="comfyuiOpensACopy ? 'Open a copy in ComfyUI' : 'Open in ComfyUI'"
           data-testid="wftab-open-comfyui"
           :aria-disabled="runTarget && !comfyuiLacksNode ? undefined : 'true'"
           :aria-describedby="openDescribedBy"
@@ -1025,8 +1047,14 @@
           class="wftab-note wftab-quiet"
           data-testid="wftab-open-unsaved"
         >
-          Open in ComfyUI opens the saved workflow. The unsaved changes are
-          not in it until they are saved.
+          <template v-if="comfyuiOpensACopy">
+            Open in ComfyUI opens the saved workflow. The unsaved changes are
+            not in it until they are saved.
+          </template>
+          <template v-else>
+            Open in ComfyUI opens the workflow with the unsaved changes in it.
+            Saving there saves them too.
+          </template>
         </p>
         <p v-if="multiple" id="wftab-run-reason" class="wftab-note wftab-quiet">
           Run one workflow at a time
@@ -1113,6 +1141,7 @@ import {
 } from "../../utils/loraChain";
 import { quantBadge } from "../../utils/modelShelf";
 import { PIXLSTASH_PACK_URL, STAGE_LABELS } from "../../utils/runReasons";
+import { relativeDate } from "../../utils/snapshots";
 import {
   checkpointMissing,
   baseModels,
@@ -1189,16 +1218,25 @@ const canOpenComfyui = computed(
  * button to try.
  */
 const comfyuiLacksNode = ref(false);
+/**
+ * The nodes ComfyUI has are from before a workflow opened there saved back
+ * (#1852): what opens is a copy, and the button says so. Only a definite no.
+ */
+const comfyuiOpensACopy = ref(false);
 let nodeCheck = 0;
 watch(
   () => canOpenComfyui.value && filterStore.comfyuiUrl,
   async (url) => {
     const check = ++nodeCheck;
     comfyuiLacksNode.value = false;
+    comfyuiOpensACopy.value = false;
     if (!url) return;
     try {
-      const { can_open_workflows: canOpen } = await getPixlstashNode();
-      if (check === nodeCheck) comfyuiLacksNode.value = canOpen === false;
+      const { can_open_workflows: canOpen, saves_back: savesBack } =
+        await getPixlstashNode();
+      if (check !== nodeCheck) return;
+      comfyuiLacksNode.value = canOpen === false;
+      comfyuiOpensACopy.value = canOpen === true && savesBack === false;
     } catch (err) {
       console.warn("[workflows] could not ask ComfyUI for the PixlStash node", err);
     }
@@ -1378,6 +1416,18 @@ const headVersion = computed(() => {
       : null;
   }
   return c.versions > 1 ? { number: c.version, at: c.version_at ?? null } : null;
+});
+
+// A workflow opened in ComfyUI from here saves back to itself, with no
+// question in either app (#1852). So when the newest version is one ComfyUI
+// saved, this tab says so in one line and offers the way back, without the
+// menu having to be opened to learn of it.
+const fromComfyui = computed(() => {
+  const [newest, before] = shownVersions.value?.versions ?? [];
+  // By what the version is, not by the menu's words for it: a file the
+  // removed pull read is worded the same and was not saved from a canvas.
+  if (!before || newest?.source !== "comfyui") return null;
+  return { when: relativeDate(newest.created_at), back: before.version };
 });
 
 // All three read the MODEL SHELF's name where it has one, the same preference

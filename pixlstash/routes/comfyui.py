@@ -1,26 +1,20 @@
-import asyncio
 import functools
 import hashlib
 import json
 import math
 import os
 import time
-import uuid
 from collections import Counter
-from urllib.parse import quote
+from copy import deepcopy
 
-import websockets
-from fastapi import APIRouter, Body, HTTPException, Query, Request, WebSocket
-from fastapi.websockets import WebSocketDisconnect
-from pydantic import BaseModel, ConfigDict
+from fastapi import APIRouter, Body, HTTPException, Query, Request
+from pydantic import BaseModel, ConfigDict, Field
 from send2trash import TrashPermissionError, send2trash
 
 from typing import Optional
 
-from pixlstash.database import DBPriority
 from pixlstash.db_models import (
     Picture,
-    User,
 )
 from pixlstash.hub import workflow_cards, workflow_origin, workflow_versions
 from pixlstash.hub.workflow_card_reads import (
@@ -69,8 +63,11 @@ from pixlstash.services.comfyui_ui_graph import (
     is_ui_graph,
 )
 from pixlstash.services.model_shelf_service import (
+    adapter_digest_index,
+    fetch_character_names,
     fetch_locations,
     fetch_model_by_hash,
+    lora_owners,
 )
 from pixlstash.services.picture_recipe_service import (
     describe_recipe,
@@ -89,8 +86,13 @@ from pixlstash.services.workflow_events import announce_changed_workflows
 from pixlstash.services.workflow_inbox import workflow_user_dir
 from pixlstash.services.workflow_hash import (
     WorkflowGraphError,
+    normalized_filename,
     topology_hash as api_topology_hash,
     ui_topology_hash,
+)
+from pixlstash.services.workflow_run_service import (
+    take_out_empty_adapter_loaders,
+    take_out_person_loras,
 )
 from pixlstash.services.workflow_io import (
     api_graph,
@@ -106,7 +108,9 @@ from pixlstash.utils.workflow_ids import MANUAL_PREFIX
 # stay thin and delegate to it. See pixlstash/services/comfyui_service.py.
 from pixlstash.services.comfyui_service import (
     _comfyui_abort,
-    comfyui_can_open_workflows,
+    PACK_OPENS_WORKFLOWS,
+    PACK_SAVES_BACK,
+    comfyui_pixlstash_scripts,
     library_ids_named,
     probe_comfyui,
     pixlstash_node_refusals,
@@ -591,6 +595,140 @@ MAX_RUNS_PER_REQUEST = 200
 # not place, which on this shelf is usually an adapter in a format it has not
 # been taught. Everything else it holds is refused by name (#1310).
 LOADABLE_ADAPTER_FILE_KINDS = frozenset({FILE_ADAPTER, FILE_UNKNOWN})
+
+
+def slot_digests(slots: list[dict], shelf_index) -> dict:
+    """``{(node_id, field): sha256 or None}``: which shelf LoRA each slot loads.
+
+    A digest slot names its LoRA exactly, and counts when the shelf holds
+    that digest. A filename slot is matched on its case-folded basename,
+    and a name two shelf LoRAs share names neither - the rule
+    ``resolveRecipeLoras`` and ``_resolve_against_shelf`` already apply.
+    """
+    by_name, digests = shelf_index or ({}, set())
+    answer: dict[tuple[str, str], str | None] = {}
+    for slot in slots:
+        value = str(slot.get("value") or "")
+        if slot.get("by") == "digest":
+            digest = value.strip().lower()
+            found = digest if digest in digests else None
+        else:
+            matched = by_name.get(normalized_filename(value.strip()), set())
+            found = next(iter(matched)) if len(matched) == 1 else None
+        answer[(str(slot.get("node_id")), str(slot.get("field")))] = found
+    return answer
+
+
+def people_loras_in(hub, vault, graph: dict) -> list[dict]:
+    """Every LoRA slot of an API *graph* holding a LoRA attached to a person.
+
+    Rule 4 of #1846's one question, for a graph that is being stored or
+    exported: ``[{node_id, class_type, field, sha256, character_ids, lora,
+    people}]``,
+    ``lora`` and ``people`` being names for the sentence that says a LoRA was
+    left out (the shelf's name for it, else its file's). A digest row names
+    its LoRA whether or not the shelf still lists it: an attachment outlives
+    a shelf row.
+    """
+    owners = lora_owners(vault)
+    if not owners:
+        return []
+    targets = detect_lora_targets(graph)
+    digests = slot_digests(targets, adapter_digest_index(hub))
+    # (digest, the file the slot names when it names one)
+    held: dict[tuple[str, str], tuple[str, str]] = {}
+    for target in targets:
+        slot = (str(target["node_id"]), str(target["field"]))
+        value = str(target.get("value") or "")
+        by_digest = target.get("by") == "digest"
+        digest = digests.get(slot) or (value.strip().lower() if by_digest else None)
+        if digest in owners:
+            held[slot] = (digest, "" if by_digest else value)
+    if not held:
+        return []
+    wanted = sorted({digest for digest, _ in held.values()})
+    shelf = {
+        str(row["sha256"]).lower(): row
+        for row in hub.fetchall(
+            "SELECT sha256, filename, display_name FROM model WHERE "
+            f"lower(sha256) IN ({','.join('?' * len(wanted))})",
+            tuple(wanted),
+        )
+    }
+    names = fetch_character_names(vault)
+    found = []
+    for (node_id, slot_field), (digest, named) in sorted(held.items()):
+        row = shelf.get(digest)
+        file = (row["filename"] if row else None) or named
+        found.append(
+            {
+                "node_id": node_id,
+                "class_type": (graph.get(node_id) or {}).get("class_type"),
+                "field": slot_field,
+                "sha256": digest,
+                "character_ids": sorted(owners[digest]),
+                "lora": (row["display_name"] if row else None)
+                or os.path.splitext(os.path.basename(file))[0]
+                or digest[:12],
+                "people": [
+                    names[cid] for cid in sorted(owners[digest]) if names.get(cid)
+                ],
+            }
+        )
+    return found
+
+
+def without_peoples_picks(
+    editor: dict, people: set[str], *, filenames: set[str] | None = None
+) -> dict:
+    """An editor document with no person's LoRA named in it by digest.
+
+    *people* is every digest attached to a person. An editor document names
+    its widgets by position, so this goes by value: a digest is blanked
+    wherever the document holds it (a row of a loader, a note quoting it), and
+    the entry a PixlStash loader records beside a pick
+    (``properties.pixlstash_models``: the digest with its file and display
+    name) goes whole. Nodes the graph does not run (bypassed, muted) are in
+    the document like any other, so they are covered. A copy; *editor* is not
+    changed. A person's LoRA named by FILE has no empty value: that is the
+    caller's to refuse. When *filenames* is supplied, widgets naming one
+    of those case-folded basenames refuse the export, including bypassed nodes.
+    """
+    if not people:
+        return editor
+
+    def clean(value, key=None):
+        if key == "widgets_values" and filenames:
+            widgets = value.values() if isinstance(value, dict) else value
+            if isinstance(widgets, (list, tuple)) or isinstance(value, dict):
+                if any(
+                    isinstance(widget, str)
+                    and normalized_filename(widget.strip()) in filenames
+                    for widget in widgets
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="The editor names a person's LoRA by file name; "
+                        "remove it before exporting the workflow.",
+                    )
+        if isinstance(value, str):
+            return "" if value.strip().lower() in people else value
+        if isinstance(value, list):
+            if key == "pixlstash_models":
+                value = [
+                    entry
+                    for entry in value
+                    if not (
+                        isinstance(entry, dict)
+                        and str(entry.get("sha256") or "").strip().lower() in people
+                    )
+                ]
+            return [clean(item) for item in value]
+        if isinstance(value, dict):
+            return {name: clean(item, name) for name, item in value.items()}
+        return value
+
+    return clean(editor)
 
 
 def _shelf_adapter(hub, sha256) -> dict:
@@ -1501,6 +1639,10 @@ class ComfyUIPixlstashNodeResponse(BaseModel):
     """Whether the owner's ComfyUI can open a PixlStash workflow link."""
 
     can_open_workflows: Optional[bool] = None
+    # Whether a workflow opened there saves back to PixlStash (#1852): the
+    # pack's `save_workflow.js` is loaded. False for an older pack, which
+    # opens a copy; null when ComfyUI cannot be asked.
+    saves_back: Optional[bool] = None
 
 
 class ComfyUIProbeRequest(BaseModel):
@@ -1535,6 +1677,10 @@ class ComfyUILinkStatus(BaseModel):
     refused_from: Optional[str] = None
     # "other_computer", "listening" or None: see comfyui_link_service.exposure.
     exposure: Optional[str] = None
+    # The key's row in the token list, and whether it works in every library
+    # or only one: `PUT /users/me/token/{token_id}/libraries` changes that.
+    token_id: Optional[int] = None
+    all_libraries: bool = False
 
 
 class ComfyUILinkStep(BaseModel):
@@ -1600,6 +1746,12 @@ class ComfyUIWorkflowConvertResponse(BaseModel):
     matched: bool
     # That manual workflow (the first, where several matched).
     workflow_id: Optional[str] = None
+    # LoRAs attached to a person that the graph loads (rule 4 of #1846): each
+    # `{node_id, class_type, field, sha256, character_ids, lora, people}`.
+    # They are stored
+    # in the document as sent and left out of every read of the workflow, so
+    # Run, Open in ComfyUI and Export go without them; the node says so.
+    left_out: list[dict] = Field(default_factory=list)
 
 
 class ComfyUIRecipeModelSlot(BaseModel):
@@ -1824,146 +1976,6 @@ def _recipe_extras(server, request, pic_id: int, graph: Optional[dict]) -> dict:
 def create_router(server) -> APIRouter:
     router = APIRouter()
 
-    @router.websocket("/ws/comfyui")
-    async def comfyui_progress_proxy(websocket: WebSocket):
-        lease = server.library_coordinator.acquire_read()
-        if lease is None:
-            await websocket.close(code=1013, reason="Library unavailable")
-            return
-        ws_client = None
-        ws_auth = None
-        admission_lease = None
-        try:
-            # The HTTP auth middleware does not cover WebSockets. Require an
-            # authenticated OWNER before accepting - running ComfyUI is an owner
-            # operation. Without this, an unauthenticated (or merely resource-
-            # scoped) client would get a WebSocket proxy to the internal ComfyUI
-            # service via the DEFAULT_COMFYUI_URL fallback. Also reject cross-site
-            # handshakes (CSWSH).
-            if not server.auth.is_websocket_origin_allowed(
-                websocket, server.allow_origins, server.allow_origin_regex
-            ):
-                await websocket.close(code=1008)
-                return
-            ws_auth = server.auth.authenticate_websocket(websocket)
-            if ws_auth is None or not ws_auth.is_owner:
-                await websocket.close(code=1008)
-                return
-            admission_lease = server.auth.register_authenticated_websocket(websocket)
-            if admission_lease is None:
-                await websocket.close(code=1012)
-                return
-            await websocket.accept()
-            # The proxy is library-bound even though its upstream URL is a machine
-            # setting: an in-flight workflow and its eventual picture ids belong to
-            # the old vault. Register it in the same lifecycle set as /ws/updates so
-            # a switch terminates both sides instead of leaving a stale proxy alive.
-            candidate = {
-                "ws": websocket,
-                "loop": asyncio.get_running_loop(),
-                "owner": True,
-                "broadcast": False,
-            }
-            with server._ws_clients_lock:
-                server._ws_clients.append(candidate)
-            ws_client = candidate
-        finally:
-            server.library_coordinator.release_read(lease)
-        if ws_client is None or ws_auth is None:
-            # Admission can be granted before a later step in the leased block
-            # fails. The proxy's ``finally`` never runs on this path, so release
-            # the admission lease here instead.
-            if admission_lease is not None:
-                server.auth.unregister_authenticated_websocket(admission_lease)
-            return
-        try:
-            # comfyui_url is a machine setting, so it lives in the hub.
-            user = server.hub_engine.run_task(
-                lambda session: session.get(User, ws_auth.user_id),
-                priority=DBPriority.IMMEDIATE,
-            )
-
-            comfyui_url = _comfyui_url(user)
-            client_id = (
-                websocket.query_params.get("clientId")
-                or websocket.query_params.get("client_id")
-                or f"pixlstash-{uuid.uuid4().hex[:8]}"
-            )
-            ws_base = (
-                comfyui_url.replace("https://", "wss://")
-                if comfyui_url.startswith("https://")
-                else comfyui_url.replace("http://", "ws://")
-            )
-            ws_url = f"{ws_base}/ws?clientId={quote(client_id)}"
-
-            async def forward_upstream(upstream):
-                try:
-                    async for message in upstream:
-                        if isinstance(message, (bytes, bytearray)):
-                            await websocket.send_bytes(bytes(message))
-                        else:
-                            await websocket.send_text(message)
-                except asyncio.CancelledError:
-                    raise
-                except WebSocketDisconnect:
-                    logger.debug(
-                        "ComfyUI WebSocket client disconnected while forwarding upstream."
-                    )
-                except Exception as exc:
-                    logger.debug("ComfyUI WebSocket upstream forward failed: %s", exc)
-
-            async def forward_downstream(upstream):
-                try:
-                    while True:
-                        message = await websocket.receive_text()
-                        if message:
-                            await upstream.send(message)
-                except asyncio.CancelledError:
-                    raise
-                except WebSocketDisconnect:
-                    logger.debug("ComfyUI WebSocket client disconnected normally.")
-                except Exception as exc:
-                    logger.debug("ComfyUI WebSocket downstream receive failed: %s", exc)
-
-            try:
-                async with websockets.connect(
-                    ws_url, ping_interval=None, close_timeout=2
-                ) as upstream:
-                    upstream_task = asyncio.create_task(forward_upstream(upstream))
-                    downstream_task = asyncio.create_task(forward_downstream(upstream))
-                    proxy_tasks = {upstream_task, downstream_task}
-                    try:
-                        done, _pending = await asyncio.wait(
-                            proxy_tasks,
-                            return_when=asyncio.FIRST_COMPLETED,
-                        )
-                        for task in done:
-                            exc = task.exception()
-                            if exc:
-                                raise exc
-                    finally:
-                        # The restore barrier cancels this owning handler after
-                        # closing the client socket. Always tear down both proxy
-                        # directions as part of that cancellation; otherwise an
-                        # orphaned upstream iterator could outlive cutover.
-                        for task in proxy_tasks:
-                            if not task.done():
-                                task.cancel()
-                        await asyncio.gather(*proxy_tasks, return_exceptions=True)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.warning("ComfyUI progress proxy failed: %s", exc)
-        finally:
-            with server._ws_clients_lock:
-                if ws_client is not None and ws_client in server._ws_clients:
-                    server._ws_clients.remove(ws_client)
-            try:
-                await websocket.close()
-            except Exception as exc:
-                logger.debug("Failed to close WebSocket cleanly: %s", exc)
-            server.auth.unregister_authenticated_websocket(admission_lease)
-
     @router.get(
         "/comfyui/workflows",
         summary="List ComfyUI workflows",
@@ -2050,7 +2062,13 @@ def create_router(server) -> APIRouter:
     )
     def get_comfyui_pixlstash_node(request: Request):
         comfyui_url = _comfyui_url(server.auth.get_user_for_request(request))
-        return {"can_open_workflows": comfyui_can_open_workflows(comfyui_url)}
+        scripts = comfyui_pixlstash_scripts(comfyui_url)
+        if scripts is None:
+            return {"can_open_workflows": None, "saves_back": None}
+        return {
+            "can_open_workflows": PACK_OPENS_WORKFLOWS in scripts,
+            "saves_back": PACK_SAVES_BACK in scripts,
+        }
 
     @router.get(
         "/comfyui/link",
@@ -2063,18 +2081,20 @@ def create_router(server) -> APIRouter:
 
     @router.post(
         "/comfyui/link",
-        summary="Link the saved ComfyUI with a full-access token",
+        summary="Link the saved ComfyUI with a ComfyUI-only token",
         description=(
             "For a ComfyUI on this computer or the local network, from a local "
-            "owner: mints a full-access token that works only from ComfyUI's "
-            "address (bound by the check) and writes it, with the PixlStash URL "
+            "owner: mints a token that reaches only the routes the "
+            "ComfyUI-PixlStash nodes call and works only from ComfyUI's "
+            "address (bound by the check), and writes it, with the PixlStash URL "
             "ComfyUI should call (and PixlStash's certificate over HTTPS), into "
             "ComfyUI's settings for the ComfyUI-PixlStash nodes. Then checks "
             "that ComfyUI reaches PixlStash with it. Always 200: `steps` says "
             "how far it got (`reach`, `nodes`, `link`, `check`), and `reason` "
             "why a step needs the person. A ComfyUI on the local network needs "
             "remote access on with HTTPS. `exposure` says whether other "
-            "computers can reach that ComfyUI."
+            "computers can reach that ComfyUI. The token covers the open "
+            "library; `PUT /users/me/token/{token_id}/libraries` widens it."
         ),
         response_model=ComfyUILinkResponse,
     )
@@ -2289,8 +2309,11 @@ def create_router(server) -> APIRouter:
             "document is that editor workflow. A workflow not stored yet is "
             "stored first, as an import would. Such a workflow then runs and "
             "takes parameters from the API graph. Sent by the "
-            "ComfyUI-PixlStash node's *Convert for PixlStash* command, one "
-            "workflow at a time."
+            "ComfyUI-PixlStash node's *Export to PixlStash* command, one "
+            "workflow at a time. It is never a version of another workflow. "
+            "A LoRA attached to a person is no part of a workflow: it is "
+            "taken out of the graph that is stored, the loader for picking "
+            "people comes off, and `left_out` names each one and whose it is."
         ),
         response_model=ComfyUIWorkflowConvertResponse,
         responses={
@@ -2320,9 +2343,48 @@ def create_router(server) -> APIRouter:
             )
         hub = require_hub(server, "The workflow library is not open.")
         name = _stem(payload.get("name") or "workflow")
+        # Rule 4 of #1846, as for a graph saved over a workflow: whose LoRAs
+        # the graph loads is said, and the loader for picking people comes
+        # off where nobody is left in it.
         try:
-            migrated, _ = workflow_bindings.migrate_placeholders(workflow)
+            # Before anything walks it: the cap is what bounds the work.
             _within_the_cap(output)
+            # Rule 4 of #1846, as for a graph saved over a workflow: a
+            # person's LoRA is taken out of the graph that is stored, row by
+            # row, and the loader for picking people comes off with nobody
+            # left in it. Best effort where the save refuses: one that cannot
+            # be taken out (ComfyUI not answering for the loader's wiring) is
+            # stored as sent, named like the rest, and left out by every read.
+            left_out = people_loras_in(hub, server.vault, api_graph(output))
+            output = deepcopy(output)
+            if left_out:
+                user = server.auth.get_user_for_request(request)
+                object_info = _read_object_info(_comfyui_url(user), cached=True)[0]
+                _taken, kept_in = take_out_person_loras(
+                    api_graph(output),
+                    [(entry["node_id"], entry["field"]) for entry in left_out],
+                    object_info,
+                )
+                for entry in kept_in:
+                    logger.info(
+                        "An exported workflow keeps a person's LoRA in node %s "
+                        "of its stored graph; reads leave it out: %s",
+                        entry.get("node_id"),
+                        entry.get("message"),
+                    )
+            # The editor document goes without the picks too, including
+            # a bypassed or muted node that is absent from the API graph.
+            people = set(lora_owners(server.vault))
+            by_name = adapter_digest_index(hub)[0] if people else {}
+            workflow = without_peoples_picks(
+                workflow,
+                people,
+                filenames={
+                    name for name, digests in by_name.items() if digests & people
+                },
+            )
+            take_out_empty_adapter_loaders(api_graph(output))
+            migrated, _ = workflow_bindings.migrate_placeholders(workflow)
             canonical = workflow_bindings.canonical(migrated)
             matched = manual_documents_holding(hub, canonical)
             if matched:
@@ -2354,7 +2416,12 @@ def create_router(server) -> APIRouter:
             "imported",
             origin_client_id=getattr(request.state, "origin_client_id", None),
         )
-        return {"name": name, "matched": bool(matched), "workflow_id": workflow_id}
+        return {
+            "name": name,
+            "matched": bool(matched),
+            "workflow_id": workflow_id,
+            "left_out": left_out,
+        }
 
     @router.get(
         "/comfyui/pictures/{picture_id}/workflow",

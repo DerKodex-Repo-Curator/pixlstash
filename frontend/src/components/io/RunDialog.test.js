@@ -184,7 +184,7 @@ const globalOpts = {
 
 async function mountRun(source = { kind: "picture", pictureIds: [42] }) {
   const wrapper = mount(RunDialog, {
-    props: { source, context: { client_id: "test-client" } },
+    props: { source, context: {} },
     ...globalOpts,
   });
   await flushPromises();
@@ -2201,13 +2201,13 @@ describe("the body it sends", () => {
     expect(runWorkflowCard.mock.calls[0][0].prompt).toBe("");
   });
 
-  it("emits the prompts so the grid's runner can follow them", async () => {
+  it("emits the prompts so the grid can follow them", async () => {
     const wrapper = await mountRun();
     await wrapper.vm.submit();
     await flushPromises();
 
     expect(wrapper.emitted("run")[0][0]).toEqual({
-      prompts: [{ prompt_id: "p1", label: "Cinematic portrait" }],
+      prompts: [{ prompt_id: "p1" }],
       pictureIds: [42],
     });
     // Only a popup the Edit tab opened hands it the run to follow.
@@ -2232,21 +2232,12 @@ describe("the body it sends", () => {
     expect(wrapper.emitted("close")).toBeTruthy();
   });
 
-  // What the Tasks tab calls the run: a clone, else the saved recipe, else
-  // the workflow.
+  // What the Tasks tab calls the run, sent with it: a clone, else the saved
+  // recipe, else the workflow. The backend reports it with the run in flight.
   async function labelOf(wrapper) {
     await wrapper.vm.submit();
     await flushPromises();
-    return wrapper.emitted("run")[0][0].prompts[0].label;
-  }
-
-  /** The run's answer, saying which picture's graph the server ran. */
-  function ranFrom(pictureId) {
-    runWorkflowCard.mockResolvedValue({
-      status: "success",
-      prompts: [{ prompt_id: "p1" }],
-      groups: [{ workflow_id: KEY, source_picture_id: pictureId }],
-    });
+    return runWorkflowCard.mock.calls[0][0].label;
   }
 
   it("calls an untouched run of a picture, with its seed typed in, a clone", async () => {
@@ -2264,24 +2255,16 @@ describe("the body it sends", () => {
     expect(await labelOf(wrapper)).toBe("Cinematic portrait");
   });
 
-  it("calls a kept seed a clone when the graph run was this picture's", async () => {
-    ranFrom(42);
+  it("leaves an untouched run on a kept seed for the server to name", async () => {
+    // "Keep" leaves the seed of the graph the server runs, and that graph is
+    // the workflow's best picture's, not necessarily the one opened: only the
+    // server knows whether this is the picture again.
     const wrapper = await mountRun();
     wrapper.vm.seedMode = "keep";
-    expect(await labelOf(wrapper)).toBe("Clone picture");
-  });
-
-  it("names the workflow when the kept seed is another picture's", async () => {
-    // "Keep" leaves the seed of the graph the server ran, and that graph is
-    // the workflow's best picture's, not necessarily the one opened.
-    ranFrom(7);
-    const wrapper = await mountRun();
-    wrapper.vm.seedMode = "keep";
-    expect(await labelOf(wrapper)).toBe("Cinematic portrait");
+    expect(await labelOf(wrapper)).toBe(null);
   });
 
   it("names the workflow once the form differs from the picture", async () => {
-    ranFrom(42);
     const wrapper = await mountRun();
     wrapper.vm.seedMode = "keep";
     wrapper.vm.prompt = "something else entirely";
@@ -2289,7 +2272,6 @@ describe("the body it sends", () => {
   });
 
   it("names the workflow for a picture another workflow is run on", async () => {
-    ranFrom(42);
     const wrapper = await mountRun({
       kind: "selection",
       pictureIds: [42],
@@ -2301,7 +2283,6 @@ describe("the body it sends", () => {
   });
 
   it("names the workflow for several pictures, whichever graph ran", async () => {
-    ranFrom(42);
     const wrapper = await mountRun({
       kind: "selection",
       pictureIds: [42, 43],

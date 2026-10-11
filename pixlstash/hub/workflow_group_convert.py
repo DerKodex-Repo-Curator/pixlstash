@@ -1398,6 +1398,7 @@ _WORKFLOW_ID_COLUMNS = (
     ("workflow_group_picture_input", "workflow_id"),
     ("workflow_version", "workflow_id"),
     ("workflow_change", "workflow_id"),
+    ("workflow_layout", "workflow_id"),
     ("workflow_key_successor", "workflow_id"),
     ("workflow_id_successor", "successor_id"),
     ("workflow_document", "from_workflow_id"),
@@ -1752,6 +1753,8 @@ def _carry_group_state(
         waiting = conn.execute(
             "DELETE FROM workflow_change WHERE workflow_id = ?", (group,)
         ).rowcount
+        # Its ComfyUI layout was of that graph too.
+        conn.execute("DELETE FROM workflow_layout WHERE workflow_id = ?", (group,))
         if waiting:
             logger.info(
                 "Workflow %s is retired: the unsaved change(s) waiting on it "

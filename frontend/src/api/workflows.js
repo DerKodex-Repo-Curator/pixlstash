@@ -243,6 +243,20 @@ export async function runWorkflowCard(body) {
 }
 
 /**
+ * How one run `runWorkflowCard` queued stands, by its prompt id: `running`,
+ * `completed` or `failed`, with the message the app shows. A 404 for a run the
+ * backend no longer knows (it restarted, or the run is another library's).
+ *
+ * @param {string} promptId
+ * @returns {Promise<{prompt_id: string, status: string, message: ?string, stopped: boolean, picture_ids: number[]}>}
+ */
+export async function getRunOutcome(promptId) {
+  return unwrap(
+    apiClient.get(`/workflows/runs/${encodeURIComponent(promptId)}`),
+  );
+}
+
+/**
  * This card as a ComfyUI file somebody else can open (v1.12 B8).
  *
  * Scrubbed by the server - prompts and seeds blanked, recipe LoRA slots
@@ -335,6 +349,31 @@ export async function planSetClones(workflowId, sets) {
  */
 export async function deleteWorkflow(workflowId) {
   return unwrap(apiClient.delete(wf(workflowId)));
+}
+
+/**
+ * The versions a workflow keeps, newest first (#1849). Empty for an automatic
+ * workflow nobody has saved over.
+ *
+ * @param {string} workflowId
+ * @returns {Promise<{workflow_id: string, version: ?number,
+ *   versions: Array<{version: number, created_at: string, source: ?string, reason: ?string, current: boolean}>}>}
+ */
+export async function getWorkflowVersions(workflowId) {
+  return unwrap(apiClient.get(wf(workflowId, "/versions")));
+}
+
+/**
+ * Go back to an earlier version. Its graph becomes the newest version, so
+ * nothing is removed and going back can itself be undone. Answers with the
+ * versions re-read.
+ *
+ * @param {string} workflowId
+ * @param {number} version
+ * @returns {Promise<Object>} the same shape `getWorkflowVersions` returns
+ */
+export async function restoreWorkflowVersion(workflowId, version) {
+  return unwrap(apiClient.post(wf(workflowId, `/versions/${version}/restore`)));
 }
 
 /**
@@ -479,29 +518,4 @@ export async function saveWorkflow(workflowId, body = {}) {
  */
 export async function saveWorkflowAsNew(workflowId, body) {
   return unwrap(apiClient.post(wf(workflowId, "/save-as-new"), body));
-}
-
-/**
- * The versions a workflow keeps, newest first. Empty for an automatic
- * workflow nobody has saved over.
- *
- * @param {string} workflowId
- * @returns {Promise<{workflow_id: string, version: ?number,
- *   versions: Array<{version: number, created_at: string, reason: ?string,
- *   current: boolean}>}>}
- */
-export async function getWorkflowVersions(workflowId) {
-  return unwrap(apiClient.get(wf(workflowId, "/versions")));
-}
-
-/**
- * Go back: an earlier version's graph becomes the newest version. Nothing is
- * removed, so going back can itself be undone.
- *
- * @param {string} workflowId
- * @param {number} version
- * @returns {Promise<Object>} the list `getWorkflowVersions` answers.
- */
-export async function restoreWorkflowVersion(workflowId, version) {
-  return unwrap(apiClient.post(wf(workflowId, `/versions/${version}/restore`)));
 }

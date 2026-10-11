@@ -134,7 +134,10 @@ export async function abortRun() {
 /**
  * Whether the configured ComfyUI can open a PixlStash workflow link: it needs
  * the ComfyUI-PixlStash node's `open_workflow.js`. Owner-only.
- * @returns {Promise<{can_open_workflows: ?boolean}>} `null` when ComfyUI
+ * @returns {Promise<{can_open_workflows: ?boolean, saves_back: ?boolean}>}
+ *   `saves_back`: a workflow opened there saves back to PixlStash (the
+ *   node's `save_workflow.js` is loaded); false for older nodes, which open a
+ *   copy. Both `null` when ComfyUI
  *   cannot be asked.
  */
 export async function getPixlstashNode() {
@@ -163,20 +166,23 @@ export async function probeComfyui(url) {
  * made before keys were bound, which works from anywhere); `refused_from` the
  * last other address it was refused from since PixlStash started; `exposure`
  * `"other_computer"` or `"listening"` when other computers can reach ComfyUI.
+ * `token_id` is the key's row in the token list and `all_libraries` whether it
+ * works in every library (`setTokenLibraries` changes that).
  *
  * @returns {Promise<{linked: boolean, comfyui_url: ?string,
  *   pixlstash_url: ?string, where: ?("this_computer"|"local_network"),
  *   linked_at: ?string, bound_address: ?string, refused_from: ?string,
- *   exposure: ?("other_computer"|"listening")}>}
+ *   exposure: ?("other_computer"|"listening"), token_id: ?number,
+ *   all_libraries: boolean}>}
  */
 export async function getComfyuiLink() {
   return unwrap(apiClient.get(comfyUrl("/link")));
 }
 
 /**
- * Link the saved ComfyUI: mint a full-access token that works only from
- * ComfyUI's address and write it, with PixlStash's URL, into ComfyUI's
- * settings. Local owner only.
+ * Link the saved ComfyUI: mint a token that reaches only what the PixlStash
+ * nodes call and works only from ComfyUI's address, and write it, with
+ * PixlStash's URL, into ComfyUI's settings. Local owner only.
  *
  * Always resolves 200 whether or not it linked. `steps` is exactly four, in
  * order `reach`, `nodes`, `link`, `check`, each `{id, state, detail, reason}`

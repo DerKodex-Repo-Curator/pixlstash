@@ -250,11 +250,11 @@
  * not running) is no verdict on any one card, so every card stays and the run
  * says why; so does a card whose pre-flight itself failed.
  *
- * **After a run the lightbox stays put.** The run is handed to the grid's
- * progress runner WITHOUT a source picture, because a source picture is what
- * makes the runner step the lightbox to the newest stack member when the
- * output lands - the Run popup's behaviour, and the opposite of this design.
- * *Show it* does that step when asked.
+ * **After a run the lightbox stays put.** The run is handed to the grid
+ * WITHOUT a source picture, because a source picture is what makes the grid
+ * step the lightbox to the newest stack member when the output lands - the
+ * Run popup's behaviour, and the opposite of this design. *Show it* does that
+ * step when asked.
  *
  * One run is shown at a time. A second Run while the first is going is queued
  * by ComfyUI as usual, and the tab follows the newest.
@@ -278,7 +278,7 @@ import {
   readReason,
 } from "../../utils/runReasons";
 import { onMenuKeydown } from "../../utils/menuKeyboard";
-import { labelPrompts, runTaskLabel } from "../../utils/runTaskLabel";
+import { runTaskLabel } from "../../utils/runTaskLabel";
 import { withRef } from "../../utils/withRef";
 import { selectNewestStackMember } from "../../utils/stack";
 import { stackMemberIds } from "../../utils/stackMembers";
@@ -542,8 +542,8 @@ async function resolveResult(current, attempt = 1) {
   }
 }
 
-// The grid's runner is the one follower of ComfyUI progress, so this tab reads
-// its state rather than opening a socket of its own.
+// The grid follows the runs started from it (`useGridComfyuiRuns`), so this
+// tab reads that state rather than asking after its run itself.
 watch(
   () => props.comfyuiProgress?.status,
   (status) => {
@@ -563,9 +563,9 @@ watch(
 );
 
 // Whether the grid's ComfyUI state on screen is this tab's run: while it runs,
-// and through the runner's short "complete" tail after it, which the tab's own
-// Last edit already says. The lightbox drops its own bar for as long as this
-// holds. A later run from the grid's menus flips the runner back to running,
+// and through the short "complete" tail after it, which the tab's own Last
+// edit already says. The lightbox drops its own bar for as long as this
+// holds. A later run from the grid's menus flips the state back to running,
 // which this done run does not claim.
 const tellsRun = computed(() => {
   const status = runHere.value?.status;
@@ -656,9 +656,7 @@ async function submit() {
       ...(Object.values(destination).some((value) => value != null)
         ? { destination }
         : {}),
-      client_id: runDialog.hasRunner
-        ? runDialog.context?.client_id || null
-        : null,
+      label: runTaskLabel({ workflow: card?.name }),
     });
     const prompts = Array.isArray(answer?.prompts) ? answer.prompts : [];
     if (!prompts.length) {
@@ -672,11 +670,7 @@ async function submit() {
     remember(workflowId.value);
     follow(id, card?.name, text, stack.value, before);
     // No picture ids: see the component's docstring.
-    const label = runTaskLabel({ workflow: card?.name });
-    runDialog.started(
-      labelPrompts(prompts, () => label),
-      [],
-    );
+    runDialog.started(prompts, []);
   } catch (err) {
     submitError.value = errorMessage(err, "Could not start the edit.");
   } finally {
@@ -699,7 +693,7 @@ function follow(sourceId, workflowName, text, stacked, before) {
 
 // A run the Run popup started for this tab (*More options…*, or a card that
 // needs a reference picture), followed as one of its own. App.vue has already
-// handed it to the runner without picture ids, so the lightbox stays put.
+// handed it on without picture ids, so the lightbox stays put.
 watch(
   () => runDialog.editRun,
   (started) => {

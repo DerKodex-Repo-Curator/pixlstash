@@ -168,6 +168,38 @@ def test_a_workflow_keeps_its_first_version_and_the_newest_49(folders, hub):
     assert (card.versions, card.version) == (50, 61)
 
 
+def test_saves_from_comfyui_never_push_out_a_version_the_owner_saved(folders, hub):
+    """Ctrl+S in ComfyUI is pressed often, and sent by whoever can reach
+    ComfyUI: its versions are counted apart and prune only each other.
+
+    Wrong if a `chain` version is gone, or if more ComfyUI versions are kept
+    than their own cap.
+    """
+    workflow_id = comfyui_module.store_manual_workflow(hub, "w", PLAIN, "import")
+
+    def save(n: int, source: str) -> int:
+        edited = copy.deepcopy(PLAIN)
+        edited["extra"] = {"n": n}
+        with hub.transaction() as conn:
+            return workflow_versions.append_version(
+                conn, workflow_id, edited, source=source
+            )
+
+    owners = [save(n, "chain") for n in range(3)]
+    cap = workflow_versions.MAX_COMFYUI_VERSIONS
+    from_comfyui = [save(100 + n, "comfyui") for n in range(cap + 15)]
+    kept = _versions(hub, workflow_id)
+    assert [v for v, source in kept if source == "chain"] == owners
+    assert [v for v, source in kept if source == "comfyui"] == from_comfyui[-cap:]
+    assert kept[0] == (1, "import")
+    # And the owner's own saves leave ComfyUI's alone, also past their cap.
+    owners += [save(1000 + n, "chain") for n in range(workflow_versions.MAX_VERSIONS)]
+    kept = _versions(hub, workflow_id)
+    assert [v for v, source in kept if source == "comfyui"] == from_comfyui[-cap:]
+    assert [v for v, source in kept if source == "chain"] == owners[-49:]
+    assert len(kept) == 1 + 49 + cap
+
+
 def test_a_conversion_is_not_stored_on_a_version_made_since_it_matched(folders, hub):
     workflow_id = comfyui_module.store_manual_workflow(hub, "w", PLAIN, "import")
     canonical = workflow_bindings.canonical(

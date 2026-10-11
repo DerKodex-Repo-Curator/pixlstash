@@ -1421,6 +1421,11 @@ CREATE TABLE IF NOT EXISTS workflow_card_move (
 # and logs the rows of a retired id, for the case that should be impossible.
 # ``source`` is also what the version menu's words are made from
 # (``workflow_versions.reason``).
+#
+# ``opening`` names the one opening in ComfyUI a ``comfyui`` version was saved
+# from (#1852), NULL for every other version: the next save of that opening
+# takes the version it supersedes away, where nothing was made on it, so an
+# afternoon of Ctrl+S is one version. Added to an existing hub by ``_apply_v2``.
 _V2_WORKFLOW_VERSION = """
 CREATE TABLE IF NOT EXISTS workflow_version (
     workflow_id      TEXT NOT NULL,
@@ -1432,6 +1437,7 @@ CREATE TABLE IF NOT EXISTS workflow_version (
     remote_modified  INTEGER,
     source           TEXT NOT NULL,
     created_at       TEXT NOT NULL,
+    opening          TEXT,
     PRIMARY KEY (workflow_id, version)
 )
 """
@@ -1467,6 +1473,20 @@ _V2_WORKFLOW_KEPT_VARIANT = """
 CREATE TABLE IF NOT EXISTS workflow_kept_variant (
     structural_hash  TEXT PRIMARY KEY,
     workflow_id      TEXT NOT NULL
+)
+"""
+
+# The editor document a workflow was last saved from ComfyUI with (#1852): the
+# layout, which a runnable graph has none of. One per workflow, of either
+# kind. ``structure`` is ``workflow_run_service.graph_structure`` of the graph
+# it arrived with, as stored; the layout is handed back only while what opens
+# is still wired that way (``workflow_versions.py``).
+_V2_WORKFLOW_LAYOUT = """
+CREATE TABLE IF NOT EXISTS workflow_layout (
+    workflow_id  TEXT PRIMARY KEY,
+    document     TEXT NOT NULL,
+    structure    TEXT NOT NULL,
+    saved_at     TEXT NOT NULL
 )
 """
 
@@ -1549,6 +1569,7 @@ _V2_WORKFLOW_TABLES = (
     _V2_WORKFLOW_VERSION,
     _V2_WORKFLOW_CHANGE,
     _V2_WORKFLOW_KEPT_VARIANT,
+    _V2_WORKFLOW_LAYOUT,
     *_V2_WORKFLOW_INDEXES,
 )
 
@@ -1845,6 +1866,13 @@ def _apply_v2(conn: sqlite3.Connection) -> None:
     if "traits" not in core_columns:
         conn.execute("ALTER TABLE workflow_topology_core ADD COLUMN traits TEXT")
 
+    # Which opening in ComfyUI a version was saved from (#1852), the same way.
+    version_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(workflow_version)").fetchall()
+    }
+    if "opening" not in version_columns:
+        conn.execute("ALTER TABLE workflow_version ADD COLUMN opening TEXT")
+
     # The content key (#1440), guarded the same way. No released hub has this
     # table; a development hub that ran an earlier commit of the pull does,
     # and ``workflow_origin.stored_as`` reads the column.
@@ -1922,6 +1950,17 @@ def _apply_v2(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE usertoken ADD COLUMN all_libraries INTEGER NOT NULL DEFAULT 0"
         )
+    # Only the ComfyUI link sets ``bound_address``, and before #1811 it minted
+    # a full-access key. Narrow those to the ComfyUI scope (``auth.COMFYUI_SCOPE``)
+    # so an existing link is held to the nodes' routes without linking again.
+    # One statement that is a no-op once done, so it is here rather than in a
+    # one-shot backfill: a build from before #1811 opening this hub can still
+    # mint one. A link older than the binding has no ``bound_address`` and is
+    # narrowed by ``comfyui_link_service.narrow_recorded_key`` instead.
+    conn.execute(
+        "UPDATE usertoken SET scope = 'COMFYUI' "
+        "WHERE bound_address IS NOT NULL AND scope = 'ALL'"
+    )
 
     # Rows from the earliest feature-lane v1 may predate the column entirely.
     # Backfill in Python so every library gets a distinct cryptographic value;

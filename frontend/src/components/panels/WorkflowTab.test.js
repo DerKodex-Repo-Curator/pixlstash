@@ -34,6 +34,8 @@ const getWorkflowVersions = vi.fn();
 const restoreWorkflowVersion = vi.fn();
 
 vi.mock("../../api/workflows", () => ({
+  getWorkflowVersions: (...args) => getWorkflowVersions(...args),
+  restoreWorkflowVersion: (...args) => restoreWorkflowVersion(...args),
   getWorkflowCard: (...args) => getWorkflowCard(...args),
   listWorkflowCards: (...args) => listWorkflowCards(...args),
   patchWorkflowCard: (...args) => patchWorkflowCard(...args),
@@ -53,8 +55,6 @@ vi.mock("../../api/workflows", () => ({
   discardWorkflowChanges: (...args) => discardWorkflowChanges(...args),
   saveWorkflow: (...args) => saveWorkflow(...args),
   saveWorkflowAsNew: (...args) => saveWorkflowAsNew(...args),
-  getWorkflowVersions: (...args) => getWorkflowVersions(...args),
-  restoreWorkflowVersion: (...args) => restoreWorkflowVersion(...args),
 }));
 
 const getPixlstashNode = vi.fn();
@@ -366,6 +366,8 @@ beforeEach(() => {
   getLoraSummary.mockReset().mockResolvedValue(loraSummary());
   getLoraChain.mockReset().mockResolvedValue(loraChain());
   getWorkflowFormInputs.mockReset().mockResolvedValue({ nodes: [] });
+  getWorkflowVersions.mockReset().mockResolvedValue({ versions: [] });
+  restoreWorkflowVersion.mockReset().mockResolvedValue({ versions: [] });
   replace.mockReset();
   preflightWorkflowRun.mockReset().mockResolvedValue({ groups: [] });
   // One small fake of the changes routes: a write is kept, a read answers
@@ -562,6 +564,68 @@ describe("the version menu in the head", () => {
     expect(row(wrapper, 2).text()).toContain("LoRAs edited");
     expect(row(wrapper, 3).attributes("aria-checked")).toBe("true");
     expect(row(wrapper, 2).attributes("aria-checked")).toBe("false");
+  });
+
+  describe("a version saved from ComfyUI (#1852)", () => {
+    const line = (wrapper) =>
+      wrapper.find('[data-testid="wftab-from-comfyui"]');
+    /** Version 3 as the newest, arrived as `source` says. */
+    const kept = (source, reason = "from ComfyUI") => {
+      const at = versionsAt(3);
+      at.versions[0] = {
+        version: 3,
+        created_at: new Date().toISOString(),
+        source,
+        reason,
+        current: true,
+      };
+      return at;
+    };
+
+    it("is named in its row of the menu", async () => {
+      getWorkflowVersions.mockResolvedValue(kept("comfyui"));
+      const { wrapper } = await mountVersioned();
+      expect(row(wrapper, 3).text()).toContain("from ComfyUI");
+    });
+
+    it("is said in one line under the chip, with the way back beside it", async () => {
+      getWorkflowVersions.mockResolvedValue(kept("comfyui"));
+      const { wrapper } = await mountVersioned();
+      expect(line(wrapper).text()).toMatch(
+        /^Saved from ComfyUI just now ·\s+Go back$/,
+      );
+
+      // Go back makes the version BEFORE it current, by the menu's own write.
+      restoreWorkflowVersion.mockResolvedValue(versionsAt(4));
+      const back = wrapper.find('[data-testid="wftab-go-back"]');
+      expect(back.attributes("aria-label")).toBe("Go back to version 2");
+      await back.trigger("click");
+      await flush(wrapper);
+      expect(restoreWorkflowVersion).toHaveBeenCalledWith(KEY, 2);
+      expect(line(wrapper).exists()).toBe(false);
+    });
+
+    it("is not said of a version saved in PixlStash", async () => {
+      getWorkflowVersions.mockResolvedValue(kept("loras", "LoRAs edited"));
+      const { wrapper } = await mountVersioned();
+      expect(line(wrapper).exists()).toBe(false);
+    });
+
+    it("is not said of a file the old pull read, worded the same", async () => {
+      getWorkflowVersions.mockResolvedValue(kept("pull", "from ComfyUI"));
+      const { wrapper } = await mountVersioned();
+      expect(line(wrapper).exists()).toBe(false);
+    });
+
+    it("keeps the line when going back is refused, and says why", async () => {
+      getWorkflowVersions.mockResolvedValue(kept("comfyui"));
+      restoreWorkflowVersion.mockRejectedValue(new Error("offline"));
+      const { wrapper } = await mountVersioned();
+      await wrapper.find('[data-testid="wftab-go-back"]').trigger("click");
+      await flush(wrapper);
+      expect(refusal(wrapper).exists()).toBe(true);
+      expect(line(wrapper).exists()).toBe(true);
+    });
   });
 
   it("goes back: the earlier graph becomes the newest version and the rail re-reads", async () => {
@@ -2667,6 +2731,19 @@ describe("Open in ComfyUI", () => {
     );
   });
 
+  it("says it opens a copy when ComfyUI's nodes are from before saving back", async () => {
+    configure();
+    getPixlstashNode.mockResolvedValue({
+      can_open_workflows: true,
+      saves_back: false,
+    });
+    const { wrapper } = await mountWith([ID], [card({ id: ID })]);
+    await flush(wrapper);
+    expect(openButton(wrapper).attributes("aria-label")).toBe(
+      "Open a copy in ComfyUI",
+    );
+  });
+
   it("goes through the desktop shell's bridge, which window.open cannot", async () => {
     configure();
     const openComfyui = vi.fn().mockResolvedValue(true);
@@ -3033,12 +3110,14 @@ describe("the Tasks tab", () => {
         .exists(),
     ).toBe(false);
 
-    tasksStore.setComfyuiRun("run-1", {
-      status: "running",
-      percent: 10,
-      message: "sampling",
-      label: "Cinematic portrait",
-    });
+    tasksStore.comfyuiRuns = [
+      {
+        prompt_id: "run-1",
+        status: "running",
+        percent: 10,
+        label: "Cinematic portrait",
+      },
+    ];
     await flush(wrapper);
     expect(
       wrapper
@@ -4153,21 +4232,33 @@ describe("the tab as the editor (#1850)", () => {
       expect(document.activeElement).toBe(runButton(wrapper));
     });
 
-    it("says Open in ComfyUI opens the saved workflow while changes wait, and not otherwise", async () => {
-      useFilterStore().comfyuiUrl = "http://127.0.0.1:8188";
-      getPixlstashNode.mockResolvedValue({ can_open_workflows: true });
-      const { wrapper } = await mountEditor();
-      const line = () => wrapper.find('[data-testid="wftab-open-unsaved"]');
-      expect(line().exists()).toBe(false);
-      await wrapper.find('[data-testid="wftab-stage-upscale"]').setValue(true);
-      await flush(wrapper);
-      expect(line().text().replace(/\s+/g, " ")).toBe(
+    it.each([
+      // The node asks for the unsaved graph and saves back (#1852).
+      [
+        { can_open_workflows: true, saves_back: true },
+        "Open in ComfyUI opens the workflow with the unsaved changes in it. Saving there saves them too.",
+      ],
+      // Nodes from before that open a copy of the saved one.
+      [
+        { can_open_workflows: true, saves_back: false },
         "Open in ComfyUI opens the saved workflow. The unsaved changes are not in it until they are saved.",
-      );
-      expect(
-        wrapper.find('[data-testid="wftab-open-comfyui"]').attributes("aria-describedby"),
-      ).toBe("wftab-open-unsaved");
-    });
+      ],
+    ])(
+      "says what Open in ComfyUI opens while changes wait, and nothing otherwise (%o)",
+      async (node, sentence) => {
+        useFilterStore().comfyuiUrl = "http://127.0.0.1:8188";
+        getPixlstashNode.mockResolvedValue(node);
+        const { wrapper } = await mountEditor();
+        const line = () => wrapper.find('[data-testid="wftab-open-unsaved"]');
+        expect(line().exists()).toBe(false);
+        await wrapper.find('[data-testid="wftab-stage-upscale"]').setValue(true);
+        await flush(wrapper);
+        expect(line().text().replace(/\s+/g, " ")).toBe(sentence);
+        expect(
+          wrapper.find('[data-testid="wftab-open-comfyui"]').attributes("aria-describedby"),
+        ).toBe("wftab-open-unsaved");
+      },
+    );
   });
 
   describe("two edits in a hurry", () => {

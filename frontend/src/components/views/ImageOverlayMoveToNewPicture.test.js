@@ -72,7 +72,6 @@ const STUBS = {
   CharacterEditor: true,
   StarRatingOverlay: true,
   PluginParametersUI: true,
-  ComfyUiRunner: true,
   ProgressOverlay: true,
   // Real-but-thin panel, so the test can read the card actually on screen.
   OverlayMetadataPanel: {
@@ -150,5 +149,48 @@ describe("ImageOverlay follows a picture created while it was open", () => {
     await flush();
 
     expect(shownId(wrapper)).toBe(7);
+  });
+});
+
+// A run started from the grid ends while the lightbox is open (#1862). The
+// grid holds `picture_imported` inserts back until the lightbox closes, so the
+// result is in no list the lightbox has: `showRunResult` reads it by id, as
+// *Show it* does. Only the lightbox knows what the reader is on by then.
+describe("ImageOverlay steps to a finished run's picture", () => {
+  const RESULT = { id: 31, stack_id: "s1", stackCount: 2, tags: [] };
+  const rowsById = () =>
+    getMock.mockImplementation(async (url, config) => {
+      const asked = `${url} ${JSON.stringify(config?.params ?? {})}`;
+      if (url.includes("/metadata")) return { data: { tags: [] } };
+      if (asked.includes("31")) return { data: [RESULT] };
+      return { data: [] };
+    });
+
+  it("moves when the reader is still on the picture the run was made from", async () => {
+    setActivePinia(createPinia());
+    rowsById();
+    const wrapper = await openOverlayOn(7, [
+      { id: 7, stack_id: "s1", stackCount: 1, tags: [] },
+      { id: 9, tags: [] },
+    ]);
+    wrapper.vm.showRunResult(31, 7, "s1");
+    await flush();
+    await flush();
+    expect(shownId(wrapper)).toBe(31);
+    expect(wrapper.emitted("show-picture")?.at(-1)).toEqual([31]);
+  });
+
+  it("leaves a reader who has moved on to another picture where they are", async () => {
+    setActivePinia(createPinia());
+    rowsById();
+    const wrapper = await openOverlayOn(9, [
+      { id: 7, stack_id: "s1", stackCount: 1, tags: [] },
+      { id: 9, tags: [] },
+    ]);
+    wrapper.vm.showRunResult(31, 7, "s1");
+    await flush();
+    await flush();
+    expect(shownId(wrapper)).toBe(9);
+    expect(wrapper.emitted("show-picture")).toBeUndefined();
   });
 });

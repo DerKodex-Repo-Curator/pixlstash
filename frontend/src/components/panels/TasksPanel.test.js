@@ -34,6 +34,9 @@ import TasksPanel, { tasksTabFor } from "./TasksPanel.vue";
 import { useRunDialogStore } from "../../stores/useRunDialogStore";
 import { useTasksStore } from "../../stores/useTasksStore";
 import { useWorkflowsStore } from "../../stores/useWorkflowsStore";
+import { abortRun } from "../../api/comfyui";
+
+vi.mock("../../api/comfyui", () => ({ abortRun: vi.fn(async () => ({})) }));
 
 const globalOpts = { global: { stubs: { "v-icon": true, Tooltip: true } } };
 
@@ -65,13 +68,13 @@ describe("the tab the hosts declare", () => {
       icon: "mdi-timeline-clock-outline",
     });
 
-    tasksStore.setComfyuiRun("run-1", { label: "One" });
+    tasksStore.comfyuiRuns = [{ prompt_id: "run-1", label: "One" }];
     expect(tasksTabFor(tasksStore)).toMatchObject({
       busy: true,
       busyTooltip: "1 active task",
     });
 
-    tasksStore.setComfyuiRun("run-2", { label: "Two" });
+    tasksStore.setImportRun("import-1", { label: "Two" });
     expect(tasksTabFor(tasksStore)).toMatchObject({
       busy: true,
       busyTooltip: "2 active tasks",
@@ -122,28 +125,49 @@ describe("what the task manager shows", () => {
     expect(wrapper.find(".tm-worker-row").exists()).toBe(false);
   });
 
-  it("draws a ComfyUI run with its own progress and an abort", async () => {
+  // #1862: the runs are what the backend's poll reported and nothing else, so
+  // the row is there with no view mounted to follow them - a run another tab
+  // or MCP started included.
+  it("draws the runs the backend reports, with progress and an abort", async () => {
     const tasksStore = useTasksStore();
-    tasksStore.setComfyuiRun("run-1", {
-      status: "running",
-      percent: 40,
-      message: "sampling step 4",
-      label: "Cinematic portrait",
-    });
+    tasksStore.comfyuiRuns = [
+      { prompt_id: "p-1", label: "Night market", status: "queued", percent: 0 },
+      {
+        prompt_id: "p-2",
+        label: "Cinematic portrait",
+        status: "running",
+        percent: 40,
+      },
+      { prompt_id: "p-3", label: "Upscale", status: "queued", percent: 0 },
+    ];
     const wrapper = mount(TasksPanel, globalOpts);
     const text = textOf(wrapper);
     expect(text).not.toContain("No active tasks");
+    // One row, named for the run ComfyUI is on, counting the rest.
+    expect(wrapper.findAll(".tm-worker-row")).toHaveLength(1);
     expect(text).toContain("Cinematic portrait");
-    expect(text).toContain("sampling step 4");
+    expect(text).toContain("ComfyUI running… 2 more queued");
     expect(wrapper.find(".tm-comfy-fill").attributes("style")).toContain(
       "width: 40%",
     );
 
+    // The abort asks the backend, not a handler some view registered.
     const abort = wrapper.find('button[aria-label="Abort ComfyUI run"]');
     expect(abort.exists()).toBe(true);
-    const aborted = vi.spyOn(tasksStore, "abortComfyuiRun");
+    expect(abortRun).not.toHaveBeenCalled();
     await abort.trigger("click");
-    expect(aborted).toHaveBeenCalledWith("run-1");
+    expect(abortRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("names the first run in line while none has started", () => {
+    const tasksStore = useTasksStore();
+    tasksStore.comfyuiRuns = [
+      { prompt_id: "p-1", label: "Night market", status: "queued", percent: 0 },
+    ];
+    const text = textOf(mount(TasksPanel, globalOpts));
+    expect(text).toContain("Night market");
+    expect(text).toContain("ComfyUI queued…");
+    expect(text).not.toContain("more queued");
   });
 
   it("gives an import row the FLIP target the import dialog flies into", () => {
