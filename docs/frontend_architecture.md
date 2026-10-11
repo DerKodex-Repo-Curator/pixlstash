@@ -4601,20 +4601,48 @@ on a pick** (a click, never an arrow key) and `ModelShelf.vue` hands focus back
 to the Group button. Picking **Folder** leaves the menu up, because it opens the
 layout sub-choice below.
 
-The `Show` panel (`components/panels/ShelfShowPanel.vue`) is the toolbar's
+The `Show` menu (`components/panels/ShelfShowPanel.vue`) is the toolbar's
 shipped filter pattern reused whole: a `bar-btn--boxed` activator with a
-`bar-filter-badge`, a `.tbm` panel of `.tbm-check` rows, and a `v-menu` — which
-is also what returns focus to the invoking button on Escape and on an outside
-click, so none of that is hand-rolled. It is deliberately **not** an ARIA tree:
-two flat groups of native checkboxes in DOM order give Tab-between and
-Space-to-toggle for free, where `role="tree"` would be a widget contract to
-maintain for nothing. Unchecking **Adapters** sets its nested kind boxes
-`disabled` — which greys them, keeps their selection so re-checking restores it
-exactly, and takes them out of the tab order — rather than clearing them; the
-fade is legal only because they are genuinely disabled (§11). The parent shows
-`indeterminate` when some but not all kinds are ticked. `Not set` is a
-first-class option carrying the API's `base_model=UNASSIGNED`, never omitted,
-and the wire sentinel never reaches the UI.
+`bar-filter-badge`, and a `v-menu` — which is also what returns focus to the
+invoking button on Escape and on an outside click, so none of that is
+hand-rolled. Inside it is **the cascade the picture grid's `FilterMenu` and the
+Workflows screen's `WorkflowFilterMenu` draw** (`useCascadeMenu`, the `.fm-row`
+rows): a root of one row per filter kind — **Type**, **Adapter kind**, **Engine
+feature**, **Base model**, **Copies**, **Hidden models** — each opening one
+submenu beside it. The last two are flags and each is a pick-one list, as every
+flag in the Workflows menu is: All / Only duplicates, and Hide / Show with how
+many this library hides on both rows. The
+root holds no options, so it cannot grow with the library and **never
+scrolls**; the one list that does grow, Base model, is the grid's
+`FilterChecklistMenu` and scrolls inside its own submenu. A single panel
+holding every box had to scroll around a base-model list that scrolled inside
+it, which is the shape not to go back to. A row whose list is empty is not
+drawn, and a root row says whether its filter is on: nothing at rest, a count
+when narrowed, and `4 of 5` for Type, whose rest state is every block on. That
+rest state is also why the header keeps **Reset** where the other two menus say
+Clear all: clearing every box here would empty the shelf.
+
+The menu hangs from the **end** of its button, so the submenu opens on the
+root's **left** (`flex-direction: row-reverse`; DOM order is still root, then
+submenu). Opened on the right it would widen the menu away from its anchor and
+slide the root out from under the pointer. The chevrons still point right and
+Right still opens, Left still returns, as in the other two menus and as a system
+menu behaves when its submenu flips sides for want of room; focus order stays
+root, then submenu, which is the order that means something.
+
+The submenus are flat groups of native checkboxes in DOM order — Tab-between
+and Space-to-toggle for free, where `role="tree"` would be a widget contract to
+maintain for nothing. Turning **Adapters** off in Type sets the Adapter kind
+boxes `disabled` — which greys them, keeps their selection so turning it back
+on restores it exactly, and takes them out of the tab order — rather than
+clearing them, and the submenu's footer says why; the fade is legal only
+because they are genuinely disabled (§11). A greyed list has no box to focus,
+so the submenu itself takes focus and is `aria-describedby` that footer, and its
+root row shows no count: picks under a block that is off narrow nothing.
+Engines and Engine feature are the same pair. The block's own box shows `indeterminate` when some but not all of
+its kinds are ticked. `Not set` is a first-class option carrying the API's
+`base_model=UNASSIGNED`, never omitted, and the wire sentinel never reaches the
+UI.
 
 Windowing is `content-visibility: auto` with `contain-intrinsic-size` on the
 row rather than a virtual scroller: the browser skips layout and paint outside
