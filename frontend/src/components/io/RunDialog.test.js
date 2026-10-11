@@ -4028,6 +4028,25 @@ describe("Save what you ran", () => {
       expect(saveWorkflowAsNew).not.toHaveBeenCalled();
     });
 
+    it("offers a name with the picked checkpoint as its picker shows it", async () => {
+      readModelSwap.mockImplementation(async (_key, { slotKind }) =>
+        slotKind === "checkpoint"
+          ? {
+              replacements: [
+                { id: 7, filename: "juggernautXL_v9.safetensors", display_name: "Juggernaut XL v9" },
+              ],
+            }
+          : { replacements: [] },
+      );
+      const wrapper = await mountFocusable();
+      wrapper.vm.pickCheckpoint("juggernautXL_v9.safetensors");
+      await flushPromises();
+      await button(wrapper, "Save as new…").trigger("click");
+      await flushPromises();
+      // The name the owner just picked it by, not the file read as a name.
+      expect(nameBox(wrapper).element.value).toBe("Cinematic portrait (Juggernaut XL v9)");
+    });
+
     it("stores the changes under the name given and moves the popup onto the new workflow", async () => {
       saveWorkflowAsNew.mockResolvedValue({
         workflow_id: OTHER,

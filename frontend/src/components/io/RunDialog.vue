@@ -814,6 +814,7 @@
       <div
         v-if="band.count"
         class="rund-band"
+        :class="{ 'rund-band--naming': naming }"
         role="group"
         aria-label="Changes from the workflow"
         data-testid="rund-band"
@@ -3097,7 +3098,11 @@ async function saveOver() {
 /** Save as new…: the band becomes its one question, the name. */
 async function askName() {
   if (saving.value || submitting.value) return;
-  const picked = checkpointEdited.value ? shownModel(checkpointValue.value) : "";
+  // The picked checkpoint by the name its picker shows it under.
+  const picked = checkpointEdited.value
+    ? checkpointOptions.value.find((option) => option.value === checkpointValue.value)
+        ?.label || shownModel(checkpointValue.value)
+    : "";
   newName.value = suggestedName(card.value?.name, picked);
   bandError.value = "";
   naming.value = true;
@@ -4808,16 +4813,43 @@ button.rund-in-tile.rund-in-tile--off {
    however much has changed: its coming and going moves the footer by
    exactly that, once, and not again as the owner types. */
 .rund-band {
+  /* Readable at rest: the form is taller than the window more often than
+     not, and a band at the foot of a scrolled body is a count nobody sees.
+     It holds to the bottom of the body's scrollport, over the form, and is
+     in its own place once the form is scrolled to its end. */
+  position: sticky;
+  bottom: 0;
+  z-index: var(--z-sticky);
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-3);
-  margin-top: var(--space-5);
   padding: var(--space-3) var(--space-4);
   border: 1px solid rgb(var(--v-theme-border));
   border-radius: var(--radius-md);
   background: rgb(var(--v-theme-panel));
   color: rgb(var(--v-theme-on-panel));
+}
+
+/* The name question is a labelled field: its buttons sit on the field's own
+   line, not on the middle of the label and the field together. */
+.rund-band--naming {
+  align-items: flex-end;
+}
+
+/* The body's own bottom padding is under a held band, and the form would
+   show through it as a sliver: painted over in the dialog's surface, from
+   under the band's border to a pixel past the padding, since the band can
+   sit on a half pixel and a seam one pixel high shows the tops of letters. */
+.rund-band::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  right: 0;
+  left: 0;
+  height: calc(var(--space-5) + 1px);
+  margin-top: 1px;
+  background: rgb(var(--v-theme-surface));
 }
 
 .rund-band-text {
@@ -4858,7 +4890,6 @@ button.rund-in-tile.rund-in-tile--off {
 }
 
 .rund-band-done {
-  margin-top: var(--space-5);
   color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
 }
 
