@@ -161,7 +161,23 @@ def _copy_into(target, source_root: str, row) -> str:
             session.add(Tag(tag=tag, picture_id=picture.id))
         session.commit()
 
-    target.db.run_task(persist)
+    try:
+        target.db.run_task(persist)
+    except Exception:
+        # Import construction writes the file (and may write a thumbnail)
+        # before the database row is committed. Do not leave either behind
+        # when persisting the row fails.
+        written = os.path.join(target.image_root, picture.file_path)
+        try:
+            os.remove(written)
+        except OSError:
+            logger.exception(
+                "Could not remove orphan file %s after failed move of picture %s",
+                written,
+                row.id,
+            )
+        ImageUtils.remove_thumbnail(target.image_root, picture.file_path)
+        raise
     return "new"
 
 
@@ -182,11 +198,6 @@ def register_routes(router, server):
     )
     def move_pictures_to_library(request: Request, payload: MoveToLibraryRequest):
         _refuse_token_pinned_elsewhere(request, payload.library_uuid)
-        source = server.vault
-        rows, locked = source.db.run_immediate_read_task(
-            _read_source, payload.picture_ids
-        )
-
         outcomes: dict[int, str] = {}
         try:
             # ponytail: one synchronous request, one file in memory at a time.
@@ -197,6 +208,14 @@ def register_routes(router, server):
                 library,
                 target,
             ):
+                # open_other_library holds the switch lock. Read the active
+                # vault only after acquiring it, then keep the lock through
+                # the source soft delete so a switch cannot retarget either
+                # the copy's source files or the ids being moved to Scrapheap.
+                source = server.vault
+                rows, locked = source.db.run_immediate_read_task(
+                    _read_source, payload.picture_ids
+                )
                 for row in rows:
                     if row.id in locked:
                         continue
@@ -212,6 +231,12 @@ def register_routes(router, server):
                             library.name,
                         )
                         outcomes[row.id] = "failed"
+                arrived = [pid for pid, how in outcomes.items() if how == "new"]
+                moved, newly_locked = (
+                    scrapheap_pictures(server, request, arrived)
+                    if arrived
+                    else ([], [])
+                )
         except LibraryNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except LibraryError as exc:
@@ -219,10 +244,6 @@ def register_routes(router, server):
             # running. Nothing was copied and nothing here was touched.
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-        arrived = [pid for pid, how in outcomes.items() if how == "new"]
-        moved, newly_locked = (
-            scrapheap_pictures(server, request, arrived) if arrived else ([], [])
-        )
         logger.info(
             "Moved %d picture(s) to library %s: %s",
             len(moved),
