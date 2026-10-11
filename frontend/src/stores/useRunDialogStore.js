@@ -77,6 +77,24 @@ export const useRunDialogStore = defineStore("runDialog", () => {
    * the owner comes back. Kept until dismissed or the workflow runs again.
    */
   const failures = ref({});
+  /**
+   * What the last run of each workflow changed, by workflow id, as the Run
+   * popup's band said it: `{name, count, text, promptIds, finished}` (#1850).
+   * Here for the reason `failures` is: the popup is closed by the time the
+   * pictures are back, and the Tasks tab offers to save those changes then.
+   * Only what the offer is WORDED from; whether there is one is the server's
+   * (`GET …/changes`, `ran`), which the tab asks before it draws. Kept until
+   * the workflow runs again or the changes are saved.
+   */
+  const ranChanges = ref({});
+  /**
+   * The last save of a workflow's changes made in this tab, as
+   * `{workflowId, savedAs, at}` (`savedAs` is the new workflow of a Save as
+   * new, else ""). The server's own announcement skips the tab that wrote, so
+   * the Workflow tab and the Tasks tab take it from here: what waited on the
+   * workflow, and what its last run offered, are gone.
+   */
+  const saved = ref(null);
   /** Bumped on every session reset, so a pin write answered after one is dropped. */
   let session = 0;
   function sessionEpoch() {
@@ -135,12 +153,44 @@ export const useRunDialogStore = defineStore("runDialog", () => {
   }
 
   /**
+   * A run of *workflowId* was queued with these changes from the workflow
+   * (`{name, count, text, promptIds}`), or with none (*record* null), which
+   * takes down what its run before offered.
+   */
+  function ranWith(workflowId, record) {
+    if (!workflowId) return;
+    const next = { ...ranChanges.value };
+    if (record) next[workflowId] = { ...record, finished: false };
+    else delete next[workflowId];
+    ranChanges.value = next;
+  }
+
+  /** The changes of *workflowId* were saved, over it or as *savedAs*. */
+  function changesSaved(workflowId, savedAs = "") {
+    if (!workflowId) return;
+    ranWith(workflowId, null);
+    saved.value = { workflowId, savedAs, at: Date.now() };
+  }
+
+  /**
    * Take a `plugin_progress` event. A ComfyUI run that failed is recorded on
    * the workflow it names and answered as `{promptId, message, stopped}`;
-   * anything else is null.
+   * anything else is null. One that completed marks what that run changed as
+   * ready to offer: the pictures are back.
    */
   function runEvent(payload) {
     if (String(payload?.plugin || "").toLowerCase() !== "comfyui") return null;
+    const ran = ranChanges.value[payload.workflow_id];
+    if (payload.status === "completed" && ran && !ran.finished) {
+      const promptId = String(payload.run_id || "").replace(/^comfyui-/i, "");
+      // Of the run on record, not of an earlier one still finishing.
+      if (!ran.promptIds?.length || ran.promptIds.includes(promptId)) {
+        ranChanges.value = {
+          ...ranChanges.value,
+          [payload.workflow_id]: { ...ran, finished: true },
+        };
+      }
+    }
     if (payload.status !== "failed") return null;
     const failure = {
       promptId: String(payload.run_id || "").replace(/^comfyui-/i, ""),
@@ -183,6 +233,8 @@ export const useRunDialogStore = defineStore("runDialog", () => {
     pinsWritten.value = null;
     editRun.value = null;
     failures.value = {};
+    ranChanges.value = {};
+    saved.value = null;
     session += 1;
   });
   onScopeDispose(() => unsubscribeSessionReset());
@@ -195,6 +247,10 @@ export const useRunDialogStore = defineStore("runDialog", () => {
     pinsWritten,
     editRun,
     failures,
+    ranChanges,
+    ranWith,
+    saved,
+    changesSaved,
     runEvent,
     runFailed,
     dismissFailure,
