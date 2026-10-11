@@ -678,7 +678,9 @@ def people_loras_in(hub, vault, graph: dict) -> list[dict]:
     return found
 
 
-def without_peoples_picks(editor: dict, people: set[str]) -> dict:
+def without_peoples_picks(
+    editor: dict, people: set[str], *, filenames: set[str] | None = None
+) -> dict:
     """An editor document with no person's LoRA named in it by digest.
 
     *people* is every digest attached to a person. An editor document names
@@ -689,12 +691,26 @@ def without_peoples_picks(editor: dict, people: set[str]) -> dict:
     name) goes whole. Nodes the graph does not run (bypassed, muted) are in
     the document like any other, so they are covered. A copy; *editor* is not
     changed. A person's LoRA named by FILE has no empty value: that is the
-    caller's to refuse.
+    caller's to refuse. When *filenames* is supplied, widgets naming one
+    of those case-folded basenames refuse the export, including bypassed nodes.
     """
     if not people:
         return editor
 
     def clean(value, key=None):
+        if key == "widgets_values" and filenames:
+            widgets = value.values() if isinstance(value, dict) else value
+            if isinstance(widgets, (list, tuple)) or isinstance(value, dict):
+                if any(
+                    isinstance(widget, str)
+                    and normalized_filename(widget.strip()) in filenames
+                    for widget in widgets
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="The editor names a person's LoRA by file name; "
+                        "remove it before exporting the workflow.",
+                    )
         if isinstance(value, str):
             return "" if value.strip().lower() in people else value
         if isinstance(value, list):
@@ -2358,7 +2374,15 @@ def create_router(server) -> APIRouter:
                     )
             # The editor document goes without the picks too, including
             # a bypassed or muted node that is absent from the API graph.
-            workflow = without_peoples_picks(workflow, set(lora_owners(server.vault)))
+            people = set(lora_owners(server.vault))
+            by_name = adapter_digest_index(hub)[0] if people else {}
+            workflow = without_peoples_picks(
+                workflow,
+                people,
+                filenames={
+                    name for name, digests in by_name.items() if digests & people
+                },
+            )
             take_out_empty_adapter_loaders(api_graph(output))
             migrated, _ = workflow_bindings.migrate_placeholders(workflow)
             canonical = workflow_bindings.canonical(migrated)

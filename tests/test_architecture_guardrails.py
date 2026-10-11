@@ -1081,6 +1081,7 @@ _COMFYUI_PACK_INDIRECT_CALLS = {
     "/api/v1/comfyui/workflows/convert": "POST",
     "/api/v1/pictures/likeness-search": "POST",
     "/api/v1/pictures/face-search": "POST",
+    "/api/v1/workflows/1/graph": "PUT",
 }
 
 

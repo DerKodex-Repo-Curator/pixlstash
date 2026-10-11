@@ -2960,7 +2960,8 @@ therefore never push a version the owner saved in PixlStash out of the
 workflow, and a workflow keeps at most version 1 and 49 of each kind. **Who
 saved a version is the key's to say, not the caller's**: a request made with
 a key bound to an address (`UserToken.bound_address`, the ComfyUI link key,
-#1810) is stored as `comfyui` whatever `source` it sends, so that key cannot
+#1810), or any `COMFYUI`-scope key even when minted without a binding, is
+stored as `comfyui` whatever `source` it sends, so that key cannot
 count its saves among the owner's or pass the Workflow tab's line by.
 
 **The saves of one opening are one version** (`opening` on the request and on
@@ -3072,7 +3073,9 @@ there: a loader that cannot be rewired because ComfyUI does not answer is
 stored as sent and left out by every read), the loader comes off, the editor
 document it stores goes without the picks (`without_peoples_picks`), and
 `left_out` names each LoRA and whose it is from the same read
-(`routes/comfyui.people_loras_in`).
+(`routes/comfyui.people_loras_in`). An editor widget naming a person's LoRA
+by file refuses the export (409), including a bypassed or muted node absent
+from the runnable graph; there is no empty filename the loader can use.
 
 **Where the loader goes** is `GET …/graph`'s `people_loader`
 (`_people_loader_place`): the splice a run makes for a person

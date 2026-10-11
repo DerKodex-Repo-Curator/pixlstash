@@ -59,6 +59,7 @@ from pydantic import (
     model_validator,
 )
 
+from pixlstash.auth import COMFYUI_SCOPE
 from pixlstash.hub import workflow_versions
 from pixlstash.hub.workflow_card_reads import (
     Workflow,
@@ -10522,6 +10523,7 @@ def create_router(server) -> APIRouter:
             TypeError,
             ValueError,
             sqlite3.Error,
+            SQLAlchemyError,
         ) as exc:
             logger.warning(
                 "[workflows] Workflow %s keeps no ComfyUI layout: it could "
@@ -10687,11 +10689,14 @@ def create_router(server) -> APIRouter:
                 raise HTTPException(status_code=413, detail=str(exc)) from exc
         # Who saved it is not the caller's to say where the key says it: the
         # key ComfyUI holds is bound to ComfyUI's address (#1810), and what it
-        # saves is counted, and shown, as saved from ComfyUI.
-        bound = getattr(
-            getattr(request.state, "matched_token", None), "bound_address", None
+        # saves is counted, and shown, as saved from ComfyUI. A manually minted
+        # COMFYUI key has the same retention limit even without a binding.
+        token = getattr(request.state, "matched_token", None)
+        from_comfyui = (
+            getattr(token, "bound_address", None) is not None
+            or getattr(token, "scope", None) == COMFYUI_SCOPE
         )
-        source = "comfyui" if bound is not None else payload.source
+        source = "comfyui" if from_comfyui else payload.source
         # Cached: only a bypass and the installed check ask it, and a save
         # from ComfyUI's own page arrives often.
         object_info = _owner_object_info()

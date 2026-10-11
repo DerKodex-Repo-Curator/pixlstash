@@ -2226,6 +2226,14 @@ _COMFYUI_SCOPE_REQUESTS = {
         f"{API}/workflows/auto:{_HEX64}/graph",
         None,
     ),
+    ("PUT", f"{API}/workflows/{{workflow_id}}/graph"): (
+        f"{API}/workflows/auto:{_HEX64}/graph",
+        {},
+    ),
+    ("GET", f"{API}/workflows/{{workflow_id}}/people"): (
+        f"{API}/workflows/auto:{_HEX64}/people",
+        None,
+    ),
     ("POST", f"{API}/comfyui/workflows/convert"): (
         f"{API}/comfyui/workflows/convert",
         {},
@@ -19129,6 +19137,41 @@ def test_an_export_from_comfyui_goes_without_a_persons_lora(a_persons_lora):
     assert "2" in stored and "9" not in stored
 
 
+@pytest.mark.parametrize("by_file", [False, True])
+def test_export_checks_people_picks_on_bypassed_nodes(a_persons_lora, by_file):
+    env = a_persons_lora
+    graph = _without_five()
+    graph.pop("2", None)
+    picked = {
+        "id": 9,
+        "type": "LoraLoader" if by_file else "PixlStashMultiAdapterLoader",
+        "mode": 4,
+        "widgets_values": [
+            f"people/{RUN_ADAPTER_FILENAME.upper()}" if by_file else RUN_ADAPTER_DIGEST,
+            1,
+            1,
+        ],
+    }
+    before = env.server.hub.fetchall("SELECT workflow_id FROM workflow_document")
+    r = env.owner.post(
+        f"{API}/comfyui/workflows/convert",
+        json={"name": "bypassed", "workflow": _editor(nodes=[picked]), "output": graph},
+    )
+    if by_file:
+        assert r.status_code == 409, r.text
+        assert (
+            env.server.hub.fetchall("SELECT workflow_id FROM workflow_document")
+            == before
+        )
+    else:
+        assert r.status_code == 200 and r.json()["left_out"] == [], r.text
+        (document,) = env.server.hub.fetchone(
+            "SELECT document FROM workflow_document WHERE workflow_id = ?",
+            (r.json()["workflow_id"],),
+        )
+        assert RUN_ADAPTER_DIGEST not in document.lower()
+
+
 def test_a_layout_that_cannot_be_kept_never_fails_the_save(saving):
     """The graph is stored by the time the layout is looked at, so a layout
     that cannot be kept is dropped and said in the log, never a 500.
@@ -19156,6 +19199,27 @@ def test_a_layout_that_cannot_be_kept_never_fails_the_save(saving):
     )
 
 
+def test_a_vault_failure_while_keeping_a_layout_never_fails_the_save(saving):
+    from sqlalchemy.exc import SQLAlchemyError
+
+    graph = _strength(0.7)
+    r = _put_graph(saving, saving.manual, graph, editor=_editor())
+    assert r.status_code == 200, r.text
+    calls = 0
+
+    def unavailable(vault):
+        nonlocal calls
+        calls += 1
+        raise SQLAlchemyError("vault temporarily unavailable")
+
+    with saving.monkeypatch.context() as patch:
+        patch.setattr(workflows_routes, "lora_owners", unavailable)
+        r = _put_graph(saving, saving.manual, _strength(0.6), editor=_editor(moved=3))
+    assert calls == 1
+    assert r.status_code == 200 and r.json()["version"] == 3, r.text
+    assert _opened(saving, saving.manual, all_stages="true")["editor"] is None
+
+
 def test_a_layout_that_will_not_compare_never_fails_the_open(saving):
     """`GET …/graph` answered before there were layouts: a graph that cannot
     be matched to the kept layout opens without it, never a 500.
@@ -19176,7 +19240,10 @@ def test_a_layout_that_will_not_compare_never_fails_the_open(saving):
     assert opened["workflow"]["5"]["inputs"]["strength_model"] == 0.7
 
 
-def test_the_key_comfyui_holds_always_saves_as_comfyui(saving):
+@pytest.mark.parametrize(
+    "scope, bound", [("ALL", True), ("COMFYUI", True), ("COMFYUI", False)]
+)
+def test_the_key_comfyui_holds_always_saves_as_comfyui(saving, scope, bound):
     """Who saved a version is what its history is counted and shown by, so it
     is not the caller's to say where the key says it: the key PixlStash hands
     ComfyUI is bound to ComfyUI's address.
@@ -19185,7 +19252,7 @@ def test_the_key_comfyui_holds_always_saves_as_comfyui(saving):
     the owner's own versions and pass the Workflow tab's line by.
     """
     r = saving.owner.post(
-        f"{API}/users/me/token", json={"description": "link", "scope": "ALL"}
+        f"{API}/users/me/token", json={"description": "link", "scope": scope}
     )
     assert r.status_code == 200, r.text
     token, token_id = r.json()["token"], r.json()["token_id"]
@@ -19198,8 +19265,9 @@ def test_the_key_comfyui_holds_always_saves_as_comfyui(saving):
         )
         session.commit()
 
-    saving.server.auth._db.run_task(bind, priority=DBPriority.IMMEDIATE)
-    saving.server.auth._flush_token_cache()
+    if bound:
+        saving.server.auth._db.run_task(bind, priority=DBPriority.IMMEDIATE)
+        saving.server.auth._flush_token_cache()
     try:
         r = _bearer(saving.server, token).put(
             f"{API}/workflows/{saving.manual}/graph",
