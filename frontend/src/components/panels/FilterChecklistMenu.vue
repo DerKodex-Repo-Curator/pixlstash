@@ -165,6 +165,17 @@ onMounted(() => nextTick(() => fieldRef.value?.focus()));
    workflow's name beside its cover, kind and count clips to a few letters. */
 .fm-checklist {
   width: var(--filter-menu-w);
+  /* The submenu slot's own cap, so in a short window it is the list that gives
+     up height. Left to overflow the slot, the slot scrolled too: a scrollbar
+     around a scrollbar. */
+  display: flex;
+  flex-direction: column;
+  max-height: min(80vh, 760px);
+}
+.fm-checklist > .tbm-section {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 /* --space-3, not --space-2: the field's focus ring reaches 4px out, and would
    fuse with the highlighted first row's ring into one thick bar. */
@@ -177,6 +188,7 @@ onMounted(() => nextTick(() => fieldRef.value?.focus()));
    them whole), so nothing here ever needs a horizontal scrollbar. */
 .fm-list {
   max-height: 320px;
+  min-height: 0;
   margin-inline: calc(var(--space-3) * -1);
   padding-inline: var(--space-3);
   overflow: hidden auto;

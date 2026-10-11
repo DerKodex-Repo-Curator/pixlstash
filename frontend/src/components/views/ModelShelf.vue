@@ -396,7 +396,7 @@
                 :tooltip="showButtonTitle"
               />
             </template>
-            <ShelfShowPanel />
+            <ShelfShowPanel :open="showMenuOpen" />
           </v-menu>
         </template>
 

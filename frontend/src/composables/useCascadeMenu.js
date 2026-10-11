@@ -1,6 +1,7 @@
-// The cascade both Filters menus share (the picture grid's `FilterMenu` and the
-// Workflows screen's `WorkflowFilterMenu`): a root list of rows, each opening
-// one submenu beside it, so somebody who has learnt one knows the other.
+// The cascade the filter menus share (the picture grid's `FilterMenu`, the
+// Workflows screen's `WorkflowFilterMenu` and the Models shelf's
+// `ShelfShowPanel`): a root list of rows, each opening one submenu beside it,
+// so somebody who has learnt one knows the others.
 
 import { nextTick, reactive, ref, watch } from "vue";
 
