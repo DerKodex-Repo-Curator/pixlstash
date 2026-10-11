@@ -434,3 +434,105 @@ export async function getWorkflowFormInputs(workflowId) {
 export async function saveLoraChain(workflowId, body) {
   return unwrap(apiClient.put(wf(workflowId, "/lora-chain"), body));
 }
+
+// --- Saving over a workflow (#1849, #1850) ---------------------------------
+//
+// A workflow's graph is changed and saved with two verbs. A set of changes is
+// one shape everywhere (`WorkflowChanges`), in the words a run body uses:
+// `{models: [{address, filename | sha256}], loras: [{node_id, field, sha256,
+// strength_model, strength_clip}], skip_loras: [{node_id, field}],
+// stages: {stage: bool}, values: [{slot_label, input_name, value}]}`.
+
+/**
+ * What waits on a workflow, unsaved, what its last run changed, and which
+ * verbs are open for each.
+ *
+ * `reason` is the server's sentence for a closed verb and is printed as it
+ * is: the Workflow tab, the Run popup and the Tasks tab must say the same.
+ *
+ * @param {string} workflowId
+ * @returns {Promise<{workflow_id: string, version: ?number, waiting: ?Object,
+ *   count: number, ran: ?Object, save: {open: boolean, reason: ?string},
+ *   save_as_new: {open: boolean, reason: ?string},
+ *   ran_save: ?{open: boolean, reason: ?string}}>}
+ */
+export async function getWorkflowChanges(workflowId) {
+  return unwrap(apiClient.get(wf(workflowId, "/changes")));
+}
+
+/**
+ * Replace what waits on a workflow with *changes*; an empty set discards.
+ * Not checked against the graph: a change it cannot take is refused at Save.
+ *
+ * @param {string} workflowId
+ * @param {Object} changes - a `WorkflowChanges`.
+ * @returns {Promise<Object>} the state `getWorkflowChanges` answers.
+ */
+export async function setWorkflowChanges(workflowId, changes) {
+  return unwrap(apiClient.put(wf(workflowId, "/changes"), changes));
+}
+
+/**
+ * Discard what waits on a workflow.
+ *
+ * @param {string} workflowId
+ * @returns {Promise<Object>} the state `getWorkflowChanges` answers.
+ */
+export async function discardWorkflowChanges(workflowId) {
+  return unwrap(apiClient.delete(wf(workflowId, "/changes")));
+}
+
+/**
+ * Save: what waits, with `changes` on top, written over the workflow as its
+ * next version. `dry_run: true` answers which verbs are open for that
+ * combination and writes nothing. A 409's `detail` is the reason to print.
+ *
+ * @param {string} workflowId
+ * @param {{changes?: Object, version?: ?number, from_run?: boolean,
+ *   dry_run?: boolean}} [body]
+ * @returns {Promise<{workflow_id: string, version: ?number,
+ *   new_workflow: boolean, dry_run: boolean, save: ?Object,
+ *   save_as_new: ?Object, left_out: Array<Object>}>}
+ */
+export async function saveWorkflow(workflowId, body = {}) {
+  return unwrap(apiClient.post(wf(workflowId, "/save"), body));
+}
+
+/**
+ * Save as new: the same graph stored as a new manual workflow called `name`.
+ * This workflow is left as it was and what waited on it is cleared.
+ *
+ * @param {string} workflowId
+ * @param {{name: string, changes?: Object, from_run?: boolean,
+ *   dry_run?: boolean}} body
+ * @returns {Promise<{workflow_id: string, name: ?string, new_workflow: boolean,
+ *   version: ?number, left_out: Array<Object>}>}
+ */
+export async function saveWorkflowAsNew(workflowId, body) {
+  return unwrap(apiClient.post(wf(workflowId, "/save-as-new"), body));
+}
+
+/**
+ * The versions a workflow keeps, newest first. Empty for an automatic
+ * workflow nobody has saved over.
+ *
+ * @param {string} workflowId
+ * @returns {Promise<{workflow_id: string, version: ?number,
+ *   versions: Array<{version: number, created_at: string, reason: ?string,
+ *   current: boolean}>}>}
+ */
+export async function getWorkflowVersions(workflowId) {
+  return unwrap(apiClient.get(wf(workflowId, "/versions")));
+}
+
+/**
+ * Go back: an earlier version's graph becomes the newest version. Nothing is
+ * removed, so going back can itself be undone.
+ *
+ * @param {string} workflowId
+ * @param {number} version
+ * @returns {Promise<Object>} the list `getWorkflowVersions` answers.
+ */
+export async function restoreWorkflowVersion(workflowId, version) {
+  return unwrap(apiClient.post(wf(workflowId, `/versions/${version}/restore`)));
+}
