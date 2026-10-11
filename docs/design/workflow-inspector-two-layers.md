@@ -112,7 +112,7 @@ counts and "Show N" links, never as structure.
  │ Portrait SDXL                        │
  │ 40 pictures                          │ <- link, shows all
  │                                      │
- │ DEFAULT RECIPE   Clone onto a set…   │
+ │ DEFAULT RECIPE   Use a set…          │
  │ Most used in your 4★+ pictures.      │
  │ Checkpoint  juggernautXL_v9     Show 34│
  │             +2 others ▸              │ <- disclosure, §1.5
@@ -685,7 +685,7 @@ Reference chrome is the shipped Vue (`WorkflowTab.vue`, `WorkflowDefaultRow.vue`
 #### Section head and note
 
 - `.wftab-sec-head`: `.section-label` "Default recipe" (CSS uppercases it) plus
-  the ghost sm "Clone onto a set…". The ghost sm "Edit LoRAs…" sits at the
+  the ghost sm "Use a set…". The ghost sm "Edit LoRAs…" sits at the
   foot of the section, under the LoRA and Stages rows and their notes: both verbs in the head
   overflowed a narrow inspector.
 - Provenance note under the head: `.wftab-note.wftab-quiet` ("Most used in your

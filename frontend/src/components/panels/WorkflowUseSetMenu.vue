@@ -3,6 +3,10 @@
        Workflow tab's model rows, as unsaved changes. It replaces *Clone onto a
        set…*: nothing is written here and no workflow is made, the menu only
        works out which rows a set fills and hands that to the tab. -->
+  <!-- A wrapper, so the button can be found from here: `v-menu` hands its
+       activator a `ref` of its own, and a second `ref` on the same button is
+       the one that loses. -->
+  <span ref="root" class="wfset">
   <v-menu
     v-model="open"
     location="bottom end"
@@ -11,7 +15,6 @@
   >
     <template #activator="{ props: menuProps }">
       <AppButton
-        ref="button"
         v-bind="{ ...menuProps, ...$attrs }"
         size="sm"
         variant="ghost"
@@ -76,6 +79,7 @@
       </button>
     </div>
   </v-menu>
+  </span>
 </template>
 
 <script setup>
@@ -89,8 +93,8 @@ import { onMenuKeydown } from "../../utils/menuKeyboard";
 import { handMadeName, headName, setGroups } from "../../utils/workflowSets";
 import AppButton from "../widgets/AppButton.vue";
 
-// The root is the menu, whose content is teleported: what the tab puts on this
-// component belongs on the button.
+// The root is a wrapper round the menu, whose content is teleported: what the
+// tab puts on this component belongs on the button.
 defineOptions({ inheritAttrs: false });
 
 const props = defineProps({
@@ -118,7 +122,10 @@ const props = defineProps({
 const emit = defineEmits(["use"]);
 
 const open = ref(false);
-const button = ref(null);
+const root = ref(null);
+/** The button itself, as the page has it. */
+const buttonEl = () =>
+  root.value?.querySelector('[data-testid="wftab-use-set"]') ?? null;
 const surface = ref(null);
 /** Every set with its plan, or null while they are unread. */
 const sets = ref(null);
@@ -296,7 +303,7 @@ function choose(row) {
 
 /** Put the keyboard on the button. */
 function focus() {
-  button.value?.focus();
+  buttonEl()?.focus();
 }
 
 /**
@@ -305,7 +312,7 @@ function focus() {
  */
 function openMenu() {
   if (props.disabled || open.value) return;
-  button.value?.$el?.scrollIntoView?.({ block: "nearest" });
+  buttonEl()?.scrollIntoView?.({ block: "nearest" });
   focusOnOpen = true;
   open.value = true;
 }
@@ -353,9 +360,35 @@ defineExpose({ open: openMenu, focus });
 </script>
 
 <style scoped>
-/* Wider than the 288px rail's button: a row is a name and what it would do. */
+/* Wider than the 288px rail's button, and a width of its own rather than
+   its content's: the sets are read after the menu has opened and been placed,
+   and a surface that then grew with a long row ran off the window's edge. */
+.wfset {
+  display: inline-flex;
+}
+
 .wfset-menu {
-  min-width: 320px;
+  width: 320px;
+}
+
+/* A row is a set's name over what taking it would do. On two lines, and the
+   second one wraps: a set that will not load says why in the server's own
+   sentence, which no single line of a menu this wide holds. */
+.wfset-menu .ctx-item[data-set] {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
+  padding-block: var(--space-2);
+  white-space: normal;
+}
+
+.wfset-menu .ctx-item[data-set] .ctx-label-text {
+  flex: none;
+  max-width: 100%;
+}
+
+.wfset-menu .ctx-item[data-set] .ctx-meta {
+  margin-left: 0;
 }
 
 /* A set that cannot be used says why, and the reason has to stay readable:

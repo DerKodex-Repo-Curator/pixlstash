@@ -5,7 +5,7 @@
 // when the menu closes over the row that held it.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { h } from "vue";
+import { h, nextTick, watch } from "vue";
 import { mount } from "@vue/test-utils";
 
 import WorkflowVersionMenu, { versionDay } from "./WorkflowVersionMenu.vue";
@@ -13,15 +13,29 @@ import WorkflowVersionMenu, { versionDay } from "./WorkflowVersionMenu.vue";
 // Vuetify is not installed in the test app, so `v-menu` is stubbed with the
 // two behaviours the component relies on: the activator's click toggles it,
 // and the rows are in the page only while it is open.
+// As `v-menu` does, an arrow on the activator opens it too, before any other
+// keydown handler on the same button runs, and `afterEnter` follows once the
+// rows are drawn.
 const VMenuStub = {
   name: "VMenu",
   props: { modelValue: { type: Boolean, default: false } },
-  emits: ["update:modelValue"],
+  emits: ["update:modelValue", "afterEnter"],
   setup(props, { slots, emit }) {
+    watch(
+      () => props.modelValue,
+      (open) => open && nextTick(() => emit("afterEnter")),
+    );
     return () =>
       h("div", { class: "v-menu-stub" }, [
         slots.activator?.({
-          props: { onClick: () => emit("update:modelValue", !props.modelValue) },
+          props: {
+            onClick: () => emit("update:modelValue", !props.modelValue),
+            onKeydown: (event) => {
+              if (["ArrowDown", "ArrowUp"].includes(event.key)) {
+                emit("update:modelValue", true);
+              }
+            },
+          },
         }),
         props.modelValue ? slots.default?.() : null,
       ]);
@@ -242,6 +256,55 @@ describe("focus", () => {
     } finally {
       elsewhere.remove();
     }
+  });
+
+  it("goes to the first row when ArrowDown opened the menu, and the last for ArrowUp", async () => {
+    const wrapper = mountMenu();
+    chip(wrapper).element.focus();
+    await chip(wrapper).trigger("keydown", { key: "ArrowDown" });
+    await wrapper.vm.$nextTick();
+    await wrapper.vm.$nextTick();
+    expect(document.activeElement).toBe(row(wrapper, 3).element);
+
+    await row(wrapper, 3).trigger("click");
+    await wrapper.vm.$nextTick();
+    await wrapper.vm.$nextTick();
+    await chip(wrapper).trigger("keydown", { key: "ArrowUp" });
+    await wrapper.vm.$nextTick();
+    await wrapper.vm.$nextTick();
+    expect(document.activeElement).toBe(row(wrapper, 1).element);
+  });
+
+  it("stays on the chip when a click opened the menu", async () => {
+    const wrapper = mountMenu();
+    chip(wrapper).element.focus();
+    await openMenu(wrapper);
+    await wrapper.vm.$nextTick();
+    await wrapper.vm.$nextTick();
+    expect(document.activeElement).toBe(chip(wrapper).element);
+    // An arrow pressed in the open menu is the menu's own business, and is
+    // forgotten with it: the next click-open is still a click-open.
+    await chip(wrapper).trigger("keydown", { key: "ArrowDown" });
+    await wrapper.vm.$nextTick();
+    expect(document.activeElement).toBe(chip(wrapper).element);
+    await openMenu(wrapper);
+    await wrapper.vm.$nextTick();
+    await openMenu(wrapper);
+    await wrapper.vm.$nextTick();
+    await wrapper.vm.$nextTick();
+    expect(row(wrapper, 3).exists()).toBe(true);
+    expect(document.activeElement).toBe(chip(wrapper).element);
+  });
+
+  it("lands on the menu itself when an arrow opened it with the list unread", async () => {
+    const wrapper = mountMenu({ versions: null });
+    chip(wrapper).element.focus();
+    await chip(wrapper).trigger("keydown", { key: "ArrowDown" });
+    await wrapper.vm.$nextTick();
+    await wrapper.vm.$nextTick();
+    expect(document.activeElement).toBe(
+      wrapper.find('[data-testid="wftab-version-menu"]').element,
+    );
   });
 
   it("can be put on the chip from outside", () => {

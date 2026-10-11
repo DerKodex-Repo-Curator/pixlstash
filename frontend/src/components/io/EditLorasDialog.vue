@@ -240,11 +240,6 @@
         <p v-else class="eld-note eld-quiet">Working out what changes…</p>
       </div>
 
-      <!-- What the one button does with this edit. It names the button, so
-           it is the button's description too. -->
-      <p v-if="editable" :id="noteId" class="eld-note eld-quiet" data-testid="eld-note">
-        {{ note }}
-      </p>
       <p v-if="saveError" class="eld-note eld-bad" role="alert">
         {{ saveError }}
       </p>
@@ -268,6 +263,18 @@
     </p>
 
     <template #footer>
+      <!-- What the one button does with this edit. It names the button, so
+           it is the button's description too, and it is pinned in the footer
+           with it: in the body it scrolled out from under a long chain, and
+           the sentence saying a Save writes at once was the part cut off. -->
+      <p
+        v-if="editable"
+        :id="noteId"
+        class="eld-note eld-quiet eld-foot-note"
+        data-testid="eld-note"
+      >
+        {{ note }}
+      </p>
       <span v-if="editable" class="eld-count" data-testid="eld-count">
         {{ changeLabel }}
       </span>
@@ -1444,6 +1451,15 @@ watch(
   padding-left: var(--space-5);
   font-size: var(--text-sm);
   line-height: var(--leading-body);
+}
+
+/* The note takes a line of its own above the footer's row. */
+.app-dialog__footer:has(> .eld-foot-note) {
+  flex-wrap: wrap;
+}
+
+.eld-foot-note {
+  flex-basis: 100%;
 }
 
 .eld-count {

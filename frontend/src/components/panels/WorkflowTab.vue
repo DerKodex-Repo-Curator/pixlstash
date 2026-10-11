@@ -4150,12 +4150,6 @@ async function checkInstalled(key, { quiet = false } = {}) {
   accent-color: rgb(var(--v-theme-primary));
 }
 
-/* A model row's picker opens over the label column too: the field alone is
-   too narrow for a model's name in a 288px rail. */
-.wftab-model :deep(.app-select__menu) {
-  left: calc(-1 * (var(--space-9) + var(--space-3)));
-}
-
 .wftab-foot > :first-child {
   flex: 1;
 }

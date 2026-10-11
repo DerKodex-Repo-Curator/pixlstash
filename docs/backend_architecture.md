@@ -2427,7 +2427,7 @@ nothing in the vault moves; a manual workflow's own runs are the one exception
 | `workflow_group`, `workflow_group_member` | A workflow somebody decided about, and (legacy) a topology placed in a hand-made group by the dropped merge and split, one workflow per topology. Hub data step 6 dissolves every such group and nothing writes a member row any more |
 | `workflow_group_attr`, `workflow_group_default`, `workflow_group_pins`, `workflow_group_picture_input` | The owner's name, notes and hidden flag; edits to the default recipe; pins; picture inputs (library-keyed, pictures by `pixel_sha`). All keyed by `workflow_id` and addressed by **address**, never slot label |
 | `workflow_key_successor` | Which workflow each card became; written by the cut-over, read by the vault's saved-recipe conversion |
-| `workflow_version` (rows of an `auto:` id) | **The versions the owner saved over an automatic workflow** (Save, a whole graph from ComfyUI or the MCP server, Edit LoRAs *Over the original*; "Saving over a workflow", below). An automatic workflow holds no `workflow_document`, so it has versions only once it is saved over: the first overwrite stores the graph read off its pictures as version 1 (`source` `pictures`) and the edit as version 2, and each later overwrite is the next version (`hub/workflow_versions.append_version`, its `first` argument; the same cap of 50). Its graph is then its highest version: `routes/workflows._edited_graph_for` reads it ahead of every other tier (`workflow_versions.edited_document`, `run_service.FROM_EDIT`, `source: "edit"` on Run, Open and Export) **for the workflow's base card only**: a saved recipe or a picture on another card of the workflow runs that card's own graph. The grid shows it as *Version N* (`workflow_versions.automatic_version_facts`, read once per grid; the overwrite also moves `changed_at`). Its default recipe is then read off that graph, as a manual workflow's is ("Saving over a workflow", below); the grid's models, the LoRA pile and the ghost counts are still read off the pictures. A version that is not an API graph is logged and the pictures' graph runs; the version number still stands, so the next overwrite replaces it. **A saved-over automatic workflow keeps its id** (rule 5 of #1846; "A saved-over automatic workflow keeps its id", below), so its versions are never retired with it; `_carry_group_state` still deletes and logs the rows of a retired id, for the case that should now be impossible. `stranded_workflow_ids` counts the table |
+| `workflow_version` (rows of an `auto:` id) | **The versions the owner saved over an automatic workflow** (Save, a whole graph from ComfyUI or the MCP server, Edit LoRAs for a loader moved or added; "Saving over a workflow", below). An automatic workflow holds no `workflow_document`, so it has versions only once it is saved over: the first overwrite stores the graph read off its pictures as version 1 (`source` `pictures`) and the edit as version 2, and each later overwrite is the next version (`hub/workflow_versions.append_version`, its `first` argument; the same cap of 50). Its graph is then its highest version: `routes/workflows._edited_graph_for` reads it ahead of every other tier (`workflow_versions.edited_document`, `run_service.FROM_EDIT`, `source: "edit"` on Run, Open and Export) **for the workflow's base card only**: a saved recipe or a picture on another card of the workflow runs that card's own graph. The grid shows it as *Version N* (`workflow_versions.automatic_version_facts`, read once per grid; the overwrite also moves `changed_at`). Its default recipe is then read off that graph, as a manual workflow's is ("Saving over a workflow", below); the grid's models, the LoRA pile and the ghost counts are still read off the pictures. A version that is not an API graph is logged and the pictures' graph runs; the version number still stands, so the next overwrite replaces it. **A saved-over automatic workflow keeps its id** (rule 5 of #1846; "A saved-over automatic workflow keeps its id", below), so its versions are never retired with it; `_carry_group_state` still deletes and logs the rows of a retired id, for the case that should now be impossible. `stranded_workflow_ids` counts the table |
 | `workflow_core_successor` | Per (topology, new workflow), the automatic workflow the retired rule put the topology in, each one the live rule puts its variants in, and the old -> new core label map (data step 8 from v1, step 10 from v2, step 13 from v3, step 15 from v4, below) |
 | `workflow_variant_family` | Per variant, its base-model families (`variant_families`), frozen on first derivation: part of its workflow's id, so a later shelf scan never moves it |
 | `workflow_family_pass` | The shelf signature the last successful family pass (`reidentify_families`) ran against; at most one row |
@@ -2560,8 +2560,7 @@ names every one of its LoRAs; otherwise every loader keeps its LoRA. A
 stage the recipe has off stays in for a run that names it in `keep_stages`. `models: [{address, filename | sha256}]` goes through
 `apply_filename_swap`; a model made for another family or modality than the one
 it replaces is **flagged, never blocked** (`RunGroup.flags`, `family_mismatch`;
-`model_shelf_service.families_clash`, which the clone dialog's LoRA flags use
-too). `target` names a workflow to run instead, over the pictures selected,
+`model_shelf_service.families_clash` makes the call). `target` names a workflow to run instead, over the pictures selected,
 with its default recipe applied the same way. A run of pictures alone runs each
 picture's own graph with no workflow default, and reports the workflow its
 variant is in (`RunGroup.workflow_id`); `workflow_key` is no longer a source.
@@ -2825,9 +2824,15 @@ workflow is gone is left as it is.
 name, pictures, recipes and settings, and the graph it replaces becomes the
 version before. *Save as new* stores a new manual workflow and leaves this one
 alone. Manual and automatic workflows take the same changes. The older
-single-purpose routes (`…/model-fix`, `…/fixed-copy`, `…/clone-with-models`,
-`…/set-clone-plans`, `PUT …/lora-chain`, `…/default-lora`) still answer for
-the screens that call them and go when nothing does.
+single-purpose routes still answer, and since #1850 the app calls fewer of
+them: `…/fixed-copy` and `…/clone-with-models` have no caller left in the
+app (the Run popup's *Save fixed workflow* and the clone dialogs are gone);
+they keep answering until a backend change takes them out, with their tests; `…/model-fix` is written only by the Models shelf's *Replace
+missing*; `…/set-clone-plans` is read by the Workflow tab's *Use a set…*,
+which turns a plan into unsaved model changes; `PUT …/lora-chain` is called
+with `overwrite` by Edit LoRAs for a loader moved or added, which has no
+waiting form (`WorkflowChanges` can remove a loader and set its strengths,
+not rewire one); and `…/default-lora` is the *Also used* pile's.
 
 **A change is said in a run's words.** `routes/workflows.WorkflowChanges` is
 `models` (a file per loader address, `RunModel`), `loras` (a loader's LoRA and

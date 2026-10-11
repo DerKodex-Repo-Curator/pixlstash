@@ -4,7 +4,12 @@
        count: the count shares its line with the star chart, and the three do
        not fit the 288px rail together. -->
   <span ref="root" class="wfver">
-    <v-menu v-model="open" location="bottom start" :offset="4">
+    <v-menu
+      v-model="open"
+      location="bottom start"
+      :offset="4"
+      @after-enter="enterRows"
+    >
       <template #activator="{ props: menuProps }">
         <button
           v-bind="menuProps"
@@ -13,6 +18,7 @@
           aria-haspopup="menu"
           :aria-expanded="open ? 'true' : 'false'"
           data-testid="wftab-version"
+          @keydown="noteArrow"
         >
           <!-- A row acts at once, so what the menu is for is said before it
                is opened. -->
@@ -23,6 +29,7 @@
         </button>
       </template>
       <div
+        ref="surface"
         class="ctx-menu wfver-menu"
         role="menu"
         aria-label="Versions"
@@ -144,6 +151,40 @@ function partsOf(row) {
   ].filter(Boolean);
 }
 
+/**
+ * The arrow that is opening the menu, until it has opened.
+ *
+ * `v-menu` answers ArrowDown on a closed menu by opening it and then focusing
+ * the first row two timeouts later, which in a browser is before the content
+ * is laid out: the focus call lands on nothing, and the keyboard is left on
+ * the chip of a menu that says it is expanded. So the arrow is remembered
+ * here and answered once the menu has entered.
+ */
+let opening = "";
+const surface = ref(null);
+
+// Every arrow on the chip, not only one on a closed menu: `v-menu`'s own
+// handler runs first on the same keydown and has already set `open` by the
+// time this one is called. One pressed in an open menu is forgotten when the
+// menu closes, and nothing reads it before then.
+function noteArrow(event) {
+  if (["ArrowDown", "ArrowUp"].includes(event.key)) opening = event.key;
+}
+
+/** Entered by an arrow: the first row for ↓, the last for ↑. */
+function enterRows() {
+  const key = opening;
+  opening = "";
+  if (!key) return;
+  const rows = [
+    ...(surface.value?.querySelectorAll(".ctx-item:not(.ctx-item--disabled)") ??
+      []),
+  ];
+  // Unread: nothing to land on but the surface, which says why.
+  (key === "ArrowUp" ? rows.at(-1) : rows[0])?.focus();
+  if (!rows.length) surface.value?.focus();
+}
+
 function choose(row) {
   open.value = false;
   if (!row.current) emit("go-back", row);
@@ -162,6 +203,7 @@ watch(open, async (now) => {
     emit("open");
     return;
   }
+  opening = "";
   await nextTick();
   const active = document.activeElement;
   if (!active || active === document.body || active.closest(".wfver-menu")) {

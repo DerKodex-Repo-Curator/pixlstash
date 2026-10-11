@@ -932,7 +932,7 @@
         {{ keptAs ? "Saved" : "Save as recipe" }}
       </AppButton>
       <span class="rund-sp" />
-      <AppButton :disabled="submitting" @click="onRequestClose">Cancel</AppButton>
+      <AppButton :disabled="submitting || Boolean(saving)" @click="onRequestClose">Cancel</AppButton>
       <!-- `aria-disabled`, not `disabled`: a natively-disabled button is out of
            the tab order, so a keyboard reader could never reach the reason
            `aria-describedby` points at. `submit()` does the actual refusing.
@@ -4315,7 +4315,9 @@ function rememberSet(value) {
 }
 
 function onRequestClose() {
-  if (submitting.value) return;
+  // A band save in flight is this popup's work: closing over it would leave
+  // its answer nowhere to land, so closing waits for it like a run does.
+  if (submitting.value || saving.value) return;
   emit("close");
 }
 
@@ -4328,7 +4330,7 @@ function onRequestClose() {
  * to back out of first.
  */
 function onEscape(event) {
-  if (submitting.value) return;
+  if (submitting.value || saving.value) return;
   event.stopPropagation();
   emit("close");
 }

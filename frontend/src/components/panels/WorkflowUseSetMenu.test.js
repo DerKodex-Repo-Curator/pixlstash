@@ -7,7 +7,7 @@
 // page body when the menu closes.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { h } from "vue";
+import { h, ref } from "vue";
 import { flushPromises, mount } from "@vue/test-utils";
 
 const fetchWorkflowSets = vi.fn();
@@ -31,10 +31,18 @@ const VMenuStub = {
   props: { modelValue: { type: Boolean, default: false } },
   emits: ["update:modelValue", "afterEnter"],
   setup(props, { slots, emit }) {
+    // As `v-menu` does, the activator's props carry a `ref` of the menu's
+    // own. A component that also puts a `ref` on its button loses one of the
+    // two, and in a browser it was its own: the button it then could not find
+    // was the one focus had to go back to.
+    const activator = ref(null);
     return () =>
       h("div", { class: "v-menu-stub" }, [
         slots.activator?.({
-          props: { onClick: () => emit("update:modelValue", !props.modelValue) },
+          props: {
+            ref: activator,
+            onClick: () => emit("update:modelValue", !props.modelValue),
+          },
         }),
         props.modelValue ? slots.default?.() : null,
       ]);

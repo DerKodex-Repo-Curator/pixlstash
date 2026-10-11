@@ -688,6 +688,18 @@ describe("one button: Apply or Save", () => {
     });
   });
 
+  it("keeps the note in the footer with the button it explains, not in what scrolls", async () => {
+    // In the body it went under the fold of a long chain, and the sentence
+    // saying that Save writes at once was the part cut off.
+    const wrapper = await mountDialog();
+    const footer = wrapper.find(".app-dialog__footer");
+    expect(footer.find("[data-testid='eld-note']").exists()).toBe(true);
+    expect(footer.find("[data-testid='eld-primary']").exists()).toBe(true);
+    expect(
+      wrapper.find(".app-dialog__body [data-testid='eld-note']").exists(),
+    ).toBe(false);
+  });
+
   describe("the footer's summary", () => {
     const summary = (wrapper) =>
       wrapper.find("[data-testid='eld-count']").text();
