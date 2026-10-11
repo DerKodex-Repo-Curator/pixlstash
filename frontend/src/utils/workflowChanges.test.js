@@ -15,7 +15,9 @@ import {
   modelWord,
   noChanges,
   over,
+  saveFailure,
   suggestedName,
+  whole,
 } from "./workflowChanges";
 
 const CKPT = "core:CheckpointLoader/ckpt_name";
@@ -25,6 +27,24 @@ const value = (slotLabel, inputName, v) => ({
   slot_label: slotLabel,
   input_name: inputName,
   value: v,
+});
+
+describe("a set with every list present", () => {
+  it("fills in what a set leaves out, and keeps what it has", () => {
+    const models = [{ address: CKPT, filename: "a.safetensors" }];
+    expect(whole({ models, stages: { upscale: false } })).toEqual({
+      ...noChanges(),
+      models,
+      stages: { upscale: false },
+    });
+  });
+
+  it("reads no set as an empty one, a new one each time", () => {
+    expect(whole(null)).toEqual(noChanges());
+    expect(whole(undefined)).toEqual(noChanges());
+    // Callers push onto the lists: two readers must not share them.
+    expect(whole(null).loras).not.toBe(whole(null).loras);
+  });
 });
 
 describe("laying one set over another", () => {
@@ -214,6 +234,14 @@ describe("a save beside what waits on the workflow", () => {
     expect(answering(own, waiting, form)).toEqual({ ...noChanges(), ...own });
   });
 
+  it("says a loader once where the form changed it and another LoRA waits on it", () => {
+    // Node 7 is the form's own change. Answered for as well, it would be sent
+    // twice: once as the change, once as the form's present answer.
+    const mine = slot("7", { sha256: "m".repeat(64), strength_model: 0.8 });
+    const waiting = { loras: [slot("7", { sha256: "t".repeat(64), strength_model: 1 })] };
+    expect(answering({ loras: [mine] }, waiting, form).loras).toEqual([mine]);
+  });
+
   it("leaves to what waits a thing the form has no control for", () => {
     const waiting = {
       models: [{ address: VAE, filename: "waiting-vae.safetensors" }],
@@ -232,13 +260,51 @@ describe("a save beside what waits on the workflow", () => {
   });
 
   it("does not answer for a loader the form itself has removed", () => {
-    // Node 8 is removed in the form, and so in `own`: nothing to add.
+    // `own` is what says node 8 is removed, and it is what holds: a reader
+    // that still had a LoRA to answer with for that loader is not taken up.
+    const stillAnswers = { ...form, lora: () => ({ sha256: "s".repeat(64), strength_model: 1 }) };
     const own = { skip_loras: [slot("8")] };
     const waiting = { loras: [slot("8", { sha256: "t".repeat(64) })] };
-    expect(answering(own, waiting, form)).toMatchObject({
+    expect(answering(own, waiting, stillAnswers)).toMatchObject({
       loras: [],
       skip_loras: [slot("8")],
     });
+  });
+
+  it("keeps a loader removed over a LoRA that waits on it, by the caller's removal", () => {
+    // The contract `answering` leans on: a form that answers null for a
+    // loader (node 8 here) has it in `own.skip_loras`. Nothing is added for
+    // it, and laid over what waits, as the server lays a save, the removal
+    // wins.
+    const own = { skip_loras: [slot("8")] };
+    const waiting = { loras: [slot("8", { sha256: "t".repeat(64) })] };
+    expect(form.lora("8")).toBeNull();
+    const sent = answering(own, waiting, form);
+    expect(sent).toEqual({ ...noChanges(), ...own });
+    expect(over(waiting, sent)).toMatchObject({ loras: [], skip_loras: [slot("8")] });
+  });
+});
+
+describe("the sentence for a save that did not land", () => {
+  const refusal = (status, detail) => ({
+    message: `Request failed with status code ${status}`,
+    response: { status, data: { detail } },
+  });
+
+  it("says ComfyUI did not answer on a 503, whatever came with it", () => {
+    expect(saveFailure(refusal(503, "upstream said something"))).toBe(
+      "ComfyUI did not answer, so nothing was saved. Start ComfyUI and save again.",
+    );
+  });
+
+  it("prints a 409's reason as the server sent it", () => {
+    const reason = "A checkpoint change is saved as a new workflow.";
+    expect(saveFailure(refusal(409, reason))).toBe(reason);
+  });
+
+  it("falls back to the transport's message, then to its own words", () => {
+    expect(saveFailure(new Error("Network Error"))).toBe("Network Error");
+    expect(saveFailure(null)).toBe("Could not save the workflow.");
   });
 });
 

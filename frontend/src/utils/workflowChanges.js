@@ -79,6 +79,13 @@ export function over(base, top) {
  * stage's on or off, the parameter's value. A thing the form has no control
  * for is left to what waits.
  *
+ * A removal is never added here: `skip_loras` is *own*'s, as sent. That is
+ * enough because of what the caller guarantees: `form.lora` answers `null`
+ * only for a loader *own* removes (the Run popup, the one caller, builds both
+ * from the same removed rows). The removal in *own* is then what puts down a
+ * LoRA that waits on that loader. A caller whose form removed a loader *own*
+ * did not name would save the waiting LoRA on it.
+ *
  * @param {Object} own - what the form changes, a `WorkflowChanges`.
  * @param {Object} waiting - what waits on the workflow, or null.
  * @param {FormAnswers} form
@@ -149,7 +156,8 @@ export function modelWord(address) {
   return { one: "Model", many: "models" };
 }
 
-const SIZE_INPUTS = ["width", "height"];
+/** The two inputs that are one Size where a node has both. */
+export const SIZE_INPUTS = ["width", "height"];
 
 /**
  * A set of changes in words: how many, and which.

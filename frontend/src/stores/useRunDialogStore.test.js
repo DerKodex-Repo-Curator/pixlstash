@@ -4,6 +4,7 @@
 import { beforeEach, describe, it, expect } from "vitest";
 import { setActivePinia, createPinia } from "pinia";
 import { useRunDialogStore } from "./useRunDialogStore";
+import { notifySessionReset } from "../utils/apiClient";
 
 describe("useRunDialogStore", () => {
   beforeEach(() => setActivePinia(createPinia()));
@@ -168,6 +169,21 @@ describe("useRunDialogStore", () => {
       const store = useRunDialogStore();
       store.ranWith("", record);
       store.changesSaved("");
+      expect(store.ranChanges).toEqual({});
+      expect(store.saved).toBeNull();
+    });
+
+    // Both name workflows of the library the session could see: the next
+    // session must be offered nothing from them, and told of no save.
+    it("is forgotten with the session, and so is the last save", () => {
+      const store = useRunDialogStore();
+      store.ranWith("wf-a", record);
+      store.runEvent(completed("wf-a", "p-1"));
+      store.ranWith("wf-b", record);
+      store.changesSaved("wf-b");
+      expect(store.ranChanges["wf-a"]).toBeDefined();
+      expect(store.saved).not.toBeNull();
+      notifySessionReset("test");
       expect(store.ranChanges).toEqual({});
       expect(store.saved).toBeNull();
     });
