@@ -16958,6 +16958,14 @@ def test_changes_made_before_another_version_are_save_as_new_only(saving):
     assert r.status_code == 409 and r.json()["detail"] == state["save"]["reason"]
     assert [row[0] for row in _versions_of(saving, saving.manual)] == [1, 2]
 
+    # Nor do they open in the graph: saved back with `waiting_applied` they
+    # would land over the workflow by the door Save just closed.
+    opened = saving.owner.get(
+        f"{API}/workflows/{saving.manual}/graph", params={"waiting": "true"}
+    ).json()
+    assert "5" in opened["workflow"], "stale changes were applied to the graph"
+    assert (opened["waiting_applied"], opened["version"]) == (False, 2)
+
     r = _save(saving, saving.manual, as_new=True, name="Without the style")
     assert r.status_code == 201, r.text
     copy = manual_document(saving.server.hub, r.json()["workflow_id"])

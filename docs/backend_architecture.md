@@ -2839,7 +2839,8 @@ things follow. *Run with changes* is a run whose body carries them
 has off, on for this run). *Open the unsaved graph* is
 `GET /workflows/{id}/graph?waiting=true` (`all_stages=true` leaves in a stage
 the default recipe runs without, for a graph that will be saved back: the MCP
-export asks for it). And **what Save stores is built by that same planner**:
+export asks for it; changes made before the workflow got another version are
+not applied, as Save refuses them, and `waiting_applied` is then false). And **what Save stores is built by that same planner**:
 `_plan(…, saving="over" | "new")`, which is Open's plan with three differences. Every stage stays in the graph,
 on or off, because a stage is a default stored beside the graph and can be
 switched on again. And a save *over* the workflow leaves the parameters the

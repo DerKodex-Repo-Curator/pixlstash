@@ -7306,7 +7306,9 @@ def create_router(server) -> APIRouter:
             description=(
                 "Apply the workflow's waiting changes "
                 "(`GET /workflows/{workflow_id}/changes`), so what opens is "
-                "the unsaved graph. `waiting_applied` says whether any were."
+                "the unsaved graph. `waiting_applied` says whether any were: "
+                "changes made before the workflow got another version are "
+                "not, as Save refuses them."
             ),
         ),
         all_stages: bool = Query(
@@ -7322,9 +7324,21 @@ def create_router(server) -> APIRouter:
         server.auth.ensure_secure_when_required(request)
         hub = _hub()
         workflow, _ = _require_base(hub, workflow_id)
-        unsaved = (
-            _stored_changes(hub, workflow.workflow_id)[0] if waiting else None
-        ) or WorkflowChanges()
+        unsaved = WorkflowChanges()
+        if waiting:
+            held, base, _ = _stored_changes(hub, workflow.workflow_id)
+            if held is not None and base == workflow_versions.current_version(
+                hub, workflow.workflow_id
+            ):
+                unsaved = held
+            elif held is not None:
+                # Save's own rule (`_CHANGED_SINCE`): applied here they would
+                # come back in a graph saved over the workflow, and be cleared.
+                logger.info(
+                    "[workflows] Workflow %s has changed since its waiting "
+                    "changes were made, so its graph opens without them.",
+                    workflow.workflow_id,
+                )
         asked = _run_with(workflow.workflow_id, unsaved)
         if all_stages:
             asked = asked.model_copy(
