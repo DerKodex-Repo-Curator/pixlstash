@@ -274,6 +274,21 @@ describe("the offer to save what a run changed", () => {
     return runDialog;
   }
   const doneLine = (wrapper) => wrapper.find('[data-testid="tm-offer-done"]');
+  const nameInput = (wrapper, id = WF) => offer(wrapper, id).find("input");
+
+  /** Two workflows, each with a changed run that finished: WF's offer first. */
+  function twoRuns() {
+    ranAndFinished(WF);
+    ranAndFinished(OTHER, "Night market");
+    return mountPanel();
+  }
+
+  /** Leave the next Save out: what this answers is called with lands it. */
+  function holdNextSave() {
+    let land;
+    saveWorkflow.mockImplementation(() => new Promise((resolve) => (land = resolve)));
+    return (answer) => land(answer);
+  }
 
   beforeEach(() => {
     getWorkflowChanges.mockResolvedValue(state());
@@ -323,9 +338,7 @@ describe("the offer to save what a run changed", () => {
     getWorkflowChanges.mockImplementation((id) =>
       id === WF ? Promise.reject(new Error("Network Error")) : Promise.resolve(state()),
     );
-    ranAndFinished(WF);
-    ranAndFinished(OTHER, "Night market");
-    const wrapper = await mountPanel();
+    const wrapper = await twoRuns();
     // Not knowing is not an offer, and it does not cost the other its own.
     expect(offer(wrapper, WF).exists()).toBe(false);
     expect(textOf(offer(wrapper, OTHER))).toContain("Night market");
@@ -402,11 +415,8 @@ describe("the offer to save what a run changed", () => {
   });
 
   it("sends one save at a time, whichever Save is pressed while it is out", async () => {
-    let land;
-    saveWorkflow.mockImplementation(() => new Promise((resolve) => (land = resolve)));
-    ranAndFinished(WF);
-    ranAndFinished(OTHER, "Night market");
-    const wrapper = await mountPanel();
+    const land = holdNextSave();
+    const wrapper = await twoRuns();
     const save = button(offer(wrapper, WF), "Save");
     // Twice before the button has been drawn busy, then the other row's.
     save.trigger("click");
@@ -431,11 +441,8 @@ describe("the offer to save what a run changed", () => {
   });
 
   it("closes a row's name question while another row's save is out", async () => {
-    let land;
-    saveWorkflow.mockImplementation(() => new Promise((resolve) => (land = resolve)));
-    ranAndFinished(WF);
-    ranAndFinished(OTHER, "Night market");
-    const wrapper = await mountPanel();
+    const land = holdNextSave();
+    const wrapper = await twoRuns();
     await button(offer(wrapper, WF), "Save as new…").trigger("click");
     await flushPromises();
     await button(offer(wrapper, OTHER), "Save").trigger("click");
@@ -451,7 +458,7 @@ describe("the offer to save what a run changed", () => {
     await name.trigger("keydown", { key: "Escape" });
     await flushPromises();
     expect(saveWorkflowAsNew).not.toHaveBeenCalled();
-    expect(offer(wrapper, WF).find("input").exists()).toBe(true);
+    expect(nameInput(wrapper, WF).exists()).toBe(true);
 
     // The other row's save landing does not answer this row's question.
     land({ workflow_id: OTHER, version: 4 });
@@ -486,7 +493,7 @@ describe("the offer to save what a run changed", () => {
     const wrapper = await mountPanel();
     await button(wrapper, "Save as new…").trigger("click");
     await flushPromises();
-    const name = offer(wrapper).find("input");
+    const name = nameInput(wrapper);
     expect(document.activeElement).toBe(name.element);
     expect(name.element.value).toBe("Portrait, soft window light 2");
     expect(name.element.value).not.toMatch(/copy|clone|fixed|edited/i);
@@ -494,7 +501,7 @@ describe("the offer to save what a run changed", () => {
 
     await button(wrapper, "Back").trigger("click");
     await flushPromises();
-    expect(offer(wrapper).find("input").exists()).toBe(false);
+    expect(nameInput(wrapper).exists()).toBe(false);
     expect(document.activeElement).toBe(button(wrapper, "Save as new…").element);
     expect(saveWorkflowAsNew).not.toHaveBeenCalled();
   });
@@ -507,20 +514,18 @@ describe("the offer to save what a run changed", () => {
     ["an earlier row while a later one is asking", OTHER, WF],
     ["a later row while an earlier one is asking", WF, OTHER],
   ])("puts the keyboard in the name field of %s", async (_name, first, second) => {
-    ranAndFinished(WF);
-    ranAndFinished(OTHER, "Night market");
-    const wrapper = await mountPanel();
+    const wrapper = await twoRuns();
     expect(
       wrapper.findAll("[data-offer]").map((row) => row.attributes("data-offer")),
     ).toEqual([WF, OTHER]);
     await button(offer(wrapper, first), "Save as new…").trigger("click");
     await flushPromises();
-    expect(document.activeElement).toBe(offer(wrapper, first).find("input").element);
+    expect(document.activeElement).toBe(nameInput(wrapper, first).element);
 
     await button(offer(wrapper, second), "Save as new…").trigger("click");
     await flushPromises();
-    expect(offer(wrapper, first).find("input").exists()).toBe(false);
-    const name = offer(wrapper, second).find("input").element;
+    expect(nameInput(wrapper, first).exists()).toBe(false);
+    const name = nameInput(wrapper, second).element;
     expect(document.activeElement).toBe(name);
     // Selected, to be typed over.
     expect([name.selectionStart, name.selectionEnd]).toEqual([0, name.value.length]);
@@ -532,14 +537,14 @@ describe("the offer to save what a run changed", () => {
     const wrapper = await mountPanel();
     await button(wrapper, "Save as new…").trigger("click");
     await flushPromises();
-    await offer(wrapper).find("input").trigger("keydown", { key: "Escape" });
+    await nameInput(wrapper).trigger("keydown", { key: "Escape" });
     await flushPromises();
-    expect(offer(wrapper).find("input").exists()).toBe(false);
+    expect(nameInput(wrapper).exists()).toBe(false);
     expect(document.activeElement).toBe(button(wrapper, "Save as new…").element);
 
     await button(wrapper, "Save as new…").trigger("click");
     await flushPromises();
-    const name = offer(wrapper).find("input");
+    const name = nameInput(wrapper);
     // Twice before the field has been drawn busy: one new workflow, not two.
     name.trigger("keydown", { key: "Enter" });
     name.trigger("keydown", { key: "Enter" });
@@ -563,7 +568,7 @@ describe("the offer to save what a run changed", () => {
     const wrapper = await mountPanel();
     await button(wrapper, "Save as new…").trigger("click");
     await flushPromises();
-    await offer(wrapper).find("input").setValue(" Portrait on Juggernaut ");
+    await nameInput(wrapper).setValue(" Portrait on Juggernaut ");
     await button(wrapper, "Save as new workflow").trigger("click");
     await flushPromises();
 
@@ -582,7 +587,7 @@ describe("the offer to save what a run changed", () => {
     const wrapper = await mountPanel();
     await button(wrapper, "Save as new…").trigger("click");
     await flushPromises();
-    await offer(wrapper).find("input").setValue("  ");
+    await nameInput(wrapper).setValue("  ");
     await button(wrapper, "Save as new workflow").trigger("click");
     await flushPromises();
     expect(saveWorkflowAsNew).not.toHaveBeenCalled();
@@ -611,14 +616,14 @@ describe("the offer to save what a run changed", () => {
     const wrapper = await mountPanel();
     await button(wrapper, "Save as new…").trigger("click");
     await flushPromises();
-    await offer(wrapper).find("input").setValue("Portrait on Juggernaut");
+    await nameInput(wrapper).setValue("Portrait on Juggernaut");
     await button(wrapper, "Save as new workflow").trigger("click");
     await flushPromises();
     expect(offer(wrapper).find('[role="alert"]').text()).toBe(
       "A checkpoint this machine does not have cannot be saved.",
     );
     // Still the question, with what was typed, and open to be sent again.
-    const name = offer(wrapper).find("input");
+    const name = nameInput(wrapper);
     expect(name.element.value).toBe("Portrait on Juggernaut");
     expect(name.attributes("disabled")).toBeUndefined();
     expect(doneLine(wrapper).exists()).toBe(false);
@@ -638,7 +643,7 @@ describe("the offer to save what a run changed", () => {
     const wrapper = await mountPanel();
     await button(wrapper, "Save as new…").trigger("click");
     await flushPromises();
-    const name = offer(wrapper).find("input");
+    const name = nameInput(wrapper);
     await name.trigger("keydown", { key: "Enter" });
     await flushPromises();
     expect(saveWorkflowAsNew).toHaveBeenCalledTimes(1);
@@ -648,7 +653,7 @@ describe("the offer to save what a run changed", () => {
     // Escape waits for the write, as Back does.
     await name.trigger("keydown", { key: "Escape" });
     await flushPromises();
-    expect(offer(wrapper).find("input").exists()).toBe(true);
+    expect(nameInput(wrapper).exists()).toBe(true);
 
     refuse(refusal(409, "A checkpoint this machine does not have cannot be saved."));
     await flushPromises();
@@ -674,9 +679,7 @@ describe("the offer to save what a run changed", () => {
   // The line is the receipt of the last save made here. What it must never
   // do is sit beside something newer as if it were the news.
   it("leaves a save's line beside an offer that was there before it, and a later save writes over it", async () => {
-    ranAndFinished(WF);
-    ranAndFinished(OTHER, "Night market");
-    const wrapper = await mountPanel();
+    const wrapper = await twoRuns();
     const lines = () =>
       wrapper.findAll('[data-testid="tm-offer-done"]').map((line) => line.text());
     await button(offer(wrapper, WF), "Save").trigger("click");
@@ -803,7 +806,7 @@ describe("the offer to save what a run changed", () => {
       const wrapper = await mountPanel();
       await button(wrapper, "Save as new…").trigger("click");
       await flushPromises();
-      await offer(wrapper).find("input").setValue("Portrait on Juggernaut");
+      await nameInput(wrapper).setValue("Portrait on Juggernaut");
       await button(wrapper, "Save as new workflow").trigger("click");
       await flushPromises();
       const done = doneLine(wrapper);
@@ -814,8 +817,7 @@ describe("the offer to save what a run changed", () => {
     // The server says what it dropped once, in this answer. A tab closed
     // while the save was out has no line to say it on.
     it("says what was lost on a notice that stays when the tab closed before the save landed", async () => {
-      let land;
-      saveWorkflow.mockImplementation(() => new Promise((resolve) => (land = resolve)));
+      const land = holdNextSave();
       ranAndFinished();
       const wrapper = await mountPanel();
       await button(wrapper, "Save").trigger("click");
@@ -828,8 +830,7 @@ describe("the offer to save what a run changed", () => {
     });
 
     it("raises no notice from a closed tab for a save that lost nothing", async () => {
-      let land;
-      saveWorkflow.mockImplementation(() => new Promise((resolve) => (land = resolve)));
+      const land = holdNextSave();
       ranAndFinished();
       const wrapper = await mountPanel();
       await button(wrapper, "Save").trigger("click");

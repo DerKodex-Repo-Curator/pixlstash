@@ -3577,6 +3577,8 @@ describe("Save what you ran", () => {
   const MIRA_SHA = "s".repeat(64);
   const GRAIN_SHA = "t".repeat(64);
   const fromCard = { kind: "card", workflowId: KEY };
+  const picked = { ...fromCard, pickWorkflow: true };
+  const THIRD = `auto:${"c".repeat(64)}`;
   const ownCard = (overrides = {}) =>
     card({
       specials: ["upscale", "face_detailer"],
@@ -3641,6 +3643,19 @@ describe("Save what you ran", () => {
     );
     return post;
   }
+  /** Presses Save with its POST held open, and lets the press settle. */
+  async function pressSave(wrapper) {
+    const post = heldSave();
+    await button(wrapper, "Save").trigger("click");
+    await flushPromises();
+    return post;
+  }
+  /** The next read of the workflow, held open until the test answers it. */
+  function holdReread() {
+    const reread = held();
+    getWorkflowCard.mockReturnValueOnce(reread.promise);
+    return reread;
+  }
   const runButton = (wrapper) =>
     wrapper.findAll("button").find((b) => b.text().trim().startsWith("Run"));
   /** The sentence the Run button points a reader at, or "". */
@@ -3663,8 +3678,7 @@ describe("Save what you ran", () => {
   // where the keyboard is can only be asked of those.
   const focusable = {
     AppButton: {
-      props: ["disabled"],
-      template: "<button :disabled='disabled'><slot /></button>",
+      ...globalOpts.global.stubs.AppButton,
       methods: {
         focus() {
           this.$el.focus();
@@ -4278,7 +4292,7 @@ describe("Save what you ran", () => {
     });
 
     it("drops them when the owner picks another workflow, whose slots are other slots", async () => {
-      const wrapper = await mountRun({ ...fromCard, pickWorkflow: true });
+      const wrapper = await mountRun(picked);
       wrapper.vm.picks["LoadImage/image"] = {
         slot_label: "LoadImage",
         input_name: "image",
@@ -4308,10 +4322,8 @@ describe("Save what you ran", () => {
     it("waits in the footer when Save is clicked with the caret in the form, and is on Save after a refusal", async () => {
       const wrapper = await edited();
       caretInForm(wrapper);
-      const post = heldSave();
       // A dispatched click, which focuses nothing: the button as Safari clicks it.
-      await button(wrapper, "Save").trigger("click");
-      await flushPromises();
+      const post = await pressSave(wrapper);
       // Not in the form, which is inert, and not on the page.
       expect(document.activeElement).toBe(waitLine(wrapper).element);
       expect(waitLine(wrapper).text()).toBe("Run waits for the save to finish.");
@@ -4347,9 +4359,7 @@ describe("Save what you ran", () => {
       const wrapper = await edited();
       const save = button(wrapper, "Save").element;
       save.focus();
-      const post = heldSave();
-      await button(wrapper, "Save").trigger("click");
-      await flushPromises();
+      const post = await pressSave(wrapper);
       expect(document.activeElement).toBe(save);
       post.reject(refusal(409, "This workflow got a newer version since."));
       await flushPromises();
@@ -4359,13 +4369,10 @@ describe("Save what you ran", () => {
     it("is not dropped on the page when the band leaves, before the line that says Saved is there", async () => {
       const wrapper = await edited();
       button(wrapper, "Save").element.focus();
-      const post = heldSave();
-      await button(wrapper, "Save").trigger("click");
-      await flushPromises();
+      const post = await pressSave(wrapper);
       // The POST has landed and the workflow is being read again: the band,
       // and the verb that had the keyboard, are gone.
-      const reread = held();
-      getWorkflowCard.mockReturnValueOnce(reread.promise);
+      const reread = holdReread();
       post.resolve({ workflow_id: KEY, version: 4 });
       await flushPromises();
       expect(band(wrapper).exists()).toBe(false);
@@ -4382,14 +4389,11 @@ describe("Save what you ran", () => {
     it("does not take focus from somewhere else that stays, when the band leaves", async () => {
       const wrapper = await edited();
       button(wrapper, "Save").element.focus();
-      const post = heldSave();
-      await button(wrapper, "Save").trigger("click");
-      await flushPromises();
+      const post = await pressSave(wrapper);
       // Tabbed on to the footer while the save was out.
       const run = runButton(wrapper).element;
       run.focus();
-      const reread = held();
-      getWorkflowCard.mockReturnValueOnce(reread.promise);
+      const reread = holdReread();
       post.resolve({ workflow_id: KEY, version: 4 });
       await flushPromises();
       expect(document.activeElement).toBe(run);
@@ -4404,9 +4408,7 @@ describe("Save what you ran", () => {
       wrapper.vm.setValue(field(wrapper, "steps"), 32);
       wrapper.vm.pickCheckpoint("juggernautXL.safetensors");
       await flushPromises();
-      const post = heldSave();
-      await button(wrapper, "Save").trigger("click");
-      await flushPromises();
+      const post = await pressSave(wrapper);
       expect(wrapper.vm.saving).toBe("save");
       expect(runButton(wrapper).attributes("aria-disabled")).toBe("true");
       expect(runWhy(wrapper)).toBe("Run waits for the save to finish.");
@@ -4415,8 +4417,7 @@ describe("Save what you ran", () => {
       // The POST has landed and the workflow is being read again: the edits
       // are off the form and its baseline is still the one before the save,
       // so a run now would send 8 steps over the 32 just saved.
-      const reread = held();
-      getWorkflowCard.mockReturnValueOnce(reread.promise);
+      const reread = holdReread();
       post.resolve({ workflow_id: KEY, version: 4 });
       await flushPromises();
       expect(writes()).toHaveLength(1);
@@ -4445,9 +4446,7 @@ describe("Save what you ran", () => {
       await flushPromises();
       expect(form().hasAttribute("inert")).toBe(false);
 
-      const post = heldSave();
-      await button(wrapper, "Save").trigger("click");
-      await flushPromises();
+      const post = await pressSave(wrapper);
       // An edit made now would be in neither the save nor the form that
       // comes back. Every control that edits is in the part that is inert.
       expect(form().hasAttribute("inert")).toBe(true);
@@ -4467,8 +4466,7 @@ describe("Save what you ran", () => {
         expect(live.element.closest("[inert]")).toBeNull();
       }
 
-      const reread = held();
-      getWorkflowCard.mockReturnValueOnce(reread.promise);
+      const reread = holdReread();
       post.resolve({ workflow_id: KEY, version: 4 });
       await flushPromises();
       expect(form().hasAttribute("inert")).toBe(true);
@@ -4481,19 +4479,17 @@ describe("Save what you ran", () => {
       const wrapper = await mountRun(fromCard);
       wrapper.vm.setValue(field(wrapper, "steps"), 32);
       await flushPromises();
-      const post = heldSave();
-      await button(wrapper, "Save").trigger("click");
-      await flushPromises();
+      const post = await pressSave(wrapper);
 
       const escape = { stopPropagation: vi.fn() };
       wrapper.vm.close();
       wrapper.vm.onEscape(escape);
       wrapper.vm.openInWorkflows();
       wrapper.vm.editLoras(KEY);
-      wrapper.vm.onSave();
       expect(wrapper.emitted("close")).toBeUndefined();
       expect(push).not.toHaveBeenCalled();
-      expect(wrapper.vm.saveOpen).toBe(false);
+      // Nor a recipe made of a form the save is still putting right.
+      expect(button(wrapper, "Save as recipe").element.disabled).toBe(true);
       // An Escape this popup did not act on is not swallowed either.
       expect(escape.stopPropagation).not.toHaveBeenCalled();
 
@@ -4563,27 +4559,23 @@ describe("Save what you ran", () => {
       expect(wrapper.vm.canRun).toBe(true);
     };
 
-    it("leave what the newer one said, whatever the older one says after it", async () => {
+    it.each([
+      [
+        "leave what the newer one said, whatever the older one says after it",
+        (ask) => ask.resolve(OLDER),
+      ],
+      [
+        "leave it too when the older one comes back refused",
+        (ask) => ask.reject(refusal(400, "Name exactly one source.")),
+      ],
+    ])("%s", async (_name, settleOlder) => {
       const wrapper = await mountRun(fromCard);
       const asks = asked();
       const older = wrapper.vm.runPreflight();
       const newer = wrapper.vm.runPreflight();
       asks[1].resolve(NEWER);
       await newer;
-      asks[0].resolve(OLDER);
-      await older;
-      await flushPromises();
-      newerStands(wrapper);
-    });
-
-    it("leave it too when the older one comes back refused", async () => {
-      const wrapper = await mountRun(fromCard);
-      const asks = asked();
-      const older = wrapper.vm.runPreflight();
-      const newer = wrapper.vm.runPreflight();
-      asks[1].resolve(NEWER);
-      await newer;
-      asks[0].reject(refusal(400, "Name exactly one source."));
+      settleOlder(asks[0]);
       await older;
       await flushPromises();
       newerStands(wrapper);
@@ -4591,9 +4583,6 @@ describe("Save what you ran", () => {
   });
 
   describe("while the picker moves to another workflow", () => {
-    const picked = { ...fromCard, pickWorkflow: true };
-    const THIRD = `auto:${"c".repeat(64)}`;
-
     beforeEach(() => {
       getWorkflowChanges.mockImplementation(async (id) =>
         changesOf(id, { version: id === OTHER ? 9 : 3 }),
@@ -4622,12 +4611,11 @@ describe("Save what you ran", () => {
       wrapper.vm.newName = "Mine";
       await wrapper.vm.saveAsNew();
       await wrapper.vm.submit();
-      wrapper.vm.onSave();
       await wrapper.vm.freeField(field(wrapper, "denoise"));
       expect(writes()).toEqual([]);
       expect(saveWorkflowAsNew).not.toHaveBeenCalled();
       expect(runWorkflowCard).not.toHaveBeenCalled();
-      expect(wrapper.vm.saveOpen).toBe(false);
+      expect(button(wrapper, "Save as recipe").element.disabled).toBe(true);
       // Nor its pin list, which is written whole.
       expect(setWorkflowPins).not.toHaveBeenCalled();
 
@@ -4755,7 +4743,7 @@ describe("Save what you ran", () => {
 
     it("does not offer Save as new again once the new workflow exists", async () => {
       saveWorkflowAsNew.mockResolvedValue({ workflow_id: OTHER, name: "Mine" });
-      const wrapper = await mountRun({ ...fromCard, pickWorkflow: true });
+      const wrapper = await mountRun(picked);
       wrapper.vm.setValue(field(wrapper, "steps"), 32);
       await flushPromises();
       await button(wrapper, "Save as new…").trigger("click");
@@ -4836,7 +4824,7 @@ describe("Save what you ran", () => {
 
     it("is said again for the next workflow, from the same region", async () => {
       getWorkflowChanges.mockImplementation(async (id) => changesOf(id, WAITS));
-      const wrapper = await mountRun({ ...fromCard, pickWorkflow: true });
+      const wrapper = await mountRun(picked);
       const region = live(wrapper).element;
       const arrival = region.textContent.trim();
       expect(arrival).toContain("differs from the workflow");
@@ -5265,7 +5253,7 @@ describe("Save what you ran", () => {
       getWorkflowChanges.mockImplementation(async (id) =>
         changesOf(id, id === OTHER ? { version: 9 } : { waiting: WAITING, version: 6 }),
       );
-      const wrapper = await mountRun({ ...fromCard, pickWorkflow: true });
+      const wrapper = await mountRun(picked);
       expect(wrapper.vm.band.count).toBe(5);
       wrapper.vm.workflowId = OTHER;
       await flushPromises();
@@ -5279,7 +5267,6 @@ describe("Save what you ran", () => {
     // in the tab since. Only the popup knows what it saw, so the run says it.
     describe("as the run says it saw it", () => {
       const NOTHING = { models: [], loras: [], skip_loras: [], stages: {}, values: [] };
-      const picked = { ...fromCard, pickWorkflow: true };
       const waited = () => runWorkflowCard.mock.calls[0][0].waited;
 
       it("is the whole set the form was laid from", async () => {
@@ -5338,10 +5325,9 @@ describe("Save what you ran", () => {
     // Picked, left and picked again, the first pick's card answering last:
     // two reads of one workflow, which no check of the key can tell apart.
     describe("with an earlier read of the same workflow still out", () => {
-      const THIRD = `auto:${"c".repeat(64)}`;
       /** The popup back on OTHER and read, and the first read's held card. */
       async function backOnOther() {
-        const wrapper = await mountRun({ ...fromCard, pickWorkflow: true });
+        const wrapper = await mountRun(picked);
         const slow = held();
         getWorkflowCard.mockReturnValueOnce(slow.promise);
         wrapper.vm.workflowId = OTHER;

@@ -486,6 +486,19 @@ describe("the version menu in the head", () => {
     return mountWith([KEY], [shown]);
   }
 
+  /** Two rails: KEY on version 3, OTHER on version 2, each with its own list. */
+  async function mountTwoRails() {
+    const a = versioned(3);
+    const b = versioned(2, { id: OTHER, name: "Other" });
+    getWorkflowCard.mockImplementation((key) =>
+      Promise.resolve(detail({ card: key === OTHER ? b : a })),
+    );
+    getWorkflowVersions.mockImplementation((key) =>
+      Promise.resolve(key === OTHER ? versionsAt(2, OTHER) : versionsAt(3)),
+    );
+    return mountWith([KEY], [a, b]);
+  }
+
   it("is its own button beside the pictures link, saying the version and its day", async () => {
     const { wrapper } = await mountVersioned();
     expect(chip(wrapper).element.tagName).toBe("BUTTON");
@@ -681,15 +694,7 @@ describe("the version menu in the head", () => {
   });
 
   it("remembers the version an Undo left for the workflow it undid, whatever the rail shows by then", async () => {
-    const a = versioned(3);
-    const b = versioned(2, { id: OTHER, name: "Other" });
-    getWorkflowCard.mockImplementation((key) =>
-      Promise.resolve(detail({ card: key === OTHER ? b : a })),
-    );
-    getWorkflowVersions.mockImplementation((key) =>
-      Promise.resolve(key === OTHER ? versionsAt(2, OTHER) : versionsAt(3)),
-    );
-    const { wrapper, store } = await mountWith([KEY], [a, b]);
+    const { wrapper, store } = await mountTwoRails();
     await row(wrapper, 2).trigger("click");
     await flush(wrapper);
     const first = useNoticeStore().notices.at(-1);
@@ -740,14 +745,7 @@ describe("the version menu in the head", () => {
   });
 
   it("leaves a refusal on screen alone when an Undo goes back on a workflow the rail has left", async () => {
-    const a = versioned(3);
-    const b = versioned(2, { id: OTHER, name: "Other" });
-    getWorkflowCard.mockImplementation((key) =>
-      Promise.resolve(detail({ card: key === OTHER ? b : a })),
-    );
-    getWorkflowVersions.mockImplementation((key) =>
-      Promise.resolve(key === OTHER ? versionsAt(2, OTHER) : versionsAt(3)),
-    );
+    const { wrapper, store } = await mountTwoRails();
     restoreWorkflowVersion.mockImplementation((key) =>
       key === OTHER
         ? Promise.reject({
@@ -758,7 +756,6 @@ describe("the version menu in the head", () => {
           })
         : Promise.resolve(versionsAt(4)),
     );
-    const { wrapper, store } = await mountWith([KEY], [a, b]);
     await row(wrapper, 2).trigger("click");
     await flush(wrapper);
     const undo = useNoticeStore().notices.at(-1).action;
@@ -3781,6 +3778,14 @@ describe("the tab as the editor (#1850)", () => {
     wrapper.find('[data-testid="wftab-pick-checkpoint"] select');
   const loraRowsOf = (wrapper) =>
     wrapper.findAll("[data-testid='wftab-default-lora']");
+  const WAITING = {
+    models: [{ address: ADDRESS, filename: JUGGERNAUT.filename }],
+  };
+  /** The one lookup for the bar's verbs and the rows' controls. */
+  const verb = (wrapper, name) => wrapper.find(`[data-testid="wftab-${name}"]`);
+  const save = (wrapper) => verb(wrapper, "save");
+  const discard = (wrapper) => verb(wrapper, "discard");
+  const stage = (wrapper, name) => verb(wrapper, `stage-${name}`);
 
   /** A card whose checkpoint is named as the server names one: no extension. */
   const plain = (overrides = {}) =>
@@ -3799,6 +3804,15 @@ describe("the tab as the editor (#1850)", () => {
     mounted.push(wrapper);
     await flush(wrapper);
     return { wrapper, store };
+  }
+
+  /** Two workflows, each answering for its own detail. */
+  function twoWorkflows() {
+    const other = plain({ id: OTHER, name: "Other" });
+    getWorkflowCard.mockImplementation((key) =>
+      Promise.resolve(detail({ card: key === OTHER ? other : plain() })),
+    );
+    return [plain(), other];
   }
 
   /** A picture-less workflow: its LoRA rows are the graph's own loaders. */
@@ -3928,7 +3942,7 @@ describe("the tab as the editor (#1850)", () => {
       const { wrapper } = await mountEditor();
       await settle(wrapper);
       const note = () => wrapper.find('[data-testid="wftab-changes-failed"]');
-      const box = () => wrapper.find('[data-testid="wftab-stage-upscale"]');
+      const box = () => stage(wrapper, "upscale");
       const useSet = () => wrapper.find('[data-testid="wftab-use-set"]');
       expect(note().text()).toContain(
         "Could not read this workflow's unsaved changes just now",
@@ -3966,7 +3980,7 @@ describe("the tab as the editor (#1850)", () => {
       getWorkflowChanges.mockReset().mockReturnValue(read.promise);
       const { wrapper } = await mountEditor();
       await settle(wrapper);
-      const box = () => wrapper.find('[data-testid="wftab-stage-upscale"]');
+      const box = () => stage(wrapper, "upscale");
       expect(picker(wrapper).element.disabled).toBe(true);
       expect(box().element.disabled).toBe(true);
       // Still being read is not a failure: nothing to retry yet.
@@ -4206,23 +4220,21 @@ describe("the tab as the editor (#1850)", () => {
   });
 
   describe("the stages", () => {
-    const box = (wrapper, name) =>
-      wrapper.find(`[data-testid="wftab-stage-${name}"]`);
     const mark = (wrapper) =>
       wrapper.find('[data-testid="wftab-stages-edited"]');
 
     it("are checkboxes: a toggle joins the changes, and back again leaves them", async () => {
       const { wrapper } = await mountEditor();
-      expect(box(wrapper, "upscale").element.checked).toBe(false);
+      expect(stage(wrapper, "upscale").element.checked).toBe(false);
       expect(mark(wrapper).exists()).toBe(false);
 
-      await box(wrapper, "upscale").setValue(true);
+      await stage(wrapper, "upscale").setValue(true);
       await flush(wrapper);
       expect(lastSet().stages).toEqual({ upscale: true });
       expect(mark(wrapper).text()).toBe("Edited");
       expect(count(wrapper)).toBe("1 unsaved change");
 
-      await box(wrapper, "upscale").setValue(false);
+      await stage(wrapper, "upscale").setValue(false);
       await flush(wrapper);
       expect(lastSet().stages).toEqual({});
       expect(mark(wrapper).exists()).toBe(false);
@@ -4340,10 +4352,6 @@ describe("the tab as the editor (#1850)", () => {
   });
 
   describe("the bar", () => {
-    const WAITING = {
-      models: [{ address: ADDRESS, filename: JUGGERNAUT.filename }],
-    };
-    const save = (wrapper) => wrapper.find('[data-testid="wftab-save"]');
     const saveAsNew = (wrapper) =>
       wrapper.find('[data-testid="wftab-save-as-new"]');
     const runButton = (wrapper) =>
@@ -4750,7 +4758,6 @@ describe("the tab as the editor (#1850)", () => {
       "A change of checkpoint is saved as a new workflow, so this one keeps its pictures.";
     const reasons = (wrapper) =>
       wrapper.findAll('[data-testid="wftab-draft-reason"]').map((p) => p.text());
-    const verb = (wrapper, name) => wrapper.find(`[data-testid="wftab-${name}"]`);
     /** The changes routes as the server answers them: an empty set closes Save. */
     const answer = (set, extra = {}) =>
       changesState(set, {
@@ -4872,25 +4879,9 @@ describe("the tab as the editor (#1850)", () => {
   });
 
   describe("one set, one writer at a time", () => {
-    const WAITING = {
-      models: [{ address: ADDRESS, filename: JUGGERNAUT.filename }],
-    };
-    const save = (wrapper) => wrapper.find('[data-testid="wftab-save"]');
-    const discard = (wrapper) => wrapper.find('[data-testid="wftab-discard"]');
-    const stage = (wrapper, name) =>
-      wrapper.find(`[data-testid="wftab-stage-${name}"]`);
     const useSetMenu = (wrapper) =>
       wrapper.findComponent({ name: "WorkflowUseSetMenu" });
     const SAVED = { workflow_id: KEY, version: 2, left_out: [] };
-
-    /** Two workflows, each answering for its own detail. */
-    function twoWorkflows() {
-      const other = plain({ id: OTHER, name: "Other" });
-      getWorkflowCard.mockImplementation((key) =>
-        Promise.resolve(detail({ card: key === OTHER ? other : plain() })),
-      );
-      return [plain(), other];
-    }
 
     it.each([
       ["Save", save, () => saveWorkflow, SAVED],
@@ -5137,16 +5128,13 @@ describe("the tab as the editor (#1850)", () => {
     it("does not let a late read of one workflow wipe what waits on the next", async () => {
       // A's read is still out when B is selected, and lands after B's.
       const slow = held();
-      const other = plain({ id: OTHER, name: "Other" });
-      getWorkflowCard.mockImplementation((key) =>
-        Promise.resolve(detail({ card: key === OTHER ? other : plain() })),
-      );
+      const cards = twoWorkflows();
       getWorkflowChanges.mockImplementation((key) =>
         key === KEY
           ? slow.promise
           : Promise.resolve(changesState({ stages: { face_detailer: true } })),
       );
-      const { wrapper, store } = await mountEditor([plain(), other]);
+      const { wrapper, store } = await mountEditor(cards);
       store.selectedKeys = [OTHER];
       await flush(wrapper);
       expect(count(wrapper)).toBe("1 unsaved change");
@@ -5166,17 +5154,14 @@ describe("the tab as the editor (#1850)", () => {
     it("does not let an edit's answer for the workflow just left retire the read of the one arrived at", async () => {
       // A strength typed, then another card clicked: the blur sends A's
       // write and the click selects B, and A's answer comes back first.
-      const other = plain({ id: OTHER, name: "Other" });
-      getWorkflowCard.mockImplementation((key) =>
-        Promise.resolve(detail({ card: key === OTHER ? other : plain() })),
-      );
+      const cards = twoWorkflows();
       const put = held();
       const readB = held();
       getWorkflowChanges.mockImplementation((key) =>
         key === OTHER ? readB.promise : Promise.resolve(changesState(null)),
       );
       setWorkflowChanges.mockImplementation(() => put.promise);
-      const { wrapper, store } = await mountEditor([plain(), other]);
+      const { wrapper, store } = await mountEditor(cards);
       await wrapper.find('[data-testid="wftab-stage-upscale"]').setValue(true);
       store.selectedKeys = [OTHER];
       await flush(wrapper);
@@ -5199,10 +5184,7 @@ describe("the tab as the editor (#1850)", () => {
     it("does not draw a workflow's old read when the rail comes straight back to it", async () => {
       // A's write answers while B is shown, so nothing here took it; back on
       // A, the read from before that write is not what waits any more.
-      const other = plain({ id: OTHER, name: "Other" });
-      getWorkflowCard.mockImplementation((key) =>
-        Promise.resolve(detail({ card: key === OTHER ? other : plain() })),
-      );
+      const cards = twoWorkflows();
       const put = held();
       setWorkflowChanges.mockImplementationOnce((_key, set) =>
         put.promise.then(() => {
@@ -5210,8 +5192,8 @@ describe("the tab as the editor (#1850)", () => {
           return changesState(set);
         }),
       );
-      const { wrapper, store } = await mountEditor([plain(), other]);
-      const box = (name) => wrapper.find(`[data-testid="wftab-stage-${name}"]`);
+      const { wrapper, store } = await mountEditor(cards);
+      const box = (name) => stage(wrapper, name);
       await box("upscale").setValue(true);
 
       const again = held();
@@ -5243,16 +5225,13 @@ describe("the tab as the editor (#1850)", () => {
     });
 
     it("does not draw the last workflow's changes while the next one's are being read", async () => {
-      const other = plain({ id: OTHER, name: "Other" });
-      getWorkflowCard.mockImplementation((key) =>
-        Promise.resolve(detail({ card: key === OTHER ? other : plain() })),
-      );
+      const cards = twoWorkflows();
       getWorkflowChanges.mockImplementation((key) =>
         key === OTHER
           ? new Promise(() => {})
           : Promise.resolve(changesState({ stages: { upscale: true } })),
       );
-      const { wrapper, store } = await mountEditor([plain(), other]);
+      const { wrapper, store } = await mountEditor(cards);
       expect(count(wrapper)).toBe("1 unsaved change");
 
       store.selectedKeys = [OTHER];
@@ -5339,7 +5318,7 @@ describe("the tab as the editor (#1850)", () => {
       getWorkflowCard.mockResolvedValue(detail({ card: before }));
       const { wrapper, store } = await mountEditor([before]);
       await settle(wrapper);
-      const box = () => wrapper.find('[data-testid="wftab-stage-upscale"]');
+      const box = () => stage(wrapper, "upscale");
       expect(box().element.disabled).toBe(false);
 
       const after = versioned(4, { models: plain().models });
@@ -5677,8 +5656,7 @@ describe("the tab as the editor (#1850)", () => {
       discardWorkflowChanges.mockImplementation(() =>
         cleared.promise.then(() => changesState()),
       );
-      const box = () => wrapper.find('[data-testid="wftab-stage-face_detailer"]');
-      const save = () => wrapper.find('[data-testid="wftab-save"]');
+      const box = () => stage(wrapper, "face_detailer");
 
       dialog.vm.$emit("overwritten", KEY);
       await flush(wrapper);
@@ -5687,7 +5665,7 @@ describe("the tab as the editor (#1850)", () => {
       // Between the discard and the store there is nothing on the server:
       // an edit or a save made now would be of a set that is not there.
       expect(box().element.disabled).toBe(true);
-      expect(save().element.disabled).toBe(true);
+      expect(save(wrapper).element.disabled).toBe(true);
       await box().trigger("change");
       await flush(wrapper);
       expect(setWorkflowChanges).not.toHaveBeenCalled();
@@ -5697,7 +5675,7 @@ describe("the tab as the editor (#1850)", () => {
       await flush(wrapper);
       expect(lastSet().stages).toEqual({ upscale: true });
       expect(box().element.disabled).toBe(false);
-      expect(save().element.disabled).toBe(false);
+      expect(save(wrapper).element.disabled).toBe(false);
     });
 
     it("keeps the rows locked through a second Save of the dialog that waits behind the first", async () => {
@@ -5708,7 +5686,7 @@ describe("the tab as the editor (#1850)", () => {
       discardWorkflowChanges
         .mockImplementationOnce(() => first.promise.then(() => changesState()))
         .mockImplementationOnce(() => second.promise.then(() => changesState()));
-      const box = () => wrapper.find('[data-testid="wftab-stage-face_detailer"]');
+      const box = () => stage(wrapper, "face_detailer");
       const dialog = await openDialog(wrapper);
       dialog.vm.$emit("overwritten", KEY);
       dialog.vm.$emit("overwritten", KEY);
