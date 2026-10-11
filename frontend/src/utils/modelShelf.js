@@ -2291,3 +2291,38 @@ export function assignmentRing(
     count: named.length,
   };
 }
+
+/**
+ * The Hide row for a selection of models, or null when nothing is selected.
+ *
+ * One wording for every menu that offers it (the shelf's and the rail's), and
+ * the rule `toggleHiddenModels` runs: it hides the ones still shown, and turns
+ * into "show again" only when every one is already hidden. Worded *model* so
+ * it cannot be read as the workflow set's own Hide, which sits beside it on a
+ * set card's menu.
+ *
+ * @param {Array<number>} ids - the selected `model.id`s.
+ * @param {Set<number>} hiddenIds - the models this library hides.
+ * @returns {?{hide: boolean, icon: string, label: string, title: string}}
+ */
+export function hideModelsVerb(ids, hiddenIds) {
+  if (!ids?.length) return null;
+  const shown = ids.filter((id) => !hiddenIds.has(id)).length;
+  const n = shown || ids.length;
+  const models = n === 1 ? "model" : `${n} models`;
+  return shown
+    ? {
+        hide: true,
+        icon: "mdi-eye-off-outline",
+        label: `Hide ${models}`,
+        title:
+          "Leaves it off the shelf and out of every menu in this library. " +
+          "No file is touched. Show, Hidden models brings it back.",
+      }
+    : {
+        hide: false,
+        icon: "mdi-eye-outline",
+        label: `Show ${models} again`,
+        title: "",
+      };
+}

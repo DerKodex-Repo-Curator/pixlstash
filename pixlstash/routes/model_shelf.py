@@ -124,8 +124,10 @@ from pixlstash.services.model_shelf_service import (
     fetch_workflow_sets,
     forget_models,
     base_model_family,
+    hidden_model_ids,
     replace_attachments,
     served_family,
+    set_models_hidden,
     update_models,
 )
 from pixlstash.services.model_workflow_sets import (
@@ -518,6 +520,16 @@ class ModelResponse(BaseModel):
             "there is not counted here."
         ),
     )
+    hidden: bool = Field(
+        default=False,
+        description=(
+            "The ACTIVE library hides this model (`PUT /models/hidden`): its "
+            "shelf leaves the row out unless asked for the hidden ones, and "
+            "nothing that offers a model to pick offers this one. The answer "
+            "is the library's, not the machine's, and it is still served so a "
+            "recipe or a workflow that already uses the model can name it."
+        ),
+    )
     set_verdicts: list[ModelSetVerdictMark] = Field(
         default_factory=list,
         description=(
@@ -693,6 +705,29 @@ class ModelForgetRequest(BaseModel):
         min_length=1,
         max_length=MAX_MODELS_PER_EDIT,
         description="The models to forget, by hub `model.id`.",
+    )
+
+
+class ModelsHiddenRequest(BaseModel):
+    """Body of ``PUT /models/hidden``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ids: list[int] = Field(
+        min_length=1,
+        max_length=MAX_MODELS_PER_EDIT,
+        description="The models to hide or show, by hub `model.id`.",
+    )
+    hidden: bool = Field(
+        description="True hides them in this library, false shows them again."
+    )
+
+
+class ModelsHiddenResponse(BaseModel):
+    """Body of ``PUT /models/hidden``: what is hidden now."""
+
+    hidden_models: list[int] = Field(
+        description="Every model hidden in the active library, after the call."
     )
 
 
@@ -1387,6 +1422,14 @@ class WorkflowSetsResponse(BaseModel):
             "library that has not hidden it."
         ),
     )
+    hidden_models: list[int] = Field(
+        default_factory=list,
+        description=(
+            "The models (hub `model.id`) the active library hides, so the grid "
+            "can leave them out of the cards and trays this payload draws "
+            "without reading the model lists first."
+        ),
+    )
 
 
 class ModelOpenLocationResponse(BaseModel):
@@ -1537,6 +1580,7 @@ def _to_response(
     picture_counts: dict[int, dict[str, int]],
     marks: dict[int, list[dict]],
     character_names: dict[int, str],
+    hidden: set[int],
 ) -> ModelResponse:
     counts = picture_counts.get(int(row["id"]), {})
     attached = attachments.get(row["sha256"] or "", [])
@@ -1585,6 +1629,7 @@ def _to_response(
         capabilities=capabilities.get(int(row["id"]), []),
         pictures_verified=counts.get("verified", 0),
         pictures_by_filename=counts.get("by_filename", 0),
+        hidden=int(row["id"]) in hidden,
         set_verdicts=[
             ModelSetVerdictMark(**mark) for mark in marks.get(int(row["id"]), [])
         ],
@@ -1651,6 +1696,7 @@ def create_router(server) -> APIRouter:
         picture_counts = fetch_picture_counts(server.hub, server.vault)
         marks = fetch_model_marks(server.hub)
         character_names = fetch_character_names(server.vault)
+        hidden = set(hidden_model_ids(server.hub, server.vault.library_uuid))
         return [
             _to_response(
                 row,
@@ -1660,6 +1706,7 @@ def create_router(server) -> APIRouter:
                 picture_counts,
                 marks,
                 character_names,
+                hidden,
             )
             for row in rows
         ]
@@ -1774,6 +1821,7 @@ def create_router(server) -> APIRouter:
             fetch_picture_counts(server.hub, server.vault),
             fetch_model_marks(server.hub),
             fetch_character_names(server.vault),
+            set(hidden_model_ids(server.hub, server.vault.library_uuid)),
         )
 
     @router.get(
@@ -2184,6 +2232,33 @@ def create_router(server) -> APIRouter:
             refused=[ForgetRefusal(**item) for item in refused],
         )
 
+    @router.put(
+        "/models/hidden",
+        summary="Hide or show models in this library",
+        description=(
+            "Which models the ACTIVE library leaves off its shelf and out of "
+            "every list that offers a model to pick. Per library: a model "
+            "hidden here is still shown in another library. Nothing else "
+            "changes: no file, no row and no set member is touched, and a "
+            "workflow or a recipe that already uses a hidden model still runs "
+            "with it. An id that names no model is skipped. Returns every "
+            "model the library now hides, so the client can draw from one "
+            "answer."
+        ),
+        tags=["model_shelf"],
+        response_model=ModelsHiddenResponse,
+    )
+    def put_models_hidden(request: Request, payload: ModelsHiddenRequest = Body(...)):
+        server.auth.ensure_secure_when_required(request)
+        return ModelsHiddenResponse(
+            hidden_models=set_models_hidden(
+                server.hub,
+                server.vault.library_uuid,
+                payload.ids,
+                payload.hidden,
+            )
+        )
+
     @router.post(
         "/models/companions",
         summary="What deleting models would leave behind",
@@ -2268,6 +2343,7 @@ def create_router(server) -> APIRouter:
             hand_made=[_hand_made_set(entry) for entry in found["hand_made"]],
             set_checks=[WorkflowSetCheck(**check) for check in checks],
             hidden_sets=hidden_set_keys(server.hub, server.vault.library_uuid),
+            hidden_models=hidden_model_ids(server.hub, server.vault.library_uuid),
         )
 
     def _workflow_sets() -> dict:

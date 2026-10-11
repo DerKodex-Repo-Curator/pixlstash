@@ -386,6 +386,22 @@ describe("a chain that stops at a branch", () => {
 });
 
 describe("Add a LoRA", () => {
+  it("offers no LoRA this library hides", async () => {
+    listAdapters.mockResolvedValue([
+      { filename: "skin-detail-xl.safetensors", sha256: "sha-skin" },
+      { filename: "put-away.safetensors", sha256: "sha-away", hidden: true },
+    ]);
+    const wrapper = await mountDialog();
+    await button(wrapper, "Add a LoRA").trigger("click");
+    await flushPromises();
+
+    const select = wrapper.findAll(".eld-row").at(-1).find("select");
+    expect(select.findAll("option").map((option) => option.text())).toEqual([
+      "Pick a LoRA from your shelf…",
+      "skin-detail-xl",
+    ]);
+  });
+
   it("appends one picker row at the end, and sends only a picked LoRA", async () => {
     const wrapper = await mountDialog();
     await button(wrapper, "Add a LoRA").trigger("click");

@@ -2480,6 +2480,11 @@ const workflowOptions = computed(() => {
   return rows;
 });
 
+/**
+ * The LoRAs a row may be given. A LoRA this library hides is not offered;
+ * `adapters` still holds it, so a workflow that already loads one names it
+ * (`optionsFor`).
+ */
 const adapterOptions = computed(() =>
   [
     ...adapters.value,
@@ -2489,7 +2494,7 @@ const adapterOptions = computed(() =>
       (row) => !adapters.value.some((adapter) => adapter.sha256 === row.sha256),
     ),
   ]
-    .filter((adapter) => adapter?.sha256)
+    .filter((adapter) => adapter?.sha256 && !adapter.hidden)
     .map(adapterOption)
     .sort((a, b) => a.label.localeCompare(b.label)),
 );
@@ -2528,7 +2533,9 @@ const personFits = computed(() =>
   offersPerson.value && card.value
     ? fitPeople(
         card.value,
-        [...adapters.value, ...unknownLoras.value],
+        // A person is offered for a LoRA of theirs, and a hidden one is not
+        // offered, so it vouches for nobody here.
+        [...adapters.value, ...unknownLoras.value].filter((row) => !row.hidden),
         entityLists.characters,
       )
     : { people: [], clash: 0, unknown: 0, family: null },
@@ -3954,10 +3961,18 @@ function resetLora(row) {
  * shelf has never seen.
  */
 function optionsFor(row) {
-  if (row.baseSha || !row.graphValue || row.added) return adapterOptions.value;
+  // The same for a file this library hides: the workflow loads it, so the
+  // row names it, though no other row is offered it.
+  const held = adapterOptions.value.some((o) => o.value === row.sha256)
+    ? null
+    : adapters.value.find((a) => a.sha256 && a.sha256 === row.sha256);
+  const options = held
+    ? [adapterOption(held), ...adapterOptions.value]
+    : adapterOptions.value;
+  if (row.baseSha || !row.graphValue || row.added) return options;
   return [
     { value: "", label: `${row.graphValue} (not on your shelf)` },
-    ...adapterOptions.value,
+    ...options,
   ];
 }
 
@@ -4205,7 +4220,10 @@ async function loadLoraSource() {
       return { hand_made: [] };
     }),
   ]);
-  attachedLoras.value = kinds.flat().filter((row) => row?.sha256);
+  // Offered, and the first one added: so not the ones this library hides.
+  attachedLoras.value = kinds
+    .flat()
+    .filter((row) => row?.sha256 && !row.hidden);
   // A set hidden in this library does not rank the picker (#1869). No "Show
   // them" here, so the payload's own list decides.
   const hidden = new Set(sets?.hidden_sets || []);

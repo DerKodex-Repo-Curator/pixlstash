@@ -607,6 +607,15 @@ Rules neither side may drift from:
    re-read. A key is the client's own (`model:<head id>`, or `missing:<filename>`
    when the head is off the shelf, `hand:<id>` for a hand-made set), opaque to
    the server; the route is owner-only and writes hub rows only.
+   **Hidden models are the active library's own too**: `PUT /models/hidden`
+   (`{ids: [...], hidden}`) answers `{hidden_models}`, the whole new list of
+   `model.id`s. Every `/adapters` and `/checkpoints` row carries
+   `hidden: bool` and this payload carries `hidden_models`. The server never
+   drops a hidden row from those lists, since the client also names models
+   from them; **the client leaves a hidden model out of anything it offers**
+   (the shelf's rows, cards and trays, the rail, the set choosers, the Run
+   popup's and Edit LoRAs' pickers), and the server does the same in the
+   offers it builds (`model-swap`, `people`).
 9. **PixlStash's check and the owner's verdicts ride on it too, keyed by
    `combo_key`** (`docs/ideas/workflow-set-verdicts.md`; backend §25,
    "Workflow sets: PixlStash's check and the owner's verdict"). `set_checks`

@@ -26,6 +26,7 @@ import {
   removeWorkflowSetMembers,
   renameWorkflowSet,
   setAdapterAttachments,
+  setModelsHidden,
   setWorkflowSetDeclines,
   setWorkflowSetsHidden,
 } from "../api/modelShelf";
@@ -46,6 +47,7 @@ import {
   deriveModelName,
   quantFromFilename,
   fileKindLabel,
+  hideModelsVerb,
   locationState,
   presentCopies,
   trashName,
@@ -58,6 +60,7 @@ import {
   handMadeBase,
   handMadeCard,
   handMadeName,
+  headModel,
   hideSetsVerb,
   pictureCount,
   rowBaseModel,
@@ -729,6 +732,10 @@ function defaultFilters() {
     // a shelf that opens showing four rows of an eighteen-hundred-row library
     // with no obvious reason why.
     duplicatesOnly: false,
+    // Draw the models this library hides too, marked, so one can be shown
+    // again. Not restored on startup either, for the same reason: it is how a
+    // hide is taken back, not a way to keep the shelf.
+    showHidden: false,
   };
 }
 
@@ -1130,6 +1137,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     // Read before the request goes out: a tick while it is on the wire is the
     // next fetch's business.
     const blocks = fetchedBlocks();
+    const hidesAtStart = modelHideEvents;
     try {
       const results = await Promise.all(blockRequests(blocks));
       if (startedAt !== epoch) return;
@@ -1138,6 +1146,16 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
         ...rows.value.filter((row) => !refreshed.has(blockOf(row))),
         ...results.flat(),
       ];
+      // Each row says whether this library hides it. Skipped when a hide was
+      // sent or answered while the read was out: the local list is newer.
+      if (modelHideEvents === hidesAtStart) {
+        const hidden = new Set(hiddenModelIds.value);
+        for (const row of results.flat()) {
+          if (row.hidden) hidden.add(row.id);
+          else hidden.delete(row.id);
+        }
+        hiddenModelIds.value = hidden;
+      }
       // Cleared on every ordinary fetch, so the badge is exactly "what the scan
       // you just ran added" and never a stale mark from three refreshes ago.
       newIds.value = markNew
@@ -1393,15 +1411,29 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
       // would report `1` for exactly the rows this is meant to mark.
       copies: presentCopies(row.locations),
       isNew: newIds.value.has(row.id),
+      // The store's list, not the row's own field: a hide lands here first.
+      hidden: hiddenModelIds.value.has(row.id),
     };
   }
+
+  /**
+   * The rows a list may OFFER or draw: every row but the ones this library
+   * hides, unless `Show` asks for those too. The row list, the rail and the
+   * set tray's choosers all start here, so a hidden model is left out of each
+   * by one rule rather than one check per menu.
+   */
+  const offeredRows = computed(() =>
+    filters.showHidden
+      ? rows.value
+      : rows.value.filter((row) => !hiddenModelIds.value.has(row.id)),
+  );
 
   /** The rows the current selection actually shows, with display fields. */
   const visibleRows = computed(() => {
     const kinds = filters.adapterKinds;
     const bases = filters.baseModels;
     const capabilities = filters.capabilities;
-    const shown = rows.value
+    const shown = offeredRows.value
       .filter((row) => {
         // The type checkboxes narrow here as well as choosing what to fetch:
         // a block already fetched stays in `rows` so its options survive.
@@ -1631,6 +1663,20 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
   // keeps the local list rather than its own snapshot, which may predate it.
   let hideEvents = 0;
 
+  // ── Hidden models ─────────────────────────────────────────────────────────
+  //
+  // Which models the ACTIVE library hides, by `model.id`: a per-library answer
+  // kept on the server (`model_hidden`), like a set's hide. ONE list for the
+  // row list, the rail and the set grid, whichever payload brought it - every
+  // model list carries `hidden` on its rows and the set payload carries the
+  // whole list, so the grid can leave a model out before its block is read.
+  const hiddenModelIds = ref(new Set());
+  // The same ordering guards the set hides use just above, for the same race:
+  // an answer landing out of order, or a read that was out while a hide landed.
+  let modelHideSent = 0;
+  let modelHideApplied = 0;
+  let modelHideEvents = 0;
+
   /** The stack whose member panel is open, by its card key. */
   const openSetKey = ref("");
 
@@ -1677,6 +1723,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     if (!force && (setsLoaded.value || setsLoading.value)) return;
     const startedAt = (setsEpoch += 1);
     const hidesAtStart = hideEvents;
+    const modelHidesAtStart = modelHideEvents;
     setsLoading.value = true;
     setsError.value = "";
     try {
@@ -1693,6 +1740,15 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
             ? (body.hidden_sets ?? [])
             : workflowSets.value.hiddenSets,
       };
+      // The whole list, so it replaces: the same rule as the set hides above.
+      // Only a payload that carries one, or the rows' own answer would be
+      // wiped by a read that never asked.
+      if (
+        modelHideEvents === modelHidesAtStart &&
+        Array.isArray(body.hidden_models)
+      ) {
+        hiddenModelIds.value = new Set(body.hidden_models);
+      }
       setsLoaded.value = true;
     } catch (err) {
       if (startedAt !== setsEpoch) return;
@@ -1736,6 +1792,9 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
         // card and not again as evidence (#1520): evidence cards are built only
         // from the pictures no hand-made set covers.
         !combination.covered_by?.length &&
+        // A card is named after its head, so a hidden head takes its card
+        // with it - otherwise the hidden model would be the card's own title.
+        !isHiddenHere(headModel(combination)?.id) &&
         ((combination.models ?? []).some((model) => shown.has(model.id)) ||
           // Named after a missing base model, which has no shelf row for
           // `Show` to filter on: drawn always, or hiding its support files
@@ -1753,17 +1812,39 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
    * re-derive the grouping to answer a question about one member.
    */
   const evidenceGroups = computed(() =>
-    setGroups(visibleCombinations.value).map((group) => ({
-      ...group,
-      hidden: hiddenSetKeys.value.has(group.key),
-      check: checkOf(group.models),
-      card: {
-        ...setCard(group),
+    setGroups(visibleCombinations.value).map((whole) => {
+      // The check is the whole combination's, read before the hidden members
+      // are left out: a hide is a view choice and changes no verdict.
+      const check = checkOf(whole.models);
+      // The one narrowing of what a shown card CONTAINS. `Show` never does it
+      // (see `visibleCombinations`); a model this library hides is not drawn
+      // anywhere on its shelf, a tray included.
+      const group = {
+        ...whole,
+        // Every member, hidden or not: what a copy of the set is made of
+        // (`cloneSetFromPictures`), so the copy covers the same pictures.
+        allModels: whole.models,
+        models: whole.models
+          .filter((model) => !isHiddenHere(model.id))
+          // Drawn only while `Show` asks for the hidden ones, and then marked.
+          .map((model) =>
+            hiddenModelIds.value.has(model.id)
+              ? { ...model, hidden: true }
+              : model,
+          ),
+      };
+      return {
+        ...group,
         hidden: hiddenSetKeys.value.has(group.key),
-        // The owner's word only; PixlStash's check never reaches the card.
-        verdict: checkOf(group.models)?.verdict ?? null,
-      },
-    })),
+        check,
+        card: {
+          ...setCard(group),
+          hidden: hiddenSetKeys.value.has(group.key),
+          // The owner's word only; PixlStash's check never reaches the card.
+          verdict: check?.verdict ?? null,
+        },
+      };
+    }),
   );
 
   // ── The owner's verdicts (docs/ideas/workflow-set-verdicts.md) ───────────
@@ -1822,6 +1903,86 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     ).length;
     return derived + hand;
   });
+
+  // ── Hiding models ─────────────────────────────────────────────────────────
+
+  /** Whether a list should leave this model out: hidden, and not asked for. */
+  function isHiddenHere(id) {
+    return !filters.showHidden && hiddenModelIds.value.has(id);
+  }
+
+  /**
+   * Hide or show models in this library, on the server.
+   *
+   * Never throws: a failure is reported and the previous answer stands.
+   *
+   * @param {Array<number>} ids - `model.id`s.
+   * @param {boolean} hide - true hides, false shows again.
+   * @returns {Promise<boolean>} false when the write did not land.
+   */
+  async function changeModelsHidden(ids, hide) {
+    const sent = (modelHideSent += 1);
+    modelHideEvents += 1;
+    try {
+      const hidden = await setModelsHidden(ids, hide);
+      if (sent > modelHideApplied) {
+        modelHideApplied = sent;
+        modelHideEvents += 1;
+        hiddenModelIds.value = new Set(hidden);
+      }
+    } catch (err) {
+      useNoticeStore().push({
+        level: "error",
+        text:
+          errorDetail(err) ||
+          "Could not change which models this library hides.",
+      });
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Hide over a selection of models: the one rule the menus' row is worded by
+   * (`hideModelsVerb`), so what it says is what runs. It hides the ones still
+   * shown, and shows them again only when every one is already hidden.
+   *
+   * A hidden model leaves the screen and so leaves the selection, which is
+   * read off the screen (`selectedRows`): no verb can reach a row nobody sees.
+   *
+   * @param {Array<Object>} models - rows, a stack already expanded to members.
+   */
+  async function toggleHiddenModels(models) {
+    const verb = hideModelsVerb(
+      models.map((model) => model.id),
+      hiddenModelIds.value,
+    );
+    if (!verb) return;
+    const acted = models.filter(
+      (model) => hiddenModelIds.value.has(model.id) !== verb.hide,
+    );
+    const ids = acted.map((model) => model.id);
+    if (!(await changeModelsHidden(ids, verb.hide))) return;
+    // A model that left the screen leaves the selection, as a hidden set's
+    // head does (`changeHidden`): otherwise Undo or *Hidden models* would
+    // bring it back lit, with the pill armed by no gesture.
+    if (verb.hide && !filters.showHidden) {
+      const gone = new Set(ids);
+      selectedIds.value = new Set(
+        [...selectedIds.value].filter((id) => !gone.has(id)),
+      );
+    }
+    const one = modelName(acted[0]).text || acted[0].filename || "the model";
+    const what = ids.length === 1 ? `"${one}"` : `${ids.length} models`;
+    useOperationStore().showLocalReceipt({
+      summary: verb.hide
+        ? `Hid ${what} in this library. No file was touched.`
+        : `${what} ${ids.length === 1 ? "is" : "are"} shown again.`,
+      icon: verb.icon,
+      undo: () => changeModelsHidden(ids, !verb.hide),
+      redo: () => changeModelsHidden(ids, verb.hide),
+    });
+  }
 
   // ── Hiding sets from pictures ─────────────────────────────────────────────
   //
@@ -1994,18 +2155,28 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
       const row = byId.get(model.id);
       return (row && modelName(row).text) || model.name;
     };
+    // An offer is a list to pick from, so a model this library hides is not
+    // in it, and an offer of nothing else is no offer.
+    const offered = (set.offer?.models ?? []).filter(
+      (model) => !isHiddenHere(model.id),
+    );
     return {
       ...set,
       // The merge offer's models (#1523) are always on the shelf.
-      offer: set.offer && {
-        ...set.offer,
-        head_name: shelfName({ id: set.offer.head_id, name: set.offer.head_name }),
-        models: (set.offer.models ?? []).map((model) => ({
-          ...model,
-          name: shelfName(model),
-          quant: byId.get(model.id)?.quant ?? null,
-        })),
-      },
+      offer: offered.length
+        ? {
+            ...set.offer,
+            head_name: shelfName({
+              id: set.offer.head_id,
+              name: set.offer.head_name,
+            }),
+            models: offered.map((model) => ({
+              ...model,
+              name: shelfName(model),
+              quant: byId.get(model.id)?.quant ?? null,
+            })),
+          }
+        : null,
       members: (set.members ?? []).map((member) => {
         const row = member.id != null ? byId.get(member.id) : null;
         const kept = member.label || member.name || "";
@@ -2641,7 +2812,10 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     try {
       return await createHandMadeSet({
         cloned: true,
-        members: group.models
+        // `allModels`, not the drawn ones: a copy that left out a member this
+        // library hides would not cover the card's pictures, and the card
+        // would stay on the grid beside its own copy.
+        members: (group.allModels ?? group.models)
           // An engine is not a file a workflow loads, so no set holds one, and
           // the pictures that ran with it stay on the card.
           .filter((model) => model.kind !== "engine")
@@ -3146,6 +3320,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     if (filters.baseModels.length) n += 1;
     if (filters.capabilities.length) n += 1;
     if (filters.duplicatesOnly) n += 1;
+    if (filters.showHidden) n += 1;
     return n;
   });
 
@@ -3886,6 +4061,9 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     setsEpoch += 1;
     // A hide still on the wire answers into the session it was sent in: drop it.
     hideApplied = hideSent;
+    modelHideApplied = modelHideSent;
+    // Another library, another list: nothing it hides is known yet.
+    hiddenModelIds.value = new Set();
     workflowSets.value = {
       combinations: [],
       handMade: [],
@@ -3975,6 +4153,9 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     setGroups: setGroupList,
     hiddenSetCount,
     showHiddenSets,
+    hiddenModelIds,
+    offeredRows,
+    toggleHiddenModels,
     hideSets,
     unhideSets,
     toggleHiddenSets,

@@ -199,6 +199,28 @@
       </label>
     </div>
 
+    <!-- Hidden. The models this library leaves off its shelf and out of every
+         menu that offers one. Ticked, they are drawn again, marked, and the
+         context menu's Hide row reads "Show model again" - the one way back.
+         `refetch: false` like Copies: every row already says whether it is
+         hidden. -->
+    <div class="tbm-section">
+      <span class="tbm-label">Hidden</span>
+      <label class="tbm-check">
+        <Tooltip
+          text="Models you hid in this library. Right-click one to show it again."
+          activator="parent"
+        />
+        <input
+          type="checkbox"
+          data-testid="shelf-show-hidden"
+          :checked="filters.showHidden"
+          @change="store.setFilters({ showHidden: $event.target.checked })"
+        />
+        Hidden models{{ hiddenLabel }}
+      </label>
+    </div>
+
     <!-- Base model. "Not set" is an option, not an omission: a null base model
          is what most real adapters record, so dropping those rows from a
          filtered view would hide the largest group in the shelf. -->
@@ -235,6 +257,13 @@ const filters = store.filters;
 const matchLabel = computed(() => {
   const n = store.visibleRows.length;
   return `${n.toLocaleString()} ${n === 1 ? "model" : "models"}`;
+});
+
+// How many models this library hides, so the box says whether it has anything
+// to show before it is ticked. Nothing after the label when there are none.
+const hiddenLabel = computed(() => {
+  const n = store.hiddenModelIds.size;
+  return n ? ` (${n.toLocaleString()})` : "";
 });
 
 // Some-but-not-all kinds ticked is a real third state and the checkbox says so

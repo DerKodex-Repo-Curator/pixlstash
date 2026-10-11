@@ -35,6 +35,7 @@ const createWorkflowSet = vi.fn();
 const deleteWorkflowSet = vi.fn();
 const setWorkflowSetDeclines = vi.fn();
 const setWorkflowSetsHidden = vi.fn();
+const setModelsHidden = vi.fn();
 const addWorkflowSetMembers = vi.fn();
 const setModelIcon = vi.fn();
 const clearModelIcons = vi.fn();
@@ -60,6 +61,7 @@ vi.mock("../api/modelShelf", () => ({
   deleteWorkflowSet: (...args) => deleteWorkflowSet(...args),
   setWorkflowSetDeclines: (...args) => setWorkflowSetDeclines(...args),
   setWorkflowSetsHidden: (...args) => setWorkflowSetsHidden(...args),
+  setModelsHidden: (...args) => setModelsHidden(...args),
   addWorkflowSetMembers: (...args) => addWorkflowSetMembers(...args),
 }));
 
@@ -120,6 +122,7 @@ function onTheRowList() {
 
 /** The set keys the active library hides, as the doubles' server holds them. */
 let hiddenOnServer = new Set();
+let modelsHiddenOnServer = new Set();
 
 beforeEach(() => {
   setActivePinia(createPinia());
@@ -134,6 +137,15 @@ beforeEach(() => {
       else hiddenOnServer.delete(key);
     }
     return [...hiddenOnServer];
+  });
+  // And the models it hides: the hub's `model_hidden` rows for this library.
+  modelsHiddenOnServer = new Set();
+  setModelsHidden.mockReset().mockImplementation(async (ids, hidden) => {
+    for (const id of ids) {
+      if (hidden) modelsHiddenOnServer.add(id);
+      else modelsHiddenOnServer.delete(id);
+    }
+    return [...modelsHiddenOnServer];
   });
   listAdapters.mockReset().mockResolvedValue([]);
   listCheckpoints.mockReset().mockResolvedValue([]);
@@ -3892,5 +3904,261 @@ describe("sets from pictures are hidden, never deleted", () => {
     expect(createWorkflowSet).toHaveBeenCalledWith(
       expect.objectContaining({ cloned: true }),
     );
+  });
+});
+
+describe("a model is hidden in this library", () => {
+  const checkpoint = { id: 1, name: "base.st", kind: "checkpoint" };
+  const lora = { id: 2, name: "style.st", kind: "adapter" };
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  /** A checkpoint and a LoRA that ran together, as the server holds them now. */
+  function shelf({ handMade = [] } = {}) {
+    const flagged = (row) => ({
+      ...row,
+      hidden: modelsHiddenOnServer.has(row.id),
+    });
+    listCheckpoints.mockImplementation(async () => [
+      flagged(
+        adapter({
+          id: 1,
+          sha256: "a".repeat(64),
+          file_kind: "checkpoint",
+          filename: "base.st",
+          display_name: "Base",
+        }),
+      ),
+    ]);
+    listAdapters.mockImplementation(async () => [
+      flagged(
+        adapter({
+          id: 2,
+          sha256: "b".repeat(64),
+          filename: "style.st",
+          display_name: "Style",
+        }),
+      ),
+    ]);
+    fetchWorkflowSets.mockImplementation(async () => ({
+      combinations: [
+        {
+          key: "1+2",
+          models: [checkpoint, lora],
+          recipes: 2,
+          picture_count: 5,
+          covers: [],
+          covered_by: [],
+        },
+      ],
+      no_set: [],
+      hand_made: handMade,
+      set_checks: [{ combo_key: "1,2", verdict: "yes", suspects: [] }],
+      hidden_sets: [],
+      hidden_models: [...modelsHiddenOnServer],
+    }));
+    return useModelShelfStore();
+  }
+
+  it("leaves the row list, the offered rows and the tray, and comes back on request", async () => {
+    const store = shelf();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    const row = () => store.rows.find((r) => r.id === 2);
+
+    await store.toggleHiddenModels([row()]);
+
+    expect(setModelsHidden).toHaveBeenCalledWith([2], true);
+    expect(store.visibleRows.map((r) => r.id)).toEqual([1]);
+    expect(store.offeredRows.map((r) => r.id)).toEqual([1]);
+    // The card stays (its head is shown), the tray loses the member, and the
+    // owner's verdict on the whole set is still the card's.
+    expect(store.setGroups.map((g) => g.key)).toEqual(["model:1"]);
+    expect(store.setGroups[0].models.map((m) => m.id)).toEqual([1]);
+    expect(store.setGroups[0].card.verdict).toBe("yes");
+    // Nothing was removed: the row is still known, only not listed.
+    expect(store.rows.map((r) => r.id).sort()).toEqual([1, 2]);
+    expect(store.activeCount).toBe(0);
+
+    store.setFilters({ showHidden: true });
+    expect(store.activeCount).toBe(1);
+    expect(store.visibleRows.map((r) => [r.id, r.hidden])).toEqual([
+      [2, true],
+      [1, false],
+    ]);
+    expect(store.setGroups[0].models.map((m) => [m.id, m.hidden])).toEqual([
+      [1, undefined],
+      [2, true],
+    ]);
+
+    // Every one selected is hidden, so the same verb shows it again.
+    await store.toggleHiddenModels([row()]);
+    expect(setModelsHidden).toHaveBeenLastCalledWith([2], false);
+    store.setFilters({ showHidden: false });
+    expect(store.visibleRows.map((r) => r.id).sort()).toEqual([1, 2]);
+  });
+
+  it("takes the card with it when the hidden model is the one the set is named after", async () => {
+    const store = shelf();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+
+    await store.toggleHiddenModels([store.rows.find((r) => r.id === 1)]);
+
+    expect(store.setGroups).toHaveLength(0);
+    // Not one of the hidden SETS: "Show them" under the grid is not its way back.
+    expect(store.hiddenSetCount).toBe(0);
+    store.setFilters({ showHidden: true });
+    expect(store.setGroups.map((g) => g.key)).toEqual(["model:1"]);
+  });
+
+  it("hides the selected models that are shown, and leaves a hidden one hidden", async () => {
+    modelsHiddenOnServer.add(2);
+    const store = shelf();
+    store.setFilters({ showHidden: true });
+    await store.fetchRows();
+
+    await store.toggleHiddenModels(store.rows);
+
+    expect(setModelsHidden).toHaveBeenCalledWith([1], true);
+    expect([...store.hiddenModelIds].sort()).toEqual([1, 2]);
+  });
+
+  it("reads the hide off the rows, and off the set payload for a row not read yet", async () => {
+    modelsHiddenOnServer.add(2);
+    const store = shelf();
+    await store.fetchRows();
+    expect(store.visibleRows.map((r) => r.id)).toEqual([1]);
+
+    // The set payload names a model no fetched block holds: the grid must still
+    // leave it out of a tray.
+    modelsHiddenOnServer.add(9);
+    await store.loadWorkflowSets();
+    expect([...store.hiddenModelIds].sort()).toEqual([2, 9]);
+
+    // And a later read that no longer flags it shows it again.
+    modelsHiddenOnServer.delete(2);
+    await store.fetchRows();
+    expect(store.visibleRows.map((r) => r.id).sort()).toEqual([1, 2]);
+  });
+
+  it("keeps a hide that landed while a read was out", async () => {
+    const store = shelf();
+    await store.fetchRows();
+    let release;
+    listAdapters.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          // Served before the hide: the row says it is shown.
+          release = () => resolve([adapter({ id: 2, hidden: false })]);
+        }),
+    );
+    const read = store.fetchRows();
+    await store.toggleHiddenModels([store.rows.find((r) => r.id === 2)]);
+    release();
+    await read;
+
+    expect([...store.hiddenModelIds]).toEqual([2]);
+  });
+
+  it("says so and changes nothing when the write fails", async () => {
+    const store = shelf();
+    await store.fetchRows();
+    setModelsHidden.mockRejectedValueOnce(new Error("offline"));
+    useOperationStore().setLocalReceiptHost(true);
+
+    await store.toggleHiddenModels([store.rows.find((r) => r.id === 2)]);
+
+    expect(store.visibleRows.map((r) => r.id).sort()).toEqual([1, 2]);
+    expect(useNoticeStore().notices.at(-1).level).toBe("error");
+    expect(useOperationStore().receipt).toBe(null);
+  });
+
+  it("raises a receipt whose Undo shows the model again", async () => {
+    const store = shelf();
+    await store.fetchRows();
+    useOperationStore().setLocalReceiptHost(true);
+
+    await store.toggleHiddenModels([store.rows.find((r) => r.id === 2)]);
+    expect(useOperationStore().receipt.summary).toBe(
+      'Hid "Style" in this library. No file was touched',
+    );
+
+    await useOperationStore().takeLocalReceiptAction();
+    await settle();
+    expect(setModelsHidden).toHaveBeenLastCalledWith([2], false);
+    expect(store.visibleRows.map((r) => r.id).sort()).toEqual([1, 2]);
+  });
+
+  it("drops a hidden model from the selection, so it does not come back lit", async () => {
+    const store = shelf();
+    store.setView({ groupBy: "none" });
+    await store.fetchRows();
+    store.toggleSelected(1);
+    store.toggleSelected(2);
+
+    await store.toggleHiddenModels([store.rows.find((r) => r.id === 2)]);
+
+    expect([...store.selectedIds]).toEqual([1]);
+  });
+
+  it("copies a set from pictures whole, a hidden member included", async () => {
+    // The copy has to cover the card's pictures, or the card stays on the
+    // grid beside its own copy: a hidden member is left off the tray, never
+    // out of the set.
+    createWorkflowSet.mockResolvedValue({ id: 30, members: [], declined: [] });
+    const store = shelf();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    await store.toggleHiddenModels([store.rows.find((r) => r.id === 2)]);
+    const [group] = store.setGroups;
+    expect(group.models.map((m) => m.id)).toEqual([1]);
+
+    await store.cloneSetFromPictures(group);
+
+    expect(createWorkflowSet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        members: [
+          { model_id: 1, slot: "checkpoint" },
+          { model_id: 2, slot: "lora" },
+        ],
+      }),
+    );
+  });
+
+  it("offers a hand-made set no hidden model to merge in", async () => {
+    const offer = (models) => ({
+      head_id: 1,
+      head_name: "base.st",
+      models,
+      covers: [],
+      recipes: 1,
+      picture_count: 1,
+    });
+    const store = shelf({
+      handMade: [
+        {
+          id: 7,
+          name: "seven",
+          declined: [],
+          members: [
+            {
+              ...checkpoint,
+              sha256: "a".repeat(64),
+              slot: "checkpoint",
+              on_shelf: true,
+            },
+          ],
+          offer: offer([{ id: 2, name: "style.st", slot: "lora" }]),
+        },
+      ],
+    });
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    expect(store.handMadeSets[0].offer.models.map((m) => m.id)).toEqual([2]);
+
+    await store.toggleHiddenModels([store.rows.find((r) => r.id === 2)]);
+
+    // An offer of nothing but hidden models is no offer.
+    expect(store.handMadeSets[0].offer).toBe(null);
   });
 });

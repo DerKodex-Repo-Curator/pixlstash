@@ -173,11 +173,18 @@ function setsOf(payload) {
       loraIds: members.filter((m) => m.slot === "lora").map((m) => m.id),
     };
   });
-  // A set whose base model is off the shelf has no checkpoint to load.
+  // A set whose base model is off the shelf has no checkpoint to load. One
+  // named after a model this library hides is not on its shelf either, and a
+  // hidden member is not filled in: the shelf's own rule for these sets.
+  const hiddenModels = new Set(payload.hidden_models ?? []);
   const evidence = setGroups(payload.combinations ?? [])
-    .filter((group) => !group.head?.missing)
+    .filter(
+      (group) => !group.head?.missing && !hiddenModels.has(group.head.id),
+    )
     .map((group) => {
-      const models = group.models ?? [];
+      const models = (group.models ?? []).filter(
+        (m) => !hiddenModels.has(m.id),
+      );
       const others = models.filter((m) => m.id !== group.head.id);
       return {
         key: group.key,

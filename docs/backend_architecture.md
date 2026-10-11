@@ -619,6 +619,7 @@ Public guest scoring and shared-link endpoints.
 | GET    | /api/v1/models/base-models                                                    | model_shelf     | Completion targets for the base-model field                 |
 | POST   | /api/v1/models/companions                                                     | model_shelf     | What deleting models would leave behind                     |
 | POST   | /api/v1/models/forget                                                         | model_shelf     | Forget models whose files are gone                          |
+| PUT    | /api/v1/models/hidden                                                         | model_shelf     | Hide or show models in this library                         |
 | POST   | /api/v1/models/icons/clear                                                    | model_shelf     | Clear the icon on one or more models                        |
 | GET    | /api/v1/models/workflow-sets                                                  | model_shelf     | Which models have actually run together                     |
 | POST   | /api/v1/models/workflow-sets                                                  | model_shelf     | Make a workflow set by hand                                 |
@@ -10149,6 +10150,26 @@ like every shelf table), read and written by
   else. The endpoints are `owner_only`; the key is opaque, so no set has to
   exist for its key to be hidden and a stale one is harmless (a set id is
   `AUTOINCREMENT`, never reused, and its row goes with it on delete).
+- **A model hides the same way, per library.** `PUT /models/hidden`
+  (`{ids, hidden}`, answering `{hidden_models}`) writes hub `model_hidden`
+  rows keyed by `(library_uuid, model_id)`
+  (`model_shelf_service.set_models_hidden`; an id naming no model is skipped,
+  no library hides nothing). A row means hidden; showing a model deletes it.
+  It is a view choice and nothing else: no file, `model` row or set member is
+  touched. **The reads flag it, they never drop it**: every `/adapters` and
+  `/checkpoints` row carries `hidden`, and `GET /models/workflow-sets` carries
+  the whole list as `hidden_models`, because the same lists also *name* the
+  models a recipe or a workflow already uses (`adapter_digest_index`,
+  `recipe_asset_index`, `_swap_models` are resolve paths and are not
+  filtered). **What is offered leaves a hidden model out, on the server where
+  the server builds the offer**: `GET /workflows/{id}/model-swap` (the
+  `checkpoints` / `vaes` / `text_encoders` lists, the `proposals`, and the
+  `replacements` of *Replace with…*, through `_hidden_models()` in
+  `routes/workflows.py`) and `people_who_fit` (a hidden LoRA vouches for
+  nobody, so its person is neither offered nor counted). The rows go with
+  their model (`_purge`), carry to the survivor when two unhashed checkpoint
+  rows turn out to be one file (`checkpoint_hash_task`), and go with their
+  library (`LibraryRegistry.forget`).
 - **The merge offer is derived, and only the declines are stored (#1523).**
   `_attach_offers` groups the combinations no set covers by their head (the
   grid's own evidence cards, but over `hub_combinations`: every library's

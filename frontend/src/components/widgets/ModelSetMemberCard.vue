@@ -45,6 +45,7 @@
           {{ member.name }}
         </button>
         <span v-if="member.head" class="msm__pill">Names this set</span>
+        <span v-if="member.hidden" class="msm__pill">Hidden</span>
         <span v-if="possibleProblem" class="msm__pill">Possible problem</span>
         <VerdictIcon
           v-if="verdict"

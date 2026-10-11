@@ -1914,6 +1914,8 @@ def people_who_fit(hub, vault, family: Optional[str]) -> dict:
     """
     owners = lora_owners(vault)
     names = fetch_character_names(vault)
+    # A LoRA this library hides is not offered, so it vouches for nobody here.
+    hidden = set(hidden_model_ids(hub, getattr(vault, "library_uuid", None)))
     rows = {}
     for batch in chunked(sorted(owners)):
         placeholders = ",".join("?" * len(batch))
@@ -1923,7 +1925,8 @@ def people_who_fit(hub, vault, family: Optional[str]) -> dict:
             f"WHERE lower(sha256) IN ({placeholders}) ORDER BY id",
             tuple(batch),
         ):
-            rows[str(row["sha256"]).lower()] = row
+            if int(row["id"]) not in hidden:
+                rows[str(row["sha256"]).lower()] = row
     attached: dict[int, list] = {}
     for sha256, row in sorted(rows.items(), key=lambda item: item[1]["id"]):
         for character_id in owners[sha256]:
@@ -2097,6 +2100,49 @@ CURATABLE_CAPABILITIES = (
     FEATURE_SEARCH,
     FEATURE_SCORER,
 )
+
+
+def hidden_model_ids(hub, library_uuid: Optional[str]) -> list[int]:
+    """The models hidden in ONE library, sorted. ``[]`` with no library."""
+    if not library_uuid:
+        return []
+    return [
+        int(row["model_id"])
+        for row in hub.fetchall(
+            "SELECT model_id FROM model_hidden WHERE library_uuid = ? "
+            "ORDER BY model_id",
+            (library_uuid,),
+        )
+    ]
+
+
+def set_models_hidden(
+    hub, library_uuid: Optional[str], ids: list[int], hidden: bool
+) -> list[int]:
+    """Hide or show models in one library; answer with that library's hidden ids.
+
+    A view choice and nothing else: no file, no ``model`` row and no set member
+    is touched, and every other library keeps showing the model. An id naming
+    no model is skipped rather than refused, so a hide sent over a selection
+    that a scan has since shortened still lands for the rest. A hub with no
+    active library hides nothing (there is no library to hide it in).
+    """
+    if not library_uuid or not ids:
+        return hidden_model_ids(hub, library_uuid)
+    with hub.transaction() as conn:
+        if hidden:
+            conn.executemany(
+                "INSERT OR IGNORE INTO model_hidden (library_uuid, model_id) "
+                "SELECT ?, id FROM model WHERE id = ?",
+                [(library_uuid, model_id) for model_id in ids],
+            )
+        else:
+            conn.executemany(
+                "DELETE FROM model_hidden WHERE library_uuid = ? AND model_id = ?",
+                [(library_uuid, model_id) for model_id in ids],
+            )
+    return hidden_model_ids(hub, library_uuid)
+
 
 # A location state that means the bytes are still out there somewhere, so the
 # row is NOT a candidate for Forget. `unreachable` is in here deliberately: it
@@ -2352,6 +2398,9 @@ def _purge(conn, ids: list[int]) -> None:
         f"DELETE FROM model_capability WHERE model_id IN ({marks})", tuple(ids)
     )
     conn.execute(f"DELETE FROM model WHERE id IN ({marks})", tuple(ids))
+    # Every library's hide of them: an id is never reissued, so the rows would
+    # only ever name nothing.
+    conn.execute(f"DELETE FROM model_hidden WHERE model_id IN ({marks})", tuple(ids))
     repair_stacks(conn, stack_ids)
 
 

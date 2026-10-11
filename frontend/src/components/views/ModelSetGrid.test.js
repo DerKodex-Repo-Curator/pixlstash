@@ -1640,6 +1640,33 @@ describe("hand-made sets (#1520)", () => {
     wrapper.unmount();
   });
 
+  it("offers no fill of a model hidden in this library, until Show asks for those", async () => {
+    const { wrapper, store } = await mountGrid({
+      rows: [
+        row(1, "realvisXL_v5", "checkpoint"),
+        { ...row(3, "filmgrain_xl"), hidden: true },
+      ],
+      handMade: [
+        handSet(11, [SET_CKPT]),
+        handSet(12, [
+          slotMember(4, "juggernautXL_v9", "checkpoint"),
+          slotMember(3, "filmgrain_xl", "lora"),
+        ]),
+      ],
+    });
+    store.toggleSet("hand:11");
+    await wrapper.vm.$nextTick();
+    const fill = () =>
+      wrapper.findAll("button").find((b) => b.text().includes("Fill from a set"));
+    // The other set's one LoRA is hidden here, so there is nothing to fill.
+    expect(fill().attributes("disabled")).toBeDefined();
+
+    store.setFilters({ showHidden: true });
+    await wrapper.vm.$nextTick();
+    expect(fill().attributes("disabled")).toBeUndefined();
+    wrapper.unmount();
+  });
+
   it("draws a combination the set covers on the set and not again as evidence", async () => {
     const { wrapper } = await mountGrid({
       rows: [

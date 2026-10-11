@@ -587,6 +587,20 @@ CREATE TABLE IF NOT EXISTS workflow_set_hidden (
 )
 """
 
+# The owner hides a MODEL in a library (the same choice ``workflow_set_hidden``
+# records for a set): a row means that library leaves the model off its shelf
+# and out of every list that offers a model. No row means shown. No foreign
+# key, as the set table has none: ``model.id`` is AUTOINCREMENT and never
+# reissued, so a row that outlives its model names nothing, and the purge
+# removes it anyway.
+_V2_MODEL_HIDDEN = """
+CREATE TABLE IF NOT EXISTS model_hidden (
+    library_uuid TEXT NOT NULL,
+    model_id     INTEGER NOT NULL,
+    PRIMARY KEY (library_uuid, model_id)
+)
+"""
+
 _V2_MODEL_SHELF_INDEXES = (
     # The scanner's hot path: "which files does this model have, and where".
     "CREATE INDEX IF NOT EXISTS ix_model_file_model ON model_file(model_id)",
@@ -617,6 +631,7 @@ _V2_MODEL_SHELF_TABLES = (
     _V2_MODEL_WORKFLOW_SET_MEMBER,
     _V2_MODEL_WORKFLOW_SET_DECLINE,
     _V2_WORKFLOW_SET_HIDDEN,
+    _V2_MODEL_HIDDEN,
     _V2_MODEL_SET_VERDICT,
     _V2_MODEL_SET_MEMBER_VERDICT,
     *_V2_MODEL_SHELF_INDEXES,

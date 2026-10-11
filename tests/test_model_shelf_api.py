@@ -83,6 +83,7 @@ _SHELF_ROUTES = (
     ("GET", "/api/v1/checkpoints"),
     ("GET", "/api/v1/models/base-models"),
     ("POST", "/api/v1/models/companions"),
+    ("PUT", "/api/v1/models/hidden"),
     ("GET", "/api/v1/models/workflow-sets"),
     ("POST", "/api/v1/models/workflow-sets"),
     ("PATCH", "/api/v1/models/workflow-sets/{set_id}"),
@@ -236,6 +237,8 @@ def _seed_hub(server) -> dict[str, int]:
         # served to the next.
         conn.execute("DELETE FROM model_set_verdict")
         conn.execute("DELETE FROM model_set_member_verdict")
+        # A hide is keyed by a model id too, and must not reach the next test.
+        conn.execute("DELETE FROM model_hidden")
         conn.execute("DELETE FROM model")
         conn.execute("DELETE FROM model_folder")
         conn.execute("DELETE FROM adapter_stack")
@@ -1271,6 +1274,12 @@ def test_hand_made_set_routes_answer_the_owner_and_refuse_tokens(shelf_env):
                 {"json": {"keys": ["hand:1"], "hidden": True}},
             ),
             (
+                "PUT",
+                "/api/v1/models/hidden",
+                None,
+                {"json": {"ids": [ids["alice.safetensors"]], "hidden": True}},
+            ),
+            (
                 "PATCH",
                 f"/api/v1/models/workflow-sets/{set_id}",
                 "/api/v1/models/workflow-sets/{set_id}",
@@ -1364,6 +1373,79 @@ def test_hiding_a_workflow_set_is_the_librarys_own_answer(shelf_env, monkeypatch
     assert (
         shelf_env.owner.get(f"{API}/models/workflow-sets").json()["hidden_sets"] == []
     )
+
+
+def _hidden_flags(shelf_env) -> dict[int, bool]:
+    """``model.id`` -> the ``hidden`` flag its row is served with, every list."""
+    owner = shelf_env.owner
+    rows = [
+        *owner.get(f"{API}/adapters").json()["adapters"],
+        *owner.get(f"{API}/checkpoints").json()["checkpoints"],
+    ]
+    return {row["id"]: row["hidden"] for row in rows}
+
+
+def test_hiding_a_model_is_the_librarys_own_answer(shelf_env, monkeypatch):
+    """A hidden model is per library: its row says so in the library that hid
+    it and nowhere else, the row is still served (a recipe that uses it must
+    be able to name it), and showing it again is the same call."""
+    server = shelf_env.server
+    assert server.vault.library_uuid
+    alice = shelf_env.model_ids["alice.safetensors"]
+    base = shelf_env.model_ids["base_xl.safetensors"]
+    bob = shelf_env.model_ids["bob.safetensors"]
+    assert not any(_hidden_flags(shelf_env).values())
+
+    # An id that names no model is skipped, not refused, and writes no row.
+    r = shelf_env.owner.put(
+        f"{API}/models/hidden", json={"ids": [alice, base, 999_999], "hidden": True}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["hidden_models"] == sorted([alice, base])
+    flags = _hidden_flags(shelf_env)
+    assert (flags[alice], flags[base], flags[bob]) == (True, True, False)
+    # The set payload carries the whole list, so the grid needs no second read.
+    sets = shelf_env.owner.get(f"{API}/models/workflow-sets").json()
+    assert sets["hidden_models"] == sorted([alice, base])
+
+    # Showing one leaves the other hidden.
+    r = shelf_env.owner.put(
+        f"{API}/models/hidden", json={"ids": [alice], "hidden": False}
+    )
+    assert r.json()["hidden_models"] == [base]
+    flags = _hidden_flags(shelf_env)
+    assert (flags[alice], flags[base]) == (False, True)
+
+    # Another library on the same hub hides nothing of this one's.
+    monkeypatch.setattr(server.vault, "_library_uuid", _h("another-library"))
+    assert not any(_hidden_flags(shelf_env).values())
+    sets = shelf_env.owner.get(f"{API}/models/workflow-sets").json()
+    assert sets["hidden_models"] == []
+
+
+def test_a_model_hide_with_no_library_writes_nothing(shelf_env):
+    """There is no library to hide it in, so nothing is written."""
+    hub = shelf_env.server.hub
+    alice = shelf_env.model_ids["alice.safetensors"]
+    assert model_shelf_service.set_models_hidden(hub, None, [alice], True) == []
+    assert hub.fetchall("SELECT 1 FROM model_hidden") == []
+
+
+def test_forgetting_a_model_forgets_every_librarys_hide_of_it(shelf_env):
+    """A model id is never reissued, so the row would name nothing."""
+    hub = shelf_env.server.hub
+    here = shelf_env.server.vault.library_uuid
+    alice = shelf_env.model_ids["alice.safetensors"]
+    bob = shelf_env.model_ids["bob.safetensors"]
+    for library in (here, _h("another-library")):
+        model_shelf_service.set_models_hidden(hub, library, [alice, bob], True)
+    _set_states(shelf_env, alice, "missing")
+
+    r = shelf_env.owner.post(f"{API}/models/forget", json={"ids": [alice]})
+    assert r.json()["forgotten"] == [alice], r.text
+
+    left = hub.fetchall("SELECT DISTINCT model_id FROM model_hidden")
+    assert [row["model_id"] for row in left] == [bob]
 
 
 def test_a_set_hide_with_no_library_or_no_keys_writes_nothing(shelf_env):
@@ -3780,9 +3862,10 @@ def test_sorting_by_an_aggregate_is_still_two_hub_queries(shelf_env):
     # tally is asserted to be an exact number, so a naming change that matched
     # nothing would fail loudly rather than pass silently.
     #
-    # That number is four: the rows, the locations, the capabilities, and the
+    # That number is five: the rows, the locations, the capabilities, the
     # owner's member verdicts for the cards' marks (one read while nobody has
-    # answered, as here; a second for the names once someone has). What
+    # answered, as here; a second for the names once someone has), and the
+    # models this library hides. What
     # this test actually guards is that the tally does not MOVE WITH THE ROW
     # COUNT, which is why both sides are compared as well as pinned - a whole-
     # page query added on purpose changes the constant, a per-row lookup breaks
@@ -3834,7 +3917,7 @@ def test_sorting_by_an_aggregate_is_still_two_hub_queries(shelf_env):
         r = shelf_env.owner.get(f"{API}/adapters", params={"sort": "size"})
         assert r.status_code == 200, r.text
         assert len(r.json()["adapters"]) == 24
-        assert len(calls) == with_four_rows == 4, (
+        assert len(calls) == with_four_rows == 5, (
             f"{len(calls)} hub queries for 24 rows vs {with_four_rows} for 4 - "
             "the list has grown a per-row lookup"
         )

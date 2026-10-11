@@ -1269,6 +1269,11 @@
                          key. Cleared by the next fetch, so it is never a stale
                          mark from three refreshes ago. -->
                     <span v-if="row.isNew" class="shelf-row-new">New</span>
+                    <!-- Drawn only while Show asks for the hidden models: this
+                         library leaves the row out otherwise. The neutral chip,
+                         because it is a state of the listing and not of the
+                         file. -->
+                    <span v-if="row.hidden" class="shelf-chip">Hidden</span>
                     <!-- The filename, on its own line under the name. It is what
                          the file is actually called, which the name above it may
                          well not be, and it is the string the reader pastes into
@@ -1485,6 +1490,7 @@
         ref="selBarRef"
         :sets="hideableSets"
         @hide-sets="store.toggleHiddenSets(hideableSets)"
+        @hide-models="store.toggleHiddenModels(store.selectedModels)"
         @rename="startRenameSelected"
         @set-base-model="editVerb = 'base-model'"
         @set-kind="editVerb = 'kind'"
@@ -1787,7 +1793,9 @@ const reviewSessionsStore = useReviewSessionsStore();
 const sidebarStore = useSidebarStore();
 
 /** Every model the Models rail can offer: what its closed handle counts. */
-const railCount = computed(() => store.rows.filter(railListed).length);
+const railCount = computed(
+  () => store.offeredRows.filter(railListed).length,
+);
 
 // One nudge of the closed rail's handle per session, never a glyph flash (the
 // toolbar glyph is busy showing tasks): the first hand-made set opened while

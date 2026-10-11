@@ -39,6 +39,7 @@ import socket
 import sqlite3
 import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
@@ -14950,6 +14951,30 @@ def test_a_clone_carrying_a_chain_needs_comfyui(cloneable):
     assert _manual_ids(cloneable) == []
 
 
+@contextmanager
+def _hidden_here(env, *model_ids):
+    """Hide models in the active library for the block, then show them again.
+
+    Written as rows rather than through the route, so a stubbed proposal's id
+    that names no real model can be hidden too.
+    """
+    here = env.server.vault.library_uuid
+    assert here, "no active library, so nothing could be hidden in it"
+    rows = [(here, model_id) for model_id in model_ids]
+    with env.server.hub.transaction() as conn:
+        conn.executemany(
+            "INSERT INTO model_hidden (library_uuid, model_id) VALUES (?, ?)", rows
+        )
+    try:
+        yield
+    finally:
+        with env.server.hub.transaction() as conn:
+            conn.executemany(
+                "DELETE FROM model_hidden WHERE library_uuid = ? AND model_id = ?",
+                rows,
+            )
+
+
 def test_the_swap_options_name_the_graphs_files_and_the_shelf(cloneable):
     r = cloneable.owner.get(f"{API}/workflows/{RUN_WF}/model-swap")
     assert r.status_code == 200, r.text
@@ -14964,6 +14989,14 @@ def test_the_swap_options_name_the_graphs_files_and_the_shelf(cloneable):
     }
     assert CLONE_CHECKPOINT in {m["filename"] for m in body["checkpoints"]}
     assert body["proposals"] == {}
+    # Hidden in this library: no longer a checkpoint to pick, and the file the
+    # graph itself loads is still named.
+    shelf_id = slots[_SHELF_FILENAME]["model"]["id"]
+    with _hidden_here(cloneable, cloneable.checkpoint_id, shelf_id):
+        hidden = cloneable.owner.get(f"{API}/workflows/{RUN_WF}/model-swap").json()
+    assert CLONE_CHECKPOINT not in {m["filename"] for m in hidden["checkpoints"]}
+    named = {slot["filename"]: slot["model"] for slot in hidden["slots"]}
+    assert named[_SHELF_FILENAME]["filename"] == _SHELF_FILENAME
 
     chosen = cloneable.owner.get(
         f"{API}/workflows/{RUN_WF}/model-swap",
@@ -14999,6 +15032,13 @@ def test_the_swap_options_carry_the_companion_proposals(cloneable):
     assert asked == [cloneable.checkpoint_id]
     assert body["proposals"]["vae"][0]["filename"] == "flux-vae.safetensors"
     assert body["proposals"]["vae"][0]["via"] == "family"
+    # A proposal is an offer, so a hidden model is not proposed.
+    with _hidden_here(cloneable, 7):
+        hidden = cloneable.owner.get(
+            f"{API}/workflows/{RUN_WF}/model-swap",
+            params={"checkpoint_id": cloneable.checkpoint_id},
+        ).json()
+    assert hidden["proposals"] == {"vae": [], "text_encoder": []}
 
 
 def test_a_lora_trained_on_another_family_is_flagged_never_dropped(cloneable):
@@ -15163,6 +15203,13 @@ def test_the_replacements_go_with_the_checkpoint_and_load_in_the_loader(cloneabl
     # A checkpoint is offered what its loader lists, with no evidence asked.
     names, _ = offered(_SHELF_FILENAME)
     assert CLONE_CHECKPOINT in names and _SHELF_FILENAME not in names
+    # A model this library hides is not offered, a checkpoint or a companion
+    # (both VAEs here), and it is offered again once it is shown again.
+    with _hidden_here(cloneable, cloneable.checkpoint_id, 1, 2):
+        assert CLONE_CHECKPOINT not in offered(_SHELF_FILENAME)[0]
+        assert offered("test-vae-fp8.safetensors") == ([], "none_go_with_it")
+    assert CLONE_CHECKPOINT in offered(_SHELF_FILENAME)[0]
+    assert offered("test-vae-fp8.safetensors") == (["test-vae-bf16.safetensors"], None)
     # ComfyUI down: the file type decides, so a core loader gets no GGUF.
     cloneable.monkeypatch.setattr(
         workflows_routes, "_read_object_info", lambda url: (None, "unreachable")
@@ -19970,6 +20017,14 @@ def test_the_people_a_workflow_offers_are_those_with_a_lora_for_its_base_model(
     assert (other["people"], other["clash"], other["unknown"]) == ([], 1, 0)
     nobody_knows = people_who_fit(env.server.hub, env.server.vault, None)
     assert (nobody_knows["people"], nobody_knows["unknown"]) == ([], 1)
+    # A LoRA this library hides is not offered, so it vouches for nobody: the
+    # person is not offered and not counted as one who almost fits.
+    lora_id = env.server.hub.fetchone(
+        "SELECT id FROM model WHERE sha256 = ?", (RUN_ADAPTER_DIGEST,)
+    )["id"]
+    with _hidden_here(env, lora_id):
+        hidden = people_who_fit(env.server.hub, env.server.vault, "sdxl")
+    assert (hidden["people"], hidden["clash"], hidden["unknown"]) == ([], 0, 0)
 
     # The route answers for the workflow's own checkpoint, which this hub
     # never identified: the person is counted, not offered.
