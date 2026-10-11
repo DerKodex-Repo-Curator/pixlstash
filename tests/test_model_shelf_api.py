@@ -519,6 +519,9 @@ def test_unhashed_checkpoint_is_listed_and_addressed_by_id(shelf_env):
     unhashed = by_name["huge_unhashed.safetensors"]
     assert unhashed["sha256"] is None
     assert unhashed["id"] == shelf_env.model_ids["huge_unhashed.safetensors"]
+    # The hash worker owes this one a digest; a row that has one is owed nothing.
+    assert unhashed["hash_pending"] is True
+    assert by_name["base_xl.safetensors"]["hash_pending"] is False
 
 
 def test_checkpoint_hash_is_not_served_by_the_adapter_detail_route(shelf_env):

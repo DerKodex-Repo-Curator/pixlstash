@@ -411,7 +411,14 @@ describe("modelFileTitle", () => {
   });
 
   it("says a checkpoint is still waiting for its hash", () => {
-    expect(modelFileTitle({ sha256: null })).toBe("SHA-256: not read yet");
+    expect(modelFileTitle({ sha256: null, hash_pending: true })).toBe(
+      "SHA-256: not read yet",
+    );
+  });
+
+  it("does not say a row that never gets a hash is waiting for one", () => {
+    // An engine, or a cached Hugging Face repo: a directory nothing hashes.
+    expect(modelFileTitle({ sha256: null, hash_pending: false })).toBe("");
   });
 
   it("claims nothing about a set member whose shelf row is not loaded", () => {

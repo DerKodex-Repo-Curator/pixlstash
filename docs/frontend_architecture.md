@@ -4967,7 +4967,8 @@ two disks. `copyPathsTitle()` (pure, in `utils/modelShelf.js`) joins each
 `locations[]` entry into one full path and the **file line carries them as its
 tooltip**, one per line, on covers and on expanded stack members alike.
 `modelFileTitle()` wraps it and adds a last line, the row's whole `sha256`
-(`SHA-256: not read yet` for a checkpoint the hasher has not reached): that is
+(`SHA-256: not read yet` for a row the hasher still owes one, `hash_pending`;
+no line for a row that never gets a hash): that is
 what a set's membership and a recipe's digest are matched against. The same
 helper is the tooltip on a model in an open workflow set - the tray card's file
 line, the tray list's name, a hand-made set's tile name - where a member that
@@ -6334,7 +6335,10 @@ rail="models"` toggles it. Closed, the shelf shows a plain `InspectorEdgeTab`
 with the count (named `Show models (N)`), which moves at most once a session:
 the first time a hand-made set opens while the rail is closed.
 
-- **What it lists.** Every shelf model some set slot takes (`railListed`), under
+- **What it lists.** Every shelf model some set slot takes that a set can keep
+  by hash, now or once the hasher has read it (`railListed`). A model with no
+  `sha256` and `hash_pending` false never gets one (a cached Hugging Face repo
+  is a directory), so it can never be added and is not offered. They sit under
   the set panel's slot headings, each saying where it already is ("In no set
   yet", "In Night city", "In 2 of your sets"). Picking a model already in
   another set is ordinary. The tab shows the count. A stack is one row, its
@@ -6375,8 +6379,8 @@ the first time a hand-made set opens while the rail is closed.
   the next library. An added row keeps its place with
   a check (*In set*); a row whose write is out ignores a second press. The
   receipt is raised again only when the run has grown since it went up.
-- **Checkpoints and hashes.** A row still being hashed is listed but cannot be
-  added or dragged. A checkpoint into a set that has one reads *Add as 2nd*;
+- **Checkpoints and hashes.** A row still being hashed (`hash_pending`) is
+  listed but cannot be added or dragged. A checkpoint into a set that has one reads *Add as 2nd*;
   pressing that button is the answer, while Enter, the footer, the menu and a
   drop ask first (`store.confirmSecondCheckpoint`). A drop on a set whose base
   model differs from the dragged models' one is refused with a notice, as the

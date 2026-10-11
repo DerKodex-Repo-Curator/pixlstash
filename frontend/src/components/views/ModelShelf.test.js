@@ -930,7 +930,9 @@ describe("location state", () => {
   });
 
   it("says a checkpoint not hashed yet is waiting, rather than showing none", async () => {
-    const wrapper = await mountShelf([adapter({ sha256: null })]);
+    const wrapper = await mountShelf([
+      adapter({ sha256: null, hash_pending: true }),
+    ]);
     expect(tip(wrapper.find(".shelf-row-file"))).toBe(
       "/m/a.st\nSHA-256: not read yet",
     );

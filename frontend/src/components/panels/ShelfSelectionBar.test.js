@@ -628,10 +628,30 @@ describe("Copy SHA-256", () => {
   });
 
   it("is refused, with the reason, for a checkpoint not hashed yet", () => {
-    selectRows([row(1, "present", { sha256: null })]);
+    selectRows([row(1, "present", { sha256: null, hash_pending: true })]);
     const wrapper = mount(ShelfSelectionBar, globalOpts);
     expect(item(wrapper).attributes("disabled")).toBeDefined();
     expect(tip(item(wrapper))).toBe("Not hashed yet");
+  });
+
+  it("does not promise a hash to a model that never gets one", () => {
+    // A cached Hugging Face repo is a directory: nothing hashes it.
+    selectRows([
+      row(1, "present", {
+        sha256: null,
+        hash_pending: false,
+        file_kind: "unknown",
+      }),
+    ]);
+    const wrapper = mount(ShelfSelectionBar, globalOpts);
+    expect(tip(item(wrapper))).toBe("No file hash");
+    const newSet = wrapper
+      .findAll(".ctx-item")
+      .find((mi) => mi.text().includes("New workflow set"));
+    expect(newSet.attributes("disabled")).toBeDefined();
+    expect(tip(newSet)).toBe(
+      "A set keeps its models by file hash, and this one has none.",
+    );
   });
 });
 

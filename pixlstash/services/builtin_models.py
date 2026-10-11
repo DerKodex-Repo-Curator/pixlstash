@@ -62,6 +62,25 @@ logger = get_logger(__name__)
 BUILTIN_KIND = "foreign"
 BUILTIN_OWNER = "pixlstash"
 
+# The rows the hash worker still owes a digest, as a predicate over `model m`.
+# A NULL `sha256` alone does not say that: an engine carries none by design,
+# and neither does anything in a folder declared here, which
+# `MissingCheckpointHashFinder` leaves out because a declared entry may be a
+# directory. Those rows never get one, so reading them as "still hashing" has
+# the shelf waiting on work nobody is going to do.
+#
+# "Never" is said only of a row whose EVERY copy is in a declared folder (the
+# MIN is 1). One copy anywhere else, in any state, and it is still owed: a
+# drive that is unplugged comes back. A row with no copy at all (NULL) stays
+# owed too, because the readers of this forget recipe digests once nothing is
+# pending, and wrongly waiting costs less than wrongly forgetting.
+HASH_PENDING_SQL = (
+    f"m.sha256 IS NULL AND m.file_kind <> '{FILE_ENGINE}' AND COALESCE(("
+    f"SELECT MIN(f.owner IS '{BUILTIN_OWNER}') FROM model_file mf "
+    "JOIN model_folder f ON f.id = mf.model_folder_id "
+    "WHERE mf.model_id = m.id), 0) = 0"
+)
+
 # How a declared folder moves, which is a statement about the folder rather than
 # a permission. `root_only` means "if it relocates, it relocates whole" - true of
 # PixlStash's own downloads, which have a relocate route since #905, and of the

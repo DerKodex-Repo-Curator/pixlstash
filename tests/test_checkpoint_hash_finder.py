@@ -19,6 +19,12 @@ import os
 import pytest
 
 from pixlstash.hub.db import HubDatabase
+from pixlstash.hub.workflows import model_ghost_names
+from pixlstash.services.model_shelf_service import fetch_models, resolve_recipe_models
+from pixlstash.services.model_workflow_sets import (
+    WorkflowSetRefusedError,
+    create_set,
+)
 from pixlstash.task_runner import TaskRunner
 from pixlstash.tasks.checkpoint_hash_task import CheckpointHashTask
 from pixlstash.tasks.missing_checkpoint_hash_finder import MissingCheckpointHashFinder
@@ -454,6 +460,84 @@ class TestFinder:
         # And it is not counted as work still owed, or the shelf would report a
         # queue that can never drain.
         assert MissingCheckpointHashFinder(hub).progress() == (1, 1)
+
+    def test_nothing_waits_on_a_row_that_is_never_hashed(self, hub, tmp_path):
+        """A row this finder leaves out for good has `sha256` NULL for good.
+        Reading that as "still hashing" had the Models rail offer every cached
+        HuggingFace repo with a permanently disabled Add, and kept recipe
+        digests from ever being judged."""
+        cache = tmp_path / "hf"
+        (cache / "models--Wan-AI--Wan2.1-T2V-14B").mkdir(parents=True)
+        declared = register(
+            hub, cache / "models--Wan-AI--Wan2.1-T2V-14B", file_kind="unknown"
+        )
+        engine = register(
+            hub, write_model(tmp_path / "Tagger.onnx"), file_kind="engine"
+        )
+        with hub.transaction() as conn:
+            conn.execute(
+                "UPDATE model_folder SET owner = 'pixlstash' WHERE path = ?",
+                (str(cache),),
+            )
+            conn.execute(
+                "INSERT INTO workflow_topology (topology_hash, hash_version, "
+                "node_count, first_seen_at) VALUES ('t', 'v1', 1, 'now')"
+            )
+            conn.execute(
+                "INSERT INTO workflow_recipe (structural_hash, topology_hash, "
+                "hash_version, node_count, first_seen_at) "
+                "VALUES ('r', 't', 'v1', 1, 'now')"
+            )
+            conn.execute(
+                "INSERT INTO workflow_recipe_asset (structural_hash, widget_name, "
+                "normalized_filename) VALUES ('r', 'lora_sha256', ?)",
+                ("ab" * 32,),
+            )
+
+        def pending():
+            kinds = ("checkpoint", "unknown", "engine")
+            return {
+                row["id"] for row in fetch_models(hub, kinds) if row["hash_pending"]
+            }
+
+        def refusal(model_id):
+            with pytest.raises(WorkflowSetRefusedError) as refused:
+                create_set(hub, "doomed", [{"model_id": model_id}])
+            return str(refused.value)
+
+        assert pending() == set()
+        assert resolve_recipe_models(hub)[2] == set()
+        assert model_ghost_names(hub) == {"ab" * 32}
+        assert "has no file hash" in refusal(declared)
+        assert "workflow loads" in refusal(engine)
+
+        # The positive control: one row the finder WILL hand out, and every
+        # reader is waiting again.
+        waiting = register(hub, write_model(tmp_path / "Mine.safetensors"))
+
+        assert MissingCheckpointHashFinder(hub).find_task().params[
+            "checkpoint_ids"
+        ] == [waiting]
+        assert pending() == {waiting}
+        assert resolve_recipe_models(hub)[2] == {"r"}
+        assert model_ghost_names(hub) == set()
+        assert "still being hashed" in refusal(waiting)
+
+        # "Never" needs EVERY copy declared. One copy anywhere else and the row
+        # is still owed, as is a row with no copy at all: judging digests early
+        # forgets them, so those wait.
+        both = register(hub, write_model(tmp_path / "Both.safetensors"))
+        gone = register(hub, write_model(tmp_path / "Gone.safetensors"))
+        with hub.transaction() as conn:
+            conn.execute(
+                "INSERT INTO model_file (model_id, model_folder_id, relpath, state, "
+                "seen_at) SELECT ?, id, 'Both.safetensors', 'present', 'now' "
+                "FROM model_folder WHERE owner = 'pixlstash'",
+                (both,),
+            )
+            conn.execute("DELETE FROM model_file WHERE model_id = ?", (gone,))
+
+        assert pending() == {waiting, both, gone}
 
     def test_the_path_it_hands_out_is_the_folder_plus_the_relpath(self, hub, tmp_path):
         path = write_model(tmp_path / "sdxl.safetensors")

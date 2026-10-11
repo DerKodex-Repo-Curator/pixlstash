@@ -296,8 +296,18 @@ class ModelResponse(BaseModel):
         default=None,
         description=(
             "Full-file SHA-256, the interop identity (Civitai lookup, the ComfyUI "
-            "node). Never null for an adapter or an unknown; null for a checkpoint "
-            "MissingCheckpointHashFinder has not read yet."
+            "node). Null for a file MissingCheckpointHashFinder has not read "
+            "yet, and for a row that never gets one: see `hash_pending`."
+        ),
+    )
+    hash_pending: bool = Field(
+        default=False,
+        description=(
+            "True while `sha256` is null and the hash worker still owes one. "
+            "False beside a null `sha256` means the row never gets a hash: an "
+            "engine, or an entry in a folder PixlStash declares rather than "
+            "scans (a cached HuggingFace repo is a directory). Such a row "
+            "cannot be kept by a workflow set, now or later."
         ),
     )
     file_kind: str = Field(
@@ -1594,6 +1604,7 @@ def _to_response(
     return ModelResponse(
         id=int(row["id"]),
         sha256=row["sha256"],
+        hash_pending=bool(row["hash_pending"]),
         file_kind=row["file_kind"],
         kind=row["kind"],
         display_name=row["display_name"],
