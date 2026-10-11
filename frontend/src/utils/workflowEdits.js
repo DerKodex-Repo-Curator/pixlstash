@@ -12,6 +12,7 @@
 // that all read as saved.
 
 import { loraBase } from "./loraChain";
+import { over } from "./workflowChanges";
 
 /**
  * A set with every list present, from what a read answered (`waiting`, null
@@ -146,25 +147,19 @@ export function withLoraStrength(changes, slot, strength, saved = {}) {
 
 /**
  * `fragment` laid over `changes`, thing by thing, as the server lays one set
- * over another (`WorkflowChanges.over`): a slot the fragment removes is no
- * longer set, and one it sets is no longer removed.
+ * over another: the rule is `over`'s, written once (`workflowChanges.js`).
+ *
+ * Only the fragment's slots are respelled first, as every edit here spells
+ * one (`slotOf`): the rows find their entry by a string node id and the field
+ * named outright, and `over` stores an entry as it was given.
  */
 export function withFragment(changes, fragment) {
-  let set = changesOf(changes);
-  for (const model of fragment?.models ?? []) {
-    set.models = set.models.filter((entry) => entry.address !== model.address);
-    set.models.push({ address: model.address, filename: model.filename });
-  }
-  for (const entry of fragment?.loras ?? []) {
-    set.skip_loras = set.skip_loras.filter((item) => !sameSlot(item, entry));
-    set.loras = set.loras.filter((item) => !sameSlot(item, entry));
-    set.loras.push({ ...entry, ...slotOf(entry) });
-  }
-  for (const entry of fragment?.skip_loras ?? []) {
-    set = withLoraRemoved(set, entry, true);
-  }
-  Object.assign(set.stages, fragment?.stages ?? {});
-  return set;
+  const top = changesOf(fragment);
+  return over(changes, {
+    ...top,
+    loras: top.loras.map((entry) => ({ ...entry, ...slotOf(entry) })),
+    skip_loras: top.skip_loras.map(slotOf),
+  });
 }
 
 /**

@@ -183,7 +183,12 @@
            "in 31 of 40"). -->
       <section class="wftab-panel" data-testid="wftab-default-recipe">
         <div class="wftab-sec-head">
-          <span class="section-label" role="heading" aria-level="3"
+          <span
+            ref="modelsHeading"
+            class="section-label"
+            role="heading"
+            aria-level="3"
+            tabindex="-1"
             >Models</span
           >
           <!-- Fills the rows below from one of the owner's model sets, as
@@ -192,11 +197,38 @@
             ref="useSetMenu"
             :workflow-id="selectedKey || ''"
             :models="settableModels"
-            :disabled="chainNoGraph || !settableModels.length"
-            :disabled-reason="chainNoGraph ? 'wftab-chain-reason' : undefined"
+            :disabled="chainNoGraph || !settableModels.length || !canEdit"
+            :disabled-reason="
+              chainNoGraph
+                ? 'wftab-chain-reason'
+                : changesFailed
+                  ? 'wftab-changes-failed'
+                  : undefined
+            "
             @use="useSet"
           />
         </div>
+        <!-- Every row below is a view of the unsaved changes, so none can be
+             edited until they are read. A read that failed says so here, with
+             the way to ask again, rather than leave the rows locked for no
+             reason anybody can see. -->
+        <p
+          v-if="changesFailed"
+          id="wftab-changes-failed"
+          class="wftab-note wftab-quiet"
+          data-testid="wftab-changes-failed"
+        >
+          Could not read this workflow's unsaved changes just now, so its
+          models, stages and LoRAs cannot be changed.
+          <AppButton
+            size="sm"
+            variant="ghost"
+            data-testid="wftab-changes-retry"
+            @click="retryChanges"
+          >
+            Retry
+          </AppButton>
+        </p>
         <!-- The list card's `default_recipe` is null, so until the detail
              lands there is no default to show: its base-card slots are not
              one. -->
@@ -266,6 +298,7 @@
               :label="row.name"
               hide-label
               :options="row.options"
+              :disabled="!canEdit"
               :data-testid="`wftab-pick-${row.kind}`"
               @update:model-value="(file) => pickModel(row, file)"
             />
@@ -294,6 +327,7 @@
                 icon-only
                 icon-left="undo"
                 data-testid="wftab-reset-model"
+                :disabled="!canEdit"
                 :tooltip="`Put ${row.name} back to ${row.savedLabel}`"
                 @click="pickModel(row, '')"
               />
@@ -467,6 +501,7 @@
               <input
                 type="checkbox"
                 :checked="stage.on"
+                :disabled="!canEdit"
                 :data-testid="`wftab-stage-${stage.key}`"
                 @change="toggleStage(stage, $event.target.checked)"
               />
@@ -552,6 +587,7 @@
                 size="sm"
                 variant="ghost"
                 data-testid="wftab-lora-put-back"
+                :disabled="!canEdit"
                 :aria-label="`Put ${lora.label} back`"
                 @click="setLoraRemoved(lora, false)"
               >
@@ -585,6 +621,7 @@
                 min="-10"
                 max="10"
                 :value="lora.strengthValue"
+                :disabled="!canEdit"
                 :aria-label="`Strength of ${lora.label}`"
                 data-testid="wftab-lora-strength"
                 @change="setLoraStrength(lora, $event.target.value, $event.target)"
@@ -599,6 +636,7 @@
                 icon-only
                 icon-left="close"
                 data-testid="wftab-lora-remove"
+                :disabled="!canEdit"
                 :tooltip="`Remove ${lora.label}`"
                 @click="setLoraRemoved(lora, true)"
               />
@@ -617,6 +655,7 @@
                 icon-only
                 icon-left="undo"
                 data-testid="wftab-reset-strength"
+                :disabled="!canEdit"
                 :tooltip="`Put the strength of ${lora.label} back to ${lora.savedStrengthText}`"
                 @click="setLoraStrength(lora, lora.savedStrength)"
               />
@@ -865,7 +904,8 @@
           <AppButton
             size="sm"
             variant="ghost"
-            :disabled="draftBusy"
+            :disabled="Boolean(settlingShown)"
+            :loading="settlingShown === 'discard'"
             data-testid="wftab-discard"
             @click="discardChanges"
           >
@@ -900,8 +940,8 @@
             </AppButton>
             <AppButton
               size="sm"
-              :disabled="!newName.trim() || draftBusy"
-              :loading="busy === 'save-as-new'"
+              :disabled="!newName.trim() || Boolean(settlingShown)"
+              :loading="settlingShown === 'save-as-new'"
               data-testid="wftab-save-as-new-confirm"
               @click="saveAsNew"
             >
@@ -917,7 +957,7 @@
             v-if="saveAsNewOpen"
             ref="saveAsNewButton"
             size="sm"
-            :disabled="draftBusy"
+            :disabled="Boolean(settlingShown)"
             data-testid="wftab-save-as-new"
             @click="startNaming"
           >
@@ -928,8 +968,8 @@
             v-if="saveOpen"
             size="sm"
             icon-left="content-save-outline"
-            :disabled="draftBusy"
-            :loading="busy === 'save'"
+            :disabled="Boolean(settlingShown)"
+            :loading="settlingShown === 'save'"
             data-testid="wftab-save"
             @click="saveChanges"
           >
@@ -977,9 +1017,11 @@
              Run…'s reason or a ComfyUI without the node. The tooltip is its
              accessible name. What opens has the changes waiting here in it,
              and what ComfyUI saves from there comes back as this workflow's
-             next version, those changes with it (#1852). With nodes from
-             before that, what opens is a copy of the SAVED graph and the
-             name says so. While changes wait, the line below says which. -->
+             next version, those changes with it (#1852). Changes made on a
+             version the workflow has since left are not in it: the server
+             leaves them out. With nodes from before that, what opens is a
+             copy of the SAVED graph and the name says so. While changes wait,
+             the line below says which of the three. -->
         <AppButton
           v-if="canOpenComfyui"
           icon-only
@@ -1047,7 +1089,11 @@
           class="wftab-note wftab-quiet"
           data-testid="wftab-open-unsaved"
         >
-          <template v-if="comfyuiOpensACopy">
+          <template v-if="changesStale">
+            Open in ComfyUI opens the workflow as it is now. The unsaved
+            changes were made on an earlier version and are not in it.
+          </template>
+          <template v-else-if="comfyuiOpensACopy">
             Open in ComfyUI opens the saved workflow. The unsaved changes are
             not in it until they are saved.
           </template>
@@ -1099,7 +1145,15 @@
 // What the rail shows follows the SELECTION: one workflow, keyed by its `id`
 // (#1623). Models and Defaults read the detail's `card.default_recipe`.
 
-import { computed, nextTick, onBeforeUnmount, ref, toRaw, watch } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  reactive,
+  ref,
+  toRaw,
+  watch,
+} from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { VIcon, VMenu } from "vuetify/components";
 
@@ -1786,6 +1840,11 @@ const modelRows = computed(() => {
  * The rows a model set may fill: the loader's address, the file it loads as
  * saved, its kind, and the file waiting on it. The last two let a set that
  * holds the saved file take an earlier pick back off the row.
+ *
+ * The file is what a set's plan names the loader by, and the plans are read
+ * off the graph with the owner's replacements applied: so it is the
+ * replacement on a row that holds one (`loadedFile`), never the file it
+ * took the place of.
  */
 const settableModels = computed(() =>
   modelRows.value
@@ -1842,15 +1901,32 @@ const editPictures = ref(0);
 /** A LoRA to open with its loader already deleted (Save-as-recipe's hand-over). */
 const editDrop = ref("");
 
+/** Every loader of a chain read: a forked chain's lanes after its trunk. */
+function loadersOf(body) {
+  return [
+    ...(body?.loaders ?? []),
+    ...(body?.lanes ?? []).flatMap((lane) => lane.loaders ?? []),
+  ];
+}
+
+/**
+ * What a change names a loader by, with the shelf LoRA it holds: a strength
+ * can only be set where the shelf knows the file.
+ */
+function slotOfLoader(loader) {
+  return {
+    node_id: String(loader.node_id),
+    field: loader.field || "lora_name",
+    sha256: loader.sha256 ? String(loader.sha256).toLowerCase() : "",
+  };
+}
+
 /**
  * The loaders as the inspector lists them: the shelf's name, and a strength.
  * A forked chain's lanes are listed after its trunk, so every loader shows.
  */
 const chainLoaders = computed(() =>
-  [
-    ...(chain.value?.loaders ?? []),
-    ...(chain.value?.lanes ?? []).flatMap((lane) => lane.loaders ?? []),
-  ].map((loader) => {
+  loadersOf(chain.value).map((loader) => {
     return {
       id: String(loader.node_id),
       node_id: String(loader.node_id),
@@ -1863,13 +1939,7 @@ const chainLoaders = computed(() =>
         : String(loader.filename || loader.name || "").split(/[\\/]/).pop(),
       on_shelf: Boolean(loader.on_shelf),
       strengthText: formatStrength(loader.strength) || "—",
-      // What a change names the loader by, with the shelf LoRA it holds: a
-      // strength can only be set where the shelf knows the file.
-      slot: {
-        node_id: String(loader.node_id),
-        field: loader.field || "lora_name",
-        sha256: loader.sha256 ? String(loader.sha256).toLowerCase() : "",
-      },
+      slot: slotOfLoader(loader),
       savedStrength: Number.isFinite(loader.strength) ? loader.strength : null,
       // Null where the clip strength is the model strength's twin.
       savedClip:
@@ -1900,9 +1970,11 @@ const shelfLine = computed(() => {
  * last would put its failure, or its end of waiting, over the newer one.
  */
 let chainRead = 0;
-async function loadChain(key, { quiet = false } = {}) {
+async function loadChain(key, { quiet = false, asked = null } = {}) {
   const read = ++chainRead;
-  // `quiet`: the rows stay as they are until the new chain is in.
+  // `quiet`: the rows stay as they are until the new chain is in, and
+  // through a read that fails. `asked` is that read already on the wire,
+  // where the caller needs its answer too.
   if (!quiet) {
     chain.value = null;
     chainFailed.value = false;
@@ -1914,20 +1986,22 @@ async function loadChain(key, { quiet = false } = {}) {
   }
   chainPending.value = !quiet;
   try {
-    const body = await getLoraChain(key);
+    const body = await (asked ?? getLoraChain(key));
     if (read !== chainRead) return;
     chain.value = body;
     chainFailed.value = false;
     chainNoGraph.value = false;
   } catch (err) {
     if (read !== chainRead) return;
-    chain.value = null;
-    if (err?.response?.status === 409) {
-      chainNoGraph.value = true;
-    } else {
+    // No graph is an answer, and is drawn; anything else is a failure.
+    const noGraph = err?.response?.status === 409;
+    if (!noGraph) {
       console.warn(`[workflows] could not read the LoRA chain of ${key}`, err);
-      chainFailed.value = true;
+      if (quiet) return;
     }
+    chain.value = null;
+    chainNoGraph.value = noGraph;
+    chainFailed.value = !noGraph;
   } finally {
     if (read === chainRead) chainPending.value = false;
   }
@@ -1973,22 +2047,29 @@ const exposable = computed(() => {
  * kept, as with the chain.
  */
 let formRead = 0;
-async function loadFormInputs(key) {
+async function loadFormInputs(key, { quiet = false } = {}) {
   const read = ++formRead;
-  formNodes.value = [];
-  formFailed.value = "";
+  // `quiet`: the choices stay as they are until the new ones are in, and a
+  // failure leaves them. Blanking them swaps every list for a plain box and
+  // back, which drops focus from the one being used.
+  if (!quiet) {
+    formNodes.value = [];
+    formFailed.value = "";
+  }
   if (!key) {
     formPending.value = false;
     return;
   }
-  formPending.value = true;
+  if (!quiet) formPending.value = true;
   try {
     const body = await getWorkflowFormInputs(key);
     if (read !== formRead) return;
     formNodes.value = body.nodes ?? [];
+    formFailed.value = "";
   } catch (err) {
     if (read !== formRead) return;
     console.warn(`[workflows] could not read the form inputs of ${key}`, err);
+    if (quiet) return;
     formFailed.value =
       err?.response?.status === 409
         ? "PixlStash has no graph for this workflow, so it has no nodes to pick from."
@@ -2579,6 +2660,13 @@ async function loadDetail(key, { quiet = false } = {}) {
  * two verbs are open and why not (the server's sentences, printed as sent).
  */
 const changesRead = ref(null);
+/** The read failed: the rows are locked, and the rail says so with a Retry. */
+const changesFailed = ref(false);
+/**
+ * Which read is the latest. Every ask is for the workflow on screen, and a
+ * write's answer counts as one only when it is that workflow's too: an answer
+ * for the workflow just left must never retire the read of the one arrived at.
+ */
 let changesAsk = 0;
 
 /**
@@ -2617,30 +2705,116 @@ const changeCount = computed(() =>
     : Number(shownChanges.value?.count) || 0,
 );
 
-/** A write of the set, a save or a discard is out. */
-const draftBusy = computed(
-  () =>
-    intent.value?.key === selectedKey.value ||
-    ["save", "save-as-new", "discard"].includes(busy.value),
+/**
+ * What is settling each workflow's set, from the press until its answer is
+ * drawn, as `{ what }`: `save`, `save-as-new`, `discard`, a go-back to
+ * another `version`, the `rebase` after Edit LoRAs… saved, or an `apply` of
+ * that dialog's made off the rows.
+ *
+ * **The one rule for who may touch a set.** While something settles it,
+ * nothing else of it is made or sent: no row edits it and no verb is pressed.
+ * An edit whose write is still out excludes nothing. The next edit queues
+ * behind it, and so does whatever settles the set (`settle`), which is why a
+ * strength typed and Save clicked in one gesture both land.
+ */
+const settling = reactive(new Map());
+/** The same for the workflow on screen, or "". */
+const settlingShown = computed(
+  () => settling.get(selectedKey.value)?.what ?? "",
 );
 
-const saveOpen = computed(() => Boolean(shownChanges.value?.save?.open));
-const saveAsNewOpen = computed(() =>
-  Boolean(shownChanges.value?.save_as_new?.open),
+/**
+ * The workflow whose rows off the graph are being read again (`refreshGraph`),
+ * or "". Until they are in, each still says the saved value of a graph that
+ * is gone, and an edit is measured against that value.
+ */
+const rereading = ref("");
+
+/**
+ * Whether a row may edit the shown workflow's set: it has been read, since
+ * the next set is built from what waits, nothing is settling it, and the rows
+ * are not being read again.
+ */
+const canEdit = computed(
+  () =>
+    Boolean(shownChanges.value) &&
+    !settlingShown.value &&
+    rereading.value !== selectedKey.value,
+);
+
+// A lock disables whichever row control has focus, and a browser then drops
+// that focus on the page. It is given back when the lock lifts, unless the
+// owner has put it somewhere else meanwhile. A strength half typed is not
+// kept across the lock: the field is drawn again with what the row holds,
+// since the number was typed for a row that was about to change.
+let heldFocus = null;
+watch(canEdit, async (can) => {
+  if (!can) {
+    heldFocus = document.activeElement;
+    return;
+  }
+  const held = heldFocus;
+  heldFocus = null;
+  await nextTick();
+  const active = document.activeElement;
+  if (
+    held?.isConnected &&
+    !held.disabled &&
+    (!active || active === document.body || active === held)
+  ) {
+    held.focus();
+  }
+});
+
+/**
+ * What waits was made on a version the workflow has since left (`stale`):
+ * Save is closed for it, and Open in ComfyUI opens the graph without it.
+ */
+const changesStale = computed(() => Boolean(shownChanges.value?.stale));
+
+/**
+ * An edit's write is out for the shown workflow, so the read is of the set
+ * BEFORE it while the bar counts the one after. Until the answer for that
+ * set is in, the bar says nothing the read knew only of the other:
+ *
+ * - A verb the bar already drew stays drawn. It may be the control the edit's
+ *   own gesture is about to click (a strength typed, then Save), and a verb
+ *   taken away under the pointer swallows that click. Pressed, it queues
+ *   behind the write, and the server answers for the set as it then is.
+ * - A bar that was not up (the read's set was empty) draws no verb yet.
+ * - No reason is printed, but that of a stale set: editing it again does not
+ *   end that, so it is as true of the set being counted.
+ */
+const editOut = computed(() => intent.value?.key === selectedKey.value);
+const verbsRead = computed(
+  () => !editOut.value || Number(shownChanges.value?.count) > 0,
+);
+
+const saveOpen = computed(
+  () => verbsRead.value && Boolean(shownChanges.value?.save?.open),
+);
+const saveAsNewOpen = computed(
+  () => verbsRead.value && Boolean(shownChanges.value?.save_as_new?.open),
 );
 
 /** Why a verb is not offered: the server's sentences, once each. */
-const closedReasons = computed(() => [
-  ...new Set(
-    [shownChanges.value?.save, shownChanges.value?.save_as_new]
-      .filter((verb) => verb && !verb.open && verb.reason)
-      .map((verb) => verb.reason),
-  ),
-]);
+const closedReasons = computed(() =>
+  editOut.value && !changesStale.value
+    ? []
+    : [
+        ...new Set(
+          [shownChanges.value?.save, shownChanges.value?.save_as_new]
+            .filter((verb) => verb && !verb.open && verb.reason)
+            .map((verb) => verb.reason),
+        ),
+      ],
+);
 
-/** Read what waits on one workflow. */
+/** Read what waits on the shown workflow. */
 async function loadChanges(key) {
+  if (!stillOn(key)) return;
   const ask = ++changesAsk;
+  changesFailed.value = false;
   if (!key) {
     changesRead.value = null;
     return;
@@ -2655,21 +2829,42 @@ async function loadChanges(key) {
     console.warn(`[workflows] could not read the changes of ${key}`, err);
     if (ask !== changesAsk || !stillOn(key)) return;
     changesRead.value = null;
+    changesFailed.value = true;
   }
 }
 
-/** A write's answer is the newest state there is: it retires any read out. */
+/**
+ * Retry takes its own button away once the read is in, so focus goes to the
+ * heading of the rows it unlocked, never to the page.
+ */
+const modelsHeading = ref(null);
+async function retryChanges() {
+  await loadChanges(selectedKey.value);
+  await nextTick();
+  const active = document.activeElement;
+  if (!active || active === document.body) modelsHeading.value?.focus();
+}
+
+/**
+ * A write's answer is the newest state there is of its workflow: on screen,
+ * it retires any read out. For a workflow the rail has left it is dropped,
+ * and the ask is left alone: the read out is the shown workflow's own, and
+ * coming back to this one reads it again.
+ */
 function takeChanges(key, state) {
-  changesAsk += 1;
   if (intent.value?.key === key) intent.value = null;
-  if (stillOn(key)) changesRead.value = { key, state };
+  if (!stillOn(key)) return;
+  changesAsk += 1;
+  changesFailed.value = false;
+  changesRead.value = { key, state };
 }
 
 /**
  * Make one edit: build the next set from what waits, draw it, and store it.
  *
- * Refused while the set has not been read: the next set is built from what
- * waits, and one built from nothing would replace changes that are there.
+ * Refused where a row could not have made it (`canEdit`): every control is
+ * disabled then, so this is for whatever comes past them, a menu left open or
+ * a dialog's answer. Said, because the change is otherwise lost in silence.
  *
  * **One write on the wire, the last intent wins.** Each edit queues a link;
  * a link sends the newest set there is when its turn comes, and an answer is
@@ -2679,12 +2874,14 @@ function takeChanges(key, state) {
 function edit(build) {
   const key = selectedKey.value;
   if (!key) return undefined;
-  if (!shownChanges.value) {
+  if (!canEdit.value) {
     notices.push({
       level: "error",
-      text: "That change was not kept: this workflow's unsaved changes could not be read. Try again.",
+      text: settling.has(key)
+        ? "That change was not kept: this workflow's changes were being written. Make it again."
+        : "That change was not kept: this workflow's unsaved changes could not be read. Try again.",
     });
-    void loadChanges(key);
+    if (changesFailed.value) void loadChanges(key);
     return undefined;
   }
   draftError.value = "";
@@ -2776,21 +2973,46 @@ function savedText(saved, lead) {
 }
 
 /**
+ * Settle the set of `key`: run `work` as the one thing writing it.
+ *
+ * Marked at the press, not when its turn comes, so no edit can be made in
+ * between and what the caller read at the press is what `work` acts on. The
+ * edits made before the press go first: their writes are the queue as it
+ * stood then (`changeWrites`), and none can join it after. Queued with every
+ * other write, so two things settling one set never run beside each other.
+ */
+function settle(key, what, work) {
+  const mark = { what };
+  settling.set(key, mark);
+  const sent = changeWrites;
+  return queueWrite(what, async () => {
+    try {
+      await sent;
+      await work();
+    } finally {
+      // Only its own mark: one made since is of a turn still to come.
+      if (toRaw(settling.get(key)) === mark) settling.delete(key);
+    }
+  });
+}
+
+/**
  * Save: what waits, written over the workflow as its next version. A refusal
  * (409) is printed in the bar in the server's words, and the verbs are read
  * again since they are what changed.
  */
 function saveChanges() {
   const key = selectedKey.value;
-  if (!key || !saveOpen.value) return undefined;
+  if (!key || !saveOpen.value || settling.has(key)) return undefined;
   draftError.value = "";
-  return queueWrite("save", async () => {
-    // The last edit's write first: a save ahead of it would leave it behind.
-    await changeWrites;
-    const before = changesRead.value?.key === key ? changesRead.value.state : null;
+  // Read at the press, for the workflow pressed on: when the save's turn
+  // comes the rail may show another, whose version this is not. Null is a
+  // version too (a workflow never saved over), and the server checks it.
+  const version = shownChanges.value.version ?? null;
+  return settle(key, "save", async () => {
     let saved;
     try {
-      saved = await saveWorkflow(key, { version: before?.version ?? null });
+      saved = await saveWorkflow(key, { version });
     } catch (err) {
       console.warn(`[workflows] could not save the changes of ${key}`, err);
       if (!stillOn(key)) {
@@ -2806,16 +3028,18 @@ function saveChanges() {
       level: "success",
       text: savedText(
         saved,
-        saved?.version != null && saved.version !== before?.version
+        saved?.version != null && saved.version !== version
           ? `Saved as version ${saved.version}. The version menu takes it back.`
           : "Saved.",
       ),
     });
     if (!stillOn(key)) return;
-    graphAt = `${key}:${saved?.version ?? ""}`;
+    // Started with the save's answer, before the grid's card can say the
+    // version moved; the rows are locked until it is in (`rereading`).
+    const graph = refreshGraph(key);
     await loadChanges(key);
-    void focusRun();
-    await refreshGraph(key);
+    if (stillOn(key)) void focusRun();
+    await graph;
   });
 }
 
@@ -2843,13 +3067,12 @@ function saveAsNew() {
   const name = newName.value.trim();
   // Enter in the name field comes here past the disabled button: a second
   // one while the save is out would queue the same new workflow again.
-  if (!key || !name || !saveAsNewOpen.value || busy.value === "save-as-new") {
+  if (!key || !name || !saveAsNewOpen.value || settling.has(key)) {
     return undefined;
   }
   draftError.value = "";
   const unmoved = selectionMark();
-  return queueWrite("save-as-new", async () => {
-    await changeWrites;
+  return settle(key, "save-as-new", async () => {
     let saved;
     try {
       saved = await saveWorkflowAsNew(key, { name });
@@ -2883,15 +3106,17 @@ function saveAsNew() {
 /** Discard what waits. Nothing is asked: the saved version is untouched. */
 function discardChanges() {
   const key = selectedKey.value;
-  if (!key) return undefined;
+  if (!key || settling.has(key)) return undefined;
   draftError.value = "";
   naming.value = false;
   unsent.delete(key);
-  return queueWrite("discard", async () => {
-    await changeWrites;
+  return settle(key, "discard", async () => {
     try {
       takeChanges(key, await discardWorkflowChanges(key));
     } catch (err) {
+      // An edit not yet sent was dropped at the press: the rows go back to
+      // what the server holds, which the read below asks for.
+      if (intent.value?.key === key) intent.value = null;
       fail(err, "Could not discard those changes.");
       if (stillOn(key)) void loadChanges(key);
       return;
@@ -2903,21 +3128,52 @@ function discardChanges() {
 
 /**
  * Which version of which workflow the rows off the graph were last read at,
- * so the card catching up with this tab's own save reads nothing twice.
+ * and the read of them that is out. Whatever this tab does that moves the
+ * graph reads it again at once; the grid's card says so a moment later, and
+ * with these two it reads nothing twice, whichever of them moved it.
  */
 let graphAt = "";
+let refreshing = Promise.resolve();
 
 /**
  * Read again everything the rail reads off the graph, in place: nothing is
  * blanked, a notes draft being typed is kept, and the rows keep their groups.
+ *
+ * Only for the workflow on screen. Each of these reads keeps the newest ask,
+ * so one made for a workflow the rail has left would retire the reads of the
+ * one it shows now.
  */
-async function refreshGraph(key) {
-  await Promise.all([
-    loadDetail(key, { quiet: true }),
-    loadChain(key, { quiet: true }),
-    loadFormInputs(key),
-  ]);
-  if (stillOn(key)) void checkInstalled(key, { quiet: true });
+function refreshGraph(key, { chain: asked = null } = {}) {
+  if (!stillOn(key)) return Promise.resolve();
+  rereading.value = key;
+  const turn = (async () => {
+    try {
+      await Promise.all([
+        loadDetail(key, { quiet: true }),
+        loadChain(key, { quiet: true, asked }),
+        loadFormInputs(key, { quiet: true }),
+      ]);
+    } finally {
+      // The newest read's to lift: an earlier one ends with rows still out.
+      if (refreshing === turn) rereading.value = "";
+    }
+    if (!stillOn(key)) return;
+    graphAt = `${key}:${detail.value?.card?.version ?? ""}`;
+    void checkInstalled(key, { quiet: true });
+  })();
+  refreshing = turn;
+  return turn;
+}
+
+/**
+ * The card says the graph is at `version`: read it, unless that is read. A
+ * read of these rows already out may be of that very version, so it is
+ * waited for first; the rows are locked by it meanwhile. With none out the
+ * read starts here and now, so the rows are never editable in between.
+ */
+async function followGraph(key, version) {
+  if (rereading.value === key) await refreshing;
+  if (graphAt !== `${key}:${version}`) void refreshGraph(key);
 }
 
 // The shown workflow's graph or its waiting changes moved, whoever moved
@@ -2935,10 +3191,7 @@ watch(
     if (!key || key !== oldKey) return;
     const moved =
       version !== oldVersion && version != null && oldVersion != null;
-    if (moved && graphAt !== `${key}:${version}`) {
-      graphAt = `${key}:${version}`;
-      void refreshGraph(key);
-    }
+    if (moved) void followGraph(key, version);
     // An edit still out answers with the newest state itself.
     if (intent.value?.key === key) return;
     const state = shownChanges.value;
@@ -2976,21 +3229,31 @@ watch(
 /**
  * Edit LoRAs… ended in Apply: removals and strengths, which can wait. They
  * join the set of the workflow the dialog was opened on.
+ *
+ * On the rows where they can take it, as one more edit. Otherwise nothing
+ * here holds that set to build on (the rail shows another workflow, the read
+ * is out, or a save is): it is read when the write's turn comes, behind
+ * whatever was writing it, so the answer is never dropped and never laid over
+ * a set that has moved.
  */
-async function applyLoraEdit(fragment) {
+function applyLoraEdit(fragment) {
   const key = editKey.value;
-  if (!key) return;
-  if (stillOn(key)) {
-    await edit((set) => withFragment(set, fragment));
-    return;
+  if (!key) return undefined;
+  if (stillOn(key) && canEdit.value) {
+    return edit((set) => withFragment(set, fragment));
   }
-  try {
-    const state = await getWorkflowChanges(key);
-    await setWorkflowChanges(key, withFragment(state?.waiting, fragment));
-    void store.refetch();
-  } catch (err) {
-    fail(err, "Could not keep that LoRA edit.");
-  }
+  return settle(key, "apply", async () => {
+    try {
+      const state = await getWorkflowChanges(key);
+      takeChanges(
+        key,
+        await setWorkflowChanges(key, withFragment(state?.waiting, fragment)),
+      );
+      void store.refetch();
+    } catch (err) {
+      fail(err, "Could not keep that LoRA edit.");
+    }
+  });
 }
 
 /**
@@ -3001,50 +3264,83 @@ async function applyLoraEdit(fragment) {
  * refuses to save a set made against another version. It is the same set of
  * rows, though, and a chain edit keeps its loaders' ids: so it is stored
  * again against the new version, less any loader the edit took out.
+ *
+ * It settles the set as a save does: behind every write of it that was out,
+ * with the rows locked until it is drawn. It is about `key` and nothing the
+ * rail shows: the set and the new version's chain are both read from the
+ * server, by id, when its turn comes, so an edit whose write was still out
+ * when the dialog saved is in it, and a rail that has moved on changes
+ * nothing. Discarded first, then stored: a set that is replaced keeps the
+ * version it was made against.
  */
-async function onOverwritten(key) {
-  void store.refetch();
-  if (!stillOn(key)) return;
-  const before = shownChanges.value;
-  await changeWrites;
-  await refreshGraph(key);
-  if (!stillOn(key)) return;
-  if (!before || !countChanges(before.waiting)) {
-    void loadChanges(key);
-    return;
-  }
-  // Only against a chain that was read: an unread one names no loader, and
-  // every LoRA change would be dropped for it.
-  const kept = chain.value
-    ? withoutGoneLoaders(
-        before.waiting,
-        chainLoaders.value.map((loader) => loader.slot),
-      )
-    : changesOf(before.waiting);
-  try {
-    await discardWorkflowChanges(key);
-    const state = await setWorkflowChanges(key, kept);
-    takeChanges(key, state);
-    if (before.save?.open && countChanges(kept) && !state?.save?.open) {
+function onOverwritten(key) {
+  // What the bar offered when the dialog saved, before the version moved.
+  // Not known for a workflow the rail has left, and then nothing is said.
+  const couldSave = stillOn(key) && saveOpen.value;
+  return settle(key, "rebase", async () => {
+    void store.refetch();
+    // Where the rail shows this workflow it reads the chain again anyway:
+    // that one read serves the trim below too. Off screen the chain is read
+    // only once something is known to wait.
+    const asked = stillOn(key) ? getLoraChain(key) : null;
+    if (asked) void refreshGraph(key, { chain: asked });
+    let waits;
+    try {
+      waits = await getWorkflowChanges(key);
+    } catch (err) {
+      console.warn(`[workflows] could not read the changes of ${key}`, err);
+      void loadChanges(key);
+      return;
+    }
+    if (!countChanges(waits?.waiting)) {
+      takeChanges(key, waits);
+      return;
+    }
+    let loaders;
+    try {
+      loaders = loadersOf(await (asked ?? getLoraChain(key)));
+    } catch (err) {
+      // Without the chain there is no telling which loaders the edit took
+      // out. Keeping every LoRA change may name one that is gone, dropping
+      // them loses ones that are not: so the set is left as it is, and said.
+      console.warn(`[workflows] could not read the LoRA chain of ${key}`, err);
       notices.push({
         level: "error",
-        text:
-          state?.save?.reason ||
-          "The changes that were waiting cannot be saved over the new version.",
+        text: "The LoRA edit was saved. The changes that were waiting are left as they were: its LoRAs could not be read to store them against the new version.",
       });
+      takeChanges(key, waits);
+      return;
     }
-  } catch (err) {
-    fail(
-      err,
-      "The LoRA edit was saved, but the changes that were waiting could not be kept.",
-    );
-    void loadChanges(key);
-  }
+    const kept = withoutGoneLoaders(waits.waiting, loaders.map(slotOfLoader));
+    try {
+      await discardWorkflowChanges(key);
+      const state = await setWorkflowChanges(key, kept);
+      takeChanges(key, state);
+      if (couldSave && countChanges(kept) && !state?.save?.open) {
+        notices.push({
+          level: "error",
+          text:
+            state?.save?.reason ||
+            "The changes that were waiting cannot be saved over the new version.",
+        });
+      }
+    } catch (err) {
+      fail(
+        err,
+        "The LoRA edit was saved, but the changes that were waiting could not be kept.",
+      );
+      void loadChanges(key);
+    }
+  });
 }
 
 // *Use a set…* asked for from outside the rail (the selection bar): the
 // workflow is selected, the rail opened on this tab, and the menu opened once
-// the model rows it fills are in.
+// the model rows it fills are in and can be edited.
+//
+// The wish is for one workflow at one moment. It is taken back when the
+// selection moves on, or when the rows are in and it cannot be met; kept, it
+// would open the menu unasked the next time that workflow was selected.
 let useSetWanted = "";
 watch(
   () => store.useSetKey,
@@ -3060,13 +3356,46 @@ watch(
   { immediate: true },
 );
 async function openWantedSet() {
-  if (!useSetWanted || useSetWanted !== selectedKey.value) return;
-  if (!settableModels.value.length) return;
+  const key = useSetWanted;
+  if (!key) return;
+  if (!stillOn(key)) {
+    useSetWanted = "";
+    return;
+  }
+  // The rows are this workflow's once its detail is: until then they are
+  // the last one's, or none.
+  if (detail.value?.card?.id !== key) return;
+  if (!settableModels.value.length) {
+    useSetWanted = "";
+    // Asked for from the grid, where nothing says why nothing opened.
+    notices.push({
+      level: "info",
+      text: "This workflow has no model a set could fill.",
+    });
+    return;
+  }
+  // No graph, or changes that could not be read: the rail says which.
+  if (chainNoGraph.value || changesFailed.value) {
+    useSetWanted = "";
+    return;
+  }
+  // The changes are still being read, or the set is being saved: soon.
+  if (!canEdit.value) return;
   useSetWanted = "";
   await nextTick();
   useSetMenu.value?.open?.();
 }
-watch(() => settableModels.value.length, openWantedSet);
+watch(
+  () => [
+    selectedKey.value,
+    detail.value,
+    settableModels.value.length,
+    chainNoGraph.value,
+    changesFailed.value,
+    canEdit.value,
+  ],
+  openWantedSet,
+);
 const useSetMenu = ref(null);
 
 function fail(err, fallback) {
@@ -3133,16 +3462,17 @@ watch(
  * removed, so it is undone by going back again, and nothing is asked first.
  *
  * Changes waiting on the workflow do not stop it: the server then refuses
- * Save on them, in its own sentence.
+ * Save on them, in its own sentence. It settles the set all the same
+ * (`settle`): every row is about to say another graph's saved value, so none
+ * is edited until that graph has been read.
  */
 function goBack(row, key = selectedKey.value) {
   if (!key) return;
-  versionError.value = "";
-  // The version being left, for the notice's Undo: going back to it again.
-  const left =
-    shownVersions.value?.versions.find((entry) => entry.current)?.version ??
-    card.value?.version;
-  return queueWrite("version", async () => {
+  // `key` is not always the workflow on screen: a notice's Undo outlives the
+  // selection it was made on. Nothing here reads or clears the rail for it
+  // unless the rail still shows it.
+  if (stillOn(key)) versionError.value = "";
+  return settle(key, "version", async () => {
     let body;
     try {
       body = await restoreWorkflowVersion(key, row.version);
@@ -3165,6 +3495,13 @@ function goBack(row, key = selectedKey.value) {
     // The grid's card carries the version too. Asked here as well as by the
     // announcement, which a dropped socket would lose.
     void store.refetch();
+    // The version left, for the notice's Undo: going back to it again. Read
+    // off the answer, where it is the row under the one this made, so it is
+    // this workflow's whatever the rail shows by now. An answer that does
+    // not say offers no Undo rather than a wrong one.
+    const versions = Array.isArray(body?.versions) ? body.versions : [];
+    const made = versions.findIndex((entry) => entry.current);
+    const left = made < 0 ? undefined : versions[made + 1]?.version;
     // Owed even when the selection has moved on: it was written either way,
     // and a number changing in the head is not much of a receipt.
     notices.push({
@@ -3186,7 +3523,6 @@ function goBack(row, key = selectedKey.value) {
     versionsRead.value = versionsOf(key, body);
     // Everything else the rail reads off the graph is another graph's now,
     // and what was waiting was made against the version left.
-    graphAt = `${key}:${body?.version ?? ""}`;
     void loadChanges(key);
     await refreshGraph(key);
   });
@@ -3650,6 +3986,9 @@ watch(
     draftError.value = "";
     naming.value = false;
     newName.value = "";
+    // The read kept is the last workflow's. Coming straight back to that one
+    // must not draw it again as read: a write of it may have answered since.
+    changesRead.value = null;
     void loadChanges(key);
     void loadDetail(key);
     void loadChain(key);

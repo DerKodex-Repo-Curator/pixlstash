@@ -415,6 +415,108 @@ describe("choosing a set", () => {
     });
   });
 
+  // The plans are read off the graph with the owner's replacements applied
+  // ("Replace with…", `model_fixes`), so `swaps`, `takes` and `unpaired_bases`
+  // name each loader by the file it loads NOW. A row is found by that file,
+  // which the tab hands over as `filename`: a row keyed by anything else is a
+  // row no set can fill.
+  describe("the file a row is found by", () => {
+    const ROW = "4.ckpt_name";
+    const DREAMSHAPER = "sdxl/dreamshaperXL.safetensors";
+    const only = (extra) => ({
+      plans: [plan("hand:7", { unpaired_bases: [], takes: {}, ...extra })],
+    });
+
+    it.each([
+      [
+        "a plain row: the file the saved graph loads",
+        { filename: "sdxl/realvisxl_v50.safetensors", pick: null },
+        { swaps: { "sdxl/realvisxl_v50.safetensors": DREAMSHAPER } },
+        [{ address: ROW, filename: DREAMSHAPER }],
+      ],
+      [
+        "a missing row with no replacement: the missing file, as the graph spells it",
+        { filename: "Old/Gone_Model.safetensors", pick: null },
+        { swaps: { "Old/Gone_Model.safetensors": DREAMSHAPER } },
+        [{ address: ROW, filename: DREAMSHAPER }],
+      ],
+      [
+        "a row holding an earlier replacement: the replacement, not the file it replaced",
+        { filename: "SDXL/realvis_bf16.safetensors", pick: null },
+        { swaps: { "SDXL/realvis_bf16.safetensors": DREAMSHAPER } },
+        [{ address: ROW, filename: DREAMSHAPER }],
+      ],
+      [
+        "a row with an unsaved pick: still its saved file, and the set's goes over the pick",
+        { filename: "sdxl/realvisxl_v50.safetensors", pick: "pony/ponyV6.safetensors" },
+        { swaps: { "sdxl/realvisxl_v50.safetensors": DREAMSHAPER } },
+        [{ address: ROW, filename: DREAMSHAPER }],
+      ],
+      [
+        "a replaced row with a pick, and a set holding the replacement: put back under the replacement",
+        { filename: "SDXL/realvis_bf16.safetensors", pick: "pony/ponyV6.safetensors" },
+        { swaps: {} },
+        [{ address: ROW, filename: "SDXL/realvis_bf16.safetensors" }],
+      ],
+      // A set holding the ORIGINAL the replacement stood in for is one that
+      // leaves the loader as saved: the pick comes off, and what is left is
+      // the replacement, never the missing original.
+      [
+        "a replaced VAE row with a pick, and a set holding the original: put back under the replacement",
+        { kind: "vae", filename: "vae/sdxl_fixed.safetensors", pick: "vae/other.safetensors" },
+        { swaps: {}, takes: { "vae/sdxl_fixed.safetensors": 12 } },
+        [{ address: ROW, filename: "vae/sdxl_fixed.safetensors" }],
+      ],
+    ])("%s", async (_case, model, answer, fill) => {
+      planSetClones.mockResolvedValue(only(answer));
+      const wrapper = mountMenu({
+        models: [{ address: ROW, kind: "checkpoint", ...model }],
+      });
+      await openMenu(wrapper);
+      expect(meta(wrapper, "hand:7")).toBe("fills 1 row");
+      await row(wrapper, "hand:7").trigger("click");
+      expect(wrapper.emitted("use")[0][0].models).toEqual(fill);
+    });
+
+    it.each([
+      [
+        "a plan keyed by the file a replacement took the place of",
+        { filename: "SDXL/realvis_bf16.safetensors", pick: null },
+        { swaps: { "realvisXL_v5.safetensors": DREAMSHAPER } },
+      ],
+      [
+        "a replaced row whose loader the set left unpaired, pick or not",
+        { filename: "SDXL/realvis_bf16.safetensors", pick: "pony/ponyV6.safetensors" },
+        { unpaired_bases: ["SDXL/realvis_bf16.safetensors"] },
+      ],
+      // The server reads the original as what that loader already loads, so
+      // it sends no swap: the row is not filled with a file that is missing.
+      [
+        "a replaced checkpoint row, from a set holding the original it replaced",
+        { filename: "SDXL/realvis_bf16.safetensors", pick: null },
+        { swaps: {}, unpaired_bases: [] },
+      ],
+      [
+        "a replaced VAE row, from a set holding the original it replaced",
+        { kind: "vae", filename: "vae/sdxl_fixed.safetensors", pick: null },
+        { swaps: {}, takes: { "vae/sdxl_fixed.safetensors": 12 } },
+      ],
+      [
+        "a row that already shows the file the set gives it",
+        { filename: "sdxl/realvisxl_v50.safetensors", pick: DREAMSHAPER },
+        { swaps: { "sdxl/realvisxl_v50.safetensors": DREAMSHAPER } },
+      ],
+    ])("fills nothing for %s", async (_case, model, answer) => {
+      planSetClones.mockResolvedValue(only(answer));
+      const wrapper = mountMenu({
+        models: [{ address: ROW, kind: "checkpoint", ...model }],
+      });
+      await openMenu(wrapper);
+      expect(meta(wrapper, "hand:7")).toBe("changes nothing here");
+      expect(row(wrapper, "hand:7").attributes("aria-disabled")).toBe("true");
+    });
+  });
+
   it("puts focus back on the button", async () => {
     const wrapper = mountMenu();
     await openMenu(wrapper);

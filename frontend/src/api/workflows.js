@@ -324,10 +324,16 @@ export async function readModelSwap(
  * One plan per set asked: the files it takes from the set (`swaps`), each model
  * loader before and after (`loaders`, with the node `pack` a new loader class
  * comes from and whether ComfyUI has it), whether the set's checkpoint has the
- * workflow's base model so its LoRAs are kept, and `fit` / `reason`. Asked once
- * per open, for every set on the shelf, and again for one set when the owner
- * picks which of its files a loader takes (`picks`, the plan's `takes` with
- * the choice made); nothing is written.
+ * workflow's base model so its LoRAs are kept, and `fit` / `reason`.
+ *
+ * The plans are read off the graph with the owner's model replacements
+ * applied (`model_fixes`, "Replace with…"), so `swaps`, `takes`,
+ * `unpaired_bases` and `loaders[].was` name a loader by the file it loads
+ * once they are: the replacement, never the file it took the place of.
+ *
+ * Asked once per open, for every set on the shelf, and again for one set when
+ * the owner picks which of its files a loader takes (`picks`, the plan's
+ * `takes` with the choice made); nothing is written.
  *
  * @param {string} workflowId
  * @param {Array<{key: string, checkpoint_ids: Array<number>, model_ids: Array<number>, picks?: Object<string, number>}>} sets
@@ -458,9 +464,21 @@ export async function saveLoraChain(workflowId, body) {
  * `reason` is the server's sentence for a closed verb and is printed as it
  * is: the Workflow tab, the Run popup and the Tasks tab must say the same.
  *
+ * `stale` is true exactly when what waits was made against a version of the
+ * workflow that is no longer its current one (it was saved over, or gone back
+ * on, since). Save is then closed with the server's "changed since" reason,
+ * and `GET …/graph?waiting=true`, which is what *Open in ComfyUI* opens,
+ * leaves the waiting changes out. Save closed for another reason (a change of
+ * checkpoint) is not stale, and that graph carries the changes. A stale set
+ * stays stale when it is edited: it keeps the version it was started on, and
+ * only Discard or Save as new ends it. False when nothing waits. Every write
+ * that answers with this state carries it too; a server from before it sends
+ * no field, which reads as false.
+ *
  * @param {string} workflowId
  * @returns {Promise<{workflow_id: string, version: ?number, waiting: ?Object,
- *   count: number, ran: ?Object, save: {open: boolean, reason: ?string},
+ *   count: number, stale?: boolean, ran: ?Object,
+ *   save: {open: boolean, reason: ?string},
  *   save_as_new: {open: boolean, reason: ?string},
  *   ran_save: ?{open: boolean, reason: ?string}}>}
  */
@@ -492,8 +510,10 @@ export async function discardWorkflowChanges(workflowId) {
 
 /**
  * Save: what waits, with `changes` on top, written over the workflow as its
- * next version. `dry_run: true` answers which verbs are open for that
- * combination and writes nothing. A 409's `detail` is the reason to print.
+ * next version. With `from_run: true` (a run's own changes, which only the
+ * Tasks tab saves) it is `changes` by themselves, never on top of what waits.
+ * `dry_run: true` answers which verbs are open for that combination and
+ * writes nothing. A 409's `detail` is the reason to print.
  *
  * @param {string} workflowId
  * @param {{changes?: Object, version?: ?number, from_run?: boolean,
@@ -508,7 +528,9 @@ export async function saveWorkflow(workflowId, body = {}) {
 
 /**
  * Save as new: the same graph stored as a new manual workflow called `name`.
- * This workflow is left as it was and what waited on it is cleared.
+ * What is stored is what `saveWorkflow` would write: what waits with `changes`
+ * on top, or `changes` alone with `from_run`. This workflow is left as it was
+ * and what waited on it is cleared.
  *
  * @param {string} workflowId
  * @param {{name: string, changes?: Object, from_run?: boolean,

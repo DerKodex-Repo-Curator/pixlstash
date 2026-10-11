@@ -107,6 +107,34 @@ describe("a LoRA loader", () => {
     expect(set.loras[0].strength_clip).toBe(0.3);
   });
 
+  it("moves a clip strength the graph spells out as the same number", () => {
+    // Stated on the loader, and equal: still one number, so it follows.
+    const set = withLoraStrength(null, SLOT, 0.5, { strength: 0.85, strength_clip: 0.85 });
+    expect(set.loras[0].strength_clip).toBe(0.5);
+  });
+
+  it.each([NaN, Infinity, undefined])(
+    "stores no strength that is not a number (%s), and takes the waiting one out",
+    (typed) => {
+      const waiting = withLoraStrength(null, SLOT, 0.5, { strength: 0.85 });
+      expect(withLoraStrength(waiting, SLOT, typed, { strength: 0.85 }).loras).toEqual([]);
+      expect(withLoraStrength(null, SLOT, typed, { strength: 0.85 }).loras).toEqual([]);
+    },
+  );
+
+  it("names a loader by its plain field where the row gives none", () => {
+    // The server addresses a slot by node and field; `lora_name` is the
+    // field of a plain loader, and an entry without one names nothing.
+    const bare = { node_id: 22, sha256: "s2" };
+    expect(withLoraRemoved(null, bare, true).skip_loras).toEqual([
+      { node_id: "22", field: "lora_name" },
+    ]);
+    expect(withLoraStrength(null, bare, 0.5, { strength: 0.85 }).loras[0]).toMatchObject({
+      node_id: "22",
+      field: "lora_name",
+    });
+  });
+
   it("leaves the set at the saved strength, and for a loader the shelf cannot name", () => {
     const waiting = withLoraStrength(null, SLOT, 0.5, { strength: 0.85 });
     expect(withLoraStrength(waiting, SLOT, 0.85, { strength: 0.85 }).loras).toEqual([]);
@@ -161,6 +189,82 @@ describe("a fragment laid over the set", () => {
       { node_id: "14", field: "lora_name", sha256: "s1", strength_model: 1 },
     ]);
     expect(set.stages).toEqual({ upscale: true, face_detailer: true });
+  });
+
+  it("lays parameters over too: it is the server's rule whole, not part of it", () => {
+    const steps = { slot_label: "s", input_name: "steps" };
+    const set = withFragment(
+      { values: [{ ...steps, value: 8 }, { slot_label: "s", input_name: "cfg", value: 7 }] },
+      { values: [{ ...steps, value: 20 }] },
+    );
+    expect(set.values).toEqual([
+      { ...steps, value: 20 },
+      { slot_label: "s", input_name: "cfg", value: 7 },
+    ]);
+  });
+
+  it("spells the fragment's slots as every other edit here does", () => {
+    // A number for a node id and no field, as a caller may send them: the
+    // rows find their entry by a string id and the field named outright.
+    const set = withFragment(
+      { loras: [{ ...SLOT, strength_model: 0.2 }] },
+      { skip_loras: [{ node_id: 22 }], loras: [{ node_id: 14, sha256: "s1", strength_model: 1 }] },
+    );
+    expect(set.skip_loras).toEqual([{ node_id: "22", field: "lora_name" }]);
+    expect(set.loras).toEqual([
+      { node_id: "14", field: "lora_name", sha256: "s1", strength_model: 1 },
+    ]);
+    expect(loraRemoved(set, SLOT)).toBe(true);
+  });
+});
+
+describe("the set a function was handed", () => {
+  // The rail draws it until the server answers: an edit that wrote into it
+  // would show a change nothing had stored.
+  const given = () => ({
+    models: [{ address: "a/b", filename: "x" }],
+    loras: [{ ...SLOT, strength_model: 0.5, strength_clip: 0.5 }],
+    skip_loras: [{ node_id: "14", field: "lora_name" }],
+    stages: { upscale: true },
+    values: [{ slot_label: "s", input_name: "steps", value: 8 }],
+  });
+  const freeze = (value) => {
+    Object.values(value).forEach((part) => {
+      if (part && typeof part === "object") freeze(part);
+    });
+    return Object.freeze(value);
+  };
+
+  it.each([
+    ["withModel", (set) => withModel(set, "a/b", "y", "saved")],
+    ["withModel, put back", (set) => withModel(set, "a/b", "", "saved")],
+    ["withStage", (set) => withStage(set, "face_detailer", true, false)],
+    ["withStage, put back", (set) => withStage(set, "upscale", false, false)],
+    ["withLoraRemoved", (set) => withLoraRemoved(set, SLOT, true)],
+    ["withLoraRemoved, put back", (set) => withLoraRemoved(set, { node_id: "14", field: "lora_name" }, false)],
+    ["withLoraStrength", (set) => withLoraStrength(set, SLOT, 0.9, { strength: 0.85 })],
+    [
+      "withLoraStrength, on a removed loader",
+      (set) => withLoraStrength(set, { node_id: "14", field: "lora_name", sha256: "s1" }, 0.9, { strength: 1 }),
+    ],
+    [
+      "withFragment",
+      (set) =>
+        withFragment(set, {
+          models: [{ address: "a/b", filename: "z" }],
+          loras: [{ node_id: "14", field: "lora_name", sha256: "s1", strength_model: 1 }],
+          skip_loras: [{ node_id: "22", field: "lora_name" }],
+          stages: { upscale: false },
+          values: [{ slot_label: "s", input_name: "steps", value: 20 }],
+        }),
+    ],
+    ["withoutGoneLoaders", (set) => withoutGoneLoaders(set, [])],
+  ])("is left as it was by %s", (_name, edit) => {
+    // Frozen all the way down: a write into it throws rather than passes.
+    const set = freeze(given());
+    const made = edit(set);
+    expect(made).not.toBe(set);
+    expect(set).toEqual(given());
   });
 });
 

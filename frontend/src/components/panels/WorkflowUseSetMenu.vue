@@ -102,11 +102,17 @@ const props = defineProps({
   workflowId: { type: String, required: true },
   /**
    * The tab's model rows, each `{address, filename, kind, pick}`: the loader
-   * address the default recipe names the model by, the file the SAVED graph
-   * loads there, as the graph spells it (the plans are read against the saved
-   * graph), the row's kind (`checkpoint`, `vae`, `text_encoder`), and the file
-   * waiting on it unsaved, if any. `pick` is only what the row shows now, so
-   * a set that holds the saved file can take an earlier pick back off it.
+   * address the default recipe names the model by, the file its loader loads
+   * as saved, the row's kind (`checkpoint`, `vae`, `text_encoder`), and the
+   * file waiting on it unsaved, if any.
+   *
+   * `filename` is what a row is found in a plan by, so it has to be the
+   * plan's own key: the plans are read off the saved graph with the owner's
+   * replacements applied (`model_fixes`), and name each loader by the file it
+   * loads then. That is the replacement on a row that holds one, and the
+   * missing file, as the graph spells it, on a row that has none yet. `pick`
+   * is only what the row shows now, so a set that holds the saved file can
+   * take an earlier pick back off it.
    */
   models: { type: Array, required: true },
   disabled: { type: Boolean, default: false },

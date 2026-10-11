@@ -680,6 +680,100 @@ describe("the version menu in the head", () => {
     expect(restoreWorkflowVersion).toHaveBeenCalledWith(KEY, 3);
   });
 
+  it("remembers the version an Undo left for the workflow it undid, whatever the rail shows by then", async () => {
+    const a = versioned(3);
+    const b = versioned(2, { id: OTHER, name: "Other" });
+    getWorkflowCard.mockImplementation((key) =>
+      Promise.resolve(detail({ card: key === OTHER ? b : a })),
+    );
+    getWorkflowVersions.mockImplementation((key) =>
+      Promise.resolve(key === OTHER ? versionsAt(2, OTHER) : versionsAt(3)),
+    );
+    const { wrapper, store } = await mountWith([KEY], [a, b]);
+    await row(wrapper, 2).trigger("click");
+    await flush(wrapper);
+    const first = useNoticeStore().notices.at(-1);
+
+    // The rail moves on while the notice is still up.
+    store.selectedKeys = [OTHER];
+    await flush(wrapper);
+    // Undo goes back to 3, which the server keeps as version 5.
+    restoreWorkflowVersion.mockReset().mockResolvedValue({
+      workflow_id: KEY,
+      version: 5,
+      versions: [
+        {
+          version: 5,
+          created_at: "2026-10-06T12:00:00+00:00",
+          reason: "went back to version 3",
+          current: true,
+        },
+        ...versionsAt(4).versions.map((entry) => ({ ...entry, current: false })),
+      ],
+    });
+    await first.action.handler();
+    expect(restoreWorkflowVersion).toHaveBeenCalledWith(KEY, 3);
+
+    // The workflow it undid was on 4. The 2 the rail shows is another's.
+    const second = useNoticeStore().notices.at(-1);
+    restoreWorkflowVersion.mockClear();
+    await second.action.handler();
+    expect(restoreWorkflowVersion).toHaveBeenCalledWith(KEY, 4);
+  });
+
+  it.each([
+    ["lists no versions", []],
+    // Rows, but none marked as the one it is on: the top one is not "left".
+    ["marks no row as current", versionsAt(4).versions.map((entry) => ({ ...entry, current: false }))],
+  ])("offers no Undo when the answer %s, rather than a wrong one", async (_how, versions) => {
+    restoreWorkflowVersion.mockResolvedValue({
+      workflow_id: KEY,
+      version: 4,
+      versions,
+    });
+    const { wrapper } = await mountVersioned();
+    await row(wrapper, 2).trigger("click");
+    await flush(wrapper);
+    const notice = useNoticeStore().notices.at(-1);
+    expect(notice.text).toContain("Back on version 2");
+    expect(notice.action).toBeNull();
+  });
+
+  it("leaves a refusal on screen alone when an Undo goes back on a workflow the rail has left", async () => {
+    const a = versioned(3);
+    const b = versioned(2, { id: OTHER, name: "Other" });
+    getWorkflowCard.mockImplementation((key) =>
+      Promise.resolve(detail({ card: key === OTHER ? b : a })),
+    );
+    getWorkflowVersions.mockImplementation((key) =>
+      Promise.resolve(key === OTHER ? versionsAt(2, OTHER) : versionsAt(3)),
+    );
+    restoreWorkflowVersion.mockImplementation((key) =>
+      key === OTHER
+        ? Promise.reject({
+            response: {
+              status: 409,
+              data: { detail: "That version cannot be read." },
+            },
+          })
+        : Promise.resolve(versionsAt(4)),
+    );
+    const { wrapper, store } = await mountWith([KEY], [a, b]);
+    await row(wrapper, 2).trigger("click");
+    await flush(wrapper);
+    const undo = useNoticeStore().notices.at(-1).action;
+
+    store.selectedKeys = [OTHER];
+    await flush(wrapper);
+    await row(wrapper, 1).trigger("click");
+    await flush(wrapper);
+    expect(refusal(wrapper).text()).toContain("That version cannot be read.");
+
+    await undo.handler();
+    await flush(wrapper);
+    expect(refusal(wrapper).text()).toContain("That version cannot be read.");
+  });
+
   it("asks nothing first: going back is undone by going back", async () => {
     const { wrapper } = await mountVersioned();
     await row(wrapper, 1).trigger("click");
@@ -3457,6 +3551,38 @@ describe("expose a parameter", () => {
     expect(dialog(wrapper).props("nodes")).toEqual([]);
   });
 
+  it("keeps a choice's list on screen while the graph is read again, and when that read fails", async () => {
+    const wrapper = await mountExposing(
+      detail({
+        card: { defaults: [STEPS, SAMPLER] },
+        pins: [{ slot_label: SAMPLER.slot_label, input_name: SAMPLER.input_name }],
+      }),
+    );
+    const list = () =>
+      rowNamed(wrapper, "sampler_name").find(
+        "[data-testid='wfdef-select'] select",
+      );
+    const drawn = list().element;
+    let refuse;
+    getWorkflowFormInputs.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        refuse = reject;
+      }),
+    );
+    // A save in the Run popup: everything off the graph is read again.
+    useRunDialogStore().saved = { workflowId: KEY, savedAs: null, at: 1 };
+    await flush(wrapper);
+    // The very element, not one swapped for a plain box and drawn again:
+    // focus on it would have gone with it.
+    expect(list().exists()).toBe(true);
+    expect(list().element).toBe(drawn);
+
+    refuse(new Error("offline"));
+    await flush(wrapper);
+    expect(list().exists()).toBe(true);
+    expect(list().element).toBe(drawn);
+  });
+
   it("draws a choice set each run as a list of ComfyUI's options", async () => {
     const wrapper = await mountExposing(
       detail({
@@ -3797,15 +3923,79 @@ describe("the tab as the editor (#1850)", () => {
       ).toEqual([]);
     });
 
-    it("refuses an edit while what waits could not be read, so nothing waiting is replaced", async () => {
+    it("locks the rows while what waits could not be read, and says so with the way to ask again", async () => {
+      getWorkflowChanges.mockReset().mockRejectedValue(new Error("offline"));
+      const { wrapper } = await mountEditor();
+      await settle(wrapper);
+      const note = () => wrapper.find('[data-testid="wftab-changes-failed"]');
+      const box = () => wrapper.find('[data-testid="wftab-stage-upscale"]');
+      const useSet = () => wrapper.find('[data-testid="wftab-use-set"]');
+      expect(note().text()).toContain(
+        "Could not read this workflow's unsaved changes just now",
+      );
+      // Not editable: a control that took the pick would show a value
+      // nothing holds, with no way to make it again.
+      expect(picker(wrapper).element.disabled).toBe(true);
+      expect(box().element.disabled).toBe(true);
+      expect(useSet().element.disabled).toBe(true);
+      expect(
+        wrapper.findComponent({ name: "WorkflowUseSetMenu" }).props("disabledReason"),
+      ).toBe("wftab-changes-failed");
+      await box().trigger("change");
+      await flush(wrapper);
+      expect(setWorkflowChanges).not.toHaveBeenCalled();
+      expect(bar(wrapper).exists()).toBe(false);
+
+      getWorkflowChanges
+        .mockReset()
+        .mockImplementation(() => Promise.resolve(changesState(null)));
+      const retry = wrapper.find('[data-testid="wftab-changes-retry"]');
+      retry.element.focus();
+      await retry.trigger("click");
+      await flush(wrapper);
+      expect(getWorkflowChanges).toHaveBeenCalledWith(KEY);
+      expect(note().exists()).toBe(false);
+      expect(picker(wrapper).element.disabled).toBe(false);
+      expect(box().element.disabled).toBe(false);
+      // Retry left with its note: focus is on the heading of what it unlocked.
+      expect(document.activeElement.textContent).toBe("Models");
+    });
+
+    it("keeps the rows locked until what waits has been read", async () => {
+      const read = held();
+      getWorkflowChanges.mockReset().mockReturnValue(read.promise);
+      const { wrapper } = await mountEditor();
+      await settle(wrapper);
+      const box = () => wrapper.find('[data-testid="wftab-stage-upscale"]');
+      expect(picker(wrapper).element.disabled).toBe(true);
+      expect(box().element.disabled).toBe(true);
+      // Still being read is not a failure: nothing to retry yet.
+      expect(wrapper.find('[data-testid="wftab-changes-failed"]').exists()).toBe(
+        false,
+      );
+      read.release(changesState({ stages: { upscale: true } }));
+      await flush(wrapper);
+      expect(box().element.disabled).toBe(false);
+      expect(box().element.checked).toBe(true);
+      expect(picker(wrapper).element.disabled).toBe(false);
+    });
+
+    it("refuses, out loud, an edit that comes past the locked rows, and asks for the changes again", async () => {
       getWorkflowChanges.mockReset().mockRejectedValue(new Error("offline"));
       const { wrapper } = await mountEditor();
       await settle(wrapper);
       getWorkflowChanges.mockClear();
-      await picker(wrapper).setValue(JUGGERNAUT.filename);
+      // A menu left open hands its answer over whatever the rows say.
+      wrapper.findComponent({ name: "WorkflowUseSetMenu" }).vm.$emit("use", {
+        name: "Pony stack",
+        models: [{ address: ADDRESS, filename: "pony/ponyV6.safetensors" }],
+      });
       await flush(wrapper);
       expect(setWorkflowChanges).not.toHaveBeenCalled();
-      expect(useNoticeStore().notices.at(-1).level).toBe("error");
+      expect(useNoticeStore().notices.at(-1)).toMatchObject({
+        level: "error",
+        text: "That change was not kept: this workflow's unsaved changes could not be read. Try again.",
+      });
       // Asked again, so the next try can work.
       expect(getWorkflowChanges).toHaveBeenCalledWith(KEY);
     });
@@ -3866,6 +4056,140 @@ describe("the tab as the editor (#1850)", () => {
       expect(lastSet().models).toEqual([]);
       expect(bar(wrapper).exists()).toBe(false);
       expect(wrapper.find('[data-testid="wftab-edited"]').exists()).toBe(false);
+    });
+
+    it("hands a set the file a row loads now: the owner's earlier replacement, not the file it replaced", async () => {
+      // The plans are keyed by what each loader loads once the replacement
+      // is applied, so that is the file the row has to be found by.
+      getWorkflowCard.mockResolvedValue(
+        detail({
+          card: plain(),
+          model_fixes: [
+            {
+              slot_label: "m1/ckpt_name",
+              was: "realvisXL_v5.safetensors",
+              now: "SDXL/realvisXL_v5_bf16.safetensors",
+              slot_kind: "checkpoint",
+            },
+          ],
+        }),
+      );
+      const { wrapper } = await mountEditor();
+      await settle(wrapper);
+      const menu = wrapper.findComponent({ name: "WorkflowUseSetMenu" });
+      expect(menu.props("models")).toEqual([
+        {
+          address: ADDRESS,
+          filename: "SDXL/realvisXL_v5_bf16.safetensors",
+          kind: "checkpoint",
+          pick: null,
+        },
+      ]);
+      // A set that holds that very file leaves the row as saved.
+      menu.vm.$emit("use", {
+        name: "The set it runs on",
+        models: [{ address: ADDRESS, filename: "realvisXL_v5_bf16.safetensors" }],
+      });
+      await flush(wrapper);
+      expect(lastSet().models).toEqual([]);
+    });
+
+    describe("asked for from the grid", () => {
+      const other = () => plain({ id: OTHER, name: "Other" });
+
+      it("waits for the rows of the workflow asked for, never opening on the last one's", async () => {
+        const slow = held();
+        getWorkflowCard.mockImplementation((key) =>
+          key === OTHER ? slow.promise : Promise.resolve(detail({ card: plain() })),
+        );
+        const { wrapper, store } = await mountEditor([plain(), other()]);
+        await settle(wrapper);
+        store.requestUseSet(OTHER);
+        await flush(wrapper);
+        expect(store.selectedKeys).toEqual([OTHER]);
+        expect(useSetOpened).not.toHaveBeenCalled();
+
+        slow.release(detail({ card: other() }));
+        await flush(wrapper);
+        await flush(wrapper);
+        expect(useSetOpened).toHaveBeenCalledTimes(1);
+        expect(useSetOpened).toHaveBeenCalledWith(OTHER);
+      });
+
+      it("waits for the unsaved changes to be read: the menu fills rows nothing can edit until then", async () => {
+        const read = held();
+        getWorkflowChanges.mockReset().mockReturnValue(read.promise);
+        const { wrapper, store } = await mountEditor();
+        await settle(wrapper);
+        store.requestUseSet(KEY);
+        await flush(wrapper);
+        expect(useSetOpened).not.toHaveBeenCalled();
+
+        read.release(changesState(null));
+        await flush(wrapper);
+        await flush(wrapper);
+        expect(useSetOpened).toHaveBeenCalledTimes(1);
+      });
+
+      it("is taken back when the selection moves on before its rows are in", async () => {
+        const slow = held();
+        getWorkflowCard.mockImplementation((key) =>
+          key === OTHER ? slow.promise : Promise.resolve(detail({ card: plain() })),
+        );
+        const { wrapper, store } = await mountEditor([plain(), other()]);
+        await settle(wrapper);
+        store.requestUseSet(OTHER);
+        await flush(wrapper);
+        store.selectedKeys = [KEY];
+        await flush(wrapper);
+
+        // Selected again later, by hand: nobody asked for the menu now.
+        getWorkflowCard.mockImplementation((key) =>
+          Promise.resolve(detail({ card: key === OTHER ? other() : plain() })),
+        );
+        store.selectedKeys = [OTHER];
+        await flush(wrapper);
+        await flush(wrapper);
+        expect(useSetOpened).not.toHaveBeenCalled();
+      });
+
+      it("is taken back where no row could be filled, and says why", async () => {
+        // A shelf loader: its value is a shelf row, which no set fills.
+        const shelf = detail();
+        shelf.card.default_recipe.models = [
+          {
+            address: "core:m1/checkpoint_id",
+            kind: "checkpoint",
+            filename: "41",
+            shelf_filename: "SDXL/realvisXL_v5.safetensors",
+            provenance: "best",
+          },
+        ];
+        getWorkflowCard.mockImplementation((key) =>
+          Promise.resolve(key === OTHER ? detail({ card: other() }) : shelf),
+        );
+        const { wrapper, store } = await mountEditor([plain(), other()]);
+        await settle(wrapper);
+        store.requestUseSet(KEY);
+        await flush(wrapper);
+        expect(useSetOpened).not.toHaveBeenCalled();
+        expect(useNoticeStore().notices.at(-1)).toMatchObject({
+          level: "info",
+          text: "This workflow has no model a set could fill.",
+        });
+
+        // The workflow gains a row a set can fill and is selected again:
+        // the menu stays shut, the wish was for then.
+        getWorkflowCard.mockImplementation((key) =>
+          Promise.resolve(detail({ card: key === OTHER ? other() : plain() })),
+        );
+        store.selectedKeys = [OTHER];
+        await flush(wrapper);
+        store.selectedKeys = [KEY];
+        await flush(wrapper);
+        await flush(wrapper);
+        expect(useSetOpened).not.toHaveBeenCalled();
+      });
     });
 
     it("opens on the workflow the selection bar asked for", async () => {
@@ -4267,6 +4591,416 @@ describe("the tab as the editor (#1850)", () => {
     );
   });
 
+  describe("changes made on a version the workflow has left", () => {
+    const STALE =
+      "Open in ComfyUI opens the workflow as it is now. The unsaved changes were made on an earlier version and are not in it.";
+
+    it.each([
+      [{ can_open_workflows: true, saves_back: true }],
+      // A copy of the saved graph has none of them either, and "until they
+      // are saved" would promise a Save that is closed.
+      [{ can_open_workflows: true, saves_back: false }],
+    ])(
+      "are not promised to be in what Open in ComfyUI opens (%o)",
+      async (node) => {
+        useFilterStore().comfyuiUrl = "http://127.0.0.1:8188";
+        getPixlstashNode.mockResolvedValue(node);
+        const shown = versioned(3, { models: plain().models });
+        getWorkflowCard.mockResolvedValue(detail({ card: shown }));
+        const { wrapper } = await mountEditor([shown]);
+        await settle(wrapper);
+        const line = () => wrapper.find('[data-testid="wftab-open-unsaved"]');
+        await picker(wrapper).setValue(JUGGERNAUT.filename);
+        await flush(wrapper);
+        expect(line().text()).not.toContain("earlier version");
+
+        // Going back a version: what waits was made on the one left, and the
+        // graph ComfyUI is handed leaves it out.
+        getWorkflowChanges.mockImplementation(() =>
+          Promise.resolve(
+            changesState(waitingOnServer, {
+              version: 4,
+              stale: true,
+              save: {
+                open: false,
+                reason: "This workflow has changed since these changes were made.",
+              },
+            }),
+          ),
+        );
+        await wrapper
+          .find('[data-testid="wftab-version-menu"] [data-version="2"]')
+          .trigger("click");
+        await flush(wrapper);
+        await flush(wrapper);
+
+        expect(count(wrapper)).toBe("1 unsaved change");
+        expect(line().text().replace(/\s+/g, " ")).toBe(STALE);
+        // Still what the button is described by.
+        expect(
+          wrapper
+            .find('[data-testid="wftab-open-comfyui"]')
+            .attributes("aria-describedby"),
+        ).toBe("wftab-open-unsaved");
+      },
+    );
+  });
+
+  describe("the bar while an edit's write is out", () => {
+    const NOTHING = "There is nothing to save.";
+    const CHECKPOINT =
+      "A change of checkpoint is saved as a new workflow, so this one keeps its pictures.";
+    const reasons = (wrapper) =>
+      wrapper.findAll('[data-testid="wftab-draft-reason"]').map((p) => p.text());
+    const verb = (wrapper, name) => wrapper.find(`[data-testid="wftab-${name}"]`);
+    /** The changes routes as the server answers them: an empty set closes Save. */
+    const answer = (set, extra = {}) =>
+      changesState(set, {
+        save: changesState(set).count
+          ? { open: true, reason: null }
+          : { open: false, reason: NOTHING },
+        ...extra,
+      });
+
+    it("says the count and offers Discard on a first edit, and holds the verbs and their reasons for the answer", async () => {
+      getWorkflowChanges.mockImplementation(() =>
+        Promise.resolve(answer(waitingOnServer)),
+      );
+      const put = held();
+      setWorkflowChanges.mockImplementation((_key, set) =>
+        put.promise.then(() => {
+          waitingOnServer = set;
+          return answer(set);
+        }),
+      );
+      const { wrapper } = await mountEditor();
+      await wrapper.find('[data-testid="wftab-stage-upscale"]').setValue(true);
+      await flush(wrapper);
+
+      // What was read is about the set before the edit, an empty one: its
+      // reason and its verbs say nothing of the one change being counted.
+      expect(count(wrapper)).toBe("1 unsaved change");
+      expect(verb(wrapper, "discard").exists()).toBe(true);
+      expect(reasons(wrapper)).toEqual([]);
+      expect(verb(wrapper, "save").exists()).toBe(false);
+      expect(verb(wrapper, "save-as-new").exists()).toBe(false);
+
+      put.release();
+      await flush(wrapper);
+      expect(verb(wrapper, "save").exists()).toBe(true);
+      expect(verb(wrapper, "save-as-new").exists()).toBe(true);
+      expect(reasons(wrapper)).toEqual([]);
+    });
+
+    it("prints no reason read for the set before the edit, and the answer's own once it is in", async () => {
+      waitingOnServer = {
+        models: [{ address: ADDRESS, filename: JUGGERNAUT.filename }],
+      };
+      const closed = { save: { open: false, reason: CHECKPOINT } };
+      getWorkflowChanges.mockImplementation(() =>
+        Promise.resolve(answer(waitingOnServer, closed)),
+      );
+      const put = held();
+      setWorkflowChanges.mockImplementation((_key, set) =>
+        put.promise.then(() => answer(set, closed)),
+      );
+      const { wrapper } = await mountEditor();
+      expect(reasons(wrapper)).toEqual([CHECKPOINT]);
+
+      await wrapper.find('[data-testid="wftab-stage-upscale"]').setValue(true);
+      await flush(wrapper);
+      expect(count(wrapper)).toBe("2 unsaved changes");
+      expect(reasons(wrapper)).toEqual([]);
+      // The verb that was drawn stays, so a click on it is not swallowed.
+      expect(verb(wrapper, "save-as-new").exists()).toBe(true);
+      expect(verb(wrapper, "save-as-new").element.disabled).toBe(false);
+
+      put.release();
+      await flush(wrapper);
+      expect(reasons(wrapper)).toEqual([CHECKPOINT]);
+    });
+
+    it("keeps the reason of a stale set through an edit: editing it again does not end that", async () => {
+      const SINCE = "This workflow has changed since these changes were made.";
+      waitingOnServer = { stages: { upscale: true } };
+      const stale = { stale: true, save: { open: false, reason: SINCE } };
+      getWorkflowChanges.mockImplementation(() =>
+        Promise.resolve(answer(waitingOnServer, stale)),
+      );
+      const put = held();
+      setWorkflowChanges.mockImplementation((_key, set) =>
+        put.promise.then(() => answer(set, stale)),
+      );
+      const { wrapper } = await mountEditor();
+      await wrapper.find('[data-testid="wftab-stage-face_detailer"]').setValue(true);
+      await flush(wrapper);
+      expect(count(wrapper)).toBe("2 unsaved changes");
+      expect(reasons(wrapper)).toEqual([SINCE]);
+      put.release();
+      await flush(wrapper);
+      expect(reasons(wrapper)).toEqual([SINCE]);
+    });
+  });
+
+  describe("changes Save is closed for, for another reason than the version", () => {
+    it("are still said to be in what Open in ComfyUI opens: only a stale set is left out", async () => {
+      useFilterStore().comfyuiUrl = "http://127.0.0.1:8188";
+      getPixlstashNode.mockResolvedValue({ can_open_workflows: true, saves_back: true });
+      waitingOnServer = {
+        models: [{ address: ADDRESS, filename: JUGGERNAUT.filename }],
+      };
+      getWorkflowChanges.mockImplementation(() =>
+        Promise.resolve(
+          changesState(waitingOnServer, {
+            stale: false,
+            save: {
+              open: false,
+              reason:
+                "A change of checkpoint is saved as a new workflow, so this one keeps its pictures.",
+            },
+          }),
+        ),
+      );
+      const { wrapper } = await mountEditor();
+      expect(
+        wrapper
+          .find('[data-testid="wftab-open-unsaved"]')
+          .text()
+          .replace(/\s+/g, " "),
+      ).toBe(
+        "Open in ComfyUI opens the workflow with the unsaved changes in it. Saving there saves them too.",
+      );
+    });
+  });
+
+  describe("one set, one writer at a time", () => {
+    const WAITING = {
+      models: [{ address: ADDRESS, filename: JUGGERNAUT.filename }],
+    };
+    const save = (wrapper) => wrapper.find('[data-testid="wftab-save"]');
+    const discard = (wrapper) => wrapper.find('[data-testid="wftab-discard"]');
+    const stage = (wrapper, name) =>
+      wrapper.find(`[data-testid="wftab-stage-${name}"]`);
+    const useSetMenu = (wrapper) =>
+      wrapper.findComponent({ name: "WorkflowUseSetMenu" });
+    const SAVED = { workflow_id: KEY, version: 2, left_out: [] };
+
+    /** Two workflows, each answering for its own detail. */
+    function twoWorkflows() {
+      const other = plain({ id: OTHER, name: "Other" });
+      getWorkflowCard.mockImplementation((key) =>
+        Promise.resolve(detail({ card: key === OTHER ? other : plain() })),
+      );
+      return [plain(), other];
+    }
+
+    it.each([
+      ["Save", save, () => saveWorkflow, SAVED],
+      ["Discard", discard, () => discardWorkflowChanges, changesState()],
+    ])(
+      "locks every control that edits the set while %s is out, so no edit can ride beside it",
+      async (_verb, button, route, answer) => {
+        // One of each kind of row: a pick, a strength, a removed loader.
+        waitingOnServer = {
+          ...WAITING,
+          loras: [
+            {
+              node_id: "22",
+              field: "lora_name",
+              sha256: "s2",
+              strength_model: 0.5,
+              strength_clip: 0.5,
+            },
+          ],
+          skip_loras: [{ node_id: "31", field: "lora_name" }],
+        };
+        getWorkflowCard.mockResolvedValue(chainDetail());
+        const out = held();
+        route().mockImplementation(() => out.promise);
+        const { wrapper } = await mountEditor();
+        await settle(wrapper);
+        const editors = () =>
+          [
+            '[data-testid="wftab-pick-checkpoint"] select',
+            '[data-testid="wftab-reset-model"]',
+            '[data-testid="wftab-stage-upscale"]',
+            '[data-testid="wftab-lora-strength"]',
+            '[data-testid="wftab-reset-strength"]',
+            '[data-testid="wftab-lora-remove"]',
+            '[data-testid="wftab-lora-put-back"]',
+            '[data-testid="wftab-use-set"]',
+          ].map((selector) => wrapper.find(selector));
+        expect(editors().map((control) => control.element.disabled)).toEqual(
+          Array(8).fill(false),
+        );
+
+        await button(wrapper).trigger("click");
+        await flush(wrapper);
+        expect(route()).toHaveBeenCalledTimes(1);
+        // `disabled` itself: out of the tab order, and said as unavailable.
+        expect(editors().map((control) => control.element.disabled)).toEqual(
+          Array(8).fill(true),
+        );
+        await stage(wrapper, "upscale").trigger("change");
+        await flush(wrapper);
+        expect(setWorkflowChanges).not.toHaveBeenCalled();
+
+        waitingOnServer = null;
+        out.release(answer);
+        await flush(wrapper);
+        await flush(wrapper);
+        expect(bar(wrapper).exists()).toBe(false);
+        expect(stage(wrapper, "upscale").element.disabled).toBe(false);
+        expect(picker(wrapper).element.disabled).toBe(false);
+      },
+    );
+
+    it("locks the rows while a go-back is out and its graph is read: they are about to say another version's", async () => {
+      const shown = versioned(3, { models: plain().models });
+      getWorkflowCard.mockResolvedValue(detail({ card: shown }));
+      const { wrapper } = await mountEditor([shown]);
+      await settle(wrapper);
+      const back = held();
+      restoreWorkflowVersion.mockImplementation(() => back.promise);
+      await wrapper
+        .find('[data-testid="wftab-version-menu"] [data-version="2"]')
+        .trigger("click");
+      await flush(wrapper);
+      expect(stage(wrapper, "upscale").element.disabled).toBe(true);
+      expect(picker(wrapper).element.disabled).toBe(true);
+
+      // Answered, and the rows of the version it made still being read.
+      const reread = held();
+      getWorkflowCard.mockReturnValue(reread.promise);
+      back.release(versionsAt(4));
+      await flush(wrapper);
+      expect(stage(wrapper, "upscale").element.disabled).toBe(true);
+
+      reread.release(detail({ card: versioned(4, { models: plain().models }) }));
+      await flush(wrapper);
+      await flush(wrapper);
+      expect(stage(wrapper, "upscale").element.disabled).toBe(false);
+      expect(picker(wrapper).element.disabled).toBe(false);
+    });
+
+    it("refuses, out loud, an edit that comes past the locked rows while a save is out", async () => {
+      waitingOnServer = { ...WAITING };
+      const out = held();
+      saveWorkflow.mockImplementation(() => out.promise);
+      const { wrapper } = await mountEditor();
+      await settle(wrapper);
+      await save(wrapper).trigger("click");
+      await flush(wrapper);
+      // A menu opened before the press hands its answer over all the same.
+      useSetMenu(wrapper).vm.$emit("use", {
+        name: "Pony stack",
+        models: [{ address: ADDRESS, filename: "pony/ponyV6.safetensors" }],
+      });
+      await flush(wrapper);
+      expect(setWorkflowChanges).not.toHaveBeenCalled();
+      expect(useNoticeStore().notices.at(-1)).toMatchObject({
+        level: "error",
+        text: "That change was not kept: this workflow's changes were being written. Make it again.",
+      });
+      waitingOnServer = null;
+      out.release(SAVED);
+      await flush(wrapper);
+    });
+
+    it("leaves the verbs open while an edit's write is out, and saves behind it", async () => {
+      // A strength typed and Save clicked is one gesture: the blur starts the
+      // edit's write, and a Save it disabled would swallow the click.
+      waitingOnServer = { ...WAITING };
+      const put = held();
+      setWorkflowChanges.mockImplementation((_key, set) =>
+        put.promise.then(() => {
+          waitingOnServer = set;
+          return changesState(set);
+        }),
+      );
+      const { wrapper } = await mountEditor();
+      await stage(wrapper, "upscale").setValue(true);
+      expect(setWorkflowChanges).toHaveBeenCalledTimes(1);
+      expect(save(wrapper).element.disabled).toBe(false);
+      expect(discard(wrapper).element.disabled).toBe(false);
+      expect(
+        wrapper.find('[data-testid="wftab-save-as-new"]').element.disabled,
+      ).toBe(false);
+
+      await save(wrapper).trigger("click");
+      await flush(wrapper);
+      // Behind the edit, never beside it.
+      expect(saveWorkflow).not.toHaveBeenCalled();
+      put.release();
+      await flush(wrapper);
+      expect(saveWorkflow).toHaveBeenCalledTimes(1);
+    });
+
+    it("saves with the version read when Save was pressed, for the workflow it was pressed on", async () => {
+      waitingOnServer = { ...WAITING };
+      const cards = twoWorkflows();
+      getWorkflowChanges.mockImplementation((key) =>
+        Promise.resolve(
+          key === OTHER
+            ? changesState(null, { workflow_id: OTHER, version: null })
+            : changesState(waitingOnServer, { version: 3 }),
+        ),
+      );
+      const { wrapper, store } = await mountEditor(cards);
+      await settle(wrapper);
+      // A write the save has to wait behind: the notes, still on the wire.
+      const notes = held();
+      patchWorkflowCard.mockImplementation(() => notes.promise);
+      const box = wrapper.find("textarea.wftab-notes");
+      await box.setValue("a note");
+      await box.trigger("blur");
+      await save(wrapper).trigger("click");
+
+      // The rail moves on, and the next workflow's changes are read.
+      store.selectedKeys = [OTHER];
+      await flush(wrapper);
+      expect(saveWorkflow).not.toHaveBeenCalled();
+      notes.release(detail({ card: plain(), notes: "a note" }));
+      await flush(wrapper);
+      // Version 3, as read at the press: not the null of the workflow shown.
+      expect(saveWorkflow).toHaveBeenCalledWith(KEY, { version: 3 });
+    });
+
+    it("does not let a save's re-read of a workflow the rail has left retire the reads of the one it shows", async () => {
+      waitingOnServer = { ...WAITING };
+      const cards = twoWorkflows();
+      const { wrapper, store } = await mountEditor(cards);
+      await settle(wrapper);
+      // The save answers, and its read of what now waits is still out when
+      // B is selected, B's own detail out too.
+      const after = held();
+      const slow = held();
+      getWorkflowChanges.mockImplementation((key) =>
+        key === OTHER
+          ? Promise.resolve(changesState(null, { workflow_id: OTHER }))
+          : after.promise,
+      );
+      await save(wrapper).trigger("click");
+      await flush(wrapper);
+      expect(saveWorkflow).toHaveBeenCalledTimes(1);
+      getWorkflowCard.mockImplementation((key) =>
+        key === OTHER ? slow.promise : Promise.resolve(detail({ card: plain() })),
+      );
+      store.selectedKeys = [OTHER];
+      await flush(wrapper);
+
+      after.release(changesState(null));
+      await flush(wrapper);
+      await flush(wrapper);
+      slow.release(detail({ card: cards[1] }));
+      await flush(wrapper);
+      // B's own rows, which a read for A must not have thrown away.
+      expect(wrapper.find('[data-testid="wftab-row-checkpoint"]').exists()).toBe(
+        true,
+      );
+    });
+  });
+
   describe("two edits in a hurry", () => {
     it("never lets the first write's answer draw over the second edit", async () => {
       const first = held();
@@ -4329,6 +5063,85 @@ describe("the tab as the editor (#1850)", () => {
       expect(
         wrapper.find('[data-testid="wftab-stage-upscale"]').element.checked,
       ).toBe(false);
+    });
+
+    it("does not let an edit's answer for the workflow just left retire the read of the one arrived at", async () => {
+      // A strength typed, then another card clicked: the blur sends A's
+      // write and the click selects B, and A's answer comes back first.
+      const other = plain({ id: OTHER, name: "Other" });
+      getWorkflowCard.mockImplementation((key) =>
+        Promise.resolve(detail({ card: key === OTHER ? other : plain() })),
+      );
+      const put = held();
+      const readB = held();
+      getWorkflowChanges.mockImplementation((key) =>
+        key === OTHER ? readB.promise : Promise.resolve(changesState(null)),
+      );
+      setWorkflowChanges.mockImplementation(() => put.promise);
+      const { wrapper, store } = await mountEditor([plain(), other]);
+      await wrapper.find('[data-testid="wftab-stage-upscale"]').setValue(true);
+      store.selectedKeys = [OTHER];
+      await flush(wrapper);
+
+      put.release(changesState({ stages: { upscale: true } }));
+      await flush(wrapper);
+      readB.release(
+        changesState({ stages: { face_detailer: true } }, { workflow_id: OTHER }),
+      );
+      await flush(wrapper);
+
+      // B's own change is drawn, with its bar, and its rows can be edited.
+      expect(count(wrapper)).toBe("1 unsaved change");
+      const box = wrapper.find('[data-testid="wftab-stage-face_detailer"]');
+      expect(box.element.checked).toBe(true);
+      expect(box.element.disabled).toBe(false);
+      expect(getWorkflowChanges.mock.calls.filter(([key]) => key === OTHER)).toHaveLength(1);
+    });
+
+    it("does not draw a workflow's old read when the rail comes straight back to it", async () => {
+      // A's write answers while B is shown, so nothing here took it; back on
+      // A, the read from before that write is not what waits any more.
+      const other = plain({ id: OTHER, name: "Other" });
+      getWorkflowCard.mockImplementation((key) =>
+        Promise.resolve(detail({ card: key === OTHER ? other : plain() })),
+      );
+      const put = held();
+      setWorkflowChanges.mockImplementationOnce((_key, set) =>
+        put.promise.then(() => {
+          waitingOnServer = set;
+          return changesState(set);
+        }),
+      );
+      const { wrapper, store } = await mountEditor([plain(), other]);
+      const box = (name) => wrapper.find(`[data-testid="wftab-stage-${name}"]`);
+      await box("upscale").setValue(true);
+
+      const again = held();
+      getWorkflowChanges
+        .mockReset()
+        .mockImplementation((key) =>
+          key === OTHER ? new Promise(() => {}) : again.promise,
+        );
+      store.selectedKeys = [OTHER];
+      await flush(wrapper);
+      put.release();
+      await flush(wrapper);
+      store.selectedKeys = [KEY];
+      await flush(wrapper);
+
+      // Not editable on the read from before the write: an edit built on
+      // it would store a set without the change that write made.
+      expect(box("face_detailer").element.disabled).toBe(true);
+      await box("face_detailer").trigger("change");
+      await flush(wrapper);
+      expect(setWorkflowChanges).toHaveBeenCalledTimes(1);
+
+      again.release(changesState(waitingOnServer));
+      await flush(wrapper);
+      expect(box("upscale").element.checked).toBe(true);
+      await box("face_detailer").setValue(true);
+      await flush(wrapper);
+      expect(lastSet().stages).toEqual({ upscale: true, face_detailer: true });
     });
 
     it("does not draw the last workflow's changes while the next one's are being read", async () => {
@@ -4408,6 +5221,82 @@ describe("the tab as the editor (#1850)", () => {
       expect(textOf(wrapper)).not.toContain("Reading its LoRAs");
     });
 
+    it("keeps the LoRA rows on screen when the re-read of their chain fails", async () => {
+      const before = versioned(3, { models: plain().models });
+      getWorkflowCard.mockResolvedValue(chainDetail({ card: before }));
+      const { wrapper, store } = await mountEditor([before]);
+      expect(loraRowsOf(wrapper)).toHaveLength(4);
+
+      getLoraChain.mockRejectedValue(new Error("offline"));
+      store.cards = [versioned(4, { models: plain().models })];
+      await flush(wrapper);
+      await flush(wrapper);
+      // What was read is still the best there is: not blanked for a failure.
+      expect(loraRowsOf(wrapper)).toHaveLength(4);
+      expect(textOf(wrapper)).not.toContain("Could not read its LoRAs just now");
+    });
+
+    it("locks the rows from the card's version moving until its graph has been read again", async () => {
+      const before = versioned(3, { models: plain().models });
+      getWorkflowCard.mockResolvedValue(detail({ card: before }));
+      const { wrapper, store } = await mountEditor([before]);
+      await settle(wrapper);
+      const box = () => wrapper.find('[data-testid="wftab-stage-upscale"]');
+      expect(box().element.disabled).toBe(false);
+
+      const after = versioned(4, { models: plain().models });
+      const reread = held();
+      getWorkflowCard.mockReturnValue(reread.promise);
+      store.cards = [after];
+      await flush(wrapper);
+      // The rows still say version 3's saved values, and an edit is measured
+      // against them: none is taken until version 4's are in.
+      expect(box().element.disabled).toBe(true);
+      expect(picker(wrapper).element.disabled).toBe(true);
+      await box().trigger("change");
+      await flush(wrapper);
+      expect(setWorkflowChanges).not.toHaveBeenCalled();
+
+      reread.release(detail({ card: after }));
+      await flush(wrapper);
+      await flush(wrapper);
+      expect(box().element.disabled).toBe(false);
+      expect(picker(wrapper).element.disabled).toBe(false);
+    });
+
+    it("puts a strength being typed back, commits nothing, and gives the field its focus back", async () => {
+      const before = versioned(3, { models: plain().models });
+      getWorkflowCard.mockResolvedValue(chainDetail({ card: before }));
+      const { wrapper, store } = await mountEditor([before]);
+      const field = () =>
+        loraRowsOf(wrapper)[1].find("[data-testid='wftab-lora-strength']");
+      // Half a number typed, not yet committed (no blur, no Enter).
+      field().element.focus();
+      field().element.value = "0.5";
+
+      const after = versioned(4, { models: plain().models });
+      const reread = held();
+      getWorkflowCard.mockReturnValue(reread.promise);
+      store.cards = [after];
+      await flush(wrapper);
+      // It was typed for a row that is being read again: put back, not kept
+      // to be committed against a graph it was not typed for.
+      expect(field().element.disabled).toBe(true);
+      expect(field().element.value).toBe("0.85");
+      // A browser drops the focus of a control as it is disabled, which this
+      // DOM does not: so that it is handed back is read off the call.
+      const focused = vi.spyOn(field().element, "focus");
+
+      reread.release(chainDetail({ card: after }));
+      await flush(wrapper);
+      await flush(wrapper);
+      expect(field().element.disabled).toBe(false);
+      expect(field().element.value).toBe("0.85");
+      expect(focused).toHaveBeenCalledTimes(1);
+      expect(document.activeElement).toBe(field().element);
+      expect(setWorkflowChanges).not.toHaveBeenCalled();
+    });
+
     it("takes notes written elsewhere when nothing was being typed", async () => {
       const before = versioned(3);
       getWorkflowCard.mockResolvedValue(detail({ card: before, notes: "as read" }));
@@ -4475,6 +5364,27 @@ describe("the tab as the editor (#1850)", () => {
       expect(wrapper.find('[data-testid="wftab-stages-edited"]').exists()).toBe(
         false,
       );
+    });
+
+    it("reads the graph once when the popup's save moves the card's version too", async () => {
+      const before = versioned(3, { models: plain().models });
+      getWorkflowCard.mockResolvedValue(detail({ card: before }));
+      const { wrapper, store } = await mountEditor([before]);
+      await settle(wrapper);
+      const after = versioned(4, { models: plain().models });
+      getWorkflowCard.mockClear().mockResolvedValue(detail({ card: after }));
+      getLoraChain.mockClear();
+      getWorkflowFormInputs.mockClear();
+
+      // The popup says so first; the grid's card catches up a moment later.
+      useRunDialogStore().saved = { workflowId: KEY, savedAs: null, at: 1 };
+      await flush(wrapper);
+      store.cards = [after];
+      await flush(wrapper);
+      await flush(wrapper);
+      expect(getWorkflowCard).toHaveBeenCalledTimes(1);
+      expect(getLoraChain).toHaveBeenCalledTimes(1);
+      expect(getWorkflowFormInputs).toHaveBeenCalledTimes(1);
     });
 
     it("leaves the rail alone when the popup saved another workflow", async () => {
@@ -4631,6 +5541,267 @@ describe("the tab as the editor (#1850)", () => {
       ]);
       expect(count(wrapper)).toBe("2 unsaved changes");
       expect(wrapper.find('[data-testid="wftab-save"]').exists()).toBe(true);
+    });
+
+    it("stores again an edit whose write was still out when the dialog saved", async () => {
+      waitingOnServer = { stages: { upscale: true } };
+      const { wrapper } = await mountEditor();
+      const dialog = await openDialog(wrapper);
+      const put = held();
+      setWorkflowChanges.mockImplementationOnce((_key, set) =>
+        put.promise.then(() => {
+          waitingOnServer = set;
+          return changesState(set);
+        }),
+      );
+      await wrapper.find('[data-testid="wftab-stage-face_detailer"]').setValue(true);
+      expect(setWorkflowChanges).toHaveBeenCalledTimes(1);
+
+      dialog.vm.$emit("overwritten", KEY);
+      await flush(wrapper);
+      // Behind the edit's write: what is stored again is read after it.
+      expect(discardWorkflowChanges).not.toHaveBeenCalled();
+      put.release();
+      await flush(wrapper);
+      await flush(wrapper);
+
+      expect(discardWorkflowChanges).toHaveBeenCalledTimes(1);
+      expect(setWorkflowChanges).toHaveBeenCalledTimes(2);
+      expect(lastSet().stages).toEqual({ upscale: true, face_detailer: true });
+      expect(count(wrapper)).toBe("2 unsaved changes");
+    });
+
+    it("locks the rows and the verbs while what waited is stored again", async () => {
+      waitingOnServer = { stages: { upscale: true } };
+      const { wrapper } = await mountEditor();
+      const dialog = await openDialog(wrapper);
+      const cleared = held();
+      discardWorkflowChanges.mockImplementation(() =>
+        cleared.promise.then(() => changesState()),
+      );
+      const box = () => wrapper.find('[data-testid="wftab-stage-face_detailer"]');
+      const save = () => wrapper.find('[data-testid="wftab-save"]');
+
+      dialog.vm.$emit("overwritten", KEY);
+      await flush(wrapper);
+      await flush(wrapper);
+      expect(discardWorkflowChanges).toHaveBeenCalledTimes(1);
+      // Between the discard and the store there is nothing on the server:
+      // an edit or a save made now would be of a set that is not there.
+      expect(box().element.disabled).toBe(true);
+      expect(save().element.disabled).toBe(true);
+      await box().trigger("change");
+      await flush(wrapper);
+      expect(setWorkflowChanges).not.toHaveBeenCalled();
+
+      cleared.release();
+      await flush(wrapper);
+      await flush(wrapper);
+      expect(lastSet().stages).toEqual({ upscale: true });
+      expect(box().element.disabled).toBe(false);
+      expect(save().element.disabled).toBe(false);
+    });
+
+    it("keeps the rows locked through a second Save of the dialog that waits behind the first", async () => {
+      waitingOnServer = { stages: { upscale: true } };
+      const { wrapper } = await mountEditor();
+      const first = held();
+      const second = held();
+      discardWorkflowChanges
+        .mockImplementationOnce(() => first.promise.then(() => changesState()))
+        .mockImplementationOnce(() => second.promise.then(() => changesState()));
+      const box = () => wrapper.find('[data-testid="wftab-stage-face_detailer"]');
+      const dialog = await openDialog(wrapper);
+      dialog.vm.$emit("overwritten", KEY);
+      dialog.vm.$emit("overwritten", KEY);
+      await flush(wrapper);
+      await flush(wrapper);
+
+      // The first is done; the second, queued behind it, has the set now.
+      first.release();
+      await flush(wrapper);
+      await flush(wrapper);
+      expect(discardWorkflowChanges).toHaveBeenCalledTimes(2);
+      expect(box().element.disabled).toBe(true);
+
+      second.release();
+      await flush(wrapper);
+      await flush(wrapper);
+      expect(box().element.disabled).toBe(false);
+      expect(count(wrapper)).toBe("1 unsaved change");
+    });
+
+    it("takes Apply behind a save that is out, over what then waits", async () => {
+      waitingOnServer = { stages: { upscale: true } };
+      const { wrapper } = await mountEditor();
+      const dialog = await openDialog(wrapper);
+      const out = held();
+      saveWorkflow.mockImplementation(() => out.promise);
+      await wrapper.find('[data-testid="wftab-save"]').trigger("click");
+      await flush(wrapper);
+
+      dialog.vm.$emit("apply", {
+        skip_loras: [{ node_id: "31", field: "lora_name" }],
+        loras: [],
+      });
+      await flush(wrapper);
+      // Not beside the save, which would store the saved set again with it.
+      expect(setWorkflowChanges).not.toHaveBeenCalled();
+
+      waitingOnServer = null;
+      out.release({ workflow_id: KEY, version: 2, left_out: [] });
+      await flush(wrapper);
+      await flush(wrapper);
+      expect(setWorkflowChanges).toHaveBeenCalledTimes(1);
+      expect(lastSet()).toEqual({
+        models: [],
+        loras: [],
+        skip_loras: [{ node_id: "31", field: "lora_name" }],
+        stages: {},
+        values: [],
+      });
+      expect(count(wrapper)).toBe("1 unsaved change");
+    });
+
+    it("does not let the re-read of a workflow the rail has left retire the reads of the one it shows", async () => {
+      const other = plain({ id: OTHER, name: "Other" });
+      const { wrapper, store } = await mountEditor([plain(), other]);
+      const dialog = await openDialog(wrapper);
+      // An edit's write still out, so the dialog's Save waits its turn.
+      const put = held();
+      setWorkflowChanges.mockImplementationOnce(() => put.promise);
+      await wrapper.find('[data-testid="wftab-stage-upscale"]').setValue(true);
+      dialog.vm.$emit("overwritten", KEY);
+      await flush(wrapper);
+
+      const slow = held();
+      getWorkflowCard.mockImplementation((key) =>
+        key === OTHER ? slow.promise : Promise.resolve(chainDetail()),
+      );
+      store.selectedKeys = [OTHER];
+      await flush(wrapper);
+      put.release(changesState({ stages: { upscale: true } }));
+      await flush(wrapper);
+      await flush(wrapper);
+      slow.release(chainDetail({ card: other }));
+      await flush(wrapper);
+      // B's own rows, which a read for A must not have thrown away.
+      expect(wrapper.find('[data-testid="wftab-row-checkpoint"]').exists()).toBe(
+        true,
+      );
+    });
+
+    it("reads the graph once when its Save moves the card's version", async () => {
+      const before = versioned(3, { models: plain().models });
+      getWorkflowCard.mockResolvedValue(chainDetail({ card: before }));
+      const { wrapper, store } = await mountEditor([before]);
+      const dialog = await openDialog(wrapper);
+      const after = versioned(4, { models: plain().models });
+      getWorkflowCard.mockClear().mockResolvedValue(chainDetail({ card: after }));
+      listWorkflowCards.mockResolvedValue({ cards: [after], one_offs: 0, hidden: 0 });
+      getLoraChain.mockClear();
+
+      dialog.vm.$emit("overwritten", KEY);
+      await flush(wrapper);
+      await flush(wrapper);
+      // The grid's card has caught up, and asked for nothing again.
+      expect(store.cards[0].version).toBe(4);
+      expect(getWorkflowCard).toHaveBeenCalledTimes(1);
+      expect(getLoraChain).toHaveBeenCalledTimes(1);
+    });
+
+    it("leaves what waits as it is, and says so, when the new version's LoRAs cannot be read", async () => {
+      waitingOnServer = {
+        stages: { upscale: true },
+        skip_loras: [{ node_id: "31", field: "lora_name" }],
+      };
+      const { wrapper } = await mountEditor();
+      const dialog = await openDialog(wrapper);
+      getLoraChain.mockRejectedValue(new Error("offline"));
+
+      dialog.vm.$emit("overwritten", KEY);
+      await flush(wrapper);
+      await flush(wrapper);
+      // Neither guess is taken: keeping every LoRA change may name a loader
+      // the edit took out, and dropping them loses ones that are still there.
+      expect(discardWorkflowChanges).not.toHaveBeenCalled();
+      expect(setWorkflowChanges).not.toHaveBeenCalled();
+      expect(count(wrapper)).toBe("2 unsaved changes");
+      expect(useNoticeStore().notices.at(-1)).toMatchObject({
+        level: "error",
+        text: "The LoRA edit was saved. The changes that were waiting are left as they were: its LoRAs could not be read to store them against the new version.",
+      });
+      // The rows are let go again.
+      expect(
+        wrapper.find('[data-testid="wftab-stage-upscale"]').element.disabled,
+      ).toBe(false);
+    });
+
+    it("stores what waited again for the workflow the dialog saved, whatever the rail shows by then", async () => {
+      waitingOnServer = {
+        stages: { upscale: true },
+        skip_loras: [
+          { node_id: "31", field: "lora_name" },
+          { node_id: "14", field: "lora_name" },
+        ],
+      };
+      const other = plain({ id: OTHER, name: "Other" });
+      const { wrapper, store } = await mountEditor([plain(), other]);
+      const dialog = await openDialog(wrapper);
+      // The rail moves on with the dialog still open on the first workflow.
+      getWorkflowChanges.mockImplementation((key) =>
+        Promise.resolve(
+          key === OTHER
+            ? changesState(null, { workflow_id: OTHER })
+            : changesState(waitingOnServer),
+        ),
+      );
+      store.selectedKeys = [OTHER];
+      await flush(wrapper);
+      expect(loraRowsOf(wrapper)).toHaveLength(4);
+
+      // The chain as the dialog's Save left it, asked for by id: loader 31 is
+      // gone from THAT workflow. The one on screen keeps its four.
+      const [first, second] = loraChain().loaders;
+      getLoraChain.mockClear().mockImplementation((key) =>
+        Promise.resolve(
+          key === KEY ? loraChain({ loaders: [first, second] }) : loraChain(),
+        ),
+      );
+      const cleared = held();
+      discardWorkflowChanges.mockImplementation(() =>
+        cleared.promise.then(() => {
+          waitingOnServer = null;
+          return changesState();
+        }),
+      );
+      dialog.vm.$emit("overwritten", KEY);
+      await flush(wrapper);
+      await flush(wrapper);
+      expect(getLoraChain.mock.calls).toEqual([[KEY]]);
+      expect(discardWorkflowChanges).toHaveBeenCalledWith(KEY);
+      expect(loraRowsOf(wrapper)).toHaveLength(4);
+
+      // Back on it mid-turn: the rows are locked by the same mark.
+      store.selectedKeys = [KEY];
+      await flush(wrapper);
+      expect(
+        wrapper.find('[data-testid="wftab-stage-face_detailer"]').element.disabled,
+      ).toBe(true);
+
+      cleared.release();
+      await flush(wrapper);
+      await flush(wrapper);
+      expect(setWorkflowChanges).toHaveBeenCalledTimes(1);
+      expect(setWorkflowChanges.mock.calls[0][0]).toBe(KEY);
+      expect(lastSet().stages).toEqual({ upscale: true });
+      expect(lastSet().skip_loras).toEqual([
+        { node_id: "14", field: "lora_name" },
+      ]);
+      expect(count(wrapper)).toBe("2 unsaved changes");
+      expect(
+        wrapper.find('[data-testid="wftab-stage-face_detailer"]').element.disabled,
+      ).toBe(false);
     });
 
     it("says so when the changes carried over can no longer be saved", async () => {
