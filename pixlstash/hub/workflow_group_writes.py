@@ -60,29 +60,65 @@ def is_parameter_address(address: str) -> bool:
 
 
 def set_group_attributes(
-    hub: HubDatabase, workflow_id: str, name=UNSET, notes=UNSET, hidden=UNSET
+    hub: HubDatabase,
+    workflow_id: str,
+    name=UNSET,
+    notes=UNSET,
+    hidden=UNSET,
+    library_uuid: Optional[str] = None,
 ) -> None:
     """Write the attributes the request carried; the rest stand.
 
     ``None`` for *name* or *notes* clears it, which is not the same as leaving
-    the field out.
+    the field out. *name* and *notes* are the machine's, on
+    ``workflow_group_attr``; *hidden* is the owner's answer for ONE library
+    when *library_uuid* is given, else the machine-wide fallback - see
+    :func:`set_group_hidden`.
     """
     given = {
-        column: (int(bool(value)) if column == "hidden" else value)
-        for column, value in (("name", name), ("notes", notes), ("hidden", hidden))
+        column: value
+        for column, value in (("name", name), ("notes", notes))
         if value is not UNSET
     }
-    if not given:
+    if given:
+        columns = ", ".join(given)
+        placeholders = ", ".join("?" for _ in given)
+        updates = ", ".join(f"{column} = excluded.{column}" for column in given)
+        with hub.transaction() as conn:
+            conn.execute(
+                f"INSERT INTO workflow_group_attr (workflow_id, {columns}) "
+                f"VALUES (?, {placeholders}) "
+                f"ON CONFLICT(workflow_id) DO UPDATE SET {updates}",
+                (workflow_id, *given.values()),
+            )
+    if hidden is not UNSET:
+        set_group_hidden(hub, workflow_id, bool(hidden), library_uuid)
+
+
+def set_group_hidden(
+    hub: HubDatabase, workflow_id: str, hidden: bool, library_uuid: Optional[str] = None
+) -> None:
+    """Hide or show one workflow in one library.
+
+    With *library_uuid* the answer is that library's own
+    (``workflow_group_hidden``); without one - a hub with no active library -
+    it is the machine-wide fallback on ``workflow_group_attr``.
+    """
+    if library_uuid:
+        with hub.transaction() as conn:
+            conn.execute(
+                "INSERT INTO workflow_group_hidden "
+                "(workflow_id, library_uuid, hidden) VALUES (?, ?, ?) "
+                "ON CONFLICT(workflow_id, library_uuid) "
+                "DO UPDATE SET hidden = excluded.hidden",
+                (workflow_id, library_uuid, int(hidden)),
+            )
         return
-    columns = ", ".join(given)
-    placeholders = ", ".join("?" for _ in given)
-    updates = ", ".join(f"{column} = excluded.{column}" for column in given)
     with hub.transaction() as conn:
         conn.execute(
-            f"INSERT INTO workflow_group_attr (workflow_id, {columns}) "
-            f"VALUES (?, {placeholders}) "
-            f"ON CONFLICT(workflow_id) DO UPDATE SET {updates}",
-            (workflow_id, *given.values()),
+            "INSERT INTO workflow_group_attr (workflow_id, hidden) VALUES (?, ?) "
+            "ON CONFLICT(workflow_id) DO UPDATE SET hidden = excluded.hidden",
+            (workflow_id, int(hidden)),
         )
 
 
@@ -480,6 +516,7 @@ def delete_manual_workflow(hub: HubDatabase, workflow_id: str) -> None:
             "workflow_group_pins",
             "workflow_group_picture_input",
             "workflow_group_attr",
+            "workflow_group_hidden",
             "workflow_change",
             "workflow_layout",
             "workflow_version",

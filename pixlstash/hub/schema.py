@@ -571,6 +571,21 @@ CREATE TABLE IF NOT EXISTS model_set_member_verdict (
 )
 """
 
+# The owner hides a set IN A LIBRARY (issue #1869). Keyed by the set's own key
+# as the shelf computes it - a combination's sorted member ids, or ``hand:<id>``
+# for a hand-made set - because a set from pictures is computed, not stored, and
+# has no row to hang a column on. A row means hidden in that library; no row
+# means shown, which is why there is no ``hidden`` column to flip. Per library
+# for the same reason ``workflow_group_hidden`` is: what a library cares about
+# is a property of the library, not the machine.
+_V2_WORKFLOW_SET_HIDDEN = """
+CREATE TABLE IF NOT EXISTS workflow_set_hidden (
+    library_uuid TEXT NOT NULL,
+    set_key      TEXT NOT NULL,
+    PRIMARY KEY (library_uuid, set_key)
+)
+"""
+
 _V2_MODEL_SHELF_INDEXES = (
     # The scanner's hot path: "which files does this model have, and where".
     "CREATE INDEX IF NOT EXISTS ix_model_file_model ON model_file(model_id)",
@@ -600,6 +615,7 @@ _V2_MODEL_SHELF_TABLES = (
     # After the set: it references `model_workflow_set(id)`.
     _V2_MODEL_WORKFLOW_SET_MEMBER,
     _V2_MODEL_WORKFLOW_SET_DECLINE,
+    _V2_WORKFLOW_SET_HIDDEN,
     _V2_MODEL_SET_VERDICT,
     _V2_MODEL_SET_MEMBER_VERDICT,
     *_V2_MODEL_SHELF_INDEXES,
@@ -1267,6 +1283,21 @@ CREATE TABLE IF NOT EXISTS workflow_group_attr (
 )
 """
 
+# The owner hides a workflow IN A LIBRARY. ``workflow_group_attr.hidden`` is
+# the machine-wide answer, kept as the fallback for a hub written before this
+# table; a row here is that workflow's answer in one library and it wins. Which
+# workflows a library cares about is a property of the library, not the machine.
+# No foreign key, as ``workflow_group_attr`` carries none: a workflow id on the
+# grid need not have a ``workflow_group`` row.
+_V2_WORKFLOW_GROUP_HIDDEN = """
+CREATE TABLE IF NOT EXISTS workflow_group_hidden (
+    workflow_id  TEXT NOT NULL,
+    library_uuid TEXT NOT NULL,
+    hidden       INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (workflow_id, library_uuid)
+)
+"""
+
 # The owner's edits to the default recipe: parameters, models (``value`` the
 # filename as the graph spells it) and LoRAs (``lora:<sha256>``, ``value`` the
 # strength). No row is the computed default.
@@ -1556,6 +1587,7 @@ _V2_WORKFLOW_TABLES = (
     _V2_WORKFLOW_GROUP,
     _V2_WORKFLOW_GROUP_MEMBER,
     _V2_WORKFLOW_GROUP_ATTR,
+    _V2_WORKFLOW_GROUP_HIDDEN,
     _V2_WORKFLOW_GROUP_DEFAULT,
     _V2_WORKFLOW_GROUP_PINS,
     _V2_WORKFLOW_GROUP_PICTURE_INPUT,

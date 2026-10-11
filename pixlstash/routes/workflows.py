@@ -4072,7 +4072,12 @@ def create_router(server) -> APIRouter:
             # a caller meaning "not hidden", which the hub is told plainly
             # rather than left to coerce.
             changes["hidden"] = False
-        set_group_attributes(hub, workflow_id, **changes)
+        set_group_attributes(
+            hub,
+            workflow_id,
+            library_uuid=getattr(server.vault, "library_uuid", None),
+            **changes,
+        )
         _announce(request, [workflow_id], "changed")
         return _read_detail(hub, workflow_id)
 

@@ -963,6 +963,7 @@ def workflow_index(
     hub: HubDatabase,
     picture_counts: Optional[dict[str, int]] = None,
     cards: Optional[list[Card]] = None,
+    library_uuid: Optional[str] = None,
 ) -> list[Workflow]:
     """Every workflow this hub holds, built from :func:`card_index`.
 
@@ -975,6 +976,9 @@ def workflow_index(
             for the base topology's first key and its last tie-break. ``None``
             skips both.
         cards: :func:`card_index`'s answer when the caller already read it.
+        library_uuid: The active library, so each workflow's *hidden* is that
+            library's own answer (``workflow_group_hidden``) where it has one,
+            else the machine-wide fallback. ``None`` reads the fallback alone.
     """
     placed = {
         topology_hash: workflow_id
@@ -1041,12 +1045,28 @@ def workflow_index(
             "SELECT workflow_id, name, notes, hidden FROM workflow_group_attr"
         )
     }
+    # The active library's own hide answer, where it has one; a workflow it has
+    # no row for keeps the machine-wide fallback from ``attrs``.
+    hidden_of = (
+        {
+            row["workflow_id"]: bool(row["hidden"])
+            for row in hub.fetchall(
+                "SELECT workflow_id, hidden FROM workflow_group_hidden "
+                "WHERE library_uuid = ?",
+                (library_uuid,),
+            )
+        }
+        if library_uuid
+        else {}
+    )
     counts = picture_counts or {}
     for entry in workflows.values():
         attr = attrs.get(entry.workflow_id)
         if attr is not None:
             entry.name, entry.notes = attr["name"], attr["notes"]
             entry.hidden = bool(attr["hidden"])
+        if entry.workflow_id in hidden_of:
+            entry.hidden = hidden_of[entry.workflow_id]
         if not entry.topologies:
             # A manual workflow: no topology to choose a base from.
             continue

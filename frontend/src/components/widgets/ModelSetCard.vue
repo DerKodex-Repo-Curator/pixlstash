@@ -180,10 +180,12 @@
           :label="`Your verdict: ${setVerdictText(card.verdict)}`"
         />
         <!-- A set from pictures is read off the library, so it is hidden rather
-             than deleted (the next read would only draw it again). Mouse-only,
-             like the toggle: the grid owns Tab, and Delete on the card hides. -->
+             than deleted (the next read would only draw it again). A hand-made
+             set is the owner's own and can be deleted, and hiding it is the
+             same view choice on top: out of the way in THIS library only.
+             Mouse-only, like the toggle: the grid owns Tab, and Delete on the
+             card deletes a hand-made set, hides a derived one. -->
         <AppButton
-          v-if="!card.handMade"
           class="msc__hide"
           variant="ghost"
           size="sm"

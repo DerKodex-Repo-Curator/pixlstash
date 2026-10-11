@@ -622,6 +622,7 @@ Public guest scoring and shared-link endpoints.
 | POST   | /api/v1/models/icons/clear                                                    | model_shelf     | Clear the icon on one or more models                        |
 | GET    | /api/v1/models/workflow-sets                                                  | model_shelf     | Which models have actually run together                     |
 | POST   | /api/v1/models/workflow-sets                                                  | model_shelf     | Make a workflow set by hand                                 |
+| PUT    | /api/v1/models/workflow-sets/hidden                                           | model_shelf     | Hide or show workflow sets in this library                  |
 | PUT    | /api/v1/models/workflow-sets/verdicts/{combo_key}                             | model_shelf     | Record the owner's verdict on a workflow set                |
 | DELETE | /api/v1/models/workflow-sets/verdicts/{combo_key}                             | model_shelf     | Clear the owner's verdict on a workflow set                 |
 | PUT    | /api/v1/models/workflow-sets/verdicts/{combo_key}/members/{model_id}          | model_shelf     | Record whether a member is a problem in a workflow set      |
@@ -2426,6 +2427,7 @@ nothing in the vault moves; a manual workflow's own runs are the one exception
 |---|---|
 | `workflow_group`, `workflow_group_member` | A workflow somebody decided about, and (legacy) a topology placed in a hand-made group by the dropped merge and split, one workflow per topology. Hub data step 6 dissolves every such group and nothing writes a member row any more |
 | `workflow_group_attr`, `workflow_group_default`, `workflow_group_pins`, `workflow_group_picture_input` | The owner's name, notes and hidden flag; edits to the default recipe; pins; picture inputs (library-keyed, pictures by `pixel_sha`). All keyed by `workflow_id` and addressed by **address**, never slot label |
+| `workflow_group_hidden` | Which workflows ONE library hides (#1869), a row per `(workflow_id, library_uuid)`; its absence in a library falls back to `workflow_group_attr.hidden`, so a hub written before the table hides the same workflows everywhere |
 | `workflow_key_successor` | Which workflow each card became; written by the cut-over, read by the vault's saved-recipe conversion |
 | `workflow_version` (rows of an `auto:` id) | **The versions the owner saved over an automatic workflow** (Save, a whole graph from ComfyUI or the MCP server, Edit LoRAs *Over the original*; "Saving over a workflow", below). An automatic workflow holds no `workflow_document`, so it has versions only once it is saved over: the first overwrite stores the graph read off its pictures as version 1 (`source` `pictures`) and the edit as version 2, and each later overwrite is the next version (`hub/workflow_versions.append_version`, its `first` argument; the same cap of 50). Its graph is then its highest version: `routes/workflows._edited_graph_for` reads it ahead of every other tier (`workflow_versions.edited_document`, `run_service.FROM_EDIT`, `source: "edit"` on Run, Open and Export) **for the workflow's base card only**: a saved recipe or a picture on another card of the workflow runs that card's own graph. The grid shows it as *Version N* (`workflow_versions.automatic_version_facts`, read once per grid; the overwrite also moves `changed_at`). Its default recipe is then read off that graph, as a manual workflow's is ("Saving over a workflow", below); the grid's models, the LoRA pile and the ghost counts are still read off the pictures. A version that is not an API graph is logged and the pictures' graph runs; the version number still stands, so the next overwrite replaces it. **A saved-over automatic workflow keeps its id** (rule 5 of #1846; "A saved-over automatic workflow keeps its id", below), so its versions are never retired with it; `_carry_group_state` still deletes and logs the rows of a retired id, for the case that should now be impossible. `stranded_workflow_ids` counts the table |
 | `workflow_core_successor` | Per (topology, new workflow), the automatic workflow the retired rule put the topology in, each one the live rule puts its variants in, and the old -> new core label map (data step 8 from v1, step 10 from v2, step 13 from v3, step 15 from v4, below) |
@@ -2576,7 +2578,11 @@ variant is in (`RunGroup.workflow_id`); `workflow_key` is no longer a source.
   (it samples stored runs per workflow) and filled on the detail route and on
   every write's answer. The stack fields (`member_keys`, `members`, `stack_id`,
   `stack_size`, `differs_by*`), the per-slot `mark` and `recipe_loras` are gone.
-  Hidden and one-off are decided per workflow (`workflow_group_attr.hidden`).
+  Hidden and one-off are decided per workflow. Since #1869 **hidden is the
+  active library's own answer** (`workflow_group_hidden`, a row per library),
+  falling back to the machine-wide `workflow_group_attr.hidden` where that
+  library has no row - so a hide made before #1869 still holds everywhere
+  until a library overrides it, in either direction.
 - Every `/workflows/{workflow_id}/…` route resolves the id with
   `find_workflow` (a malformed id is 422, an unknown one 404). The ones that act
   on ONE graph - the graph, export, the LoRA chain, the loader insertion, model
@@ -9909,6 +9915,17 @@ like every shelf table), read and written by
   members from `no_set`. Covered combinations are still served: the grid hides
   them, *Works with* reads them all. The mutators answer with the set re-read
   through that same full evidence pass, which is a per-click cost, not per row.
+- **Hidden is the library's own list, on the server (#1869).** The grid's
+  *hide* used to live in the browser, which is per-machine, not per-library.
+  `GET /models/workflow-sets` now carries `hidden_sets` and
+  `PUT /models/workflow-sets/hidden` sets it: hub `workflow_set_hidden` rows,
+  keyed by `(library_uuid, set_key)` where the key is the set's own - a
+  combination's sorted `model.id`s, or `hand:<id>`. A row means hidden; showing
+  a set deletes it. Verified and hand-made sets hide the same way, so a set
+  from pictures that is noise in one library stays hidden there and nowhere
+  else. The endpoints are `owner_only`; the key is opaque, so no set has to
+  exist for its key to be hidden and a stale one is harmless (a set id is
+  `AUTOINCREMENT`, never reused, and its row goes with it on delete).
 - **The merge offer is derived, and only the declines are stored (#1523).**
   `_attach_offers` groups the combinations no set covers by their head (the
   grid's own evidence cards, but over `hub_combinations`: every library's

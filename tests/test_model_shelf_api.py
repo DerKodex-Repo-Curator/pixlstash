@@ -90,6 +90,7 @@ _SHELF_ROUTES = (
     ("POST", "/api/v1/models/workflow-sets/{set_id}/members"),
     ("POST", "/api/v1/models/workflow-sets/{set_id}/members/remove"),
     ("PUT", "/api/v1/models/workflow-sets/{set_id}/declines"),
+    ("PUT", "/api/v1/models/workflow-sets/hidden"),
     ("PUT", "/api/v1/models/workflow-sets/verdicts/{combo_key}"),
     ("DELETE", "/api/v1/models/workflow-sets/verdicts/{combo_key}"),
     ("PUT", "/api/v1/models/workflow-sets/verdicts/{combo_key}/members/{model_id}"),
@@ -1217,6 +1218,7 @@ def _wipe_sets(server) -> None:
         conn.execute("DELETE FROM model_workflow_set_member")
         conn.execute("DELETE FROM model_workflow_set_decline")
         conn.execute("DELETE FROM model_workflow_set")
+        conn.execute("DELETE FROM workflow_set_hidden")
 
 
 def _new_set(shelf_env, **body) -> dict:
@@ -1314,6 +1316,63 @@ def test_hand_made_set_routes_answer_the_owner_and_refuse_tokens(shelf_env):
         assert set_id not in _hand_made(shelf_env)
     finally:
         _wipe_sets(shelf_env.server)
+
+
+def test_hiding_a_workflow_set_is_the_librarys_own_answer(shelf_env, monkeypatch):
+    """A hidden set is per-library (#1869): the same hub, another library, and
+    the set is still on the grid - and the key the grid hides it under is the
+    set's own, whether it was computed or hand-made."""
+    server = shelf_env.server
+    here = server.vault.library_uuid
+    assert here
+
+    made = _new_set(shelf_env, name="Hidden here")
+    hand_key = f"hand:{made['id']}"
+    other_key = _key(*shelf_env.model_ids.values())
+
+    r = shelf_env.owner.put(
+        f"{API}/models/workflow-sets/hidden",
+        json={"keys": [hand_key, other_key], "hidden": True},
+    )
+    assert r.status_code == 200, r.text
+    assert set(r.json()["hidden_sets"]) == {hand_key, other_key}
+    # The list route carries it, so the grid draws the hide without a second read.
+    assert set(
+        shelf_env.owner.get(f"{API}/models/workflow-sets").json()["hidden_sets"]
+    ) == {hand_key, other_key}
+
+    # Showing one leaves the other alone, and the answer is this library's alone.
+    r = shelf_env.owner.put(
+        f"{API}/models/workflow-sets/hidden",
+        json={"keys": [hand_key], "hidden": False},
+    )
+    assert r.json()["hidden_sets"] == [other_key]
+    monkeypatch.setattr(server.vault, "_library_uuid", _h("another-library"))
+    assert (
+        shelf_env.owner.get(f"{API}/models/workflow-sets").json()["hidden_sets"] == []
+    )
+
+
+def test_deleting_a_hand_made_set_forgets_its_hide(shelf_env):
+    """A set's id is AUTOINCREMENT, never reused, so a stale hide row is dead
+    state - and it goes with the set rather than naming nothing."""
+    server = shelf_env.server
+    made = _new_set(shelf_env, name="Soon gone")
+    key = f"hand:{made['id']}"
+    shelf_env.owner.put(
+        f"{API}/models/workflow-sets/hidden", json={"keys": [key], "hidden": True}
+    )
+
+    assert (
+        shelf_env.owner.delete(f"{API}/models/workflow-sets/{made['id']}").status_code
+        == 200
+    )
+    assert (
+        server.hub.fetchone(
+            "SELECT 1 FROM workflow_set_hidden WHERE set_key = ?", (key,)
+        )
+        is None
+    )
 
 
 def test_an_empty_unnamed_set_is_a_set(shelf_env):

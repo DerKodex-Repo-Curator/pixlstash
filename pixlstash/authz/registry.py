@@ -565,6 +565,9 @@ ROUTE_POLICIES: dict[tuple[str, str], RoutePolicy] = {
     ),
     # The models kept out of a set's merge offer (#1523): same rows, same tier.
     ("PUT", "/api/v1/models/workflow-sets/{set_id}/declines"): RoutePolicy(_OWNER),
+    # Which sets the active library hides (#1869): a hub row per library, the
+    # grid's tier, the owner's own view of their shelf.
+    ("PUT", "/api/v1/models/workflow-sets/hidden"): RoutePolicy(_OWNER),
     # The owner's verdicts on a set and on its members (workflow-set-verdicts
     # spec). Hub rows keyed by a combination of `model.id`s, which no share
     # token is ever scoped to, and the owner's own judgement about the

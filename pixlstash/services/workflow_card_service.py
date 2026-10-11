@@ -545,7 +545,9 @@ def read_grid(
         if getattr(vault, "library_uuid", None)
         else None
     )
-    workflows = workflow_index(hub, counts, cards)
+    workflows = workflow_index(
+        hub, counts, cards, library_uuid=getattr(vault, "library_uuid", None)
+    )
     run_filed = run_filed_workflow_ids(hub)
     activity, candidates, saved_recipes, model_values = read_card_grid(
         vault, COVER_DEPTH, run_filed

@@ -673,6 +673,7 @@ def _seed_hub(server) -> None:
         conn.execute("DELETE FROM workflow_recipe_instance")
         conn.execute("DELETE FROM workflow_model_fix")
         conn.execute("DELETE FROM workflow_group_default")
+        conn.execute("DELETE FROM workflow_group_hidden")
         conn.execute("DELETE FROM workflow_group_attr")
         conn.execute("DELETE FROM workflow_group_pins")
         conn.execute("DELETE FROM workflow_group_picture_input")
@@ -6783,6 +6784,95 @@ def test_hiding_a_card_takes_it_off_the_grid_and_it_still_opens(workflow_env):
     detail = owner.get(f"{API}/workflows/{BUSY_WF}")
     assert detail.status_code == 200
     assert detail.json()["hidden"] is True
+
+
+def test_hiding_a_workflow_is_the_librarys_own_answer(workflow_env, monkeypatch):
+    """A hide is per-library: a workflow hidden here is still on another
+    library's grid, and the answer is recorded against this library."""
+    owner, server, hub = (
+        workflow_env.owner,
+        workflow_env.server,
+        workflow_env.server.hub,
+    )
+    here = server.vault.library_uuid
+    assert here
+
+    assert (
+        owner.patch(f"{API}/workflows/{BUSY_WF}", json={"hidden": True}).status_code
+        == 200
+    )
+    # Gone from THIS library's grid...
+    assert BUSY_WF not in {
+        card["id"] for card in owner.get(f"{API}/workflows").json()["cards"]
+    }
+    # ...and the answer is filed against this library, not the machine.
+    assert (here, 1) in {
+        (row["library_uuid"], row["hidden"])
+        for row in hub.fetchall(
+            "SELECT library_uuid, hidden FROM workflow_group_hidden "
+            "WHERE workflow_id = ?",
+            (BUSY_WF,),
+        )
+    }
+    # The machine-wide fallback was NOT touched: nothing relies on it here.
+    assert (
+        hub.fetchone(
+            "SELECT hidden FROM workflow_group_attr WHERE workflow_id = ?",
+            (BUSY_WF,),
+        )
+        is None
+    )
+
+    # Another library attached to the same hub still draws it.
+    monkeypatch.setattr(server.vault, "_library_uuid", _h("another-library"))
+    assert BUSY_WF in {
+        card["id"] for card in owner.get(f"{API}/workflows").json()["cards"]
+    }
+
+
+def test_unhiding_in_one_library_leaves_a_machine_wide_hide_standing(workflow_env):
+    """The legacy ``workflow_group_attr`` hide is the fallback: a library can
+    show a workflow the machine hides without disturbing the others."""
+    owner, server, hub = (
+        workflow_env.owner,
+        workflow_env.server,
+        workflow_env.server.hub,
+    )
+    here = server.vault.library_uuid
+    # A hub written before this table: hidden machine-wide, no per-library row.
+    with hub.transaction() as conn:
+        conn.execute(
+            "INSERT INTO workflow_group_attr (workflow_id, hidden) VALUES (?, 1) "
+            "ON CONFLICT(workflow_id) DO UPDATE SET hidden = 1",
+            (BUSY_WF,),
+        )
+    assert BUSY_WF not in {
+        card["id"] for card in owner.get(f"{API}/workflows").json()["cards"]
+    }
+
+    # Showing it here records a per-library override and leaves the fallback on.
+    assert (
+        owner.patch(f"{API}/workflows/{BUSY_WF}", json={"hidden": False}).status_code
+        == 200
+    )
+    assert BUSY_WF in {
+        card["id"] for card in owner.get(f"{API}/workflows").json()["cards"]
+    }
+    assert (
+        hub.fetchone(
+            "SELECT hidden FROM workflow_group_attr WHERE workflow_id = ?",
+            (BUSY_WF,),
+        )["hidden"]
+        == 1
+    )
+    assert (here, 0) in {
+        (row["library_uuid"], row["hidden"])
+        for row in hub.fetchall(
+            "SELECT library_uuid, hidden FROM workflow_group_hidden "
+            "WHERE workflow_id = ?",
+            (BUSY_WF,),
+        )
+    }
 
 
 def _group_defaults(hub, workflow_id) -> dict[str, str]:

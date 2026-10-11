@@ -542,6 +542,12 @@ def delete_set(hub, set_id: int) -> dict:
             "DELETE FROM model_workflow_set_decline WHERE set_id = ?", (set_id,)
         )
         conn.execute("DELETE FROM model_workflow_set WHERE id = ?", (set_id,))
+        # Every library's hide row for it, so the AUTOINCREMENT id it leaves
+        # behind is not a hidden row for nothing.
+        conn.execute(
+            "DELETE FROM workflow_set_hidden WHERE set_key = ?",
+            (f"hand:{set_id}",),
+        )
     logger.info("Deleted workflow set %d.", set_id)
     return _shape(entry)
 
@@ -623,3 +629,44 @@ def set_declines(hub, set_id: int, sha256s: list[str]) -> list[str]:
         len(previous),
     )
     return previous
+
+
+def hidden_set_keys(hub, library_uuid: Optional[str]) -> list[str]:
+    """The set keys hidden in ONE library, sorted. ``[]`` with no library."""
+    if not library_uuid:
+        return []
+    return [
+        row["set_key"]
+        for row in hub.fetchall(
+            "SELECT set_key FROM workflow_set_hidden WHERE library_uuid = ? "
+            "ORDER BY set_key",
+            (library_uuid,),
+        )
+    ]
+
+
+def set_sets_hidden(
+    hub, library_uuid: Optional[str], keys: list[str], hidden: bool
+) -> list[str]:
+    """Hide or show sets in one library; answer with that library's hidden keys.
+
+    A key is the shelf's own for a set - a combination's sorted member ids, or
+    ``hand:<id>`` for a hand-made set - so no key has to correspond to a row. A
+    hub with no active library hides nothing (there is no library to hide it in).
+    """
+    if not library_uuid or not keys:
+        return hidden_set_keys(hub, library_uuid)
+    with hub.transaction() as conn:
+        if hidden:
+            conn.executemany(
+                "INSERT OR IGNORE INTO workflow_set_hidden (library_uuid, set_key) "
+                "VALUES (?, ?)",
+                [(library_uuid, key) for key in keys],
+            )
+        else:
+            conn.executemany(
+                "DELETE FROM workflow_set_hidden "
+                "WHERE library_uuid = ? AND set_key = ?",
+                [(library_uuid, key) for key in keys],
+            )
+    return hidden_set_keys(hub, library_uuid)

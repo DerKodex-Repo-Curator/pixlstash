@@ -27,6 +27,7 @@ import {
   renameWorkflowSet,
   setAdapterAttachments,
   setWorkflowSetDeclines,
+  setWorkflowSetsHidden,
 } from "../api/modelShelf";
 import { onSessionReset } from "../utils/apiClient";
 import { useConfirm } from "../composables/useConfirm";
@@ -89,15 +90,6 @@ const FILTERS_SCHEMA_VERSION = 1;
  * cleared a filter is a different promise than the button makes.
  */
 const VIEW_KEY = "pixlstash:modelShelfView";
-
-/**
- * Where the hidden sets from pictures are remembered, as `{keys: [...]}`.
- *
- * A set from pictures is read off the library, so it cannot be deleted - the
- * next read would draw it again. It can only be hidden, which is a view choice,
- * so it lives beside the other view choices rather than in the hub.
- */
-const HIDDEN_SETS_KEY = "pixlstash:modelShelfHiddenSets";
 
 /**
  * Bumped when the shape below changes; a blob from another `v` is discarded.
@@ -1610,6 +1602,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     noSet: [],
     handMade: [],
     setChecks: [],
+    hiddenSets: [],
   });
   const setsLoading = ref(false);
   const setsError = ref("");
@@ -1671,6 +1664,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
         noSet: body.no_set,
         handMade: body.hand_made ?? [],
         setChecks: body.set_checks ?? [],
+        hiddenSets: body.hidden_sets ?? [],
       };
       setsLoaded.value = true;
     } catch (err) {
@@ -1796,46 +1790,62 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
   );
 
   /** How many of the sets `Show` leaves on screen are hidden. */
-  const hiddenSetCount = computed(
-    () => evidenceGroups.value.filter((group) => group.hidden).length,
-  );
+  const hiddenSetCount = computed(() => {
+    const derived = evidenceGroups.value.filter((group) => group.hidden).length;
+    const hand = handMadeSets.value.filter((set) =>
+      hiddenSetKeys.value.has(`hand:${set.id}`),
+    ).length;
+    return derived + hand;
+  });
 
   // ── Hiding sets from pictures ─────────────────────────────────────────────
   //
   // A set from pictures is the library's own reading of its recipes, so there
   // is nothing to delete: the next read would draw it again. Hide is the verb,
   // remembered by group key (the base model's id, or a missing one's name).
+  //
+  // The answer is per library and lives on the server (`workflow_set_hidden`,
+  // #1869), served with the set payload under `hiddenSets`: a set hidden in one
+  // library is still drawn in another, and it survives a browser or a machine
+  // change. Hand-made sets hide the same way, under their own `hand:<id>` keys.
 
-  /** The keys of the hidden sets from pictures. */
-  const hiddenSetKeys = ref(
-    new Set(
-      [readStored(HIDDEN_SETS_KEY)?.keys]
-        .filter(Array.isArray)
-        .flat()
-        .filter((key) => typeof key === "string" && key !== ""),
-    ),
+  /** The keys the active library hides, as the last read or write left them. */
+  const hiddenSetKeys = computed(
+    () => new Set(workflowSets.value.hiddenSets ?? []),
   );
 
   /** Draw the hidden sets too, dimmed, so one can be shown again. */
   const showHiddenSets = ref(false);
 
-  function writeHiddenSets(keys) {
-    hiddenSetKeys.value = keys;
-    writeStored(HIDDEN_SETS_KEY, { keys: [...keys] });
-  }
-
-  function changeHidden(keys, hide) {
-    const next = new Set(hiddenSetKeys.value);
-    for (const key of keys) {
-      if (hide) next.add(key);
-      else next.delete(key);
+  /**
+   * Hide or show sets, on the server, and close what the hide took away.
+   *
+   * Never throws: a failure is reported and the previous answer stands, so a
+   * fire-and-forget caller (a card's eye button, the verb bar) needs no catch.
+   *
+   * @param {Array<string>} keys - the sets' own keys.
+   * @param {boolean} hide - true hides, false shows again.
+   */
+  async function changeHidden(keys, hide) {
+    const notices = useNoticeStore();
+    try {
+      const hiddenSets = await setWorkflowSetsHidden(keys, hide);
+      workflowSets.value = { ...workflowSets.value, hiddenSets };
+    } catch (err) {
+      notices.push({
+        level: "error",
+        text: errorDetail(err) || "Could not change what this library hides.",
+      });
+      return;
     }
-    writeHiddenSets(next);
+    // Only when the card actually leaves the screen: with "Show them" on it is
+    // drawn dimmed, and dropping the selection under a visible card would be a
+    // change the reader did not ask for.
     if (!hide || showHiddenSets.value) return;
+    // A hidden card leaves the screen, so it leaves the selection and the open
+    // panel with it: otherwise Undo or "Show them" would bring it back lit, with
+    // the file pill armed by no gesture.
     if (keys.includes(openSetKey.value)) openSetKey.value = "";
-    // The card has left the screen, so its head leaves the selection with it,
-    // as a missing card's key does: otherwise Undo or "Show them" would bring
-    // it back lit, with the file pill armed by no gesture.
     const gone = new Set(
       evidenceGroups.value
         .filter((group) => keys.includes(group.key))
@@ -1844,6 +1854,16 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     if ([...selectedIds.value].some((id) => gone.has(id))) {
       selectedIds.value = new Set(
         [...selectedIds.value].filter((id) => !gone.has(id)),
+      );
+    }
+    const goneSets = new Set(
+      keys
+        .filter((key) => key.startsWith("hand:"))
+        .map((key) => Number(key.slice(5))),
+    );
+    if ([...selectedSetIds.value].some((id) => goneSets.has(id))) {
+      selectedSetIds.value = new Set(
+        [...selectedSetIds.value].filter((id) => !goneSets.has(id)),
       );
     }
   }
@@ -1865,7 +1885,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
         : `Hid ${fresh.length} sets. No file was touched.`,
       "hide",
       async () => {
-        changeHidden(keys, false);
+        await changeHidden(keys, false);
         // Undo puts back the tray the hide closed, unless another has opened.
         if (wasOpen && !openSetKey.value) openSetKey.value = wasOpen;
       },
@@ -1972,20 +1992,30 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     return handMadeName(withShelfNames(set));
   }
   const handMadeGroups = computed(() =>
-    handMadeSets.value.map((set) => {
-      const models = (set.members ?? []).filter(
-        (m) => m.on_shelf && m.id != null,
-      );
-      const check = checkOf(models);
-      return {
-        key: `hand:${set.id}`,
-        set,
-        head: null,
-        models,
-        check,
-        card: { ...handMadeCard(set), verdict: check?.verdict ?? null },
-      };
-    }),
+    handMadeSets.value
+      .map((set) => {
+        const models = (set.members ?? []).filter(
+          (m) => m.on_shelf && m.id != null,
+        );
+        const check = checkOf(models);
+        const hidden = hiddenSetKeys.value.has(`hand:${set.id}`);
+        return {
+          key: `hand:${set.id}`,
+          set,
+          head: null,
+          models,
+          check,
+          hidden,
+          card: {
+            ...handMadeCard(set),
+            verdict: check?.verdict ?? null,
+            hidden,
+          },
+        };
+      })
+      // A hand-made set hides the same way a derived one does (#1869): the
+      // owner's own grouping, still theirs, just out of the way until shown.
+      .filter((group) => showHiddenSets.value || !group.hidden),
   );
 
   /**
@@ -2470,7 +2500,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
         if (set.declined?.length) {
           await setWorkflowSetDeclines(restored.id, set.declined);
         }
-        if (wasHidden) changeHidden([twin.key], true);
+        if (wasHidden) await changeHidden([twin.key], true);
         return restored;
       },
       // The swap again, checked again: the restored set may have changed since.
@@ -2486,7 +2516,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
       failure: "The set could not be swapped for the set from pictures.",
     });
     if (!done) return false;
-    if (wasHidden) changeHidden([twin.key], false);
+    if (wasHidden) await changeHidden([twin.key], false);
     // Opened only over a closed tray: an owner who has opened another set
     // since keeps it, and this never moves the view off a hand-made tray -
     // which the watch below would read as that set being closed too.

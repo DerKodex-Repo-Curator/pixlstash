@@ -29,6 +29,10 @@ const deleteModels = vi.fn();
 const fetchModelCompanions = vi.fn();
 const deleteWorkflowSet = vi.fn();
 const fetchWorkflowSets = vi.fn();
+const setWorkflowSetsHidden = vi.fn();
+
+/** The set keys the active library hides, as the double's server holds them. */
+let hiddenOnServer = new Set();
 
 vi.mock("../../api/modelShelf", () => ({
   BASE_MODEL_UNASSIGNED: "UNASSIGNED",
@@ -50,6 +54,7 @@ vi.mock("../../api/modelShelf", () => ({
   fetchModelCompanions: (...args) => fetchModelCompanions(...args),
   deleteWorkflowSet: (...args) => deleteWorkflowSet(...args),
   fetchWorkflowSets: (...args) => fetchWorkflowSets(...args),
+  setWorkflowSetsHidden: (...args) => setWorkflowSetsHidden(...args),
   // The base-model field asks for its completion list as it opens. Answered
   // with nothing here: the list is the widget's own suite's business, and left
   // unmocked this is a network call on a double-click.
@@ -326,6 +331,14 @@ beforeEach(() => {
   fetchWorkflowSets
     .mockReset()
     .mockResolvedValue({ combinations: [], no_set: [], hand_made: [] });
+  hiddenOnServer = new Set();
+  setWorkflowSetsHidden.mockReset().mockImplementation(async (keys, hidden) => {
+    for (const key of keys) {
+      if (hidden) hiddenOnServer.add(key);
+      else hiddenOnServer.delete(key);
+    }
+    return [...hiddenOnServer];
+  });
   listModelFolderDevices.mockReset();
   listModelFolderDevices.mockResolvedValue([]);
   // The thumbnail verb's two halves. Reset here rather than per-test: a
@@ -5774,6 +5787,8 @@ describe("the set grid is what the shelf opens on", () => {
     await lightCards("model:1");
     expect(hide().text()).toBe("Hide workflow set");
     await hide().trigger("click");
+    // The hide is a server call (#1869), so the grid redraws a turn later.
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(store.setGroups.map((g) => g.key).sort()).toEqual([
       "missing:gone.sft",
@@ -5801,6 +5816,7 @@ describe("the set grid is what the shelf opens on", () => {
     );
 
     await missingBar.find('.selbar [data-verb="hide-sets"]').trigger("click");
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     // Model 2's card was never selected.
     expect(store.setGroups.map((g) => g.key)).toEqual(["model:2"]);
