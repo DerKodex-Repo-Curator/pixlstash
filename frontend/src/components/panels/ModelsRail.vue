@@ -1114,13 +1114,12 @@ const hideVerb = computed(() =>
   ),
 );
 
+// A row the hide takes off the list leaves the selection by the watch on
+// `flat` above, once the hide has landed: only that row, and not at all when
+// the write fails.
 function menuHide() {
   const rows = actionRows.value;
   menuOpen.value = false;
-  // A hidden row leaves the list, so it leaves the rail's selection with it.
-  if (hideVerb.value?.hide && !store.filters.showHidden) {
-    selected.value = new Set();
-  }
   store.toggleHiddenModels(rows);
 }
 

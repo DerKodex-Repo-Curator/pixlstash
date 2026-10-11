@@ -316,11 +316,24 @@ describe("what the rail lists", () => {
 
     store.setFilters({ showHidden: true });
     await wrapper.vm.$nextTick();
+    // It left the selection when it left the list, so it does not come back lit.
+    expect(option(wrapper, "Soft").classes()).not.toContain("mrail-row--sel");
     await option(wrapper, "Soft").trigger("contextmenu");
     expect(hideRow().text()).toContain("Show model again");
     await hideRow().trigger("click");
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(setModelsHidden).toHaveBeenLastCalledWith([5], false);
+  });
+
+  it("keeps the selection when the hide does not land", async () => {
+    setModelsHidden.mockRejectedValue(new Error("offline"));
+    const { wrapper } = await mountRail();
+    await option(wrapper, "Soft").trigger("contextmenu");
+    await wrapper.find('.mrail-menu [data-testid="mrail-hide"]').trigger("click");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Still listed, so still selected: nothing happened to act on.
+    expect(option(wrapper, "Soft").classes()).toContain("mrail-row--sel");
   });
 
   it("narrows to the models in no set when asked, and only then", async () => {
