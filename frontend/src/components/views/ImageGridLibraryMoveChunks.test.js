@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { ref } from "vue";
 import { useSelectionStore } from "../../stores/useSelectionStore";
 import { useSortStore } from "../../stores/useSortStore";
+import { useOperationStore } from "../../stores/useOperationStore";
 
 const apiGet = vi.fn();
 const apiPost = vi.fn();
@@ -81,6 +82,24 @@ async function prepareGrid() {
 }
 
 describe("a move spanning multiple requests", () => {
+  it("retains tiles and selection for copies whose sources stayed live", async () => {
+    await prepareGrid();
+    wrapper.vm.selectedImageIds = [1, 2, 3];
+    apiPost.mockResolvedValue({ data: {
+      moved: [1], moved_count: 1,
+      copied_but_locked: [2], copied_but_not_moved: [3],
+    } });
+
+    await wrapper.vm.$.setupState.moveSelectedToLibrary(library);
+
+    expect(wrapper.vm.selectedImageIds).toEqual([2, 3]);
+    // The moved tile is held as an undo ghost; the retained copies stay live.
+    const ghosts = useOperationStore().ghostPictureIds;
+    expect(ghosts).toEqual([1]);
+    expect(wrapper.vm.allGridImages.filter((picture) => !ghosts.includes(picture.id))
+      .map((picture) => picture.id)).toEqual(ids.slice(1));
+  });
+
   it("uses one gesture id for every chunk, and a new id for the next gesture", async () => {
     await prepareGrid();
     await wrapper.vm.$.setupState.moveSelectedToLibrary(library);

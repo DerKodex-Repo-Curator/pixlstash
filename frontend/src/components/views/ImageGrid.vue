@@ -4034,6 +4034,7 @@ async function deleteSelected(idsOverride = null, moveTo = null) {
     const inOtherScrapheap = new Set();
     const notCopied = new Set();
     const copiedButLocked = new Set();
+    const copiedButNotMoved = new Set();
     // One selection remains one undo batch across request chunks.
     const moveBatchId = moveTo ? newOperationBatchId() : undefined;
     for (let i = 0; i < idsToRemove.length; i += BULK_DELETE_CHUNK) {
@@ -4055,6 +4056,9 @@ async function deleteSelected(idsOverride = null, moveTo = null) {
       for (const id of resp?.failed ?? []) notCopied.add(String(id));
       for (const id of resp?.copied_but_locked ?? []) {
         copiedButLocked.add(String(id));
+      }
+      for (const id of resp?.copied_but_not_moved ?? []) {
+        copiedButNotMoved.add(String(id));
       }
     }
 
@@ -4102,6 +4106,7 @@ async function deleteSelected(idsOverride = null, moveTo = null) {
         inOtherScrapheapCount: inOtherScrapheap.size,
         notCopiedCount: notCopied.size,
         copiedButLockedCount: copiedButLocked.size,
+        copiedButNotMovedCount: copiedButNotMoved.size,
       });
     } else {
       showLockedDeleteNotice(

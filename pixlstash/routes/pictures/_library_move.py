@@ -65,6 +65,9 @@ class MoveToLibraryResponse(BaseModel):
     # Copied there, but kept here because a set became locked during copying.
     # Undo cannot remove the destination copy.
     copied_but_locked: list[int] = []
+    # Copied there, but the source soft delete failed. Still in both libraries;
+    # distinct from a lock and from a file that could not be copied at all.
+    copied_but_not_moved: list[int] = []
     # Left here because the other library already holds the same file, byte
     # for byte, with whatever tags and score it has there.
     skipped_already_there: list[int] = []
@@ -237,11 +240,38 @@ def register_routes(router, server):
                         )
                         outcomes[row.id] = "failed"
                 arrived = [pid for pid, how in outcomes.items() if how == "new"]
-                moved, copied_but_locked = (
-                    scrapheap_pictures(server, request, arrived)
-                    if arrived
-                    else ([], [])
-                )
+                moved, copied_but_locked, copied_but_not_moved = [], [], []
+                if arrived:
+                    try:
+                        moved, copied_but_locked = scrapheap_pictures(
+                            server, request, arrived
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Copied pictures %s to library %s but source "
+                            "Scrapheap processing failed",
+                            arrived,
+                            library.name,
+                        )
+
+                        # The transaction rolls back on a database failure, but
+                        # notification can fail AFTER commit. Re-read instead
+                        # of claiming every source stayed live in either case.
+                        def deleted_sources(session: Session):
+                            return set(
+                                session.exec(
+                                    select(Picture.id).where(
+                                        Picture.id.in_(arrived),
+                                        Picture.deleted.is_(True),
+                                    )
+                                ).all()
+                            )
+
+                        deleted = source.db.run_immediate_read_task(deleted_sources)
+                        moved = [pid for pid in arrived if pid in deleted]
+                        copied_but_not_moved = [
+                            pid for pid in arrived if pid not in deleted
+                        ]
         except LibraryNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except LibraryError as exc:
@@ -262,6 +292,7 @@ def register_routes(router, server):
             moved=moved,
             skipped_locked=sorted(locked),
             copied_but_locked=copied_but_locked,
+            copied_but_not_moved=copied_but_not_moved,
             skipped_already_there=[
                 pid for pid, how in outcomes.items() if how == "duplicate"
             ],

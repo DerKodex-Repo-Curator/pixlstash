@@ -333,6 +333,60 @@ class TestWhatTheOtherLibraryAlreadyHolds:
 
 
 class TestWhatIsLeftBehind:
+    def test_source_transaction_failure_reports_committed_copies(
+        self, server, owner, other, monkeypatch
+    ):
+        from pixlstash.routes.pictures import _crud
+
+        picture_id = _add(server, _png())
+        sha = _here(server, picture_id).pixel_sha
+
+        def fail_record(*args, **kwargs):
+            # Runs after the source mutation, before its transaction commits.
+            raise RuntimeError("Operation recording failed")
+
+        monkeypatch.setattr(
+            _crud.operation_log_service, "record_operation_in_session", fail_record
+        )
+
+        response = _move(owner, other, [picture_id])
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["moved"] == []
+        assert body["moved_count"] == 0
+        assert body["copied_but_not_moved"] == [picture_id]
+        assert body["copied_but_locked"] == []
+        assert body["failed"] == []
+        assert _here(server, picture_id).deleted is False
+        (arrived,) = _there(server, other, sha)
+        assert arrived["deleted"] is False
+        assert arrived["on_disk"] is True
+
+    def test_failure_after_source_commit_does_not_claim_the_source_stayed_live(
+        self, server, owner, other, monkeypatch
+    ):
+        from pixlstash.routes.pictures import _library_move
+
+        picture_id = _add(server, _png())
+        scrapheap = _library_move.scrapheap_pictures
+
+        def fail_after_commit(*args):
+            scrapheap(*args)
+            raise RuntimeError("Post-commit notification failed")
+
+        monkeypatch.setattr(_library_move, "scrapheap_pictures", fail_after_commit)
+
+        response = _move(owner, other, [picture_id])
+
+        assert response.status_code == 200
+        assert response.json()["moved"] == [picture_id]
+        assert response.json()["moved_count"] == 1
+        assert response.json()["copied_but_not_moved"] == []
+        assert _here(server, picture_id).deleted is True
+        assert owner.post(f"{API}/operations/undo").status_code == 200
+        assert _here(server, picture_id).deleted is False
+
     def test_moving_a_stack_leader_keeps_uncopied_siblings_and_undo_restores_positions(
         self, server, owner, other
     ):

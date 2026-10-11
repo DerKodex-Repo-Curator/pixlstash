@@ -68,4 +68,16 @@ describe("buildLibraryMoveMessage", () => {
         "Undo will not remove it from Archive.",
     });
   });
+
+  it("reports a committed copy separately when source Scrapheap processing failed", () => {
+    expect(
+      buildLibraryMoveMessage({ libraryName: "Archive", copiedButNotMovedCount: 2 }),
+    ).toEqual({
+      level: "warning",
+      body:
+        "Nothing was moved to Archive. 2 pictures were copied to Archive " +
+        "but stayed here because moving the source to the Scrapheap failed. " +
+        "Undo will not remove them from Archive.",
+    });
+  });
 });

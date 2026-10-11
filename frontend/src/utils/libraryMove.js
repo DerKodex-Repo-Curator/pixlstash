@@ -20,6 +20,8 @@ function pictures(count) {
  * @param {number} outcome.lockedCount - kept: a locked set freezes them.
  * @param {number} outcome.copiedButLockedCount - copied there, but a new lock
  *   prevented moving the source to the Scrapheap.
+ * @param {number} outcome.copiedButNotMovedCount - copied there, but source
+ *   Scrapheap processing failed and the source remains live.
  * @param {number} outcome.alreadyThereCount - kept: the other library already
  *   holds the same file.
  * @param {number} outcome.inOtherScrapheapCount - kept: the other library has
@@ -33,6 +35,7 @@ export function buildLibraryMoveMessage({
   movedCount = 0,
   lockedCount = 0,
   copiedButLockedCount = 0,
+  copiedButNotMovedCount = 0,
   alreadyThereCount = 0,
   inOtherScrapheapCount = 0,
   notCopiedCount = 0,
@@ -65,6 +68,13 @@ export function buildLibraryMoveMessage({
       `${pictures(copiedButLockedCount)} ${copiedButLockedCount === 1 ? "was" : "were"} copied to ${libraryName} ` +
         `but stayed here because a set became locked during the move. ` +
         `Undo will not remove ${itThem(copiedButLockedCount)} from ${libraryName}.`,
+    );
+  }
+  if (copiedButNotMovedCount > 0) {
+    kept.push(
+      `${pictures(copiedButNotMovedCount)} ${copiedButNotMovedCount === 1 ? "was" : "were"} copied to ${libraryName} ` +
+        `but stayed here because moving the source to the Scrapheap failed. ` +
+        `Undo will not remove ${itThem(copiedButNotMovedCount)} from ${libraryName}.`,
     );
   }
   if (movedCount <= 0 && !kept.length) return null;
