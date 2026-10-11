@@ -213,11 +213,22 @@ export async function setWorkflowInputs(workflowId, inputs) {
  * comes back as a group with the reasons it would not run; `reasons` empty is
  * the only thing that means "this would run".
  *
+ * `cached` is for a screen that only shows the answer: the server judges
+ * against ComfyUI's node list as it last read it (up to a minute ago) rather
+ * than fetching it again. A check made before a run leaves it off.
+ *
  * @param {Object} body - see `runWorkflowCard`.
+ * @param {{cached?: boolean}} [options]
  * @returns {Promise<{ok: boolean, runs: number, groups: Array<Object>}>}
  */
-export async function preflightWorkflowRun(body) {
-  return unwrap(apiClient.post("/workflows/run/preflight", body));
+export async function preflightWorkflowRun(body, { cached = false } = {}) {
+  return unwrap(
+    apiClient.post(
+      "/workflows/run/preflight",
+      body,
+      cached ? { params: { cached: true } } : undefined,
+    ),
+  );
 }
 
 /**
@@ -302,17 +313,23 @@ export async function duplicateWorkflow(workflowId) {
  * `replacements_reason` when there are none.
  *
  * @param {string} workflowId
- * @param {{checkpointId?: number, replacing?: string, slotKind?: string}} [options]
+ * `cached` (with `replacing`) is for a screen that asks on every selection:
+ * what each loader lists is read from ComfyUI's node list as the server last
+ * read it, up to a minute ago.
+ *
+ * @param {{checkpointId?: number, replacing?: string, slotKind?: string,
+ *   cached?: boolean}} [options]
  * @returns {Promise<Object>}
  */
 export async function readModelSwap(
   workflowId,
-  { checkpointId, replacing, slotKind } = {},
+  { checkpointId, replacing, slotKind, cached = false } = {},
 ) {
   const params = {};
   if (checkpointId != null) params.checkpoint_id = checkpointId;
   if (replacing != null) params.replacing = replacing;
   if (slotKind != null) params.slot_kind = slotKind;
+  if (cached) params.cached = true;
   return unwrap(apiClient.get(wf(workflowId, "/model-swap"), { params }));
 }
 

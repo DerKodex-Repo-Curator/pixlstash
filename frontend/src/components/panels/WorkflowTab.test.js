@@ -324,9 +324,9 @@ async function mountWith(keys, cards = [card()]) {
   return { wrapper, store };
 }
 
-/** Past the pre-flight's settle delay (250 ms), and its answer rendered. */
+/** Past the pre-flight and the replacement reads it sends, both rendered. */
 async function settle(wrapper) {
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  await flush(wrapper);
   await flush(wrapper);
 }
 
@@ -1185,6 +1185,7 @@ describe("a checkpoint that will not load", () => {
     expect(readModelSwap).toHaveBeenCalledWith(KEY, {
       replacing: "SDXL/realvisXL_v5_fp8.safetensors",
       slotKind: "checkpoint",
+      cached: true,
     });
     expect(textOf(wrapper)).toContain("Checkpoint missing");
     const picker = wrapper.find('[data-testid="wftab-pick-checkpoint"] select');
@@ -1276,6 +1277,7 @@ describe("a checkpoint that will not load", () => {
     expect(readModelSwap).toHaveBeenCalledWith(KEY, {
       replacing: "SDXL/realvisXL_v5_bf16.safetensors",
       slotKind: "checkpoint",
+      cached: true,
     });
   });
 
@@ -1429,32 +1431,32 @@ describe("a checkpoint that will not load", () => {
     expect(textOf(wrapper)).not.toContain("Checkpoint missing");
   });
 
-  it("asks ComfyUI once for a selection passed straight through", async () => {
-    // Each ask is a fresh object_info read, so arrowing across the grid
-    // must not ask once per card it crosses.
-    getWorkflowCard.mockImplementation(async (key) =>
-      detail({ card: { id: key } }),
-    );
-    const { wrapper, store } = await mountWith(
-      [KEY],
-      [card(), card({ id: OTHER, name: "Card B" })],
-    );
-    store.selectedKeys = [OTHER];
-    await settle(wrapper);
+  it("asks the moment the detail is in, for the answer the server holds", async () => {
+    // No wait before the ask, and `cached`: the server answers from the
+    // object_info it last read, so what the rows say settles with the rows.
+    getWorkflowCard.mockResolvedValue(detail());
+    await mountWith([KEY]);
     expect(preflightWorkflowRun).toHaveBeenCalledTimes(1);
-    expect(preflightWorkflowRun).toHaveBeenCalledWith({
-      workflow_id: OTHER,
-      values: [],
-    });
+    expect(preflightWorkflowRun).toHaveBeenCalledWith(
+      { workflow_id: KEY, values: [] },
+      { cached: true },
+    );
   });
 
-  it("asks ComfyUI nothing once the rail has closed", async () => {
+  it("asks nothing more once the rail has closed", async () => {
+    let answer;
+    preflightWorkflowRun.mockReturnValue(
+      new Promise((resolve) => {
+        answer = () => resolve({ groups: [] });
+      }),
+    );
     getWorkflowCard.mockResolvedValue(detail());
     const { wrapper } = await mountWith([KEY]);
     wrapper.unmount();
     mounted.length = 0;
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(preflightWorkflowRun).not.toHaveBeenCalled();
+    answer();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(readModelSwap).not.toHaveBeenCalled();
   });
 
   it("does not put card A's pre-flight answer on card B", async () => {
@@ -1562,6 +1564,7 @@ describe("a VAE or text encoder row (#1596, #1850)", () => {
     expect(readModelSwap).toHaveBeenCalledWith(KEY, {
       replacing: "sdxl_vae.safetensors",
       slotKind: "vae",
+      cached: true,
     });
     expect(textOf(wrapper)).not.toContain("VAE missing");
     const vae = row(wrapper, "vae").find('[data-testid="wftab-pick-vae"] select');
@@ -1607,6 +1610,7 @@ describe("a VAE or text encoder row (#1596, #1850)", () => {
     expect(readModelSwap).toHaveBeenCalledWith(KEY, {
       replacing: "t5/t5xxl_fp8.safetensors",
       slotKind: "text_encoder",
+      cached: true,
     });
   });
 
@@ -3583,6 +3587,83 @@ describe("expose a parameter", () => {
     expect(list().element).toBe(drawn);
   });
 
+  it("draws no plain box where a list is still on its way", async () => {
+    // The choices come from their own read. A row drawn before it lands is a
+    // box that turns into a list under the pointer; it waits instead.
+    let answer;
+    getWorkflowFormInputs.mockReturnValue(
+      new Promise((resolve) => {
+        answer = () => resolve({ nodes: NODES });
+      }),
+    );
+    getWorkflowCard.mockResolvedValue(
+      detail({
+        card: { defaults: [STEPS, SAMPLER] },
+        pins: [{ slot_label: SAMPLER.slot_label, input_name: SAMPLER.input_name }],
+      }),
+    );
+    const store = useWorkflowsStore();
+    store.cards = [card()];
+    store.selectedKeys = [KEY];
+    const wrapper = mount(WorkflowTab, stubbed);
+    mounted.push(wrapper);
+    await flush(wrapper);
+    const panel = () => wrapper.find("[data-testid='wftab-parameters']");
+    expect(panel().text()).toContain("Reading its parameters");
+    expect(panel().find("[data-testid='wfdef-input']").exists()).toBe(false);
+
+    answer();
+    await flush(wrapper);
+    expect(panel().text()).not.toContain("Reading its parameters");
+    expect(
+      rowNamed(wrapper, "sampler_name")
+        .find("[data-testid='wfdef-select']")
+        .exists(),
+    ).toBe(true);
+  });
+
+  it("waits for no lists where there is no row to draw", async () => {
+    getWorkflowFormInputs.mockReturnValue(new Promise(() => {}));
+    getWorkflowCard.mockResolvedValue(detail({ card: { defaults: [] } }));
+    const store = useWorkflowsStore();
+    store.cards = [card()];
+    store.selectedKeys = [KEY];
+    const wrapper = mount(WorkflowTab, stubbed);
+    mounted.push(wrapper);
+    await flush(wrapper);
+    const panel = wrapper.find("[data-testid='wftab-parameters']");
+    expect(panel.text()).not.toContain("Reading its parameters");
+    expect(panel.text()).toContain("Nothing this workflow made records a setting");
+  });
+
+  it("stops waiting for the lists of a ComfyUI that is slow to answer", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      getWorkflowFormInputs.mockReturnValue(new Promise(() => {}));
+      getWorkflowCard.mockResolvedValue(
+        detail({
+          card: { defaults: [STEPS, SAMPLER] },
+          pins: [
+            { slot_label: SAMPLER.slot_label, input_name: SAMPLER.input_name },
+          ],
+        }),
+      );
+      const store = useWorkflowsStore();
+      store.cards = [card()];
+      store.selectedKeys = [KEY];
+      const wrapper = mount(WorkflowTab, stubbed);
+      mounted.push(wrapper);
+      await vi.advanceTimersByTimeAsync(999);
+      const panel = wrapper.find("[data-testid='wftab-parameters']");
+      expect(panel.find("[data-testid='wfdef-input']").exists()).toBe(false);
+      // Plain boxes still set the value, so they are what is drawn.
+      await vi.advanceTimersByTimeAsync(1);
+      expect(panel.find("[data-testid='wfdef-input']").exists()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("draws a choice set each run as a list of ComfyUI's options", async () => {
     const wrapper = await mountExposing(
       detail({
@@ -4268,6 +4349,24 @@ describe("the tab as the editor (#1850)", () => {
       await flush(wrapper);
       expect(lastSet().loras).toEqual([]);
       expect(bar(wrapper).exists()).toBe(false);
+    });
+
+    it("keeps a strength half typed when an answer lands under it", async () => {
+      // Typed, not committed: Enter or blur is what writes it. The tab is
+      // drawn again meanwhile by whatever lands (here the list, renamed),
+      // which used to put the row's number back so that Enter changed nothing.
+      const { wrapper } = await mountEditor();
+      const field = strength(loraRowsOf(wrapper)[1]);
+      field.element.value = "0.5";
+      const store = useWorkflowsStore();
+      store.cards = store.cards.map((entry) => ({ ...entry, name: "Renamed" }));
+      await flush(wrapper);
+      expect(wrapper.find(".wftab-title").text()).toContain("Renamed");
+      expect(field.element.value).toBe("0.5");
+
+      await field.trigger("change");
+      await flush(wrapper);
+      expect(lastSet().loras.map((lora) => lora.strength_model)).toEqual([0.5]);
     });
 
     it("puts the field back, and writes nothing, for a strength that is not one", async () => {
