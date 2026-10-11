@@ -84,14 +84,45 @@
             :sampled="Boolean(defaultRecipe?.sampled) && !card.manual"
           />
         </p>
-        <p
-          v-if="versionLine"
-          class="wftab-sublabel"
-          data-testid="wftab-version"
-        >
-          {{ versionLine }}
-        </p>
+        <!-- Which version the workflow is on, and the way back to an earlier
+             one (#1850). Only where there is one to go back to. -->
+        <WorkflowVersionMenu
+          v-if="headVersion"
+          ref="versionMenu"
+          :number="headVersion.number"
+          :at="headVersion.at"
+          :versions="shownVersions?.versions ?? null"
+          :failed="versionsFailed"
+          @open="reopenVersions"
+          @go-back="goBack"
+        />
       </div>
+
+      <!-- Going back was refused: said under the control that asked, in the
+           server's words, and an `alert` because it answers a click. -->
+      <section
+        v-if="versionError"
+        class="wftab-panel wftab-run-failure"
+        role="alert"
+        data-testid="wftab-version-error"
+      >
+        <div class="wftab-sec-head">
+          <span class="section-label" role="heading" aria-level="3"
+            >Could not go back</span
+          >
+          <AppButton
+            size="sm"
+            variant="ghost"
+            data-testid="wftab-version-error-dismiss"
+            @click="dismissVersionError"
+          >
+            Dismiss
+          </AppButton>
+        </div>
+        <p class="wftab-note wftab-run-failure__message">
+          {{ versionError }}
+        </p>
+      </section>
 
       <!-- This workflow's last run ended without a picture (#1839). First in
            the body, so it is on screen with the name whatever the panels
@@ -911,9 +942,11 @@ import {
   getLoraSummary,
   getWorkflowCard,
   getWorkflowFormInputs,
+  getWorkflowVersions,
   patchWorkflowCard,
   preflightWorkflowRun,
   readModelSwap,
+  restoreWorkflowVersion,
   setWorkflowDefaultLora,
   setWorkflowDefaults,
   setWorkflowModelFix,
@@ -927,7 +960,6 @@ import { useNoticeStore } from "../../stores/useNoticeStore";
 import { useSidebarStore } from "../../stores/useSidebarStore";
 import { useRunDialogStore } from "../../stores/useRunDialogStore";
 import { useTasksStore } from "../../stores/useTasksStore";
-import { useUserPrefsStore } from "../../stores/useUserPrefsStore";
 import { useWorkflowsStore } from "../../stores/useWorkflowsStore";
 import { errorMessage } from "../../utils/apiError";
 import { modelLabel } from "../../utils/filterChips";
@@ -957,7 +989,6 @@ import {
   setEachRun,
 } from "../../utils/workflowPins";
 import { pictureCount } from "../../utils/workflowSets";
-import { formatUserDay } from "../../utils/utils";
 import AppButton from "../widgets/AppButton.vue";
 import AppInspector from "../widgets/AppInspector.vue";
 import AppSelect from "../widgets/AppSelect.vue";
@@ -971,6 +1002,7 @@ import WorkflowDefaultRow from "./WorkflowDefaultRow.vue";
 import WorkflowStarChart from "./WorkflowStarChart.vue";
 import WorkflowLoraPile from "./WorkflowLoraPile.vue";
 import WorkflowRecipesTab from "./WorkflowRecipesTab.vue";
+import WorkflowVersionMenu from "./WorkflowVersionMenu.vue";
 
 /** Past this many, the Fixed group folds away behind "Fixed · N". */
 const FIXED_SHOWN = 3;
@@ -1150,17 +1182,45 @@ const recipesName = computed(() =>
 // link, and the words that place the card stay text.
 const picturesLabel = computed(() => outputCount(card.value));
 
-// "Version 3 · 2026-10-06": only where there is a history to speak of, a
-// workflow that has been stored more than once.
-const userPrefs = useUserPrefsStore();
-const versionLine = computed(() => {
+/**
+ * The versions kept of a workflow, as `GET …/versions` answered, with the
+ * workflow they are of: `{ key, version, versions }`. One read for the shown
+ * workflow, never one per card of the grid.
+ */
+const versionsRead = ref(null);
+const versionsFailed = ref(false);
+/** The server's sentence for a go-back it refused, or "". */
+const versionError = ref("");
+const versionMenu = ref(null);
+/** Which versions read is the latest; a go-back's answer also counts as one. */
+let versionsAsk = 0;
+
+/** The read, when it is of the workflow on screen: never another's. */
+const shownVersions = computed(() =>
+  versionsRead.value?.key === selectedKey.value ? versionsRead.value : null,
+);
+
+/**
+ * "Version 3 · 2 Oct" in the head: only where there is a history to speak of,
+ * a workflow stored more than once. An automatic workflow nobody has saved
+ * over has no versions and no control; nothing is invented for it.
+ *
+ * The read's own current row once it is in, so a go-back moves the head with
+ * its answer; until then the card's, which the grid already carries.
+ * `version`, the number, not `versions`, how many are kept: past the 50 kept
+ * the two differ.
+ */
+const headVersion = computed(() => {
   const c = card.value;
-  if (!c || !(c.versions > 1)) return "";
-  const day = formatUserDay(c.version_at, userPrefs.dateFormat);
-  // `version`, the number, not `versions`, how many are kept: past the 50
-  // kept the two differ.
-  const number = c.version;
-  return day ? `Version ${number} · ${day}` : `Version ${number}`;
+  if (!c) return null;
+  const read = shownVersions.value;
+  if (read) {
+    const current = read.versions.find((row) => row.current);
+    return current && read.versions.length > 1
+      ? { number: current.version, at: current.created_at }
+      : null;
+  }
+  return c.versions > 1 ? { number: c.version, at: c.version_at ?? null } : null;
 });
 
 // All three read the MODEL SHELF's name where it has one, the same preference
@@ -2220,6 +2280,136 @@ function fail(err, fallback) {
   notices.push({ level: "error", text: errorMessage(err, fallback) });
 }
 
+/** A versions answer as the rail keeps it, tied to the workflow it is of. */
+function versionsOf(key, body) {
+  return {
+    key,
+    version: body?.version ?? null,
+    versions: Array.isArray(body?.versions) ? body.versions : [],
+  };
+}
+
+/** Read the versions of one workflow; none is asked for one with no history. */
+async function loadVersions(key) {
+  const ask = ++versionsAsk;
+  versionsFailed.value = false;
+  if (!key || !(card.value?.versions > 1)) {
+    versionsRead.value = null;
+    return;
+  }
+  try {
+    const body = await getWorkflowVersions(key);
+    // Another workflow may have been selected while this was on the wire, or
+    // a go-back's answer, which is newer, already landed.
+    if (ask !== versionsAsk || !stillOn(key)) return;
+    versionsRead.value = versionsOf(key, body);
+  } catch (err) {
+    console.warn(`[workflows] could not read the versions of ${key}`, err);
+    if (ask !== versionsAsk || !stillOn(key)) return;
+    // The head falls back to the card's number; the menu says the read failed.
+    versionsRead.value = null;
+    versionsFailed.value = true;
+  }
+}
+
+/** The menu opened with no list to show: ask again rather than sit failed. */
+function reopenVersions() {
+  if (!shownVersions.value) void loadVersions(selectedKey.value);
+}
+
+// Read again whenever the shown workflow's version moves, which the grid's
+// card says: a save from the Run popup, Edit LoRAs…, ComfyUI or an assistant
+// is announced (`workflows_changed`), the grid is re-read, and the head and
+// the menu follow it here.
+watch(
+  () => [
+    selectedKey.value,
+    card.value?.versions > 1 ? card.value.version : null,
+  ],
+  ([key, number]) => {
+    // A go-back's answer is already the list at this number.
+    if (number !== null && shownVersions.value?.version === number) return;
+    void loadVersions(key);
+  },
+  { immediate: true },
+);
+
+/**
+ * Go back: the chosen version's graph becomes the newest version. Nothing is
+ * removed, so it is undone by going back again, and nothing is asked first.
+ *
+ * Changes waiting on the workflow do not stop it: the server then refuses
+ * Save on them, in its own sentence.
+ */
+function goBack(row, key = selectedKey.value) {
+  if (!key) return;
+  versionError.value = "";
+  // The version being left, for the notice's Undo: going back to it again.
+  const left =
+    shownVersions.value?.versions.find((entry) => entry.current)?.version ??
+    card.value?.version;
+  return queueWrite("version", async () => {
+    let body;
+    try {
+      body = await restoreWorkflowVersion(key, row.version);
+    } catch (err) {
+      const fallback = `Could not go back to version ${row.version}.`;
+      if (!stillOn(key)) {
+        // The rail shows another workflow by now: said as a notice instead.
+        fail(err, fallback);
+        return;
+      }
+      console.warn(
+        `[workflows] could not go back to version ${row.version} of ${key}`,
+        err,
+      );
+      versionError.value = errorMessage(err, fallback);
+      // A refusal (no such version, already on it) means the list is stale.
+      void loadVersions(key);
+      return;
+    }
+    // The grid's card carries the version too. Asked here as well as by the
+    // announcement, which a dropped socket would lose.
+    void store.refetch();
+    // Owed even when the selection has moved on: it was written either way,
+    // and a number changing in the head is not much of a receipt.
+    notices.push({
+      level: "success",
+      timeout: 8000,
+      text: `Back on version ${row.version}, kept as version ${body?.version}. Nothing was removed.`,
+      ...(left && left !== row.version
+        ? {
+            action: {
+              label: "Undo",
+              handler: () => goBack({ version: left }, key),
+            },
+          }
+        : {}),
+    });
+    if (!stillOn(key)) return;
+    versionsAsk += 1;
+    versionsFailed.value = false;
+    versionsRead.value = versionsOf(key, body);
+    // Everything else the rail reads off the graph is another graph's now.
+    void loadChain(key);
+    void loadFormInputs(key);
+    await loadDetail(key);
+    // A workflow the grid does not list is drawn from the detail, so its head
+    // left the screen during that read and took focus with it.
+    await nextTick();
+    if (stillOn(key) && document.activeElement === document.body) {
+      versionMenu.value?.focus();
+    }
+  });
+}
+
+/** Dismiss takes its own button away, so focus goes back to the version chip. */
+async function dismissVersionError() {
+  versionError.value = "";
+  await nextTick();
+  versionMenu.value?.focus();
+}
+
 /**
  * Run a write after whichever is already out, never beside it.
  *
@@ -2666,6 +2856,7 @@ watch(
   (key) => {
     othersOpen.value = false;
     exposeOpen.value = false;
+    versionError.value = "";
     void loadDetail(key);
     void loadChain(key);
     void loadFormInputs(key);

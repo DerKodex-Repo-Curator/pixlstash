@@ -26,6 +26,8 @@ const getWorkflowFormInputs = vi.fn();
 const readModelSwap = vi.fn();
 const setWorkflowModelFix = vi.fn();
 const setWorkflowDefaultLora = vi.fn();
+const getWorkflowVersions = vi.fn();
+const restoreWorkflowVersion = vi.fn();
 
 vi.mock("../../api/workflows", () => ({
   getWorkflowCard: (...args) => getWorkflowCard(...args),
@@ -43,6 +45,8 @@ vi.mock("../../api/workflows", () => ({
   readModelSwap: (...args) => readModelSwap(...args),
   setWorkflowModelFix: (...args) => setWorkflowModelFix(...args),
   setWorkflowDefaultLora: (...args) => setWorkflowDefaultLora(...args),
+  getWorkflowVersions: (...args) => getWorkflowVersions(...args),
+  restoreWorkflowVersion: (...args) => restoreWorkflowVersion(...args),
 }));
 
 const getPixlstashNode = vi.fn();
@@ -337,53 +341,340 @@ beforeEach(() => {
   getWorkflowFormInputs.mockReset().mockResolvedValue({ nodes: [] });
   replace.mockReset();
   preflightWorkflowRun.mockReset().mockResolvedValue({ groups: [] });
+  getWorkflowVersions.mockReset().mockResolvedValue(versionsAt(3));
+  restoreWorkflowVersion.mockReset().mockResolvedValue(versionsAt(4));
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
 
-describe("the version line", () => {
-  const line = (wrapper) =>
-    wrapper.find('[data-testid="wftab-version"]');
+/** A card with a history: `number` is its current version. */
+function versioned(number = 3, overrides = {}) {
+  return card({
+    versions: Math.min(number, 50),
+    version: number,
+    version_at: "2026-10-02T12:00:00+00:00",
+    origin_category: "own",
+    ...overrides,
+  });
+}
 
-  it("says the version and its day for a card with more than one", async () => {
-    const versioned = card({
-      versions: 3,
-      version: 3,
-      version_at: "2026-10-06T09:30:00Z",
-      origin_category: "own",
-    });
-    getWorkflowCard.mockResolvedValue(detail({ card: versioned }));
-    const { wrapper } = await mountWith([KEY], [versioned]);
-    expect(line(wrapper).text()).toMatch(/^Version 3 · \S+/);
-    expect(line(wrapper).text()).toContain("2026");
+/**
+ * `GET /workflows/{id}/versions` with `current` the newest, newest first, in
+ * the server's own words. Version 4 is what going back to 2 makes.
+ */
+function versionsAt(current, workflowId = KEY) {
+  const all = [
+    { version: 4, created_at: "2026-10-05T12:00:00+00:00", reason: "went back to version 2" },
+    { version: 3, created_at: "2026-10-02T12:00:00+00:00", reason: "models changed" },
+    { version: 2, created_at: "2026-09-28T12:00:00+00:00", reason: "LoRAs edited" },
+    { version: 1, created_at: "2026-09-20T12:00:00+00:00", reason: null },
+  ];
+  return {
+    workflow_id: workflowId,
+    version: current,
+    versions: all
+      .filter((row) => row.version <= current)
+      .map((row) => ({ ...row, current: row.version === current })),
+  };
+}
+
+/** A promise and the function that settles it, for an answer held back. */
+function held() {
+  let release;
+  const promise = new Promise((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
+}
+
+describe("the version menu in the head", () => {
+  const chip = (wrapper) => wrapper.find('[data-testid="wftab-version"]');
+  const rows = (wrapper) =>
+    wrapper.findAll('[data-testid="wftab-version-menu"] [data-version]');
+  const row = (wrapper, number) =>
+    wrapper.find(
+      `[data-testid="wftab-version-menu"] [data-version="${number}"]`,
+    );
+  const refusal = (wrapper) =>
+    wrapper.find('[data-testid="wftab-version-error"]');
+
+  /** Mount on a card at version 3 whose detail and grid reads agree. */
+  async function mountVersioned(number = 3) {
+    const shown = versioned(number);
+    getWorkflowCard.mockResolvedValue(detail({ card: shown }));
+    listWorkflowCards.mockResolvedValue({ cards: [shown], one_offs: 0, hidden: 0 });
+    return mountWith([KEY], [shown]);
+  }
+
+  it("is its own button beside the pictures link, saying the version and its day", async () => {
+    const { wrapper } = await mountVersioned();
+    expect(chip(wrapper).element.tagName).toBe("BUTTON");
+    expect(chip(wrapper).attributes("aria-haspopup")).toBe("menu");
+    expect(chip(wrapper).text()).toMatch(/^Version 3 · (2 Oct|Oct 2)$/);
+    // The count is still the link it was.
+    expect(wrapper.find('[data-testid="wftab-show-pictures"]').text()).toBe(
+      "184 pictures",
+    );
+  });
+
+  it("reads the head off the card while the versions read is still out", async () => {
+    getWorkflowVersions.mockReturnValue(new Promise(() => {}));
+    const { wrapper } = await mountVersioned();
+    expect(chip(wrapper).text()).toMatch(/^Version 3 · /);
+    expect(
+      wrapper.find('[data-testid="wftab-version-unread"]').text(),
+    ).toBe("Reading the versions…");
   });
 
   it("names the current version's number, not how many are kept", async () => {
-    // Past the 50 kept, version 61 is the 50th row: the line says 61.
-    const pruned = card({
-      versions: 50,
-      version: 61,
-      version_at: "2026-10-06T09:30:00Z",
-      origin_category: "comfyui",
-    });
+    // Past the 50 kept, version 61 is the 50th row: the head says 61.
+    const pruned = versioned(61);
+    getWorkflowVersions.mockReturnValue(new Promise(() => {}));
     getWorkflowCard.mockResolvedValue(detail({ card: pruned }));
     const { wrapper } = await mountWith([KEY], [pruned]);
-    expect(line(wrapper).text()).toMatch(/^Version 61 · /);
+    expect(chip(wrapper).text()).toMatch(/^Version 61 · /);
   });
 
   it.each(["pictures", "own", "comfyui"])(
-    "is absent for a card with a single version, whatever its origin (%s)",
+    "is absent, and reads nothing, for a workflow with nothing to go back to (%s)",
     async (origin) => {
       const plain = card({
         versions: 1,
         version: 1,
-        version_at: "2026-10-06T09:30:00Z",
+        version_at: null,
         origin_category: origin,
       });
       getWorkflowCard.mockResolvedValue(detail({ card: plain }));
       const { wrapper } = await mountWith([KEY], [plain]);
-      expect(line(wrapper).exists()).toBe(false);
+      expect(chip(wrapper).exists()).toBe(false);
+      expect(getWorkflowVersions).not.toHaveBeenCalled();
+      // The count stands as it did.
+      expect(wrapper.find('[data-testid="wftab-show-pictures"]').exists()).toBe(
+        true,
+      );
     },
   );
+
+  it("invents no version for an automatic workflow the read says has none", async () => {
+    // The card is a read behind: the versions route is the one that knows.
+    getWorkflowVersions.mockResolvedValue({
+      workflow_id: KEY,
+      version: null,
+      versions: [],
+    });
+    const { wrapper } = await mountVersioned();
+    expect(chip(wrapper).exists()).toBe(false);
+  });
+
+  it("is absent when the read says there is one version only", async () => {
+    // Nothing to go back to, whatever the card (a read behind) counted.
+    getWorkflowVersions.mockResolvedValue(versionsAt(1));
+    const { wrapper } = await mountVersioned();
+    expect(chip(wrapper).exists()).toBe(false);
+  });
+
+  it("lists the versions newest first, each with the server's own reason", async () => {
+    const { wrapper } = await mountVersioned();
+    expect(getWorkflowVersions).toHaveBeenCalledTimes(1);
+    expect(getWorkflowVersions).toHaveBeenCalledWith(KEY);
+    expect(rows(wrapper).map((entry) => entry.attributes("data-version"))).toEqual(
+      ["3", "2", "1"],
+    );
+    expect(row(wrapper, 3).text()).toContain("models changed");
+    expect(row(wrapper, 2).text()).toContain("LoRAs edited");
+    expect(row(wrapper, 3).attributes("aria-checked")).toBe("true");
+    expect(row(wrapper, 2).attributes("aria-checked")).toBe("false");
+  });
+
+  it("goes back: the earlier graph becomes the newest version and the rail re-reads", async () => {
+    const { wrapper } = await mountVersioned();
+    const after = versioned(4, { version_at: "2026-10-05T12:00:00+00:00" });
+    getWorkflowCard.mockClear().mockResolvedValue(detail({ card: after }));
+    getLoraChain.mockClear();
+    getWorkflowFormInputs.mockClear();
+    listWorkflowCards.mockClear().mockResolvedValue({
+      cards: [after],
+      one_offs: 0,
+      hidden: 0,
+    });
+
+    await row(wrapper, 2).trigger("click");
+    await flush(wrapper);
+    await flush(wrapper);
+
+    expect(restoreWorkflowVersion).toHaveBeenCalledTimes(1);
+    expect(restoreWorkflowVersion).toHaveBeenCalledWith(KEY, 2);
+    // The head and the menu, off the answer.
+    expect(chip(wrapper).text()).toMatch(/^Version 4 · /);
+    expect(rows(wrapper).map((entry) => entry.attributes("data-version"))).toEqual(
+      ["4", "3", "2", "1"],
+    );
+    expect(row(wrapper, 4).attributes("aria-checked")).toBe("true");
+    expect(row(wrapper, 4).text()).toContain("went back to version 2");
+    // Everything read off the graph, and the grid's card.
+    expect(getWorkflowCard).toHaveBeenCalledWith(KEY);
+    expect(getLoraChain).toHaveBeenCalledWith(KEY);
+    expect(getWorkflowFormInputs).toHaveBeenCalledWith(KEY);
+    expect(listWorkflowCards).toHaveBeenCalled();
+    // The answer WAS the list at version 4: the card catching up asks nothing.
+    expect(getWorkflowVersions).toHaveBeenCalledTimes(1);
+    expect(refusal(wrapper).exists()).toBe(false);
+  });
+
+  it("says what it did, with an Undo that goes back to the version left", async () => {
+    const { wrapper } = await mountVersioned();
+    await row(wrapper, 2).trigger("click");
+    await flush(wrapper);
+
+    const notice = useNoticeStore().notices.at(-1);
+    expect(notice.level).toBe("success");
+    expect(notice.text).toBe(
+      "Back on version 2, kept as version 4. Nothing was removed.",
+    );
+    expect(notice.action.label).toBe("Undo");
+
+    restoreWorkflowVersion.mockClear();
+    await notice.action.handler();
+    expect(restoreWorkflowVersion).toHaveBeenCalledWith(KEY, 3);
+  });
+
+  it("asks nothing first: going back is undone by going back", async () => {
+    const { wrapper } = await mountVersioned();
+    await row(wrapper, 1).trigger("click");
+    expect(restoreWorkflowVersion).toHaveBeenCalledWith(KEY, 1);
+  });
+
+  it("does nothing on the row of the version the workflow is on", async () => {
+    const { wrapper } = await mountVersioned();
+    await row(wrapper, 3).trigger("click");
+    await flush(wrapper);
+    expect(restoreWorkflowVersion).not.toHaveBeenCalled();
+  });
+
+  it("says a refusal under the head in the server's words, and reads the list again", async () => {
+    restoreWorkflowVersion.mockRejectedValue({
+      response: {
+        status: 409,
+        data: { detail: "That is the version this workflow has." },
+      },
+    });
+    const { wrapper } = await mountVersioned();
+    getWorkflowVersions.mockClear();
+    const noticesBefore = useNoticeStore().notices.length;
+
+    await row(wrapper, 2).trigger("click");
+    await flush(wrapper);
+
+    expect(refusal(wrapper).attributes("role")).toBe("alert");
+    expect(refusal(wrapper).text()).toContain(
+      "That is the version this workflow has.",
+    );
+    // A refusal means the list on screen was stale.
+    expect(getWorkflowVersions).toHaveBeenCalledWith(KEY);
+    // Said once, where the owner is looking: not as a toast as well.
+    expect(useNoticeStore().notices.length).toBe(noticesBefore);
+    // Still on the version it had.
+    expect(chip(wrapper).text()).toMatch(/^Version 3 · /);
+
+    await wrapper
+      .find('[data-testid="wftab-version-error-dismiss"]')
+      .trigger("click");
+    expect(refusal(wrapper).exists()).toBe(false);
+  });
+
+  it("drops a refusal when another workflow is selected", async () => {
+    restoreWorkflowVersion.mockRejectedValue({
+      response: { status: 404, data: { detail: "This workflow keeps no such version." } },
+    });
+    const other = versioned(2, { id: OTHER, name: "Other" });
+    const shown = versioned(3);
+    getWorkflowCard.mockImplementation((key) =>
+      Promise.resolve(detail({ card: key === OTHER ? other : shown })),
+    );
+    getWorkflowVersions.mockImplementation((key) =>
+      Promise.resolve(versionsAt(key === OTHER ? 2 : 3, key)),
+    );
+    const { wrapper, store } = await mountWith([KEY], [shown, other]);
+    await row(wrapper, 2).trigger("click");
+    await flush(wrapper);
+    expect(refusal(wrapper).exists()).toBe(true);
+
+    store.selectedKeys = [OTHER];
+    await flush(wrapper);
+    expect(refusal(wrapper).exists()).toBe(false);
+  });
+
+  it("never draws one workflow's versions on another", async () => {
+    // A's read is still out when B is selected, and lands after B's.
+    const slow = held();
+    const other = versioned(2, { id: OTHER, name: "Other" });
+    const shown = versioned(3);
+    getWorkflowCard.mockImplementation((key) =>
+      Promise.resolve(detail({ card: key === OTHER ? other : shown })),
+    );
+    getWorkflowVersions.mockImplementation((key) =>
+      key === KEY ? slow.promise : Promise.resolve(versionsAt(2, OTHER)),
+    );
+    const { wrapper, store } = await mountWith([KEY], [shown, other]);
+
+    store.selectedKeys = [OTHER];
+    await flush(wrapper);
+    expect(chip(wrapper).text()).toMatch(/^Version 2 · /);
+
+    slow.release(versionsAt(3, KEY));
+    await flush(wrapper);
+    expect(chip(wrapper).text()).toMatch(/^Version 2 · /);
+    expect(rows(wrapper).map((entry) => entry.attributes("data-version"))).toEqual(
+      ["2", "1"],
+    );
+  });
+
+  it("shows a newly selected workflow's own number while its versions are still out", async () => {
+    // A's list has landed and is still held when B is selected.
+    const other = versioned(7, { id: OTHER, name: "Other" });
+    const shown = versioned(3);
+    getWorkflowCard.mockImplementation((key) =>
+      Promise.resolve(detail({ card: key === OTHER ? other : shown })),
+    );
+    getWorkflowVersions.mockImplementation((key) =>
+      key === OTHER ? new Promise(() => {}) : Promise.resolve(versionsAt(3)),
+    );
+    const { wrapper, store } = await mountWith([KEY], [shown, other]);
+    expect(rows(wrapper)).toHaveLength(3);
+
+    store.selectedKeys = [OTHER];
+    await flush(wrapper);
+    expect(chip(wrapper).text()).toMatch(/^Version 7 · /);
+    expect(rows(wrapper)).toHaveLength(0);
+  });
+
+  it("follows a save made elsewhere: the card's version moves, the list is read again", async () => {
+    const { wrapper, store } = await mountVersioned();
+    expect(getWorkflowVersions).toHaveBeenCalledTimes(1);
+    getWorkflowVersions.mockResolvedValue(versionsAt(4));
+
+    // The grid re-read that `workflows_changed` brings.
+    store.cards = [versioned(4, { version_at: "2026-10-05T12:00:00+00:00" })];
+    await flush(wrapper);
+
+    expect(getWorkflowVersions).toHaveBeenCalledTimes(2);
+    expect(chip(wrapper).text()).toMatch(/^Version 4 · /);
+    expect(row(wrapper, 4).attributes("aria-checked")).toBe("true");
+  });
+
+  it("falls back to the card's number when the versions read fails, and asks again on open", async () => {
+    getWorkflowVersions.mockRejectedValue(new Error("offline"));
+    const { wrapper } = await mountVersioned();
+    expect(chip(wrapper).text()).toMatch(/^Version 3 · /);
+    expect(
+      wrapper.find('[data-testid="wftab-version-unread"]').text(),
+    ).toBe("Could not read the versions just now.");
+
+    getWorkflowVersions.mockReset().mockResolvedValue(versionsAt(3));
+    wrapper.findComponent({ name: "WorkflowVersionMenu" }).vm.$emit("open");
+    await flush(wrapper);
+    expect(getWorkflowVersions).toHaveBeenCalledTimes(1);
+    expect(rows(wrapper)).toHaveLength(3);
+  });
 });
 
 describe("the models the panel names", () => {
