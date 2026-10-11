@@ -1063,6 +1063,220 @@ def test_coverage_matrix_document_matches_the_registry():
     )
 
 
+# ---------------------------------------------------------------------------
+# Guardrail: the ComfyUI token scope admits exactly what the pack calls (#1811)
+# ---------------------------------------------------------------------------
+
+COMFYUI_PACK_DIR = REPO_ROOT / "integrations" / "ComfyUI-PixlStash"
+_COMFYUI_SCOPE_SECTION = "## The ComfyUI scope"
+_HTTP_VERBS = {"get", "post", "put", "patch", "delete"}
+
+# Paths the pack names away from the call that sends them (a constant, a
+# table, a variable), so the method cannot be read off the source and is
+# stated here. A path found that way and missing from this map fails the test.
+_COMFYUI_PACK_INDIRECT_CALLS = {
+    "/api/v1/pictures/thumbnails/1.webp": "GET",
+    "/api/v1/model-icons/1": "GET",
+    "/api/v1/characters/1/thumbnail": "GET",
+    "/api/v1/picture_sets/1/thumbnail": "GET",
+    "/api/v1/comfyui/workflows/convert": "POST",
+    "/api/v1/pictures/likeness-search": "POST",
+    "/api/v1/pictures/face-search": "POST",
+}
+
+
+def _comfyui_pack_calls(pack_dir: Path) -> set[tuple[str, str]]:
+    """``(method, path)`` for every PixlStash API path the pack's code names.
+
+    A path is a whole string or f-string under ``/api/v1/``; every
+    interpolated value and ``{}`` placeholder is written as ``1``. The method
+    is the HTTP verb of the call the path is an argument of (``client.get(...)``,
+    or ``_proxy_get`` in the proxy), else the one ``_COMFYUI_PACK_INDIRECT_CALLS``
+    states.
+    """
+    calls: set[tuple[str, str]] = set()
+    unstated: list[str] = []
+    for source in sorted(pack_dir.rglob("*.py")):
+        relative = source.relative_to(pack_dir)
+        if relative.parts[0] in {"tests", "vendor"}:
+            continue
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        verb_of: dict[int, str] = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "attr", getattr(node.func, "id", ""))
+            verb = "get" if name == "_proxy_get" else name
+            if verb in _HTTP_VERBS:
+                for argument in node.args:
+                    verb_of[id(argument)] = verb.upper()
+        inside_fstring = {
+            id(part)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.JoinedStr)
+            for part in node.values
+        }
+        for node in ast.walk(tree):
+            if isinstance(node, ast.JoinedStr):
+                text = "".join(
+                    part.value if isinstance(part, ast.Constant) else "1"
+                    for part in node.values
+                )
+            elif (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and id(node) not in inside_fstring
+            ):
+                text = node.value
+            else:
+                continue
+            # A path and nothing else: prose that mentions one has spaces.
+            if not re.fullmatch(r"/api/v1/\S+", text):
+                continue
+            path = re.sub(r"{[^}]*}", "1", text)
+            method = verb_of.get(id(node)) or _COMFYUI_PACK_INDIRECT_CALLS.get(path)
+            if method is None:
+                unstated.append(f"  {relative.as_posix()}:{node.lineno}: {path}")
+            else:
+                calls.add((method, path))
+    assert not unstated, (
+        "The ComfyUI-PixlStash pack names PixlStash path(s) away from the call "
+        "that sends them, so the method cannot be read from the source. State "
+        "it in _COMFYUI_PACK_INDIRECT_CALLS:\n" + "\n".join(unstated)
+    )
+    return calls
+
+
+def _route_template(app, method: str, path: str):
+    """The effective template of the route ``method path`` resolves to: the
+    first one mounted that matches, which is the router's own rule."""
+    from starlette.routing import compile_path
+
+    from pixlstash.route_inventory import iter_api_route_contexts
+
+    for route_method, template, _route in iter_api_route_contexts(app):
+        if route_method == method and compile_path(template)[0].match(path):
+            return template
+    return None
+
+
+def test_the_comfyui_scope_admits_every_route_the_pack_calls(built_app):
+    """The link key's allow-list and the pack's calls are the same set (#1811).
+
+    The ComfyUI link key reaches only ``auth.COMFYUI_SCOPE_ROUTES``. A route
+    the pack starts calling without an entry there is a node that fails with
+    a 403 in somebody's ComfyUI; an entry the pack no longer calls is access
+    the key has no reason to hold. Both directions fail here.
+    """
+    from pixlstash.auth import COMFYUI_SCOPE_ROUTES
+    from pixlstash.authz.registry import ROUTE_POLICIES
+
+    undeclared = COMFYUI_SCOPE_ROUTES - set(ROUTE_POLICIES)
+    assert not undeclared, (
+        "COMFYUI_SCOPE_ROUTES names route(s) the registry does not declare, so "
+        f"the scope admits nothing for them: {sorted(undeclared)}"
+    )
+
+    if not (COMFYUI_PACK_DIR / "proxy_routes.py").is_file():
+        message = (
+            "integrations/ComfyUI-PixlStash is not checked out "
+            "(git submodule update --init), so the pack's calls cannot be read."
+        )
+        if os.getenv("GITHUB_ACTIONS") == "true":
+            pytest.fail(message + " The CI checkout must set `submodules: true`.")
+        pytest.skip(message)
+
+    calls = _comfyui_pack_calls(COMFYUI_PACK_DIR)
+    assert len(calls) >= 20, (
+        f"Read only {len(calls)} PixlStash call(s) out of the pack; it makes "
+        "well over 20, so the reader has stopped finding them."
+    )
+    called: dict[tuple[str, str], str] = {}
+    unresolved: list[str] = []
+    for method, path in sorted(calls):
+        template = _route_template(built_app, method, path)
+        if template is None or template == "/{full_path:path}":
+            unresolved.append(f"  {method} {path}")
+        else:
+            called[(method, template)] = path
+    assert not unresolved, (
+        "The pack calls PixlStash path(s) no route answers:\n" + "\n".join(unresolved)
+    )
+
+    refused = set(called) - COMFYUI_SCOPE_ROUTES
+    assert not refused, (
+        "The ComfyUI-PixlStash pack calls route(s) the ComfyUI token scope does "
+        "not admit, so a linked ComfyUI is refused there. Add them to "
+        "COMFYUI_SCOPE_ROUTES in pixlstash/auth.py (and the matrix section), "
+        "after checking the nodes really need them:\n"
+        + "\n".join(
+            f"  {m} {t}  (called as {called[(m, t)]})" for m, t in sorted(refused)
+        )
+    )
+    unused = COMFYUI_SCOPE_ROUTES - set(called)
+    assert not unused, (
+        "COMFYUI_SCOPE_ROUTES admits route(s) the pack no longer calls. Remove "
+        "them: the link key should reach nothing the nodes do not use:\n"
+        + "\n".join(f"  {m} {t}" for m, t in sorted(unused))
+    )
+
+
+def test_the_pack_call_reader_has_teeth(tmp_path):
+    """The reader finds a direct call, a proxied one, an f-string and a
+    stated indirect one, and refuses an indirect path nobody stated."""
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_x.py").write_text('"/api/v1/ignored"\n')
+    (tmp_path / "nodes.py").write_text(
+        "def run(client, picture_id):\n"
+        '    """/api/v1/in-a-docstring is prose."""\n'
+        '    client.post("/api/v1/pictures/import", is_write=True)\n'
+        '    client.get(f"/api/v1/pictures/{picture_id}/metadata")\n'
+        '    _proxy_get(request, "/api/v1/projects")\n'
+        '    path = "/api/v1/comfyui/workflows/convert"\n'
+        '    table = {"set": "/api/v1/picture_sets/{}/thumbnail"}\n'
+    )
+    assert _comfyui_pack_calls(tmp_path) == {
+        ("POST", "/api/v1/pictures/import"),
+        ("GET", "/api/v1/pictures/1/metadata"),
+        ("GET", "/api/v1/projects"),
+        ("POST", "/api/v1/comfyui/workflows/convert"),
+        ("GET", "/api/v1/picture_sets/1/thumbnail"),
+    }
+    (tmp_path / "more.py").write_text('NEW = "/api/v1/users/me/token"\n')
+    with pytest.raises(AssertionError, match="more.py:1: /api/v1/users/me/token"):
+        _comfyui_pack_calls(tmp_path)
+
+
+def test_the_comfyui_scope_section_of_the_matrix_matches_the_code():
+    """The written list of what the ComfyUI key reaches is the code's list."""
+    from pixlstash.auth import COMFYUI_SCOPE_ROUTES
+    from pixlstash.authz.registry import ROUTE_POLICIES
+
+    rows: dict[tuple[str, str], str] = {}
+    inside = False
+    for line in COVERAGE_MATRIX_MD.read_text(encoding="utf-8").splitlines():
+        if line.startswith("## "):
+            inside = line.startswith(_COMFYUI_SCOPE_SECTION)
+            continue
+        match = _MATRIX_ROW_RE.match(line) if inside else None
+        if match:
+            method, path, policy = match.groups()
+            rows[(method, path)] = policy
+    assert set(rows) == COMFYUI_SCOPE_ROUTES, (
+        f"The '{_COMFYUI_SCOPE_SECTION}' table in "
+        f"{COVERAGE_MATRIX_MD.relative_to(REPO_ROOT).as_posix()} and "
+        "auth.COMFYUI_SCOPE_ROUTES disagree. Only in the document: "
+        f"{sorted(set(rows) - COMFYUI_SCOPE_ROUTES)}; only in the code: "
+        f"{sorted(COMFYUI_SCOPE_ROUTES - set(rows))}"
+    )
+    drift = {
+        key: policy
+        for key, policy in rows.items()
+        if policy != ROUTE_POLICIES[key].policy.name.lower()
+    }
+    assert not drift, f"Rows name a policy the registry does not: {drift}"
+
+
 def test_route_enumeration_is_not_silently_undercounting(built_app):
     """FAIL-LOUD: the enumeration cannot collapse and fake complete coverage.
 
