@@ -100,7 +100,9 @@
                 </span>
               </template>
               <template #meta="{ option }">
-                <span class="fm-n">{{ option.count }}</span>
+                <span v-if="option.count != null" class="fm-n">{{
+                  option.count
+                }}</span>
               </template>
             </OptionRows>
           </div>
@@ -222,7 +224,8 @@ function rowValue(kind) {
 /**
  * One submenu's radio rows. The pick-one lists lead with the row that turns
  * the filter off, counting every card; the flags carry what they hold back —
- * the server's own counts for one-offs and hidden, this grid's for ghosts.
+ * the server's own count for one-offs, this grid's for ghosts, and none for
+ * hidden.
  */
 function rows(kind) {
   const total = store.cards.length;
@@ -254,8 +257,10 @@ function rows(kind) {
       ];
     case "showHidden":
       return [
-        { id: false, label: "Hide", count: store.hidden },
-        { id: true, label: "Show", count: store.hidden },
+        // No count: a hidden workflow is one somebody stopped wanting to see,
+        // and a total beside the row keeps it in view.
+        { id: false, label: "Hide" },
+        { id: true, label: "Show" },
       ];
     case "ghosts":
       return [

@@ -1790,7 +1790,8 @@ the shelf's workflow sets section) and served as `hand_made` on
   `PUT /models/workflow-sets/hidden` for the ACTIVE library (**#1869**: the
   hide is server-side and per library, not the per-browser
   `localStorage` flag it used to be). A line under the grid
-  counts the hidden sets and toggles `store.showHiddenSets`, which draws them
+  says some sets are hidden, **without counting them**, and toggles
+  `store.showHiddenSets`, which draws them
   with `card.hidden` (faded covers, a "Hidden" tag, the eye button to show one
   again). The file verbs stay on the card's context menu and the bar.
   **Over several cards the verb is on the menus**: `hideSetsVerb`
@@ -2006,8 +2007,9 @@ filtered by.
   would otherwise take it as "previous". Which side applies which filter is in the
   `useWorkflowsStore` row of §3. The funnel's badge and the strip both count
   `filterChips`, so neither can describe a filter the other has dropped, and
-  the subtitle counts only what is STILL withheld — a grid showing its hidden
-  cards must not also caption itself "4 hidden". Filters that leave no card
+  the subtitle counts only the one-offs STILL withheld — a grid showing its
+  one-offs must not also caption itself "7 one-offs". **Hidden workflows are
+  never counted**, on the subtitle, the Hidden row or a note. Filters that leave no card
   get `.wfv-note`, not the first-run empty state: that screen offers three
   ways to get a first workflow and this reader already has some. A
   `?topology=` or `?workflow=` link whose card a filter is hiding gets its own note with a
@@ -2139,10 +2141,14 @@ filtered by.
   the model shelf wear one chip rather than two copies. `ImageGrid.css` still
   owns where it sits in a picture tile's stacking order; the shelf tightens it
   to fit a 24px mark (`.shelf-row-ident .stack-cover-flag`).
-- **Grid-level counts.** The toolbar subtitle reads "N workflows · N hidden ·
-  N one-offs" from the payload's own `hidden` / `one_offs`, and the empty state
-  says which of the two it is in rather than announcing "Nothing found yet"
-  over a subtitle reporting forty hidden cards. The inspector rail is mounted
+- **Grid-level counts.** The toolbar subtitle reads "N workflows · N
+  one-offs" from the payload's own `one_offs`, the second half only while the
+  One-offs filter is leaving them out. The payload's `hidden` is read
+  only as whether there are any: somebody hid those workflows to stop looking
+  at them, so no screen prints how many (`withheldNames` in
+  `WorkflowsView.vue` words it as "hidden workflows and 12 one-offs"), and the
+  empty state says which of the two it is in rather than announcing "Nothing
+  found yet" over a library whose every card is hidden. The inspector rail is mounted
   by `WorkflowTab.vue` below; selection lives in the store and the rail follows
   it.
 
@@ -6416,9 +6422,7 @@ from the UI today and are not oversights**:
 
 - **Group / Show / Ghosts.** One card per workflow is the grouping now, and the rest became
   the F7 Filters panel (Hide one-offs, Show hidden workflows, Ghosts row,
-  Type / Checkpoint / Source / Min rating). Until then the grid's subtitle says
-  what is being left out ("40 hidden · 12 one-offs") and there is no way to ask
-  for it, which the empty state says in as many words.
+  Type / Checkpoint / Source / Min rating).
 - **The saved workflow files band, and *Pictures in*.** Setting a picture
   input's mode (Selection / Picker / Fixed) and deleting an imported workflow
   were the shelf inspector's, keyed by FILENAME through
