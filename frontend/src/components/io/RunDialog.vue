@@ -223,46 +223,65 @@
             :placeholder="isEdit ? 'Describe the change, e.g. make it night time' : ''"
             :rows="3"
             :disabled="submitting"
-            :highlight="personTrigger ? [personTrigger] : []"
+            :highlight="personTriggers.map((trigger) => trigger.word)"
             @keydown.stop
           />
-          <!-- The person's LoRA answers to a word the prompt does not say.
-               A suggestion, never a blocker: it goes once the word is typed,
-               and the box then marks the word instead. -->
+          <!-- A picked person's LoRA answers to a word the prompt does not
+               say. A suggestion, never a blocker: a word's button goes once
+               the word is typed, and the box then marks the word instead.
+               ONE line whatever is missing: the words do not shrink, the
+               buttons do, and past three one button adds them all. -->
           <p
-            v-if="triggerMissing"
+            v-if="triggerAdds.length"
             class="rund-note rund-note--bad rund-trigger"
             role="status"
             data-testid="rund-trigger"
           >
-            <v-icon size="14" class="rund-trigger-glyph" aria-hidden="true"
-              >mdi-alert-outline</v-icon
-            >
-            <span>
-              The prompt does not have the trigger word of this person's LoRA:
-              <strong>{{ personTrigger }}</strong>
+            <span class="rund-trigger-text">
+              <v-icon size="14" aria-hidden="true">mdi-alert-outline</v-icon>
+              Trigger word missing
             </span>
-            <AppButton size="sm" :disabled="submitting" @click="addTrigger"
+            <!-- The label is the word alone and may be cut short, so the name
+                 and the tip both say it whole and whose it is. Not the
+                 button's own `tooltip`, which would describe it with the
+                 words it is already named by. -->
+            <Tooltip
+              v-for="add in triggerAdds"
+              :key="add.label"
+              :text="add.hint"
+              :describe="false"
             >
-              Add it
-            </AppButton>
+              <template #activator="{ props: tip }">
+                <AppButton
+                  v-bind="tip"
+                  class="rund-trigger-add"
+                  size="sm"
+                  :aria-label="add.hint"
+                  :disabled="submitting"
+                  @click="addTriggers(add.words)"
+                >
+                  {{ add.label }}
+                </AppButton>
+              </template>
+            </Tooltip>
           </p>
         </div>
 
         <!-- Who the run is of. A workflow run by itself carries no person's
              LoRA (the server leaves it out), so the people whose LoRA works
-             with its checkpoint are offered here, by face. Opened on a person
-             (Create with LoRA…), that person is drawn chosen and fixed. -->
+             with its checkpoint are offered here, by face, and several can be
+             picked. Opened on a person (Create with LoRA…), that person is
+             drawn chosen and fixed, with the others beside them. -->
         <div v-if="showPerson" class="rund-f rund-f--4" data-testid="rund-person">
           <span class="rund-l">Person</span>
           <PersonPicker
             v-if="personTiles.length"
             :people="personTiles"
-            :model-value="chosenPersonId"
-            :fixed="Boolean(fixedPerson)"
+            :model-value="chosenPersonIds"
+            :fixed-id="fixedPerson?.id ?? null"
             :disabled="submitting"
             aria-label="Person"
-            @update:model-value="pickPerson"
+            @toggle="pickPerson"
           />
           <p v-if="personNote" class="rund-note">{{ personNote }}</p>
         </div>
@@ -357,7 +376,8 @@
           </template>
           <!-- LoRAs this run adds in loaders of their own (`add_loras`):
                nothing the graph loads is replaced, so these work on any
-               workflow. Their × takes the addition away. -->
+               workflow. Their × takes the addition away. The picked people's
+               rows come first, in the order picked. -->
           <div
             v-for="(row, index) in addedLoras"
             :key="row.key"
@@ -366,15 +386,15 @@
           >
             <AppSelect
               v-model="row.sha256"
-              :label="row.person ? 'LoRA of the person' : `Added LoRA ${index + 1}`"
+              :label="addedRowName(row, index)"
               hide-label
               compact
-              :options="row.person ? personLoraOptions : adapterOptions"
+              :options="row.person == null ? adapterOptions : personLoraOptions(row)"
               :disabled="submitting"
             />
             <AppInput
               v-model.number="row.strength"
-              :aria-label="`Strength of added LoRA ${index + 1}`"
+              :aria-label="`Strength of ${addedRowName(row, index)}`"
               type="number"
               min="-10"
               max="10"
@@ -384,10 +404,10 @@
             <!-- Not on a fixed person's row: the popup was opened to make
                  pictures of them, and taking their LoRA off is another run. -->
             <AppBarButton
-              v-if="!(row.person && fixedPerson)"
+              v-if="row.person == null || row.person !== fixedPerson?.id"
               class="rund-lora-act"
               icon="close"
-              :tooltip="`Remove added LoRA ${index + 1}`"
+              :tooltip="`Remove ${addedRowName(row, index)}`"
               :disabled="submitting"
               @click="removeAddedLora(index)"
             />
@@ -914,6 +934,7 @@ import AppInput from "../widgets/AppInput.vue";
 import AppSelect from "../widgets/AppSelect.vue";
 import AppTextarea from "../widgets/AppTextarea.vue";
 import PicturePicker from "../widgets/PicturePicker.vue";
+import Tooltip from "../widgets/Tooltip.vue";
 import RunReasonNotice from "./RunReasonNotice.vue";
 import RunResetChip from "./RunResetChip.vue";
 
@@ -1042,8 +1063,10 @@ const seed = ref("0");
 const loras = ref([]);
 /**
  * LoRAs this run ADDS in a loader of their own (`add_loras`), rows of
- * `{key, sha256, strength}`. Nothing the graph loads is replaced, so they work
- * on a workflow with no loader, or one whose loaders are all taken.
+ * `{key, sha256, strength, person}`. Nothing the graph loads is replaced, so
+ * they work on a workflow with no loader, or one whose loaders are all taken.
+ * `person` is the id of the person whose LoRA the row holds, or null; those
+ * rows come first, in the order picked (`settlePeople`).
  */
 const addedLoras = ref([]);
 /** The added rows as the form opened with them, for `dirty`. */
@@ -2173,7 +2196,9 @@ const offersPerson = computed(
     kind.value === "card" &&
     !pictureIds.value.length &&
     !savedRecipe.value &&
-    !loraSource.value,
+    // Create with LoRA… on a person takes others beside them; on a picture
+    // set it is a run of the set's look, and offers nobody.
+    loraSource.value?.entityType !== "set",
 );
 /** Create with LoRA… on a person: that person, chosen and not changeable. */
 const fixedPerson = computed(() =>
@@ -2193,12 +2218,20 @@ const personFits = computed(() =>
       )
     : { people: [], clash: 0, unknown: 0, family: null },
 );
-/** The person picked for this run, or null for no one. */
-const personId = ref(null);
-const chosenPersonId = computed(() => fixedPerson.value?.id ?? personId.value);
-const personTiles = computed(() =>
-  fixedPerson.value ? [fixedPerson.value] : personFits.value.people,
-);
+/** The people picked for this run, in the order picked; never the fixed one. */
+const personIds = ref([]);
+/** Everyone the run is of: the person it was opened on, then the picks. */
+const chosenPersonIds = computed(() => [
+  ...(fixedPerson.value ? [fixedPerson.value.id] : []),
+  ...personIds.value,
+]);
+const personTiles = computed(() => {
+  const fixed = fixedPerson.value;
+  const offered = personFits.value.people.filter(
+    (person) => person.id !== fixed?.id,
+  );
+  return fixed ? [fixed, ...offered] : offered;
+});
 /** Absent, not empty, in a library where nobody has a LoRA. */
 const showPerson = computed(
   () =>
@@ -2217,71 +2250,165 @@ const personNote = computed(() => {
   if (unknown) parts.push(`${unknown} whose LoRA has no base model recorded`);
   const left = parts.length ? ` Not listed: ${parts.join(", ")}.` : "";
   return people.length
-    ? `A workflow runs without a person's LoRA. Pick someone to add theirs.${left}`
+    ? `A workflow runs without a person's LoRA. Pick people to add theirs.${left}`
     : `No person has a LoRA for this workflow's base model, so it runs with no one's.${left}`;
 });
-/** The LoRAs the person's row offers: theirs that fit, never the whole shelf. */
-const personLoraOptions = computed(() =>
-  (fixedPerson.value
-    ? attachedLoras.value
-    : personFits.value.people.find((person) => person.id === personId.value)
-        ?.loras || []
-  ).map(adapterOption),
-);
+
+function personName(id) {
+  return personTiles.value.find((person) => person.id === id)?.name || "this person";
+}
+
+/** What an added row is called, by whose it is or by where it stands. */
+function addedRowName(row, index) {
+  return row.person == null
+    ? `added LoRA ${index + 1}`
+    : `${personName(row.person)}'s LoRA`;
+}
 
 /**
- * The trigger word of the LoRA on the person's row, or "" when there is no
- * such row or its LoRA needs none. Read off the row's own pick, so changing
- * which of the person's LoRAs runs changes the word.
+ * The LoRAs a person's row offers: theirs that fit, never the whole shelf,
+ * and never the file another person's row already holds, which would be one
+ * loader asked for twice.
  */
-const personTrigger = computed(() => {
-  const sha = addedLoras.value.find((row) => row.person)?.sha256;
-  if (!sha) return "";
-  return triggerWord(
-    [...attachedLoras.value, ...adapters.value, ...unknownLoras.value].find(
-      (row) => row.sha256 === sha,
-    ),
+function personLoraOptions(row) {
+  const own =
+    row.person === fixedPerson.value?.id
+      ? attachedLoras.value
+      : personFits.value.people.find((person) => person.id === row.person)
+          ?.loras || [];
+  const taken = new Set(
+    addedLoras.value
+      .filter((other) => other.person != null && other.key !== row.key)
+      .map((other) => other.sha256),
   );
+  return own.filter((lora) => !taken.has(lora.sha256)).map(adapterOption);
+}
+
+/**
+ * The trigger word of each picked person's LoRA, in the order picked:
+ * `[{word, person}]`, the person by name. Read off each row's own pick, so
+ * changing which of a person's LoRAs runs changes the word; a LoRA that needs
+ * none adds nothing, and a word two people share is listed once.
+ */
+const personTriggers = computed(() => {
+  const shelf = [...attachedLoras.value, ...adapters.value, ...unknownLoras.value];
+  const triggers = [];
+  for (const row of addedLoras.value) {
+    if (row.person == null || !row.sha256) continue;
+    const word = triggerWord(shelf.find((entry) => entry.sha256 === row.sha256));
+    const known = triggers.some(
+      (trigger) => trigger.word.toLowerCase() === word.toLowerCase(),
+    );
+    if (word && !known) triggers.push({ word, person: personName(row.person) });
+  }
+  return triggers;
 });
-/** The word is asked for and the prompt, which can be set here, lacks it. */
-const triggerMissing = computed(
-  () =>
-    Boolean(personTrigger.value) &&
-    !promptUnset.value &&
-    !namesWord(prompt.value, personTrigger.value),
-);
+/** How many missing words get a button each; past it, one adds them all. */
+const MAX_TRIGGER_BUTTONS = 3;
+/**
+ * The buttons of the trigger-word line, `[{label, hint, words}]`: one for each
+ * word the prompt (which can be set here) lacks. Empty is no line at all.
+ */
+const triggerAdds = computed(() => {
+  if (promptUnset.value) return [];
+  const missing = personTriggers.value.filter(
+    (trigger) => !namesWord(prompt.value, trigger.word),
+  );
+  if (missing.length > MAX_TRIGGER_BUTTONS) {
+    const words = missing.map((trigger) => trigger.word);
+    return [
+      {
+        label: `Add all ${words.length}`,
+        hint: `Add all ${words.length} missing trigger words: ${words.join(", ")}`,
+        words,
+      },
+    ];
+  }
+  return missing.map(({ word, person }) => ({
+    label: `Add ${word}`,
+    hint: `Add ${word}, ${person}'s trigger word`,
+    words: [word],
+  }));
+});
 const promptField = ref(null);
 
-/** Put the word first, where a trigger word goes, and hand the box back. */
-function addTrigger() {
-  const rest = prompt.value.trim();
-  prompt.value = rest ? `${personTrigger.value}, ${rest}` : personTrigger.value;
+/** Put the words first, where a trigger word goes, and hand the box back. */
+function addTriggers(words) {
+  prompt.value = [...words, prompt.value.trim()].filter(Boolean).join(", ");
   // The button goes with the suggestion; focus must not fall to the page.
   promptField.value?.focus?.();
 }
 
 /**
- * Pick the person this run is of: their first matching LoRA becomes an added
- * row (`add_loras`), replacing the last pick's. Null is "No one".
+ * Pick a person for this run, or unpick one already picked. Null is "No one":
+ * every pick comes off. Their rows follow in `settlePeople`.
  */
 function pickPerson(id) {
-  if (fixedPerson.value) return;
-  const person = personFits.value.people.find((entry) => entry.id === id);
-  personId.value = person ? person.id : null;
-  addedLoras.value = addedLoras.value.filter((row) => !row.person);
-  if (person) addedLoras.value.unshift(addedRow(person.loras[0].sha256, 1, true));
+  if (id == null) {
+    personIds.value = [];
+  } else if (personIds.value.includes(id)) {
+    personIds.value = personIds.value.filter((picked) => picked !== id);
+  } else if (id !== fixedPerson.value?.id) {
+    personIds.value = [...personIds.value, id];
+  }
+  settlePeople();
 }
 
-// Another workflow may be for another base model: a pick that no longer fits
-// is taken off rather than sent, and one whose LoRA changed takes the new one.
-watch(personFits, (fits) => {
-  if (personId.value == null) return;
-  const person = fits.people.find((entry) => entry.id === personId.value);
-  const row = addedLoras.value.find((entry) => entry.person);
-  if (!person || !person.loras.some((lora) => lora.sha256 === row?.sha256)) {
-    pickPerson(person ? person.id : null);
+/**
+ * Make the added rows say what the picks say: one row per picked person,
+ * first among the added rows and in the order picked, each holding one of
+ * that person's LoRAs for this workflow.
+ *
+ * A pick the workflow no longer offers comes off rather than being sent, and
+ * a row whose LoRA is no longer that person's takes their first one. No two
+ * people's rows hold one file: a person whose every LoRA is already on
+ * somebody else's row stays picked with no row of their own (that loader IS
+ * theirs too), and gets one the moment the file is free.
+ */
+function settlePeople() {
+  const offered = new Map(
+    personFits.value.people.map((person) => [person.id, person]),
+  );
+  const fixedId = fixedPerson.value?.id ?? null;
+  const picked = personIds.value.filter(
+    (id) => id !== fixedId && offered.has(id),
+  );
+  if (picked.length !== personIds.value.length) personIds.value = picked;
+  const rows = addedLoras.value;
+  const fixedRows =
+    fixedId == null ? [] : rows.filter((row) => row.person === fixedId);
+  const held = new Set(fixedRows.map((row) => row.sha256));
+  const peopleRows = [];
+  for (const id of picked) {
+    const free = offered.get(id).loras.filter((lora) => !held.has(lora.sha256));
+    const row =
+      rows.find(
+        (entry) =>
+          entry.person === id &&
+          free.some((lora) => lora.sha256 === entry.sha256),
+      ) || (free.length ? addedRow(free[0].sha256, 1, id) : null);
+    if (!row) continue;
+    held.add(row.sha256);
+    peopleRows.push(row);
   }
-});
+  const next = [
+    ...fixedRows,
+    ...peopleRows,
+    ...rows.filter((row) => row.person == null),
+  ];
+  // Only a real change is written: this runs from a watcher on the rows.
+  if (next.length !== rows.length || next.some((row, at) => row !== rows[at])) {
+    addedLoras.value = next;
+  }
+}
+
+// Another workflow may be for another base model, the shelf may attach
+// another LoRA, and a row's own select may free a file somebody else's pick
+// was waiting for.
+watch(
+  [personFits, () => addedLoras.value.map((row) => row.sha256).join()],
+  settlePeople,
+);
 
 const setOptions = computed(() => [
   { value: "", label: "No set" },
@@ -2798,15 +2925,22 @@ function addLora() {
   addedLoras.value.push(addedRow(""));
 }
 
-/** `person` marks the row holding the LoRA of the person the run is of. */
-function addedRow(sha256, strength = 1, person = false) {
+/** `person` is the id of the person whose LoRA the row holds, or null. */
+function addedRow(sha256, strength = 1, person = null) {
   addedKey += 1;
   return { key: `added-${addedKey}`, sha256, strength, person };
 }
 
 function removeAddedLora(index) {
-  // Taking the picked person's LoRA off is picking no one.
-  if (addedLoras.value[index]?.person) personId.value = null;
+  const person = addedLoras.value[index]?.person;
+  // Taking a picked person's LoRA off is unpicking them.
+  if (personIds.value.includes(person)) {
+    pickPerson(person);
+    // The × went with the row: the keyboard goes to the tile it unpicked,
+    // which is where the pick is taken back.
+    void focusLater(`[data-person="${person}"]`);
+    return;
+  }
   addedLoras.value.splice(index, 1);
 }
 
@@ -2971,7 +3105,7 @@ function removeLora(index) {
 async function dropLoras() {
   loras.value = [];
   addedLoras.value = [];
-  personId.value = null;
+  personIds.value = [];
   await runPreflight();
 }
 
@@ -3026,7 +3160,13 @@ async function loadLoraSource() {
   handMadeSets.value = sets?.hand_made || [];
   const first = attachedLoras.value[0];
   addedLoras.value = first
-    ? [addedRow(first.sha256, 1, source.entityType === "character")]
+    ? [
+        addedRow(
+          first.sha256,
+          1,
+          source.entityType === "character" ? Number(source.entityId) : null,
+        ),
+      ]
     : [];
 }
 
@@ -3801,15 +3941,32 @@ button.rund-in-tile.rund-in-tile--off {
   color: rgb(var(--v-theme-surface-error));
 }
 
+/* One line at any width the popup has: nothing wraps, the glyph and the words
+   keep their size, and the buttons give way, each to an ellipsis. */
 .rund-trigger {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-2);
+  gap: var(--space-3);
   margin-top: var(--space-2);
 }
 
-.rund-trigger-glyph {
+.rund-trigger-text {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* A flex item's `min-width: auto` is what would hold a button at its word. */
+.rund-trigger-add {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.rund-trigger-add :deep(.app-btn__label) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 </style>

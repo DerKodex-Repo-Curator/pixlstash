@@ -14,8 +14,8 @@
 //   pictures is `target`, not a second source. Getting this wrong is a 400 on
 //   every run from the grid.
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
-import { mount, flushPromises } from "@vue/test-utils";
+import { afterEach, describe, it, expect, beforeEach, vi } from "vitest";
+import { enableAutoUnmount, mount, flushPromises } from "@vue/test-utils";
 import { setActivePinia, createPinia } from "pinia";
 
 const getWorkflowCard = vi.fn();
@@ -145,6 +145,13 @@ const globalOpts = {
         template: "<button :disabled='disabled'><slot /></button>",
       },
       AppBarButton: true,
+      // The trigger-word buttons sit in a tip's activator slot, which the
+      // stubbed Vuetify tooltip would not draw.
+      Tooltip: {
+        name: "Tooltip",
+        props: ["text", "describe"],
+        template: "<slot name='activator' :props='{}' />",
+      },
       RunReasonNotice: true,
       PicturePicker: true,
       "v-icon": true,
@@ -160,6 +167,9 @@ async function mountRun(source = { kind: "picture", pictureIds: [42] }) {
   await flushPromises();
   return wrapper;
 }
+
+// Every popup a test mounts is taken down again, watchers and all.
+enableAutoUnmount(afterEach);
 
 beforeEach(() => {
   setActivePinia(createPinia());
@@ -2856,9 +2866,57 @@ describe("Create with LoRA", () => {
     const fixed = wrapper.find('[data-testid="person-fixed"]');
     expect(fixed.text()).toBe("Example");
     // A statement, not a control: nobody else to pick, and no "No one".
-    expect(wrapper.find('[role="radio"]').exists()).toBe(false);
-    expect(wrapper.vm.addedLoras[0].person).toBe(true);
+    expect(fixed.attributes("aria-checked")).toBe("true");
+    expect(wrapper.find("button[role='checkbox']").exists()).toBe(false);
+    expect(wrapper.vm.addedLoras[0].person).toBe(3);
     expect(wrapper.findComponent({ name: "AppBarButton" }).exists()).toBe(false);
+  });
+
+  it("takes other people beside the fixed one, who stays first and fixed", async () => {
+    const OTHER_LORA = {
+      sha256: "j".repeat(64),
+      filename: "example-friend-krea2.safetensors",
+      base_model_family: "krea2",
+      attachments: [{ entity_type: "character", entity_id: 4 }],
+    };
+    const own = {
+      ...PERSON_LORA,
+      attachments: [{ entity_type: "character", entity_id: 3 }],
+    };
+    listCharacters.mockResolvedValue([
+      { id: 3, name: "Example" },
+      { id: 4, name: "Friend" },
+    ]);
+    listAdapters.mockImplementation(async ({ fileKind, characterId } = {}) => {
+      if (characterId) return fileKind === "adapter" ? [own] : [];
+      return fileKind ? [] : [own, OTHER_LORA];
+    });
+    getWorkflowCard.mockImplementation(async (key) => ({
+      card: card({ id: key, name: key, models: model("krea2") }),
+    }));
+    const wrapper = await mountRun(fromPerson);
+    // The fixed person is drawn once, as the statement, and never as a toggle.
+    expect(wrapper.findAll('[data-testid="person-fixed"]')).toHaveLength(1);
+    expect(wrapper.find('[data-person="3"]').exists()).toBe(false);
+    expect(wrapper.find('[data-person="null"]').exists()).toBe(false);
+
+    await wrapper.find('[data-person="4"]').trigger("click");
+    expect(wrapper.find('[data-person="4"]').attributes("aria-checked")).toBe("true");
+    expect(wrapper.vm.addedLoras.map((row) => row.person)).toEqual([3, 4]);
+    // Only the added person's row can be taken off.
+    const removes = wrapper.findAllComponents({ name: "AppBarButton" });
+    expect(removes.map((c) => c.props("tooltip"))).toEqual(["Remove Friend's LoRA"]);
+    await wrapper.vm.submit();
+    const body = runWorkflowCard.mock.calls[0][0];
+    expect(body.add_loras.map((row) => row.sha256)).toEqual([
+      PERSON_LORA.sha256,
+      OTHER_LORA.sha256,
+    ]);
+    // Still filed to the person the popup was opened on.
+    expect(body.destination.character_id).toBe(3);
+
+    await wrapper.find('[data-person="4"]').trigger("click");
+    expect(wrapper.vm.addedLoras.map((row) => row.person)).toEqual([3]);
   });
 
   it("suggests the fixed person's trigger word too", async () => {
@@ -3040,6 +3098,175 @@ describe("the person a workflow run alone is of", () => {
     expect(wrapper.vm.addedLoras).toEqual([]);
   });
 
+  describe("several people", () => {
+    const TOVE = {
+      sha256: "o".repeat(64),
+      filename: "tove-sdxl.safetensors",
+      base_model_family: "sdxl",
+      attachments: of(9),
+    };
+    const TOVE_ALT = {
+      sha256: "p".repeat(64),
+      filename: "tove-sdxl-v2.safetensors",
+      base_model_family: "sdxl",
+      attachments: of(9),
+    };
+    const rowsOf = (wrapper) =>
+      wrapper.vm.addedLoras.map((row) => [row.person, row.sha256]);
+    const selects = (wrapper) =>
+      wrapper
+        .findAllComponents({ name: "AppSelect" })
+        .filter((c) => /'s LoRA$/.test(c.props("label")));
+    const checked = (wrapper, id) => tile(wrapper, id).attributes("aria-checked");
+
+    beforeEach(() => {
+      listCharacters.mockResolvedValue([
+        { id: 7, name: "Mira" },
+        { id: 9, name: "Tove" },
+      ]);
+      listAdapters.mockImplementation(async ({ fileKind } = {}) =>
+        fileKind ? [] : [MIRA, TOVE, TOVE_ALT],
+      );
+    });
+
+    it("adds one LoRA per person, in the order picked", async () => {
+      const wrapper = await mountRun(fromCard);
+      // Tove first, though Mira is drawn first.
+      await tile(wrapper, 9).trigger("click");
+      await tile(wrapper, 7).trigger("click");
+      expect(checked(wrapper, 9)).toBe("true");
+      expect(checked(wrapper, 7)).toBe("true");
+      expect(checked(wrapper, "null")).toBe("false");
+      wrapper.vm.addedLoras[1].strength = 0.6;
+      await wrapper.vm.submit();
+      expect(runWorkflowCard.mock.calls[0][0].add_loras).toEqual([
+        { sha256: TOVE.sha256, strength_model: 1 },
+        { sha256: MIRA.sha256, strength_model: 0.6 },
+      ]);
+      // The pre-flight is asked about the same people.
+      await wrapper.vm.runPreflight();
+      expect(preflightWorkflowRun.mock.calls.at(-1)[0].add_loras).toHaveLength(2);
+      // And a recipe saved from the run keeps both.
+      expect(wrapper.vm.recipeLoras.map((row) => row.sha256)).toEqual([
+        TOVE.sha256,
+        MIRA.sha256,
+      ]);
+    });
+
+    it("keeps people's rows ahead of a LoRA added by hand", async () => {
+      const wrapper = await mountRun(fromCard);
+      wrapper.vm.addLora();
+      wrapper.vm.addedLoras[0].sha256 = "s".repeat(64);
+      await tile(wrapper, 7).trigger("click");
+      await tile(wrapper, 9).trigger("click");
+      expect(rowsOf(wrapper)).toEqual([
+        [7, MIRA.sha256],
+        [9, TOVE.sha256],
+        [null, "s".repeat(64)],
+      ]);
+    });
+
+    it("takes a person's row away when they are picked again, and nobody else's", async () => {
+      const wrapper = await mountRun(fromCard);
+      await tile(wrapper, 7).trigger("click");
+      await tile(wrapper, 9).trigger("click");
+      await tile(wrapper, 7).trigger("click");
+      expect(checked(wrapper, 7)).toBe("false");
+      expect(rowsOf(wrapper)).toEqual([[9, TOVE.sha256]]);
+    });
+
+    it("unpicks the person whose row is taken off with its ×", async () => {
+      const wrapper = await mountRun(fromCard);
+      await tile(wrapper, 7).trigger("click");
+      await tile(wrapper, 9).trigger("click");
+      const remove = wrapper
+        .findAllComponents({ name: "AppBarButton" })
+        .find((c) => c.props("tooltip") === "Remove Mira's LoRA");
+      await remove.trigger("click");
+      expect(checked(wrapper, 7)).toBe("false");
+      expect(checked(wrapper, 9)).toBe("true");
+      expect(rowsOf(wrapper)).toEqual([[9, TOVE.sha256]]);
+    });
+
+    it("puts the keyboard on the tile when a person's row is taken off", async () => {
+      const wrapper = mount(RunDialog, {
+        props: { source: fromCard, context: {} },
+        attachTo: document.body,
+        ...globalOpts,
+      });
+      await flushPromises();
+      await tile(wrapper, 7).trigger("click");
+      wrapper.vm.removeAddedLora(0);
+      await flushPromises();
+      // The × is gone with its row; focus must not fall to the page.
+      expect(document.activeElement).toBe(tile(wrapper, 7).element);
+    });
+
+    it("offers each row that person's LoRAs, and keeps the one chosen", async () => {
+      const wrapper = await mountRun(fromCard);
+      await tile(wrapper, 7).trigger("click");
+      await tile(wrapper, 9).trigger("click");
+      const [mira, tove] = selects(wrapper);
+      expect(mira.props("label")).toBe("Mira's LoRA");
+      expect(mira.props("options").map((o) => o.value)).toEqual([MIRA.sha256]);
+      expect(tove.props("options").map((o) => o.value)).toEqual([
+        TOVE.sha256,
+        TOVE_ALT.sha256,
+      ]);
+      // Tove's other LoRA is still Tove's: the row is not put back to the first.
+      wrapper.vm.addedLoras[1].sha256 = TOVE_ALT.sha256;
+      await flushPromises();
+      expect(rowsOf(wrapper)).toEqual([
+        [7, MIRA.sha256],
+        [9, TOVE_ALT.sha256],
+      ]);
+    });
+
+    it("takes every pick off for No one", async () => {
+      const wrapper = await mountRun(fromCard);
+      await tile(wrapper, 7).trigger("click");
+      await tile(wrapper, 9).trigger("click");
+      await tile(wrapper, "null").trigger("click");
+      expect(checked(wrapper, "null")).toBe("true");
+      expect(wrapper.vm.addedLoras).toEqual([]);
+    });
+
+    it("never asks for one file twice when two people share a LoRA", async () => {
+      const SHARED = { ...MIRA, attachments: [...of(7), ...of(9)] };
+      listAdapters.mockImplementation(async ({ fileKind } = {}) =>
+        fileKind ? [] : [SHARED],
+      );
+      const wrapper = await mountRun(fromCard);
+      await tile(wrapper, 7).trigger("click");
+      await tile(wrapper, 9).trigger("click");
+      // Both are picked; the one loader is both people's.
+      expect(checked(wrapper, 9)).toBe("true");
+      expect(rowsOf(wrapper)).toEqual([[7, SHARED.sha256]]);
+      await wrapper.vm.submit();
+      expect(runWorkflowCard.mock.calls[0][0].add_loras).toHaveLength(1);
+      // Unpicking the row's person leaves the file to the other.
+      await tile(wrapper, 7).trigger("click");
+      expect(rowsOf(wrapper)).toEqual([[9, SHARED.sha256]]);
+    });
+
+    it("does not offer a row the file another person's row holds", async () => {
+      const SHARED = { ...MIRA, attachments: [...of(7), ...of(9)] };
+      listAdapters.mockImplementation(async ({ fileKind } = {}) =>
+        fileKind ? [] : [SHARED, TOVE],
+      );
+      const wrapper = await mountRun(fromCard);
+      await tile(wrapper, 7).trigger("click");
+      await tile(wrapper, 9).trigger("click");
+      expect(rowsOf(wrapper)).toEqual([
+        [7, SHARED.sha256],
+        [9, TOVE.sha256],
+      ]);
+      expect(selects(wrapper)[1].props("options").map((o) => o.value)).toEqual([
+        TOVE.sha256,
+      ]);
+    });
+  });
+
   it("is not offered on a recipe's run, which keeps its own LoRAs", async () => {
     const wrapper = await mountRun();
     expect(wrapper.find('[data-testid="rund-person"]').exists()).toBe(false);
@@ -3060,7 +3287,7 @@ describe("the person a workflow run alone is of", () => {
   it("offers no one on a workflow whose base model is not known", async () => {
     getWorkflowCard.mockResolvedValue({ card: card({ models: [] }) });
     const wrapper = await mountRun(fromCard);
-    expect(wrapper.find('[role="radio"]').exists()).toBe(false);
+    expect(wrapper.find('[role="checkbox"]').exists()).toBe(false);
     expect(wrapper.text()).toContain("This workflow's base model is not known");
   });
 
@@ -3110,6 +3337,120 @@ describe("the person a workflow run alone is of", () => {
       await suggestion(wrapper).find("button").trigger("click");
       expect(wrapper.vm.prompt).toBe("Mira Vale, on a beach");
       expect(suggestion(wrapper).exists()).toBe(false);
+    });
+
+    describe("with several people picked", () => {
+      const person = (id, name, word) => ({
+        sha256: String(id).repeat(64),
+        filename: `${name.toLowerCase()}-sdxl.safetensors`,
+        base_model_family: "sdxl",
+        attachments: of(id),
+        trigger_words: word ? [word] : [],
+      });
+      const PEOPLE = [
+        [1, "Ada", "ada lovelace"],
+        [2, "Bea", "beaxyz"],
+        [3, "Cyd", "cyd"],
+        [4, "Dot", "dotty"],
+      ];
+      const buttons = (wrapper) => suggestion(wrapper).findAll("button");
+      const pick = async (wrapper, ids) => {
+        for (const id of ids) await tile(wrapper, id).trigger("click");
+      };
+
+      beforeEach(() => {
+        listCharacters.mockResolvedValue(PEOPLE.map(([id, name]) => ({ id, name })));
+        listAdapters.mockImplementation(async ({ fileKind } = {}) =>
+          fileKind ? [] : PEOPLE.map((row) => person(...row)),
+        );
+      });
+
+      it("offers one button for each word the prompt lacks, named for whose it is", async () => {
+        const wrapper = await mountRun(fromCard);
+        await pick(wrapper, [2, 1]);
+        await typePrompt(wrapper, "two friends on a beach");
+        expect(suggestion(wrapper).text()).toContain("Trigger word missing");
+        // In the order picked, each labelled with the word it adds.
+        expect(buttons(wrapper).map((b) => b.text())).toEqual([
+          "Add beaxyz",
+          "Add ada lovelace",
+        ]);
+        const names = ["Add beaxyz, Bea's trigger word", "Add ada lovelace, Ada's trigger word"];
+        expect(buttons(wrapper).map((b) => b.attributes("aria-label"))).toEqual(names);
+        const tips = suggestion(wrapper).findAllComponents({ name: "Tooltip" });
+        expect(tips.map((tip) => tip.props("text"))).toEqual(names);
+        // The name already says it: the tip must not describe it again.
+        expect(tips.every((tip) => tip.props("describe") === false)).toBe(true);
+        // Every picked person's word is marked in the box, not only the first.
+        expect(box(wrapper).props("highlight")).toEqual(["beaxyz", "ada lovelace"]);
+
+        await buttons(wrapper)[1].trigger("click");
+        expect(wrapper.vm.prompt).toBe("ada lovelace, two friends on a beach");
+        expect(buttons(wrapper).map((b) => b.text())).toEqual(["Add beaxyz"]);
+        await buttons(wrapper)[0].trigger("click");
+        expect(wrapper.vm.prompt).toBe("beaxyz, ada lovelace, two friends on a beach");
+        // The line goes with the last word.
+        expect(suggestion(wrapper).exists()).toBe(false);
+      });
+
+      it("keeps a button each up to three words, and one for all of them past that", async () => {
+        const wrapper = await mountRun(fromCard);
+        await pick(wrapper, [1, 2, 3]);
+        expect(buttons(wrapper)).toHaveLength(3);
+        await pick(wrapper, [4]);
+        expect(buttons(wrapper).map((b) => b.text())).toEqual(["Add all 4"]);
+        expect(buttons(wrapper)[0].attributes("aria-label")).toBe(
+          "Add all 4 missing trigger words: ada lovelace, beaxyz, cyd, dotty",
+        );
+        await typePrompt(wrapper, "at a table");
+        await buttons(wrapper)[0].trigger("click");
+        expect(wrapper.vm.prompt).toBe("ada lovelace, beaxyz, cyd, dotty, at a table");
+        expect(suggestion(wrapper).exists()).toBe(false);
+      });
+
+      it("counts the words still missing, not the people picked", async () => {
+        const wrapper = await mountRun(fromCard);
+        await pick(wrapper, [1, 2, 3, 4]);
+        await typePrompt(wrapper, "Cyd at a table");
+        expect(buttons(wrapper).map((b) => b.text())).toEqual([
+          "Add ada lovelace",
+          "Add beaxyz",
+          "Add dotty",
+        ]);
+      });
+
+      it("asks once for a word two people's LoRAs share", async () => {
+        listAdapters.mockImplementation(async ({ fileKind } = {}) =>
+          fileKind ? [] : [person(1, "Ada", "twins"), person(2, "Bea", "Twins")],
+        );
+        const wrapper = await mountRun(fromCard);
+        await pick(wrapper, [1, 2]);
+        expect(buttons(wrapper).map((b) => b.text())).toEqual(["Add twins"]);
+      });
+
+      it("hands the prompt box the keyboard after a word is added", async () => {
+        const focus = vi.fn();
+        const wrapper = mount(RunDialog, {
+          props: { source: fromCard, context: {} },
+          global: {
+            stubs: {
+              ...globalOpts.global.stubs,
+              AppTextarea: {
+                name: "AppTextarea",
+                props: ["label", "highlight", "modelValue"],
+                template: "<textarea />",
+                methods: { focus },
+              },
+            },
+          },
+        });
+        await flushPromises();
+        await pick(wrapper, [1, 2]);
+        await buttons(wrapper)[0].trigger("click");
+        // One word is still missing, and the keyboard is in the box all the same.
+        expect(buttons(wrapper)).toHaveLength(1);
+        expect(focus).toHaveBeenCalledTimes(1);
+      });
     });
 
     it("says nothing for a LoRA that needs no trigger word", async () => {
