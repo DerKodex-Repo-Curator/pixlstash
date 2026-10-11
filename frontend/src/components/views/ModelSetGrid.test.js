@@ -3267,7 +3267,10 @@ describe("hiding a set from pictures", () => {
 
     expect(onWindowKey).not.toHaveBeenCalled();
     expect(wrapper.findAll('[data-testid="model-set-card"]')).toHaveLength(0);
-    expect(wrapper.find(".msg__hidden").text()).toContain("1 hidden set");
+    // Said, not counted.
+    expect(wrapper.find(".msg__hidden").text()).toBe(
+      "Some sets are hidden.Show them",
+    );
     wrapper.unmount();
     const operations = useOperationStore();
     expect(operations.receipt.summary).toContain("Hid the set");
