@@ -1063,7 +1063,6 @@ describe("refetching after an edit", () => {
     });
     store.workflowSets = {
       combinations: [gone("a.sft"), gone("b.sft")],
-      noSet: [],
       handMade: [],
     };
     await wrapper.vm.$nextTick();
@@ -5629,7 +5628,6 @@ describe("the set grid is what the shelf opens on", () => {
           covers: [],
         },
       ],
-      noSet: [2],
     };
     store.setView({ groupBy: "workflow_set" });
     await wrapper.vm.$nextTick();
@@ -5755,7 +5753,6 @@ describe("the set grid is what the shelf opens on", () => {
           missing: [{ name: "gone.sft", workflow_ids: ["auto:a"] }],
         }),
       ],
-      noSet: [],
     };
     await wrapper.vm.$nextTick();
     expect(store.setGroups.map((g) => g.key).sort()).toEqual([

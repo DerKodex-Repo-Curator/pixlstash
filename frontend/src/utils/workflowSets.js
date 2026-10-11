@@ -21,8 +21,8 @@
 // **Co-occurrence is evidence; its absence is not.** Nothing here may hide a
 // model and nothing may infer a pairing: two models never seen together are not
 // drawn as a pair, and that is not a claim they cannot work. The models no recipe
-// names - or names only beside no base model - arrive from the server under
-// `no_set` and get a card of their own.
+// names - or names only beside no base model - get no card; the Models rail
+// lists them under `In no set yet`.
 
 import { fileKindLabel, modelName, quantBadge } from "./modelShelf";
 

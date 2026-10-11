@@ -147,6 +147,7 @@
       @remove-from-group="removeFromGroup"
       @keep-cover-only="openKeepCoverOnly"
       @delete-selected="deleteSelected"
+      @move-to-library="moveSelectedToLibrary"
       @open-tag-panel="handleContextMenuOpenTagPanel"
       @open-plugin-panel="handleContextMenuOpenPluginPanel"
       @make-more="makeMoreLikeSelection"
@@ -1105,6 +1106,7 @@
           @remove-from-group="removeFromGroup"
           @keep-cover-only="openKeepCoverOnly"
           @delete-selected="deleteSelected"
+          @move-to-library="moveSelectedToLibrary"
           @set-project="handleSetProjectForSelected"
           @add-to-character="handleAddToCharacter"
           @remove-from-character="handleRemoveFromCharacter"
@@ -1184,6 +1186,7 @@ import { markEnd, markStart } from "../../utils/perfMarks";
 import { useScopedNotice } from "../../composables/useScopedNotice";
 import { buildPurgeBadge } from "../../utils/retention.js";
 import { buildLockedDeleteMessage } from "../../utils/lockedDelete.js";
+import { buildLibraryMoveMessage } from "../../utils/libraryMove.js";
 import {
   cutFaceSuggestions,
   referenceFaceCount,
@@ -1240,11 +1243,13 @@ import {
   API_BASE_URL,
   appendShareToken,
   isReadOnly,
+  newOperationBatchId,
 } from "../../utils/apiClient";
 import {
   getPictureMetadata,
   getThumbnails,
   deletePictures,
+  movePicturesToLibrary,
   setPicturesProject,
   previewScrapheapDelete,
   purgeScrapheap,
@@ -3870,12 +3875,41 @@ function showLockedDeleteNotice(message) {
   lockedDeleteNotice.arm();
 }
 
+/**
+ * Move the selection into another library. To this library that is a delete -
+ * the same stack expansion, the same ghosted tiles, the same one undo - so it
+ * is the delete with a different request.
+ * @param {{uuid: string, name: string}} library - from the libraries list.
+ */
+function moveSelectedToLibrary(library) {
+  if (!library?.uuid || isScrapheapView.value) return;
+  return deleteSelected(null, library);
+}
+
+/**
+ * Report a move's outcome on the card its "Moving…" notice opened, or take that
+ * card away when there is nothing to say.
+ */
+function showLibraryMoveNotice(library, counts) {
+  const message = buildLibraryMoveMessage({
+    libraryName: library.name,
+    ...counts,
+  });
+  if (!message) {
+    noticeStore.dismissByKey("pictures-move");
+    return;
+  }
+  noticeStore[message.level](message.body, { key: "pictures-move" });
+}
+
 // `idsOverride` scopes the delete to an explicit picture list (the overlay
 // context menu passes `[overlayImageId]`). When set, the grid selection is
 // neither read for the target NOR mutated as a side effect - the overlay owns
 // its own post-delete cleanup (it closes the lightbox). Default (null) is the
 // grid path: act on, and update, `selectedImageIds`.
-async function deleteSelected(idsOverride = null) {
+// `moveTo` is a library: the request becomes the move, and the outcome is
+// worded by `buildLibraryMoveMessage` instead of the delete's own notice.
+async function deleteSelected(idsOverride = null, moveTo = null) {
   const scoped = Array.isArray(idsOverride) && idsOverride.length > 0;
   const baseIds = scoped ? idsOverride : selectedImageIds.value;
   if (!baseIds.length) return;
@@ -3959,15 +3993,31 @@ async function deleteSelected(idsOverride = null) {
     lockedSetsStore.isLocked(id),
   );
   if (idsToRemove.length && lockedInBatch.length === idsToRemove.length) {
-    showLockedDeleteNotice(
-      buildLockedDeleteMessage({
-        lockedCount: lockedInBatch.length,
-        deletedCount: 0,
-      }),
-    );
+    if (moveTo) {
+      showLibraryMoveNotice(moveTo, { lockedCount: lockedInBatch.length });
+    } else {
+      showLockedDeleteNotice(
+        buildLockedDeleteMessage({
+          lockedCount: lockedInBatch.length,
+          deletedCount: 0,
+        }),
+      );
+    }
     return;
   }
 
+  if (moveTo) {
+    // Copying can take time, so say that it started.
+    // Same key as the outcome, which replaces this card when it lands.
+    noticeStore.info(`Moving to ${moveTo.name}…`, {
+      key: "pictures-move",
+      timeout: 0,
+    });
+  }
+
+  // Retain confirmed successes if a later chunk fails or loses its response.
+  // Named by the server, never inferred from a missing skip/failure outcome.
+  const movedIds = new Set();
   try {
     // Soft-delete via the bulk endpoint instead of one DELETE per id, which
     // floods the browser/Electron per-host connection pool on large selections
@@ -3978,21 +4028,50 @@ async function deleteSelected(idsOverride = null) {
     // Ids the server refused because a locked set freezes them. Collected across
     // every chunk so the outcome message counts the whole operation.
     const skippedLocked = new Set();
+    // A move's other ways of leaving a picture here: the other library already
+    // has it, live or in its Scrapheap, or the file could not be copied.
+    const alreadyThere = new Set();
+    const inOtherScrapheap = new Set();
+    const notCopied = new Set();
+    const copiedButLocked = new Set();
+    const copiedButNotMoved = new Set();
+    const copiedSourceUnknown = new Set();
+    // One selection remains one undo batch across request chunks.
+    const moveBatchId = moveTo ? newOperationBatchId() : undefined;
     for (let i = 0; i < idsToRemove.length; i += BULK_DELETE_CHUNK) {
       const chunk = idsToRemove.slice(i, i + BULK_DELETE_CHUNK);
-      const resp = await deletePictures(chunk);
+      const resp = moveTo
+        ? await movePicturesToLibrary(chunk, moveTo.uuid, moveBatchId)
+        : await deletePictures(chunk);
       const skipped = resp?.skipped_locked;
       if (Array.isArray(skipped)) {
         for (const id of skipped) skippedLocked.add(String(id));
+      }
+      for (const id of resp?.moved ?? []) movedIds.add(String(id));
+      for (const id of resp?.skipped_already_there ?? []) {
+        alreadyThere.add(String(id));
+      }
+      for (const id of resp?.skipped_scrapheaped ?? []) {
+        inOtherScrapheap.add(String(id));
+      }
+      for (const id of resp?.failed ?? []) notCopied.add(String(id));
+      for (const id of resp?.copied_but_locked ?? []) {
+        copiedButLocked.add(String(id));
+      }
+      for (const id of resp?.copied_but_not_moved ?? []) {
+        copiedButNotMoved.add(String(id));
+      }
+      for (const id of resp?.copied_source_unknown ?? []) {
+        copiedSourceUnknown.add(String(id));
       }
     }
 
     // Only drop the tiles the server actually deleted. Removing the skipped ones
     // too would hide pictures that are still in the library until the next
     // refetch - a second, quieter version of the same lie.
-    const removedIds = idsToRemove.filter(
-      (id) => !skippedLocked.has(String(id)),
-    );
+    const stillHere = (id) =>
+      moveTo ? !movedIds.has(String(id)) : skippedLocked.has(String(id));
+    const removedIds = idsToRemove.filter((id) => !stillHere(id));
     // Keep the tiles mounted and greyed while the undo is still one click away,
     // and let the receipt's own clock decide when the grid closes the gap.
     // `markGhosted` declines when there is no undo window to hold them open for
@@ -4008,9 +4087,7 @@ async function deleteSelected(idsOverride = null) {
     if (!scoped) {
       // Keep the frozen pictures selected: they are still there, and the user's
       // next move (after unlocking the set) is to delete exactly them.
-      selectedImageIds.value = selectedImageIds.value.filter((id) =>
-        skippedLocked.has(String(id)),
-      );
+      selectedImageIds.value = selectedImageIds.value.filter(stillHere);
       // Drop the range-selection anchor unless it is one of the survivors -
       // otherwise a later shift-click would anchor on a deleted picture.
       const stillSelected = new Set(selectedImageIds.value.map(String));
@@ -4018,24 +4095,53 @@ async function deleteSelected(idsOverride = null) {
         lastSelectedImageId.value = null;
       }
     }
-    if (deletedExpandedStackLeader) {
+    if (deletedExpandedStackLeader || copiedSourceUnknown.size > 0) {
       // Repopulate so the promoted stack leader and remaining members reappear
-      // (same pattern as create/dissolve/remove-from-stack).
+      // (same pattern as create/dissolve/remove-from-stack), or reconcile a
+      // source deletion the server could not verify after a database failure.
       preserveScrollOnNextFetch.value = true;
       debouncedFetchAllGridImages();
     }
     emit("refresh-sidebar");
-    showLockedDeleteNotice(
-      buildLockedDeleteMessage({
+    if (moveTo) {
+      showLibraryMoveNotice(moveTo, {
+        movedCount: movedIds.size,
         lockedCount: skippedLocked.size,
-        deletedCount: removedIds.length,
-      }),
-    );
+        alreadyThereCount: alreadyThere.size,
+        inOtherScrapheapCount: inOtherScrapheap.size,
+        notCopiedCount: notCopied.size,
+        copiedButLockedCount: copiedButLocked.size,
+        copiedButNotMovedCount: copiedButNotMoved.size,
+        copiedSourceUnknownCount: copiedSourceUnknown.size,
+      });
+    } else {
+      showLockedDeleteNotice(
+        buildLockedDeleteMessage({
+          lockedCount: skippedLocked.size,
+          deletedCount: removedIds.length,
+        }),
+      );
+    }
   } catch (err) {
-    console.error("Bulk delete failed", err);
-    noticeStore.error(`Couldn't delete those pictures. ${errorDetail(err)}`, {
-      key: "pictures-delete",
-    });
+    console.error(moveTo ? "Move to library failed" : "Bulk delete failed", err);
+    if (moveTo) {
+      // Earlier chunks may have committed, and even the failed request may
+      // have committed before its response was lost. Drop confirmed moves
+      // immediately and re-read the grid and sidebar for the actual state.
+      removeImagesById([...movedIds]);
+      if (movedIds.has(String(lastSelectedImageId.value))) {
+        lastSelectedImageId.value = null;
+      }
+      preserveScrollOnNextFetch.value = true;
+      debouncedFetchAllGridImages();
+      emit("refresh-sidebar");
+    }
+    noticeStore.error(
+      moveTo
+        ? `Couldn't move those pictures to ${moveTo.name}. ${errorDetail(err)}`
+        : `Couldn't delete those pictures. ${errorDetail(err)}`,
+      { key: moveTo ? "pictures-move" : "pictures-delete" },
+    );
   }
 }
 

@@ -681,6 +681,7 @@ Public guest scoring and shared-link endpoints.
 | POST   | /api/v1/pictures/impossible-tags/restore                                      | tags            | Undo a bulk impossible-tags clear                           |
 | POST   | /api/v1/pictures/layout/move-to-match                                         | pictures        | Move pictures to where the layout would put them            |
 | POST   | /api/v1/pictures/likeness-search                                              | pictures        | Search by image likeness                                    |
+| POST   | /api/v1/pictures/move-to-library                                              | pictures        | Move pictures to another library                            |
 | PATCH  | /api/v1/pictures/project                                                      | pictures        | Set project for pictures                                    |
 | POST   | /api/v1/pictures/rotate                                                       | pictures        | Rotate pictures in place                                    |
 | POST   | /api/v1/pictures/score_character_likeness                                     | pictures        | Score uploaded images by character likeness                 |
@@ -4536,6 +4537,80 @@ which uses `is_local_ip` and therefore excludes Tailscale CGNAT. Consequently th
 route may advertise `can_manage=true` to a Tailscale cookie owner while the same
 request made with an `ALL` bearer is denied earlier; this is deliberate and not
 a promise that Tailscale is local for every authentication mechanism.
+
+### Moving pictures to another library
+
+`POST /pictures/move-to-library` (`routes/pictures/_library_move.py`) takes
+picture ids and a library uuid. Only one library is ever open, so a move is
+**a copy into the other library followed by the ordinary soft delete here**, in
+that order: a picture is committed there before anything is touched here, and
+what happens here is `DELETE /pictures`' own operation (`scrapheap_pictures`,
+one `pictures.scrapheap.move` row, one undo). Nothing in the route removes a
+file, and a crash between the two halves leaves a picture in both libraries,
+never in neither.
+
+`LibrarySwitchService.open_other_library` is how the second library is opened:
+the switch's PREPARE phase and nothing after it. It revalidates the folder and
+builds the vault through the same guarded connection (so pending migrations
+run and a newer vault is refused), yields it, and closes it; it is never
+published and the active library stays active. Two things differ from a
+switch's candidate:
+
+- **It is built with `build_vault(..., workers=False)`.** `Vault.stop()` on a
+  worker-capable vault releases the class-level detection and embedding models,
+  which are shared with the active library's running tasks. A vault that can
+  never run workers skips that release.
+- **It holds the switch lock for as long as it is open.** A switch, or a second
+  move, is refused with 409 rather than opening the same database twice. The
+  request also holds an active-library lease like any other, so a switch cannot
+  retire the source half way through. The lock is the switch's own, so the
+  promotion that ends a first import is refused too while a move runs, and
+  reports that the library could not be finished; a library still on its first
+  import is never a target, but it can be the source.
+
+Each picture goes through `_create_picture_imports`, the staged import's own
+dedup-and-write step, so it lands where the target's layout places a new
+picture and is matched against what the target already holds:
+
+| The target has the file | What happens |
+|---|---|
+| not at all | copied, row created, source soft-deleted |
+| live | left in both (`skipped_already_there`) |
+| in its Scrapheap | left in both (`skipped_scrapheaped`): restoring it there is that library's decision |
+
+**A picture leaves this library only when this move copied it there.** The
+live-duplicate row is the one that could have gone the other way: the bytes are
+safe in the target, so soft-deleting the source loses no picture. It would lose
+the source's tags, score and description without a word, though, because the
+copy there keeps its own, and the feature's own Undo makes that reachable (move,
+undo, retag, move again). Choosing between two sets of labels is the owner's
+call, so the picture stays and the notice says why.
+
+**What travels:** the file, its tags, score, description and `created_at`.
+A picture with no tags gets the pending-tag sentinel every import writes.
+**What does not:** people, sets, projects and stacks, whose ids name different
+things in the other library; reviews, guest scores and `run_workflow_id` /
+`run_workflow_version`, which are not carried; and everything derived
+(embeddings, faces, smart score, the recipe read out of the file), which the
+target's own finders compute the next time it is the active library. A picture
+a locked set freezes is skipped before it is copied (`skipped_locked`), because
+it could not be soft-deleted afterwards.
+
+The route is `LOCAL_OWNER_ONLY`, for `POST /libraries/active`'s reason rather
+than the path-authority one: it opens a library that is not the active one with
+write authority, runs its pending migrations and holds the switch lock, and its
+refusals are `open_other_library`'s, which name that library's host folder as
+the switch's do. `GET /libraries` redacts that path for a remote owner, so a
+remote owner must not reach a route that would print it. The gate pins a token
+to the *active* library; the target is named in the body, where the gate cannot
+see it, so the handler asks the same `token_covers_library` of the target and
+refuses a token good for one library alone, or a session made from one, before
+either library is read.
+
+The request is synchronous and reads one file into memory at a time. A
+selection of long videos holds the connection for as long as the copy takes;
+making it a background task with progress, as the import is, is the next step
+when that is felt.
 
 ---
 

@@ -384,6 +384,48 @@
       <div class="ctx-sep" />
     </template>
 
+    <!-- ── Move to library (mirrors ImageGridContextMenu.vue) ────────── -->
+    <template v-if="!isReadOnly && !isScrapheapView && otherLibraries.length">
+      <div
+        ref="moveSubmenuWrapRef"
+        class="ctx-submenu-wrap"
+        @mouseenter="selectedCount > 0 && (moveSubmenuOpen = true)"
+        @mouseleave="moveSubmenuOpen = false"
+      >
+        <button
+          class="ctx-item"
+          :disabled="selectedCount === 0"
+          aria-haspopup="true"
+          :aria-expanded="moveSubmenuOpen"
+          @click="moveSubmenuOpen = !moveSubmenuOpen"
+        >
+          <Tooltip
+            text="Copies the selection into another library and moves it to this library's Scrapheap. Tags, score and description go with it; people, sets, projects and stacks do not."
+            activator="parent"
+          />
+          <v-icon class="ctx-icon">mdi-folder-move-outline</v-icon>
+          Move to library
+          <v-icon class="ctx-arrow">mdi-chevron-right</v-icon>
+        </button>
+        <div v-if="moveSubmenuOpen" class="ctx-submenu">
+          <button
+            v-for="library in otherLibraries"
+            :key="library.uuid"
+            class="ctx-item"
+            :disabled="selectedCount === 0"
+            @click="
+              $emit('move-to-library', library);
+              $emit('close');
+            "
+          >
+            <v-icon class="ctx-icon">mdi-image-multiple-outline</v-icon>
+            {{ library.name }}
+          </button>
+        </div>
+      </div>
+      <div class="ctx-sep" />
+    </template>
+
     <!-- ── Remove / Delete (danger) ────────────────────────
          Ordered by escalating severity: Keep recipes only → Keep cover only
          → Move to the Scrapheap → Delete forever; Keep recipes only moves a
@@ -462,6 +504,7 @@ import { hashCompareSnapshot } from "../../api/snapshots";
 import { useSnapshotsStore } from "../../stores/useSnapshotsStore";
 import { useLockedSetsStore } from "../../stores/useLockedSetsStore";
 import { useEntityListsStore } from "../../stores/useEntityListsStore";
+import { useLibrariesStore } from "../../stores/useLibrariesStore";
 import {
   KEEP_COVER_ONLY_ICON,
   KEEP_RECIPES_ONLY_ICON,
@@ -527,6 +570,7 @@ const emit = defineEmits([
   "remove-from-group",
   "keep-cover-only",
   "delete-selected",
+  "move-to-library",
   "close",
 ]);
 
@@ -536,6 +580,17 @@ const lockedSetsStore = useLockedSetsStore();
 // so the Project row would open a flyout that lists nothing and POSTs a
 // membership read the server 403s. Omit the row instead of offering a dead one.
 const entityLists = useEntityListsStore();
+// Where the selection can be moved to (mirrors ImageGridContextMenu.vue).
+const librariesStore = useLibrariesStore();
+const otherLibraries = computed(() =>
+  // `canManage` is the server's own answer to "is this session on the tier the
+  // library routes need", and the move is on that tier.
+  librariesStore.canManage
+    ? librariesStore.libraries.filter(
+        (library) => !library.is_active && library.is_reachable,
+      )
+    : [],
+);
 
 const selectionMenuPanelRef = ref(null);
 const selectionPanelFlipped = ref(false);
@@ -546,6 +601,8 @@ const autoTagSubmenuWrapRef = ref(null);
 const descriptionSubmenuWrapRef = ref(null);
 const restoreSubmenuWrapRef = ref(null);
 const restoreSubmenuOpen = ref(false);
+const moveSubmenuWrapRef = ref(null);
+const moveSubmenuOpen = ref(false);
 const autoTagSubmenuOpen = ref(false);
 const descriptionSubmenuOpen = ref(false);
 const identicalSnapshotIds = ref(new Set());
@@ -721,6 +778,7 @@ async function onSelectionMenuKeydown(event) {
         descriptionSubmenuOpen.value = true;
       else if (restoreSubmenuWrapRef.value === wrap)
         restoreSubmenuOpen.value = true;
+      else if (moveSubmenuWrapRef.value === wrap) moveSubmenuOpen.value = true;
       await nextTick();
       wrap.querySelector(".ctx-submenu button:not(:disabled)")?.focus();
     }
@@ -752,6 +810,8 @@ async function onSelectionMenuKeydown(event) {
         descriptionSubmenuOpen.value = false;
       else if (restoreSubmenuWrapRef.value === wrap)
         restoreSubmenuOpen.value = false;
+      else if (moveSubmenuWrapRef.value === wrap)
+        moveSubmenuOpen.value = false;
       await nextTick();
       wrap?.querySelector(":scope > button.ctx-item")?.focus();
     }

@@ -11,9 +11,16 @@
     <!-- Two empty states, deliberately distinct, for the reason the row list
          keeps three: "you filtered everything out" is one click from fixed and
          "no picture records its models" is not, and stating the second when the
-         first is true tells the reader something false about their library. -->
+         first is true tells the reader something false about their library.
+         With no combination a card could be named after, the filters are
+         hiding none, so that is the second state whatever Show says. -->
     <div
-      v-else-if="nothingShown && store.activeCount && !hasHandMade"
+      v-else-if="
+        nothingShown &&
+        store.activeCount &&
+        !hasHandMade &&
+        store.workflowSets.combinations.some(headModel)
+      "
       class="msg__state"
     >
       <p class="msg__lead">No workflow set matches these filters.</p>
@@ -41,7 +48,7 @@
         class="msg__state msg__state--inline"
       >
         <p class="msg__lead">
-          No picture in this library records the models it used.
+          No picture in this library records a base model it used.
         </p>
         <p>
           A set is read off a recipe, which arrives with a picture that carries
@@ -270,39 +277,6 @@
           >{{ store.showHiddenSets ? "Leave them out" : "Show them" }}</AppButton
         >
       </p>
-
-      <!-- The models no recipe names, drawn rather than omitted. Outside the
-           treegrid: it is not a set, so it is not a row in a grid of sets, and
-           putting it in one would make it the last thing the arrow keys reach.
-           Dashed and worded so it cannot be read as a verdict. -->
-      <section v-if="store.noSetRows.length" class="msg__ghost">
-        <h3 class="msg__ghost-title">
-          <v-icon size="18">mdi-help-circle-outline</v-icon>
-          In no set
-          <span class="msg__ghost-count num"
-            >{{ store.noSetRows.length.toLocaleString() }}
-            {{ store.noSetRows.length === 1 ? "model" : "models" }}</span
-          >
-        </h3>
-        <!-- The exact claim, and no more. "No recipe names them" would be
-             wrong: a recipe on this machine may name one from another library,
-             or from pictures since deleted. What is true is the narrower thing,
-             and it is worded so it cannot be read as a verdict. -->
-        <p class="msg__ghost-note">
-          No kept picture in this library and no recorded ComfyUI run used
-          them with a base model PixlStash can name, so there is no set to
-          draw. That is all it means — nothing here rules out what they work
-          with, and a model may well have been used somewhere this library
-          cannot see.
-        </p>
-        <AppButton
-          variant="outline"
-          size="sm"
-          icon-left="format-list-bulleted"
-          @click="store.setView({ groupBy: 'none' })"
-          >List the {{ store.noSetRows.length.toLocaleString() }}</AppButton
-        >
-      </section>
     </div>
 
     <WorkflowSetChooser
@@ -396,6 +370,7 @@ import {
   fillFromPictures,
   fillFromSets,
   handMadeName,
+  headModel,
   rowMatches,
   SET_SLOTS,
   setCheckpoint,
@@ -449,10 +424,7 @@ const announcement = ref("");
 // Hidden sets are out of the grid, not absent: they keep the grid (and its
 // "Show them" line) up rather than claim no picture recorded a model.
 const nothingShown = computed(
-  () =>
-    !store.setGroups.length &&
-    !store.noSetRows.length &&
-    !store.hiddenSetCount,
+  () => !store.setGroups.length && !store.hiddenSetCount,
 );
 
 const hasHandMade = computed(() => store.handMadeGroups.length > 0);
@@ -2349,49 +2321,6 @@ function onKeyDown(event) {
   gap: var(--space-3);
   margin: var(--space-4) 0 0;
   font-size: var(--text-sm);
-  color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
-}
-
-/* Dashed, because it is the one card that stands for an absence. Not in the
-   grid's own track: a set it is not, and it must not be the last thing the
-   arrow keys walk into. */
-.msg__ghost {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--space-3);
-  margin-top: var(--space-5);
-  padding: var(--space-4) var(--space-5);
-  border: 1px dashed rgb(var(--v-theme-border));
-  border-radius: var(--radius-lg);
-}
-
-/* The shipped section-label recipe - `--text-2xs`, semibold, `--tracking-label`,
-   uppercase, secondary ink - and not `--text-sm` body weight. This heading names
-   a group exactly as the Works with dialog's own headings do, and this PR was
-   using two recipes for one job (#1479 design note). The count stays in
-   sentence case: a figure is not a label. */
-.msg__ghost-title {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  margin: 0;
-  font-size: var(--text-2xs);
-  font-weight: var(--weight-semibold);
-  letter-spacing: var(--tracking-label);
-  text-transform: uppercase;
-  color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
-}
-
-.msg__ghost-count {
-  letter-spacing: normal;
-  text-transform: none;
-}
-
-.msg__ghost-note {
-  margin: 0;
-  max-width: 68ch;
-  font-size: var(--text-xs);
   color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
 }
 </style>
