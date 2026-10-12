@@ -12,6 +12,9 @@ dedups to nothing and so loses the stack placement, the source lineage and the
 import event. Both are covered here.
 """
 
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
 import pytest
 
 import pixlstash.services.comfyui_service as comfyui_service
@@ -288,6 +291,9 @@ class TestOutputProcessing:
             lambda *a, **kw: (list(imported), list(duplicates)),
         )
         monkeypatch.setattr(
+            comfyui_service, "_held_before", lambda srv, ids, started: list(ids)
+        )
+        monkeypatch.setattr(
             comfyui_service,
             "_assign_outputs_to_lora_person",
             lambda srv, person, ids: calls.__setitem__("person", (person, ids)),
@@ -353,6 +359,8 @@ class TestOutputProcessing:
             lora_character_id=5,
         )
         assert calls["person"] == (5, [40, 41])
+        # Some new, one the library had: the run completed and says so.
+        assert "also made a picture" in _server.vault.events[-1][1]["notice"]
         _server, calls = self._run(
             monkeypatch, images=[], pixlstash_ids=[41], imported=[]
         )
@@ -923,6 +931,49 @@ class TestTheEndingIsToldAndKept:
             "picture_ids": [41, 42],
             "library_uuid": None,
         }
+
+    def test_a_run_that_made_only_what_the_library_has_says_so(self, monkeypatch):
+        """Exact duplicates are not imported twice, so a run repeated on its
+        own seed adds nothing; the ending is where the owner hears why."""
+        monkeypatch.setattr(
+            comfyui_service,
+            "_wait_for_comfyui_outputs",
+            lambda *a, **k: ([{"filename": "out.png"}], None),
+        )
+        monkeypatch.setattr(
+            comfyui_service, "_download_comfyui_image", lambda *a: (b"png", ".png")
+        )
+        monkeypatch.setattr(
+            comfyui_service, "_import_comfyui_outputs", lambda *a, **k: ([], [7, 8])
+        )
+        # 8 is this run's own file, imported first by a watched output folder.
+        pictures = {
+            7: SimpleNamespace(imported_at=datetime(2020, 1, 1, tzinfo=timezone.utc)),
+            8: SimpleNamespace(imported_at=datetime(2999, 1, 1, tzinfo=timezone.utc)),
+        }
+        server = _FakeServer()
+        server.vault.db = SimpleNamespace(
+            run_immediate_read_task=lambda fn: fn(
+                SimpleNamespace(get=lambda model, pid: pictures.get(pid))
+            )
+        )
+        comfyui_service._process_comfyui_outputs(
+            server, "http://comfy", "ending-duplicate", None, None, None
+        )
+        (event,) = server.vault.events
+        outcome = comfyui_service.run_outcome("ending-duplicate")
+        assert outcome["status"] == "completed" and outcome["picture_ids"] == []
+        assert "made a picture this library already has" in outcome["message"]
+        assert event[1]["status"] == "completed"
+        assert event[1]["notice"] == outcome["message"]
+
+        # Nothing but the run's own file, already imported: nothing to say.
+        del pictures[7]
+        comfyui_service._process_comfyui_outputs(
+            server, "http://comfy", "ending-watched", None, None, None
+        )
+        assert comfyui_service.run_outcome("ending-watched")["message"] is None
+        assert server.vault.events[-1][1]["notice"] is None
 
     def test_only_the_newest_outcomes_are_kept(self, monkeypatch):
         monkeypatch.setattr(comfyui_service, "MAX_RUN_OUTCOMES", 2)

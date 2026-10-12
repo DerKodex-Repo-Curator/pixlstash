@@ -1162,11 +1162,12 @@ def _emit_comfyui_progress(
     message: str,
     progress: int = 0,
     workflow_id: str | None = None,
+    notice: str | None = None,
     stopped: bool = False,
 ) -> None:
     """Say how a prompt's run ended. *workflow_id* is the workflow that ran,
     so the failure can be shown on it; *stopped* marks a failure that is a
-    run somebody stopped."""
+    run somebody stopped; *notice* is shown for a run that completed."""
     try:
         server.vault.notify(
             EventType.PLUGIN_PROGRESS,
@@ -1177,6 +1178,7 @@ def _emit_comfyui_progress(
                 "workflow_id": workflow_id,
                 "stopped": stopped,
                 "message": message,
+                "notice": notice,
                 "current": 0,
                 "total": 0,
                 "progress": progress,
@@ -1209,15 +1211,17 @@ def _emit_comfyui_failure_progress(
 
 
 def _emit_comfyui_completed_progress(
-    server, prompt_id: str, workflow_id: str | None = None
+    server, prompt_id: str, workflow_id: str | None = None, notice: str | None = None
 ) -> None:
     """Say a prompt's run is over, once what it made is in the library.
 
     No browser listens to ComfyUI: this event is how a tab hears that a run
-    ended, and reads the runs in flight again to drop its row.
+    ended, and reads the runs in flight again to drop its row. *notice* is a
+    sentence the owner is owed about a run that did not fail
+    (``_duplicates_notice``).
     """
     _emit_comfyui_progress(
-        server, prompt_id, "completed", "ComfyUI complete", 100, workflow_id
+        server, prompt_id, "completed", "ComfyUI complete", 100, workflow_id, notice
     )
 
 
@@ -1684,6 +1688,42 @@ def _set_run_workflow_id(
     server.vault.db.run_task(update)
 
 
+def _held_before(server, picture_ids: list[int], started: datetime) -> list[int]:
+    """Those of *picture_ids* the library held before *started*.
+
+    A watched ComfyUI output folder can import a run's file before the poller
+    downloads it, and that picture then comes back as a duplicate too: it is
+    this run's, and newer than the run.
+    """
+
+    def read(session):
+        held = []
+        for pid in dict.fromkeys(picture_ids):
+            pic = session.get(Picture, pid)
+            if pic is not None and (
+                pic.imported_at is None or pic.imported_at < started
+            ):
+                held.append(pid)
+        return held
+
+    return server.vault.db.run_immediate_read_task(read)
+
+
+def _duplicates_notice(added: int, duplicates: int) -> str:
+    """What to say of a run whose output the library already had.
+
+    Exact duplicates are not imported twice, so a run repeated on its own seed
+    ends with nothing to show for it and has to say why.
+    """
+    made = "a picture" if duplicates == 1 else f"{duplicates} pictures"
+    if not added:
+        return (
+            f"The run made {made} this library already has, so nothing was "
+            "added. Change the seed or a setting to get a new one."
+        )
+    return f"The run also made {made} this library already has, not added again."
+
+
 def _process_comfyui_outputs(
     server,
     base_url: str,
@@ -1729,8 +1769,9 @@ def _process_comfyui_outputs(
 
     - On success with newly imported pictures it emits exactly ONE
       ``EventType.PICTURE_IMPORTED`` event - never a second event, and none for
-      already-existing re-imports (``duplicate_ids`` are intentionally ignored;
-      they are already in the grid and need no event).
+      already-existing re-imports (``duplicate_ids`` are already in the grid
+      and need no event; the ``completed`` event's ``notice`` says the run made
+      a picture the library already had).
     - The payload carries ``source: "ui"`` and ``change_kind: "added"``.
     - It deliberately does NOT echo an ``origin_client_id``. In-app ComfyUI
       generation is UI-initiated but async: there is no optimistic client-side
@@ -1753,6 +1794,7 @@ def _process_comfyui_outputs(
     """
     lease = None
     pinned_server = None
+    started = datetime.now(timezone.utc)
 
     def acquire_origin():
         coordinator = getattr(server, "library_coordinator", None)
@@ -1850,9 +1892,9 @@ def _process_comfyui_outputs(
                 raw = src_pic.original_file_name or os.path.basename(src_pic.file_path)
                 source_file_stem = os.path.splitext(raw)[0] if raw else None
 
-        # Already-existing re-imports (`duplicate_ids`) are deliberately ignored:
-        # they are already in the grid and need no event.
-        new_ids, _duplicate_ids = _import_comfyui_outputs(
+        # Already-existing re-imports (`duplicate_ids`) get no import event:
+        # they are already in the grid. The ending says so instead.
+        new_ids, duplicate_ids = _import_comfyui_outputs(
             pinned_server,
             entries,
             output_dir=output_dir,
@@ -1921,8 +1963,24 @@ def _process_comfyui_outputs(
         # After the event: a failure here must not cost the pictures their
         # import event. Before the ending, so a run has one.
         _assign_outputs_to_lora_person(pinned_server, lora_character_id, new_ids)
-        record_run_outcome(prompt_id, "completed", picture_ids=new_ids)
-        _emit_comfyui_completed_progress(pinned_server, prompt_id, workflow_id)
+        held = []
+        if duplicate_ids:
+            try:
+                held = _held_before(pinned_server, duplicate_ids, started)
+            except Exception as exc:
+                # The run is done and its pictures are in: a notice that cannot
+                # be worked out is left unsaid rather than failing the run.
+                logger.warning(
+                    "Could not read whether pictures %s were in the library "
+                    "before prompt %s ran, so its ending says nothing of "
+                    "duplicates: %s",
+                    duplicate_ids,
+                    prompt_id,
+                    exc,
+                )
+        notice = _duplicates_notice(len(new_ids), len(held)) if held else None
+        record_run_outcome(prompt_id, "completed", message=notice, picture_ids=new_ids)
+        _emit_comfyui_completed_progress(pinned_server, prompt_id, workflow_id, notice)
     except ComfyUIRunStopped as exc:
         logger.warning("ComfyUI prompt %s was stopped: %s", prompt_id, exc)
         emit_failure(str(exc), stopped=True)
