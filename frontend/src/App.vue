@@ -462,12 +462,6 @@ watch(
       // The run has left the runs in flight: its row goes now, not at the
       // next poll.
       tasksStore.nudge();
-      // A run that ended well and still owes a word: every picture it made
-      // was one the library already has, so nothing arrived in the grid.
-      const notice = String(wrapped.payload.notice || "").trim();
-      if (wrapped.payload.status === "completed" && notice) {
-        noticeStore.push({ level: "info", text: notice, key: `comfyui-notice-${notice}` });
-      }
     }
     // On the workflow that ran, whatever view is up: its card and the
     // Workflow tab keep saying so until it is dismissed or run again.
@@ -481,6 +475,19 @@ watch(
       text: failure.message,
       key: `comfyui-failed-${failure.message}`,
     });
+  },
+);
+
+// A run that ended well and still owes a word: every picture it made was one
+// the library already has, so nothing arrived in the grid.
+watch(
+  () => wsStore.wsPluginProgress,
+  (wrapped) => {
+    const payload = wrapped?.payload;
+    const notice = String(payload?.notice || "").trim();
+    if (String(payload?.plugin || "").toLowerCase() !== "comfyui") return;
+    if (payload.status !== "completed" || !notice) return;
+    noticeStore.push({ level: "info", text: notice, key: `comfyui-notice-${notice}` });
   },
 );
 
