@@ -537,6 +537,15 @@ def test_a_prompt_wired_from_a_builder_is_the_builders_own_text():
     assert info["positive_prompt"] == "a plump gnome in a garden"
     assert info["negative_prompt"] == "blurry"
 
+    # A node whose only strings are a file and a choice says nothing: its
+    # longest string is a path, and that would be stored as the prompt.
+    executed["9"] = {
+        "class_type": "LoadTextFile",
+        "inputs": {"file_path": "prompts/portraits/long_list_v3.txt", "mode": "Random"},
+    }
+    info = extract_comfy_workflow_info({"png": {"prompt": json.dumps(executed)}})
+    assert info["positive_prompt"] is None
+
 
 def test_the_models_and_seed_come_from_the_executed_graph_too():
     """The same defect, and the reason the fix is not scoped to the prompt: the

@@ -412,14 +412,17 @@ def _resolve_text_api(value: Any, workflow: dict, depth: int = 0) -> str | None:
             v = inputs.get(key)
             if v is not None:
                 return _resolve_text_api(v, workflow, depth + 1)
-        # ponytail: longest string, so a text node whose longest widget is a
-        # path or a name reads as that; type the output from object_info if
-        # one turns up.
+        # Only a string with a space in it: a file name, a path, a model or a
+        # choice (``Random``) is one word, and this answer is stored as the
+        # picture's prompt.
+        # ponytail: a one-word prompt on such a node reads as no prompt, and a
+        # path with spaces as one; type the output from object_info if either
+        # turns up.
         candidates = [
             v.strip()
             for v in inputs.values()
             if isinstance(v, str)
-            and v.strip()
+            and len(v.split()) > 1
             and v.strip().lower() not in _TEXT_CONTROL_VALUES
         ]
         if candidates:
