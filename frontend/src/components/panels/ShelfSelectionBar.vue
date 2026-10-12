@@ -379,7 +379,11 @@ const newSetTitle = computed(() => {
     return "Only a checkpoint starts a set this way. The New workflow set tile on the set grid makes an empty one.";
   }
   if (!row.sha256) {
-    return "This checkpoint is still being hashed, and a set keeps its models by hash. Try again in a moment.";
+    // No hash and none on its way (a cached Hugging Face repo is a directory):
+    // "try again in a moment" would be said of it for good.
+    return row.hash_pending
+      ? "This checkpoint is still being hashed, and a set keeps its models by hash. Try again in a moment."
+      : "A set keeps its models by file hash, and this one has none.";
   }
   return "";
 });
@@ -1023,6 +1027,7 @@ const verbHandlers = computed(() => ({
   openable: openable.value,
   openTitle: openTitle.value,
   hashed: selectedHashes.value.length > 0,
+  hashPending: store.selectedRows.some((row) => row.hash_pending),
   forgettable: forgettable.value.length > 0,
   forgetTitle: forgetTitle.value,
   deletable: deletable.value.length > 0,
@@ -1258,7 +1263,13 @@ const VerbItems = (props) => {
     item("mdi-fingerprint", "Copy SHA-256", {
       on: () => props.onVerb("copy-sha256"),
       disabled: !props.hashed,
-      title: props.hashed ? "" : "Not hashed yet",
+      // "Yet" only where a hash is on its way: an engine or a cached Hugging
+      // Face repo never gets one.
+      title: props.hashed
+        ? ""
+        : props.hashPending
+          ? "Not hashed yet"
+          : "No file hash",
     }),
     sep(),
     // NOT the danger treatment: removing a model whose file is already gone

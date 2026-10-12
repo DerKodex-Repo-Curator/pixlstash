@@ -42,6 +42,7 @@ from pixlstash.db_models.adapter_attachment import (
 from pixlstash.db_models.character import Character
 from pixlstash.db_models.picture_set import PictureSet
 from pixlstash.pixl_logging import get_logger
+from pixlstash.services.builtin_models import HASH_PENDING_SQL
 from pixlstash.services.model_features import (
     FEATURE_CAPTIONER,
     FEATURE_DETECTOR,
@@ -194,7 +195,11 @@ LEFT JOIN (
 """
 
 _SELECT_LIST = ", ".join(
-    [*(f"m.{name}" for name in MODEL_COLUMNS), *(f"{c}" for c in AGGREGATE_COLUMNS)]
+    [
+        *(f"m.{name}" for name in MODEL_COLUMNS),
+        *(f"{c}" for c in AGGREGATE_COLUMNS),
+        f"({HASH_PENDING_SQL}) AS hash_pending",
+    ]
 )
 
 _FROM = f"FROM model m{_STACK_JOIN}{_LOCATION_JOIN}"
@@ -860,8 +865,7 @@ def resolve_recipe_models(
     by_name, by_digest, _filenames, _names = index or recipe_asset_index(hub)
     sorted_digests = sorted(by_digest)
     digests_are_complete = not hub.fetchall(
-        "SELECT 1 FROM model WHERE sha256 IS NULL AND file_kind <> ? LIMIT 1",
-        (FILE_ENGINE,),
+        f"SELECT 1 FROM model m WHERE {HASH_PENDING_SQL} LIMIT 1"
     )
 
     recipe_models: dict[str, set[int]] = {}

@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from pixlstash.pixl_logging import get_logger
+from pixlstash.services.builtin_models import HASH_PENDING_SQL
 from pixlstash.services.model_shelf_service import SET_COVER_DEPTH, known_base_model
 from pixlstash.services.workflow_library_service import cover_order
 from pixlstash.utils.adapter_header import (
@@ -438,7 +439,8 @@ def _resolve(conn, member: dict) -> tuple[str, str, Optional[str]]:
     if member.get("model_id") is None:
         return member["sha256"].lower(), member["slot"], member.get("label")
     row = conn.execute(
-        "SELECT id, sha256, file_kind, display_name, filename FROM model WHERE id = ?",
+        "SELECT m.id, m.sha256, m.file_kind, m.display_name, m.filename, "
+        f"({HASH_PENDING_SQL}) AS hash_pending FROM model m WHERE m.id = ?",
         (member["model_id"],),
     ).fetchone()
     if row is None:
@@ -455,6 +457,8 @@ def _resolve(conn, member: dict) -> tuple[str, str, Optional[str]]:
     if row["sha256"] is None:
         raise WorkflowSetRefusedError(
             f"{name} is still being hashed. Add it once the shelf has read it."
+            if row["hash_pending"]
+            else f"{name} has no file hash, so a set can't keep it."
         )
     slot = member.get("slot") or _DEFAULT_SLOT.get(row["file_kind"], "other")
     if slot == SLOT_CHECKPOINT and row["file_kind"] not in _CHECKPOINT_KINDS:

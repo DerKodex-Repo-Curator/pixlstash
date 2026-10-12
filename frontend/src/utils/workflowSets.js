@@ -878,9 +878,17 @@ export function slotSuggestions({
     .concat(heldSection);
 }
 
-/** Whether the Models rail lists a shelf row: any kind some slot takes. */
+/**
+ * Whether the Models rail lists a shelf row: any kind some slot takes, that a
+ * set can keep by hash now or once the hasher has read it. A row with no hash
+ * and none on its way (`hash_pending` false: a cached Hugging Face repo is a
+ * directory) can never be added, so it is not offered.
+ */
 export function railListed(row) {
-  return SET_SLOTS.some((slot) => slot.kinds.includes(row?.file_kind));
+  return (
+    Boolean(row?.sha256 || row?.hash_pending) &&
+    SET_SLOTS.some((slot) => slot.kinds.includes(row?.file_kind))
+  );
 }
 
 /**

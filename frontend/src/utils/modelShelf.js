@@ -1353,9 +1353,10 @@ export function copyPathsTitle(locations) {
  * The hash is whole, not shortened: it is what a set's membership and a
  * recipe's digest are compared against, so it is here to be compared.
  *
- * "Not read yet" is said only of a `sha256` that is NULL, which is a shelf row
- * the hasher has not reached. A set member whose row is not loaded has no
- * `sha256` at all, and that is not a claim about the hasher: it gets no line.
+ * "Not read yet" is said only of a row the hasher still owes a hash
+ * (`hash_pending`). A row that never gets one (an engine, a cached Hugging
+ * Face repo) and a set member whose row is not loaded get no line: neither is
+ * waiting for anything.
  *
  * @param {Object} row - a shelf row, or a set member (which has no `locations`).
  * @returns {string} the lines, or `""` - which disables the Tooltip.
@@ -1364,7 +1365,7 @@ export function modelFileTitle(row) {
   const sha = row?.sha256;
   return [
     copyPathsTitle(row?.locations),
-    sha ? `SHA-256: ${sha}` : sha === null ? "SHA-256: not read yet" : "",
+    sha ? `SHA-256: ${sha}` : row?.hash_pending ? "SHA-256: not read yet" : "",
   ]
     .filter(Boolean)
     .join("\n");

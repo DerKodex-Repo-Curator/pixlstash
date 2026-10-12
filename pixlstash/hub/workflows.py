@@ -24,6 +24,7 @@ from typing import Callable, Optional
 
 from pixlstash.hub import workflow_cards
 from pixlstash.hub.db import HubDatabase
+from pixlstash.services.builtin_models import HASH_PENDING_SQL
 from pixlstash.services.model_folder_scanner import SHELF_MODEL_SUFFIXES
 from pixlstash.pixl_logging import get_logger
 from pixlstash.utils.sql_chunking import chunked
@@ -437,8 +438,9 @@ def _model_ghost_names(fetchall: Callable[[str], list]) -> set[str]:
     **Digests are judged only when every shelf model has one.** A checkpoint
     waits for ``MissingCheckpointHashFinder`` with ``sha256`` NULL, and until it
     is read its loader digest matches nothing, so judging then would forget the
-    digest of a model still on disk. ``engine`` rows never carry a digest and
-    are left out of that wait. A value that is not a digest or an A1111 short
+    digest of a model still on disk. A row that never gets a digest (an engine,
+    anything in a folder PixlStash declares) is left out of that wait:
+    ``HASH_PENDING_SQL``. A value that is not a digest or an A1111 short
     hash of one (an unset loader, a download node's ``expected_sha256`` left
     blank) names no model and is never a ghost; a short hash is a ghost when no
     shelf digest starts with it.
@@ -446,7 +448,7 @@ def _model_ghost_names(fetchall: Callable[[str], list]) -> set[str]:
     shelf_names = _shelf_model_names(fetchall)
     shelf_digests = _shelf_model_digests(fetchall)
     judge_digests = not fetchall(
-        "SELECT 1 FROM model WHERE sha256 IS NULL AND file_kind <> 'engine' LIMIT 1"
+        f"SELECT 1 FROM model m WHERE {HASH_PENDING_SQL} LIMIT 1"
     )
     ghosts = set()
     for widget, value in fetchall(

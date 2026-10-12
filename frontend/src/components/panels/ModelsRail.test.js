@@ -902,7 +902,10 @@ describe("adding", () => {
 
   it("lists a model still being hashed but will not add or drag it", async () => {
     const { wrapper } = await mountRail({
-      rows: [...ROWS, row(11, "Anime_Detail", "adapter", { sha256: null })],
+      rows: [
+        ...ROWS,
+        row(11, "Anime_Detail", "adapter", { sha256: null, hash_pending: true }),
+      ],
       handMade: [set()],
       open: "hand:10",
     });
@@ -915,6 +918,26 @@ describe("adding", () => {
     expect(hashing.find(".mrail-grip").classes()).toContain("mrail-grip--off");
     await startDrag(wrapper, "Anime");
     expect(useModelShelfStore().railDrag).toBe(null);
+  });
+
+  it("does not offer a model that never gets a hash", async () => {
+    // A cached Hugging Face repo is a directory: nothing hashes it, so a set
+    // can never keep it and "Still hashing" would be said of it for good.
+    const { wrapper } = await mountRail({
+      rows: [
+        ...ROWS,
+        row(11, "Wan-AI/Wan2.1-T2V-14B", "unknown", {
+          sha256: null,
+          hash_pending: false,
+        }),
+      ],
+      handMade: [set()],
+      open: "hand:10",
+    });
+    expect(wrapper.text()).not.toContain("Wan-AI");
+    expect(wrapper.text()).not.toContain("Still hashing");
+    // The rest of the list is still there.
+    expect(option(wrapper, "Soft").exists()).toBe(true);
   });
 });
 
@@ -966,7 +989,10 @@ describe("dragging", () => {
 
   it("leaves a model still being hashed behind, and says so on the pill", async () => {
     const { wrapper, store } = await mountRail({
-      rows: [...ROWS, row(11, "Anime_Detail", "adapter", { sha256: null })],
+      rows: [
+        ...ROWS,
+        row(11, "Anime_Detail", "adapter", { sha256: null, hash_pending: true }),
+      ],
     });
     await option(wrapper, "Soft").trigger("click");
     await option(wrapper, "Anime").trigger("click", { ctrlKey: true });

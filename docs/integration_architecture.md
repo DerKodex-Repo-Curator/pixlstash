@@ -647,6 +647,12 @@ Rules neither side may drift from:
    carries `set_verdicts: [{combo_key, names, verdict}]`, the owner's member
    answers about that model, `names` being the set's members in shelf names,
    base model first.
+   The same rows carry `hash_pending: bool` beside `sha256`. A null `sha256`
+   with `hash_pending` true is a file the hash worker has not read yet; with
+   it false the row never gets a hash (an engine, or an entry in a folder
+   PixlStash declares, where a cached HuggingFace repo is a directory), so a
+   set can never keep it and **the client must not say it is still hashing**:
+   the Models rail leaves such a row out.
    The same rows carry `trigger_words` as a **list** (it was a JSON string
    before trigger words could be set) and `trigger_words_source`: `recorded`
    for what the file or the owner stored, `character` when the list is the name

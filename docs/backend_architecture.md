@@ -8673,6 +8673,24 @@ means, and the InsightFace and HuggingFace roots — both of which read a listin
 before declaring anything, and both of which bail out entirely if that listing
 fails — can only ever mean the other two.
 
+**A NULL `sha256` here is final, and one predicate says so.** Nothing in a
+declared folder is hashed: an engine carries no digest by design, and
+`MissingCheckpointHashFinder` leaves out every declared folder because an entry
+may be a directory (`models--org--name`). So "`sha256 IS NULL`" alone does not
+mean "still hashing". `builtin_models.HASH_PENDING_SQL` is the rows the worker
+still owes a digest: NULL, not an engine, and not every copy in a declared
+folder. The server's readers that wait on the hasher go through it: the shelf
+row's `hash_pending` (which the client's rail, file tooltip and *New workflow
+set* read), the digest judging in `hub/workflows._model_ghost_names` and
+`resolve_recipe_models`, and the workflow set's refusal, which says "no file
+hash" rather than "still being hashed" for a row that will never have one. It
+is deliberately wider than the finder's own query, which also wants a
+`present` copy: a row whose file is missing or whose drive is unplugged is
+still owed a hash when it comes back, and digest judging forgets what it
+judges, so it waits rather than guesses. Before it, one cached HuggingFace repo on the
+shelf kept recipe digests from ever being judged, and the Models rail offered
+every such repo with an Add that could never enable.
+
 **The unclaimed readout.** `unclaimed_files()` reports what is present and *not*
 declared — on a measured machine, `best.pt` at 339 MB, which nothing in the tree
 references by name or by pattern. It is called "not claimed by anything in this
