@@ -1377,7 +1377,7 @@ async function mergeOffer(models) {
 const answering = new Set();
 
 /**
- * The card's own answer to a one-model offer: Add to set, or Not this one
+ * The card's own answer to a one-model offer: Add to set, or Stop asking
  * (Keep separate). The panel goes with the answer, taking the clicked button
  * with it, so the cursor lands on the card rather than leaving focus on <body>.
  */

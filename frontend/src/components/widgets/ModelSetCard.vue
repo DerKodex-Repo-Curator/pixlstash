@@ -133,9 +133,14 @@
           on-dark
           tabindex="-1"
           data-testid="set-offer-no"
+          :tooltip="
+            card.offer.model
+              ? 'Keeps this model out of the set. The set\'s menu can suggest it again.'
+              : 'Keeps these models out of the set. The set\'s menu can suggest them again.'
+          "
           @click="emit('keep-separate')"
         >
-          {{ card.offer.model ? "Not this one" : "Not these" }}
+          Stop asking
         </AppButton>
       </div>
     </div>
