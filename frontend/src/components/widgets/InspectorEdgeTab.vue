@@ -7,6 +7,7 @@
     class="inspector-edge-tab"
     :class="{
       'inspector-edge-tab--labelled': label,
+      'inspector-edge-tab--plain': plain,
       [`inspector-edge-tab--nudge-${parity}`]: parity,
     }"
     type="button"
@@ -18,12 +19,6 @@
   >
     <v-icon size="16" aria-hidden="true">mdi-chevron-left</v-icon>
     <span v-if="label" class="inspector-edge-tab__label">{{ label }}</span>
-    <span
-      v-else-if="count != null"
-      class="inspector-edge-tab__count num"
-      aria-hidden="true"
-      >{{ count.toLocaleString() }}</span
-    >
   </button>
 </template>
 
@@ -37,10 +32,10 @@ const props = defineProps({
   /** A counter the host bumps on each NEW selection; each bump bounces once. */
   nudge: { type: Number, default: 0 },
   /**
-   * A plain handle's count (the Models rail: every model it can offer), drawn
-   * under the chevron with no selection stripe. Ignored when `label` is set.
+   * The label names no selection (the Models rail's "All models"): the tab is
+   * drawn without the selection stripe.
    */
-  count: { type: Number, default: null },
+  plain: { type: Boolean, default: false },
   /** The accessible name, when "Show inspector" is not what opens. */
   name: { type: String, default: "" },
 });
@@ -97,16 +92,9 @@ watch(
   border-left: 3px solid var(--active-bar);
 }
 
-/* A count is a plain handle's: as wide as the plain one, as tall as it needs. */
-.inspector-edge-tab__count {
-  writing-mode: vertical-rl;
-  font-size: var(--text-2xs);
-  line-height: 1;
-}
-
-.inspector-edge-tab:has(.inspector-edge-tab__count) {
-  height: auto;
-  padding: var(--space-3) 0;
+/* A label that names no selection keeps the tab's own border on that edge. */
+.inspector-edge-tab--plain {
+  border-left: 1px solid rgb(var(--v-theme-border));
 }
 
 .inspector-edge-tab__label {

@@ -470,16 +470,17 @@
       <div v-if="moves.running" class="shelf-dim" aria-hidden="true"></div>
       <!-- The closed Models rail's handle, the one Workflows shows
            (visual-language "Closed inspector"): it names the selection and
-           bounces on a new one. With nothing selected it is the plain handle,
-           carrying the rail's count. -->
+           bounces on a new one. With nothing selected it says "All models",
+           without the selection stripe, and bounces when a card's tray
+           opens. -->
       <InspectorEdgeTab
         v-if="!sidebarStore.modelsRailOpen"
-        :label="railLabel"
-        :count="railCount"
+        :label="railLabel || 'All models'"
+        :plain="!railLabel"
         :name="
           railLabel
             ? `Show models: ${railLabel}`
-            : `Show models (${railCount.toLocaleString()})`
+            : `Show all models (${railCount.toLocaleString()})`
         "
         :nudge="sidebarStore.inspectorNudge"
         data-testid="models-rail-handle"
@@ -1773,7 +1774,7 @@ const moves = useModelMovesStore();
 const reviewSessionsStore = useReviewSessionsStore();
 const sidebarStore = useSidebarStore();
 
-/** Every model the Models rail can offer: what its closed handle counts. */
+/** Every model the Models rail can offer: the count in its closed handle's name. */
 const railCount = computed(() => store.railRows.length);
 
 // ── The closed Models rail (visual-language "Closed inspector") ───────────
@@ -1829,6 +1830,14 @@ watch(
       .join("\n"),
   (identity) => {
     if (identity) sidebarStore.inspectorNudge += 1;
+  },
+);
+// So does a card's tray opening, with or without a selection and however it
+// opened (the caret, or the store putting one back). Closing it is not news.
+watch(
+  () => store.openSetKey,
+  (key) => {
+    if (key) sidebarStore.inspectorNudge += 1;
   },
 );
 // The date column is stamped in the reader's own format, through the same
