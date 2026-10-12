@@ -984,14 +984,17 @@ vanish — they **fold** into the ⋯ overflow (`TbOverflowMenu`, a
 The app-wide standard for a right-edge inspector that **describes a
 selection** and has been closed by the reader (`InspectorEdgeTab`; first
 adopted by Workflows). The inspector is open by default so the grid is laid
-out around it from the first paint. Closed, it is **never re-opened by itself**
+out around it from the first paint. The Models rail lists the shelf rather than
+describing a selection and starts closed, but closed it wears the same handle:
+it names the shelf's selection and takes the same nudge, and with nothing
+selected its chevron handle carries the rail's count. Closed, it is **never re-opened by itself**
 — opening the docked rail takes a column away under the pointer — so the
 closed state has to say what it is hiding:
 
 | Part | Value |
 |---|---|
 | Width · max height | 34px · 260px, label ellipsised; a 20×52 chevron handle when nothing is selected |
-| Label | `writing-mode: vertical-rl`, `--text-sm`, `--weight-medium`, chevron-left above it. One item: its name. Several: `N workflows` |
+| Label | `writing-mode: vertical-rl`, `--text-sm`, `--weight-medium`, chevron-left above it. One item: its name. Several: `N workflows` (on Models: `N models`, `N sets`, `N missing models`, or `N selected` for a mix) |
 | Surface | `--panel`, `--border` on all but the right edge, `--elevation-2` |
 | Corners | `--radius-md`, left corners only |
 | Selection stripe | 3px `--active-bar` on the left edge |

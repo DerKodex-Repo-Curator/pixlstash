@@ -35,6 +35,7 @@
     <div
       v-else
       class="msg__scroll"
+      :class="{ 'msg__scroll--edge-tab': !sidebarStore.modelsRailOpen }"
       @pointerdown="
         pressedBackground = $event.button === 0 && isBackground($event)
       "
@@ -2221,6 +2222,12 @@ function onKeyDown(event) {
   min-height: 0;
   overflow-y: auto;
   padding: var(--space-4);
+}
+
+/* The closed Models rail's edge tab (34px) floats over this edge: the cards
+   stop short of it, as the Workflows cards do (`.wfv-scroll--edge-tab`). */
+.msg__scroll--edge-tab {
+  padding-right: calc(34px + var(--space-3));
 }
 
 .msg__grid {

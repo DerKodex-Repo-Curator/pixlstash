@@ -4702,6 +4702,71 @@ describe("the app-wide toolbar tail", () => {
   });
 });
 
+// The closed Models rail's handle is the Workflows one (visual-language
+// "Closed inspector"): it names the selection, and a NEW selection bumps the
+// counter the handle's bounce and the toolbar glyph's flash both play on.
+describe("the closed Models rail's handle", () => {
+  const handle = (wrapper) => wrapper.find('[data-testid="models-rail-handle"]');
+  const rowAt = (wrapper, i) => wrapper.findAll(".shelf-row")[i];
+
+  it("is the plain handle until something is selected, then names it", async () => {
+    const wrapper = await mountShelf([
+      adapter({ id: 1 }),
+      adapter({ id: 2, display_name: "Mossy Ink" }),
+    ]);
+    expect(handle(wrapper).classes()).not.toContain(
+      "inspector-edge-tab--labelled",
+    );
+    expect(handle(wrapper).find(".inspector-edge-tab__label").exists()).toBe(
+      false,
+    );
+
+    await rowAt(wrapper, 1).trigger("click");
+    expect(handle(wrapper).classes()).toContain("inspector-edge-tab--labelled");
+    expect(handle(wrapper).find(".inspector-edge-tab__label").text()).toBe(
+      "Mossy Ink",
+    );
+    expect(handle(wrapper).attributes("aria-label")).toBe(
+      "Show models: Mossy Ink",
+    );
+
+    await rowAt(wrapper, 0).trigger("click", { ctrlKey: true });
+    expect(handle(wrapper).find(".inspector-edge-tab__label").text()).toBe(
+      "2 models",
+    );
+  });
+
+  it("nudges on a new selection, never on the same one or on clearing it", async () => {
+    const wrapper = await mountShelf([adapter({ id: 1 }), adapter({ id: 2 })]);
+    const sidebar = useSidebarStore();
+    const store = useModelShelfStore();
+    const start = sidebar.inspectorNudge;
+
+    await rowAt(wrapper, 0).trigger("click");
+    expect(sidebar.inspectorNudge).toBe(start + 1);
+    expect(handle(wrapper).classes().join(" ")).toContain(
+      "inspector-edge-tab--nudge-",
+    );
+
+    await rowAt(wrapper, 0).trigger("click");
+    expect(sidebar.inspectorNudge).toBe(start + 1);
+
+    await rowAt(wrapper, 1).trigger("click");
+    expect(sidebar.inspectorNudge).toBe(start + 2);
+
+    store.clearSelection();
+    await wrapper.vm.$nextTick();
+    expect(sidebar.inspectorNudge).toBe(start + 2);
+  });
+
+  it("opens the rail on a click, and is gone while it is open", async () => {
+    const wrapper = await mountShelf([adapter({ id: 1 })]);
+    await handle(wrapper).trigger("click");
+    expect(useSidebarStore().modelsRailOpen).toBe(true);
+    expect(handle(wrapper).exists()).toBe(false);
+  });
+});
+
 describe("Delete", () => {
   // The file-manager gesture, spelled the way Explorer spells it: Del trashes,
   // Shift+Del deletes permanently. Handled on the WINDOW beside Escape, so
