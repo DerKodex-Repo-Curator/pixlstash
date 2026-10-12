@@ -2279,10 +2279,31 @@ describe("the body it sends", () => {
     expect(await labelOf(wrapper)).toBe("Cinematic portrait");
   });
 
+  it("says an untouched run on the picture's own seed adds nothing", async () => {
+    const wrapper = await mountRun();
+    const note = () => wrapper.find('[data-testid="rund-repeats-picture"]');
+    // A new seed is a new picture.
+    expect(note().exists()).toBe(false);
+    wrapper.vm.seedMode = "keep";
+    await flushPromises();
+    expect(note().text()).toContain("exact duplicate is not added again");
+    // Typed in, it is the same seed; another one is not.
+    wrapper.vm.seedMode = "fixed";
+    await flushPromises();
+    expect(note().exists()).toBe(true);
+    wrapper.vm.seed = "7";
+    await flushPromises();
+    expect(note().exists()).toBe(false);
+    // Nor is a changed form the picture again.
+    wrapper.vm.seedMode = "keep";
+    wrapper.vm.prompt = "something else entirely";
+    await flushPromises();
+    expect(note().exists()).toBe(false);
+  });
+
   it("leaves an untouched run on a kept seed for the server to name", async () => {
-    // "Keep" leaves the seed of the graph the server runs, and that graph is
-    // the workflow's best picture's, not necessarily the one opened: only the
-    // server knows whether this is the picture again.
+    // "Keep" is this picture's seed on whatever graph the server runs, and
+    // only the server knows whether that graph is this picture's too.
     const wrapper = await mountRun();
     wrapper.vm.seedMode = "keep";
     expect(await labelOf(wrapper)).toBe(null);

@@ -478,6 +478,19 @@ watch(
   },
 );
 
+// A run that ended well and still owes a word: every picture it made was one
+// the library already has, so nothing arrived in the grid.
+watch(
+  () => wsStore.wsPluginProgress,
+  (wrapped) => {
+    const payload = wrapped?.payload;
+    const notice = String(payload?.notice || "").trim();
+    if (String(payload?.plugin || "").toLowerCase() !== "comfyui") return;
+    if (payload.status !== "completed" || !notice) return;
+    noticeStore.push({ level: "info", text: notice, key: `comfyui-notice-${notice}` });
+  },
+);
+
 /**
  * Open the settings dialog. `tab` deep-links to a nav entry (e.g. "scrapheap"
  * from the scrapheap header's "change" link); omitted callers land on Appearance.

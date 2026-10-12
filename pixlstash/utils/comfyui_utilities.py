@@ -13,7 +13,12 @@ from typing import Any
 
 from pixlstash.pixl_logging import get_logger
 from pixlstash.services.comfyui_recipe_service import model_filename_fields
-from pixlstash.services.workflow_hash import SHELF_ID_FIELD, is_link
+from pixlstash.services.workflow_hash import (
+    IMAGE_EXTENSIONS,
+    MODEL_EXTENSIONS,
+    SHELF_ID_FIELD,
+    is_link,
+)
 
 logger = get_logger(__name__)
 
@@ -393,7 +398,11 @@ def _resolve_text_api(value: Any, workflow: dict, depth: int = 0) -> str | None:
     """Resolve a text input value in API format, following single-hop references.
 
     Handles both plain strings and references to primitive/text passthrough nodes
-    (e.g. ``PrimitiveStringMultiline``).
+    (e.g. ``PrimitiveStringMultiline``). A node that names its text otherwise
+    (``LoRACharacterPromptBuilder``) answers with its longest string, as
+    :func:`_extract_text_from_node_ui` reads the same node: what it builds from
+    that is not in the graph, and its own text is the prompt as far as the
+    file says.
     """
     if depth > _MAX_FOLLOW_DEPTH:
         return None
@@ -408,6 +417,23 @@ def _resolve_text_api(value: Any, workflow: dict, depth: int = 0) -> str | None:
             v = inputs.get(key)
             if v is not None:
                 return _resolve_text_api(v, workflow, depth + 1)
+        # Only a string with a space in it that does not end as a model or a
+        # picture file does: a file name, a path or a choice (``Random``) is
+        # one word or carries its extension, and this answer is stored as the
+        # picture's prompt.
+        # ponytail: a one-word prompt on such a node reads as no prompt, and a
+        # spaced path to any other kind of file as one; type the output from
+        # object_info if either turns up.
+        candidates = [
+            v.strip()
+            for v in inputs.values()
+            if isinstance(v, str)
+            and len(v.split()) > 1
+            and v.strip().lower() not in _TEXT_CONTROL_VALUES
+            and not v.strip().lower().endswith(MODEL_EXTENSIONS + IMAGE_EXTENSIONS)
+        ]
+        if candidates:
+            return max(candidates, key=len)
     return None
 
 
