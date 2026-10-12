@@ -3379,6 +3379,43 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
   const selectedIds = ref(new Set());
 
   /**
+   * The Models rail's selection, by hub `model.id`, while it has one; else
+   * null.
+   *
+   * The rail is a third screen: its rows are in front of the reader too, so
+   * the verbs may act on them. There is one model selection at a time, as in a
+   * two-pane file manager: the rail taking it drops the shelf's, and a model
+   * picked on the shelf drops this one, which the rail watches for.
+   * `clearSelection` leaves it alone: clicking a set card clears the shelf's
+   * models, and the reader who selected here to add to that set still means
+   * them. The shelf's own keys never act on it (`ownSelection` in
+   * `ModelShelf.vue`); the rail answers its own.
+   */
+  const railSelection = ref(null);
+
+  /** The rail's selection changed: `ids` is all of it, empty for none. */
+  function setRailSelection(ids) {
+    // None is not a claim on the selection: the shelf keeps its own.
+    if (!ids?.length) {
+      railSelection.value = null;
+      return;
+    }
+    clearSelection();
+    railSelection.value = new Set(ids);
+  }
+
+  /**
+   * A shelf verb asked for from outside the shelf's own bar, as `{verb,
+   * args}`. The rail's menu and keys ask; `ModelShelf.vue` owns every
+   * confirmation and runs it against the selection, as it does for its bar.
+   */
+  const verbRequest = shallowRef(null);
+
+  function requestVerb(verb, ...args) {
+    verbRequest.value = { verb, args };
+  }
+
+  /**
    * The selected models as rows, in the order the list draws them.
    *
    * Derived from `screenRows` and NOT from `rows`, which is load-bearing: a
@@ -3406,6 +3443,12 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
    * empty selection and every verb a phantom to gate on.
    */
   const selectedRows = computed(() => {
+    // The rail lists every file by itself, so a step of a run stands alone
+    // there: the "one file picked out of a run" gesture, not the run.
+    const inRail = railSelection.value;
+    if (inRail) {
+      return rows.value.filter((row) => inRail.has(row.id)).map(displayRow);
+    }
     const chosen = selectedIds.value;
     const out = [];
     for (const row of screenRows.value) {
@@ -3643,6 +3686,16 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     anchorId.value = null;
     anchorOccurrence.value = null;
   }
+
+  // Every path that selects on the shelf, in one place. Sync, because a shelf
+  // gesture reads `selectedRows` in the same breath as it selects (a row drag).
+  watch(
+    selectedIds,
+    (ids) => {
+      if (ids.size) railSelection.value = null;
+    },
+    { flush: "sync" },
+  );
 
   // Sets are selected on the set grid only; leaving it must not leave a
   // selection behind that Delete could act on unseen.
@@ -4057,6 +4110,8 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     rows.value = [];
     newIds.value = new Set();
     selectedIds.value = new Set();
+    railSelection.value = null;
+    verbRequest.value = null;
     anchorId.value = null;
     anchorOccurrence.value = null;
     loaded.value = false;
@@ -4123,6 +4178,10 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     collapsed,
     selectedIds,
     selectedRows,
+    railSelection,
+    setRailSelection,
+    verbRequest,
+    requestVerb,
     anchorId,
     anchorOccurrence,
     isSelected,

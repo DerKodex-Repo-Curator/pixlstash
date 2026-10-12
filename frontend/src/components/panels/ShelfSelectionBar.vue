@@ -7,7 +7,7 @@
        is the only one that destroys bytes, which is why it is the only one in
        the error colour (#933). -->
   <div
-    v-if="store.selectedRows.length"
+    v-if="!rail && !store.railSelection && store.selectedRows.length"
     class="selbar"
     role="toolbar"
     aria-label="Selected models"
@@ -237,6 +237,7 @@
        row, which is what a context menu is; the view opens it through
        `openContextMenu` after it has made the row the selection. -->
   <v-menu
+    v-if="!rail"
     v-model="contextOpen"
     :target="contextAt"
     :close-on-content-click="false"
@@ -295,6 +296,13 @@ const props = defineProps({
    * which draws no sets.
    */
   sets: { type: Array, default: () => [] },
+  /**
+   * Mounted by the Models rail, which has a menu and a selection of its own:
+   * no pill and no menu here, only the verb rows (`RailVerbs`) under the same
+   * gates. A verb goes to the shelf through `store.requestVerb`, since the
+   * rail is not the shelf's child, and `picked` tells the rail to close.
+   */
+  rail: { type: Boolean, default: false },
 });
 
 const emit = defineEmits([
@@ -319,6 +327,7 @@ const emit = defineEmits([
   "remove-from-set",
   "hide-sets",
   "hide-models",
+  "picked",
 ]);
 
 const store = useModelShelfStore();
@@ -973,10 +982,13 @@ function onAttach(payload, attach) {
 const verbHandlers = computed(() => ({
   rows: store.selectedRows,
   hideSets: hideSetsVerb(props.sets),
-  hideModels: hideModelsVerb(
-    store.selectedModels.map((model) => model.id),
-    store.hiddenModelIds,
-  ),
+  // The rail's menu has its own Hide row, above these.
+  hideModels: props.rail
+    ? null
+    : hideModelsVerb(
+        store.selectedModels.map((model) => model.id),
+        store.hiddenModelIds,
+      ),
   newSetTitle: newSetTitle.value,
   removableFromSet: removableFromSet.value,
   clonable: Boolean(clonableSet.value),
@@ -1016,11 +1028,14 @@ const verbHandlers = computed(() => ({
   deletable: deletable.value.length > 0,
   deleteLabel: deleteLabel.value,
   deleteTitle: deleteTitle.value,
+  rail: props.rail,
   onVerb: (verb, event) => {
     // Read before the menu closes: it is the open menu's card.
     const cloned = clonableSet.value;
     contextOpen.value = false;
     moreMenuOpen.value = false;
+    const send = props.rail ? store.requestVerb : emit;
+    if (props.rail) emit("picked");
     if (verb === "copy-filenames")
       copyLines(
         store.selectedRows.map((row) => row.filename).filter(Boolean),
@@ -1031,9 +1046,9 @@ const verbHandlers = computed(() => ({
     // The gesture decides, not the tracked key state: `shiftHeld` drives the
     // label and nothing else, so a stale one can never turn a trash into an
     // unlink.
-    else if (verb === "delete") emit("delete", Boolean(event?.shiftKey));
-    else if (verb === "clone-set") emit("clone-set", cloned);
-    else emit(verb);
+    else if (verb === "delete") send("delete", Boolean(event?.shiftKey));
+    else if (verb === "clone-set") send("clone-set", cloned);
+    else send(verb);
   },
   onAttach,
 }));
@@ -1047,7 +1062,7 @@ const verbHandlers = computed(() => ({
  * move files, then removal. A separate component would need every gate above
  * threaded through it as props anyway, which is exactly what `verbHandlers` is.
  */
-const VerbMenu = (props) => {
+const VerbItems = (props) => {
   const item = (icon, label, { on, disabled, title, kbd, danger } = {}) =>
     h(
       "button",
@@ -1095,7 +1110,7 @@ const VerbMenu = (props) => {
       },
     );
 
-  return h("div", { class: "ctx-menu shelf-menu", role: "menu" }, [
+  return [
     // Inside an open hand-made set's tray the set's own verb leads: it is what
     // the reader is working on, and it never touches a file.
     props.removableFromSet
@@ -1220,7 +1235,8 @@ const VerbMenu = (props) => {
           on: () => props.onVerb("works-with"),
         })
       : null,
-    props.single
+    // The rail leads its menu with its own New workflow set, for any model.
+    props.single && !props.rail
       ? item("mdi-layers-plus", "New workflow set with this checkpoint", {
           on: () => props.onVerb("new-set"),
           disabled: Boolean(props.newSetTitle),
@@ -1270,14 +1286,22 @@ const VerbMenu = (props) => {
         danger: true,
       },
     ),
-  ]);
+  ];
 };
+
+const VerbMenu = (props) =>
+  h("div", { class: "ctx-menu shelf-menu", role: "menu" }, VerbItems(props));
+
+/** The verb rows alone, for the Models rail to draw inside its own menu. */
+const RailVerbs = () =>
+  VerbItems({ ...verbHandlers.value, single: single.value });
 
 // The opener the view calls, and the gates the suite asserts directly rather
 // than through seven `title` strings. Last in the file because `defineExpose`
 // evaluates its argument where it stands.
 defineExpose({
   openContextMenu,
+  RailVerbs,
   deletable,
   forgettable,
   assignable,

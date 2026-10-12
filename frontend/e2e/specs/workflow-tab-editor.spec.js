@@ -510,6 +510,12 @@ async function changeThree(page) {
  * Wait until *locator* has stopped moving and fading: a menu or a dialog
  * scales and fades in, and a box measured (or a picture taken) on the way is
  * of something smaller and fainter than what the owner sees.
+ *
+ * Still is not the same as not begun. An overlay sits at opacity 0, in its
+ * place, until its enter transition starts, and that transition's first
+ * frames still read as its start values: four identical frames there are of
+ * a dialog nobody can see yet, and whatever is probed next hits the scrim. So
+ * a frame counts only once the thing is showing and nothing is running on it.
  */
 async function settled(locator) {
   await locator.evaluate(
@@ -520,14 +526,10 @@ async function settled(locator) {
         let same = 0;
         const tick = () => {
           const box = moving.getBoundingClientRect();
-          const now = [
-            box.x,
-            box.y,
-            box.width,
-            box.height,
-            getComputedStyle(moving).opacity,
-          ].join();
-          same = now === last ? same + 1 : 0;
+          const opacity = getComputedStyle(moving).opacity;
+          const now = [box.x, box.y, box.width, box.height, opacity].join();
+          const begun = Number(opacity) > 0 && !moving.getAnimations().length;
+          same = now === last && begun ? same + 1 : 0;
           last = now;
           if (same >= 4) resolve();
           else requestAnimationFrame(tick);

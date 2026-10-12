@@ -983,3 +983,81 @@ describe("Clone set to edit", () => {
     expect(cloneItem(wrapper)).toBeUndefined();
   });
 });
+
+describe("the Models rail's selection", () => {
+  /** A menu row of the rail's verbs, by its words. */
+  const railItem = (menu, label) =>
+    menu.findAll(".ctx-item").find((b) => b.text().includes(label));
+
+  it("keeps the shelf's pill down: the rail has its own footer and menu", async () => {
+    const store = selectRows([row(1, "present"), row(2, "present")]);
+    const wrapper = mount(ShelfSelectionBar, globalOpts);
+    expect(wrapper.find(".selbar").exists()).toBe(true);
+    store.setRailSelection([2]);
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".selbar").exists()).toBe(false);
+  });
+
+  it("gates the rail's rows by the rail's selection, as the shelf's are", async () => {
+    // Row 2's file is gone and row 1's is not: Remove from shelf follows the
+    // rail's pick, not what the shelf last had selected.
+    const store = selectRows([row(1, "present")]);
+    store.rows = [...store.rows, row(2, "missing")];
+    const wrapper = mount(ShelfSelectionBar, {
+      ...globalOpts,
+      props: { rail: true },
+    });
+    expect(wrapper.vm.forgettable).toHaveLength(0);
+    // The shelf's selection is the shelf's pill's: this mount draws none.
+    expect(wrapper.find(".selbar").exists()).toBe(false);
+    store.setRailSelection([2]);
+    expect(wrapper.vm.forgettable.map((r) => r.id)).toEqual([2]);
+  });
+
+  it("draws only rows in the rail's mount, and asks the shelf instead of emitting", async () => {
+    const store = selectRows([row(1, "present")]);
+    store.setRailSelection([1]);
+    const wrapper = mount(ShelfSelectionBar, {
+      ...globalOpts,
+      props: { rail: true },
+    });
+    // Nothing of its own on screen, even with a selection to act on.
+    expect(wrapper.find(".selbar").exists()).toBe(false);
+    expect(wrapper.find(".ctx-item").exists()).toBe(false);
+
+    const menu = mount(wrapper.vm.RailVerbs, globalOpts);
+    // The rail leads with its own New workflow set and Hide model, so the
+    // shelf's are left out.
+    expect(railItem(menu, "New workflow set")).toBeUndefined();
+    expect(railItem(menu, "Hide")).toBeUndefined();
+    await railItem(menu, "Set kind").trigger("click");
+    expect(store.verbRequest).toEqual({ verb: "set-kind", args: [] });
+    expect(wrapper.emitted("set-kind")).toBeUndefined();
+    expect(wrapper.emitted("picked")).toHaveLength(1);
+    menu.unmount();
+  });
+
+  it("passes the press's own Shift on with Delete", async () => {
+    const store = selectRows([
+      row(1, "present", {
+        locations: [
+          { state: "present", folder_id: 1, folder_path: "/m", relpath: "x" },
+        ],
+      }),
+    ]);
+    useModelFoldersStore().folders = [
+      { id: 1, path: "/m", deletable: true },
+    ];
+    store.setRailSelection([1]);
+    const wrapper = mount(ShelfSelectionBar, {
+      ...globalOpts,
+      props: { rail: true },
+    });
+    const menu = mount(wrapper.vm.RailVerbs, globalOpts);
+    const del = menu.find(".ctx-item--danger");
+    expect(del.attributes("disabled")).toBeUndefined();
+    await del.trigger("click", { shiftKey: true });
+    expect(store.verbRequest).toEqual({ verb: "delete", args: [true] });
+    menu.unmount();
+  });
+});

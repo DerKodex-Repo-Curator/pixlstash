@@ -1,9 +1,9 @@
 // The Models screen's rail (design B): Models | Tasks in place of the stats.
 //
 // The lines worth holding: the rail lists every model a slot takes, with the
-// count on its tab; its selection is its own, so a click there never reaches
-// the shelf's (and with it Delete, Move and Forget); two quick presses on Add
-// file one model; a run of adds is one receipt whose Undo takes all of it
+// count on its tab; its selection is its own list and the one the shelf's
+// verbs act on, reached from its menu under its own set verbs; two quick
+// presses on Add file one model; a run of adds is one receipt whose Undo takes all of it
 // back; and a pointer drag onto a hand-made card files the dragged rows.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -63,6 +63,10 @@ import { useSidebarStore } from "../../stores/useSidebarStore";
 
 const stubs = {
   "v-icon": true,
+  // The rail's mount of the shelf's bar resolves `v-menu` by name and draws
+  // none; its Assign pickers read the entity lists as they mount.
+  "v-menu": { template: "<div><slot /></div>" },
+  AddToEntityControl: true,
   TasksPanel: true,
   Tooltip: { template: "<span><slot /></span>" },
 };
@@ -501,6 +505,121 @@ describe("the rail's own selection", () => {
     await option(wrapper, "Soft").trigger("click");
     expect(option(wrapper, "Soft").attributes("aria-selected")).toBe("true");
     expect(store.selectedIds.size).toBe(0);
+  });
+
+  it("is the one selection on screen: it drops the shelf's, and a shelf pick drops it", async () => {
+    const { wrapper, store } = await mountRail();
+    store.toggleSelected(3);
+    await option(wrapper, "Soft").trigger("click");
+    expect(store.selectedIds.size).toBe(0);
+    expect(store.selectedRows.map((r) => r.id)).toEqual([5]);
+
+    store.toggleSelected(3);
+    await wrapper.vm.$nextTick();
+    expect(option(wrapper, "Soft").attributes("aria-selected")).toBe("false");
+    expect(store.railSelection).toBeNull();
+    expect([...store.selectedIds]).toEqual([3]);
+  });
+
+  it("lets go of its selection when the list leaves the screen", async () => {
+    // Delete pressed on the shelf must not act on rows behind the Tasks tab.
+    const { wrapper, store } = await mountRail();
+    await option(wrapper, "Soft").trigger("click");
+    expect(store.selectedRows).toHaveLength(1);
+    useSidebarStore().showTasksTab();
+    await wrapper.vm.$nextTick();
+    expect(store.selectedRows).toHaveLength(0);
+  });
+});
+
+describe("the shelf's verbs, from the rail", () => {
+  const menuItems = (wrapper) => wrapper.findAll(".mrail-menu .ctx-item");
+  const menuItem = (wrapper, label) =>
+    menuItems(wrapper).find((b) => b.text().includes(label));
+
+  it("lists them under the rail's own, which lead and are marked", async () => {
+    const { wrapper } = await mountRail({
+      handMade: [handSet(10, [], { name: "Night city" })],
+    });
+    await option(wrapper, "Soft").trigger("contextmenu");
+    const items = menuItems(wrapper);
+    const labels = items.map((b) => b.text());
+    expect(labels.slice(0, 2).join()).toContain("Add to set");
+    expect(labels[1]).toContain("New workflow set with this");
+    expect(items.filter((b) => b.classes("ctx-item--key"))).toHaveLength(2);
+    // What the shelf's row menu does to a model, and was out of reach here.
+    for (const label of [
+      "Rename",
+      "Set thumbnail",
+      "Set base model",
+      "Set kind",
+      "Set trigger words",
+      "Move to…",
+      "Keep one copy",
+      "Open in file manager",
+      "Works with",
+      "Copy filename",
+      "Copy SHA-256",
+      "Remove from shelf",
+    ]) {
+      expect(menuItem(wrapper, label), label).toBeDefined();
+    }
+    expect(wrapper.find(".mrail-menu .ctx-item--danger").exists()).toBe(true);
+    // Never twice: the rail's own New workflow set and Hide stand for the
+    // shelf's.
+    expect(labels.filter((l) => l.includes("New workflow set"))).toHaveLength(1);
+    expect(labels.filter((l) => l.includes("Hide"))).toHaveLength(1);
+    expect(wrapper.find('[data-testid="mrail-hide"]').exists()).toBe(true);
+  });
+
+  it("asks the shelf to run the one picked, on the rail's selection", async () => {
+    const { wrapper, store } = await mountRail();
+    await option(wrapper, "Soft").trigger("click");
+    await option(wrapper, "FilmGrain").trigger("click", { ctrlKey: true });
+    await option(wrapper, "Soft").trigger("contextmenu");
+    expect(wrapper.vm.menuOpen).toBe(true);
+    await menuItem(wrapper, "Set base model").trigger("click");
+    expect(store.verbRequest).toEqual({ verb: "set-base-model", args: [] });
+    expect(store.selectedRows.map((r) => r.id).sort()).toEqual([3, 5]);
+    // The menu stays open on a click, for its two pickers, so a verb has to
+    // close it: left up, it would sit over the dialog the shelf opens.
+    expect(wrapper.vm.menuOpen).toBe(false);
+  });
+
+  it("right-clicks a row outside the selection onto that row alone", async () => {
+    const { wrapper, store } = await mountRail();
+    await option(wrapper, "Soft").trigger("click");
+    await option(wrapper, "FilmGrain").trigger("contextmenu");
+    expect(store.selectedRows.map((r) => r.id)).toEqual([3]);
+  });
+
+  it("makes the cursor's row the selection when the footer's menu opens on none", async () => {
+    // A verb with nothing selected would have nothing to confirm against.
+    const { wrapper, store } = await mountRail();
+    await wrapper.find('[data-testid="mrail-list"]').trigger("focus");
+    expect(store.selectedRows).toHaveLength(0);
+    await wrapper.find('[data-testid="mrail-more"]').trigger("click");
+    expect(store.selectedRows).toHaveLength(1);
+  });
+
+  it("answers Delete and F2 as the shelf does, and only with a selection", async () => {
+    const { wrapper, store } = await mountRail();
+    const list = wrapper.find('[data-testid="mrail-list"]');
+    await list.trigger("keydown", { key: "Delete" });
+    expect(store.verbRequest).toBeNull();
+
+    await option(wrapper, "Soft").trigger("click");
+    await list.trigger("keydown", { key: "Delete", shiftKey: true });
+    expect(store.verbRequest).toEqual({ verb: "delete", args: [true] });
+    await list.trigger("keydown", { key: "F2" });
+    expect(store.verbRequest).toEqual({ verb: "rename", args: [] });
+
+    // A name is one file's: two selected, and F2 asks for nothing. A marker
+    // stands in the request first, so a rename would be seen replacing it.
+    await option(wrapper, "FilmGrain").trigger("click", { ctrlKey: true });
+    store.requestVerb("none");
+    await list.trigger("keydown", { key: "F2" });
+    expect(store.verbRequest.verb).toBe("none");
   });
 });
 

@@ -227,11 +227,18 @@
     </template>
   </AppInspector>
 
-  <!-- The rail's verbs, and only those: nothing here deletes, moves or forgets
-       a file, because the rail's selection is not the shelf's. -->
+  <!-- The shelf's verbs, under the shelf's own gates: this mount draws only
+       their rows, for the menu below, and the shelf runs what is picked. -->
+  <ShelfSelectionBar v-if="onShelfTab" ref="verbsEl" rail @picked="closeMenu" />
+
+  <!-- The rail's own verbs lead, marked as the ones this list is for; under
+       them, everything the shelf's menu does to a model. A click inside does
+       not close the menu by itself, because the two Assign rows are pickers
+       that have to stay up; every other row closes it as it is picked. -->
   <v-menu
     v-model="menuOpen"
     :target="menuAt"
+    :close-on-content-click="false"
     location="top end"
     origin="bottom start"
     :offset="2"
@@ -239,7 +246,7 @@
   >
     <div
       ref="menuEl"
-      class="ctx-menu mrail-menu"
+      class="ctx-menu shelf-menu mrail-menu"
       role="menu"
       tabindex="-1"
       @keydown="onMenuKeydown"
@@ -247,7 +254,7 @@
       <template v-if="menuView === 'main'">
         <button
           v-if="targetSet"
-          class="ctx-item"
+          class="ctx-item ctx-item--key"
           type="button"
           role="menuitem"
           :disabled="!addableSelection.length"
@@ -258,7 +265,7 @@
           <span class="ctx-shortcut">Enter</span>
         </button>
         <button
-          class="ctx-item"
+          class="ctx-item ctx-item--key"
           type="button"
           role="menuitem"
           :disabled="!store.shownHandMadeSets.length"
@@ -268,7 +275,7 @@
           <span class="ctx-label-text">Add to set…</span>
         </button>
         <button
-          class="ctx-item"
+          class="ctx-item ctx-item--key"
           type="button"
           role="menuitem"
           :disabled="!hashedActionRows.length"
@@ -278,8 +285,9 @@
           <v-icon class="ctx-icon">mdi-plus-box-multiple-outline</v-icon>
           <span class="ctx-label-text">{{ newSetLabel }}</span>
         </button>
-        <!-- The one verb here that is not about a set, and like the rest it
-             touches no file: the model leaves this library's lists. -->
+        <!-- The rail's one verb that is not about a set. It touches no file:
+             the model leaves this library's lists. The shelf's menu leads with
+             the same row, so the rows below leave theirs out. -->
         <div class="ctx-sep" role="separator"></div>
         <button
           class="ctx-item"
@@ -301,6 +309,10 @@
             hideVerb?.label ?? "Hide model"
           }}</span>
         </button>
+        <template v-if="verbsEl">
+          <div class="ctx-sep" role="separator"></div>
+          <component :is="verbsEl.RailVerbs" />
+        </template>
       </template>
       <template v-else>
         <div class="ctx-label">{{ addSetsHeading }}</div>
@@ -362,10 +374,14 @@
  * several sets. Two optional filters narrow it - *Fits <set>* and *In no set
  * yet* - and neither is ever applied on the reader's behalf.
  *
- * **Its selection is its own.** A click here selects in the rail, not on the
- * shelf, so the shelf's pill never appears and nothing in the rail can reach
- * Delete, Move or Forget. Its verbs are Add to the open set, Add to set…, and a
- * new set with these.
+ * **Its selection is its own list, and the one the verbs act on.** A click
+ * here selects in the rail and drops the shelf's selection, as a shelf click
+ * drops this one (`store.railSelection`): one selection on screen. Its own
+ * verbs are Add to the open set, Add to set… and a new set with these; under
+ * them its menu holds every verb the shelf's row menu has (rename, move,
+ * delete and the rest), drawn by `ShelfSelectionBar` and run by the shelf. The
+ * shelf's pill stays down: it would come up on every click of a list whose
+ * commonest gesture is Add.
  *
  * **A run of adds is one receipt.** Adds into the same set go out quietly and,
  * once the run pauses, one receipt counts the whole run, with an Undo that
@@ -406,6 +422,7 @@ import AppButton from "../widgets/AppButton.vue";
 import AppInput from "../widgets/AppInput.vue";
 import AppInspector from "../widgets/AppInspector.vue";
 import ModelMark from "../widgets/ModelMark.vue";
+import ShelfSelectionBar from "./ShelfSelectionBar.vue";
 import TasksPanel, { tasksTabFor } from "./TasksPanel.vue";
 import Tooltip from "../widgets/Tooltip.vue";
 
@@ -769,6 +786,33 @@ watch(flat, (rows) => {
   if (kept.length !== selected.value.size) selected.value = new Set(kept);
 });
 
+// ── The shelf's verbs ─────────────────────────────────────────────────────
+
+/** The shelf runs its verbs, and the runs tab draws no shelf to run them on. */
+const onShelfTab = computed(() => route.name !== "models-runs");
+
+/** The rail's mount of the shelf's bar: the verb rows, nothing else. */
+const verbsEl = ref(null);
+
+// What is selected here is what the shelf's verbs act on. Sync, so a key
+// pressed straight after a click acts on the rows that are lit.
+watch(selected, (ids) => store.setRailSelection([...ids]), { flush: "sync" });
+onBeforeUnmount(() => store.setRailSelection([]));
+
+// A selection made on the shelf takes this one with it.
+watch(
+  () => store.railSelection,
+  (held) => {
+    if (!held && selected.value.size) selected.value = new Set();
+  },
+);
+
+// Out of sight, out of reach: nothing may act on rows behind the Tasks tab or
+// in a closed rail.
+watch([tab, () => sidebarStore.modelsRailOpen], () => {
+  if (selected.value.size) selected.value = new Set();
+});
+
 function ensureCursor() {
   if (!cursorRow.value && flat.value.length) {
     cursorId.value = flat.value[0].id;
@@ -884,6 +928,17 @@ function onListKeydown(event) {
     case "Escape":
       if (!selected.value.size) handled = false;
       selected.value = new Set();
+      break;
+    // The shelf's two keys, on the rail's selection.
+    case "Delete":
+      if (onShelfTab.value && selected.value.size) {
+        store.requestVerb("delete", event.shiftKey);
+      } else handled = false;
+      break;
+    case "F2":
+      if (onShelfTab.value && selected.value.size === 1) {
+        store.requestVerb("rename");
+      } else handled = false;
       break;
     case "ContextMenu":
       openMenuAtCursor();
@@ -1067,6 +1122,7 @@ function openMenu(x, y, row) {
     anchorId.value = row.id;
   }
   if (row) cursorId.value = row.id;
+  if (!selected.value.size) return;
   menuReturn = listEl.value;
   menuAt.value = [x, y];
   menuView.value = "main";
@@ -1075,6 +1131,11 @@ function openMenu(x, y, row) {
 }
 
 function openMenuFrom(el) {
+  // The verbs act on a selection, so the cursor's row becomes one.
+  if (!selected.value.size && cursorRow.value) {
+    selected.value = new Set([cursorRow.value.id]);
+    anchorId.value = cursorRow.value.id;
+  }
   const box = el?.getBoundingClientRect?.();
   menuReturn = el;
   menuAt.value = box ? [box.left, box.top] : [0, 0];
@@ -1134,6 +1195,12 @@ function menuHide() {
   const rows = hideRows.value;
   menuOpen.value = false;
   store.toggleHiddenModels(rows);
+}
+
+/** A shelf verb was picked: the menu goes, and focus with it, before any dialog. */
+function closeMenu() {
+  menuOpen.value = false;
+  returnFocus();
 }
 
 async function menuAdd(set) {
@@ -1610,6 +1677,17 @@ onBeforeUnmount(endDrag);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* The rail's own verbs, leading a menu that also holds the shelf's: semibold
+   words and a full-ink glyph. Weight and not colour, because olive says
+   selected and amber is a fill, and neither is true of a menu row. */
+.ctx-item--key {
+  font-weight: var(--weight-semibold);
+}
+
+.ctx-item--key .ctx-icon {
+  opacity: 1;
 }
 
 .mrail-kbd {

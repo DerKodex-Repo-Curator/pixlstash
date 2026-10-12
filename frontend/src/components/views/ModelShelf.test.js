@@ -4758,8 +4758,8 @@ describe("Delete", () => {
     });
   });
 
-  // The Models rail beside the shelf has a selection of its own: Delete
-  // pressed there must not reach the shelf's, which the reader cannot see.
+  // The Models rail beside the shelf answers its own keys: a Delete pressed
+  // there is the rail's to ask for, never the window handler's as well.
   it("is not the shelf's when pressed in the Models rail", async () => {
     const wrapper = await mountWithSelection();
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
@@ -4838,6 +4838,63 @@ describe("Delete", () => {
 
     expect(confirmSpy.mock.calls[0][0]).toContain("could not check");
     expect(deleteModels).toHaveBeenCalledWith([1], { permanent: false });
+    wrapper.unmount();
+  });
+
+  it("leaves the Models rail's selection to the rail's own keys", async () => {
+    // Delete pressed over here was aimed at the shelf, and the shelf has
+    // nothing selected: the rail's rows are not this key's to take.
+    listModelFolders.mockResolvedValue([FOLDER]);
+    const wrapper = await mountShelf([inFolder(1)]);
+    document.body.appendChild(wrapper.element);
+    const store = useModelShelfStore();
+    store.setRailSelection([1]);
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    await pressDelete();
+    document.body.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(deleteModels).not.toHaveBeenCalled();
+    expect(store.selectedRows.map((r) => r.id)).toEqual([1]);
+    wrapper.unmount();
+  });
+
+  it("deletes the Models rail's selection when the rail asks, not the shelf's", async () => {
+    // The rail is not this view's child, so its Delete arrives through the
+    // store - and lands on the same prompt, counting the rail's own rows.
+    listModelFolders.mockResolvedValue([FOLDER]);
+    const wrapper = await mountShelf([inFolder(1), inFolder(2)]);
+    const store = useModelShelfStore();
+    store.toggleSelected(1);
+    store.setRailSelection([2]);
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    store.requestVerb("delete", true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    expect(deleteModels).toHaveBeenCalledWith([2], { permanent: true });
+    wrapper.unmount();
+  });
+
+  it("opens the edit dialog for a verb the rail asks for, rename included", async () => {
+    const wrapper = await mountShelf([inFolder(1), inFolder(2)]);
+    const store = useModelShelfStore();
+    store.setRailSelection([2]);
+
+    store.requestVerb("set-kind");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.vm.editVerb).toBe("kind");
+
+    // The rail's row may not be drawn on the list at all, so there is no
+    // inline field to open: the name takes the dialog.
+    store.requestVerb("rename");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.vm.editVerb).toBe("rename");
+    expect(wrapper.find(".shelf-row-rename").exists()).toBe(false);
     wrapper.unmount();
   });
 
@@ -5658,6 +5715,29 @@ describe("the set grid is what the shelf opens on", () => {
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete" }));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(deleteWorkflowSet).toHaveBeenCalledWith(10);
+  });
+
+  it("still deletes the selected set while the Models rail holds a selection", async () => {
+    // The rail's rows are not the shelf's "a model is selected too": with
+    // them counted, Delete on a set card would ask about a file instead.
+    deleteWorkflowSet.mockReset().mockResolvedValue({
+      deleted: { id: 10, name: "Kit", members: [] },
+    });
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const { store } = await shelfOnTheGrid();
+    store.workflowSets = {
+      ...store.workflowSets,
+      handMade: [{ id: 10, name: "Kit", members: [] }],
+    };
+    store.setRailSelection([2]);
+    store.selectSet(10);
+    expect(store.selectedRows.map((r) => r.id)).toEqual([2]);
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete" }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(deleteWorkflowSet).toHaveBeenCalledWith(10);
+    expect(deleteModels).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
   });
 
   it("renames a selected hand-made set on F2, as its pill says (#1520)", async () => {
