@@ -468,16 +468,22 @@
       <!-- The visible half of the same statement. `inert` on the wrapper is
            what actually stops the interaction; this is what says so. -->
       <div v-if="moves.running" class="shelf-dim" aria-hidden="true"></div>
-      <!-- The closed Models rail's handle (design B): a plain tab with the
-           count, no selection stripe. It moves at most once a session, the
-           first time a hand-made set is opened while the rail is closed. -->
+      <!-- The closed Models rail's handle, the one Workflows shows
+           (visual-language "Closed inspector"): it names the selection and
+           bounces on a new one. With nothing selected it is the plain handle,
+           carrying the rail's count. -->
       <InspectorEdgeTab
         v-if="!sidebarStore.modelsRailOpen"
+        :label="railLabel"
         :count="railCount"
-        :name="`Show models (${railCount.toLocaleString()})`"
-        :nudge="railNudge"
+        :name="
+          railLabel
+            ? `Show models: ${railLabel}`
+            : `Show models (${railCount.toLocaleString()})`
+        "
+        :nudge="sidebarStore.inspectorNudge"
         data-testid="models-rail-handle"
-        @open="sidebarStore.setModelsRailOpen(true)"
+        @open="openRailFromTab"
       />
       <!-- An unplugged drive states its scope ONCE, here, rather than through
            300 rows each carrying the same mark. The rows still take the offline
@@ -1643,12 +1649,6 @@
   </div>
 </template>
 
-<script>
-// The closed Models rail's one nudge a session, across remounts of the shelf
-// (see `railNudge`).
-let railNudged = false;
-</script>
-
 <script setup>
 import { withRef } from "../../utils/withRef.js";
 import {
@@ -1665,7 +1665,7 @@ import ShelfShowPanel from "../panels/ShelfShowPanel.vue";
 import ShelfSortPanel from "../panels/ShelfSortPanel.vue";
 import ShelfSelectionBar from "../panels/ShelfSelectionBar.vue";
 import WorkflowSetRenameDialog from "../panels/WorkflowSetRenameDialog.vue";
-import { handMadeName } from "../../utils/workflowSets";
+import { handMadeName, headName } from "../../utils/workflowSets";
 import WorkflowSetSelectionBar from "../panels/WorkflowSetSelectionBar.vue";
 import MissingSetSelectionBar from "../panels/MissingSetSelectionBar.vue";
 import ReplaceMissingDialog from "../io/ReplaceMissingDialog.vue";
@@ -1744,6 +1744,7 @@ import {
   withFolderSignals,
   formatModelSize,
   modelDate,
+  modelName,
   GROUP_BY_LABELS,
   modelVersion,
   movableCopies,
@@ -1775,18 +1776,59 @@ const sidebarStore = useSidebarStore();
 /** Every model the Models rail can offer: what its closed handle counts. */
 const railCount = computed(() => store.railRows.length);
 
-// One nudge of the closed rail's handle per session, never a glyph flash (the
-// toolbar glyph is busy showing tasks): the first hand-made set opened while
-// the rail is closed. Module-level so a remount of the shelf is not a new
-// session.
-const railNudge = ref(0);
+// ── The closed Models rail (visual-language "Closed inspector") ───────────
+//
+// Everything selected on the shelf, as `{key, noun, name}`: models (rows,
+// cards and tray members), hand-made sets, and cards named after a missing
+// file.
+const railPicked = computed(() => [
+  ...store.selectedRows.map((row) => ({
+    key: `model:${row.id}`,
+    noun: "models",
+    name: modelName(row).text || row.filename || "",
+  })),
+  ...store.selectedSets.map((set) => ({
+    key: `set:${set.id}`,
+    noun: "sets",
+    name: handMadeName(set),
+  })),
+  ...store.selectedMissingGroups.map((group) => ({
+    key: group.key,
+    noun: "missing models",
+    name: headName(group.head),
+  })),
+]);
+
+/** What the closed handle names: one name, `N models`, or "" for none. */
+const railLabel = computed(() => {
+  const picked = railPicked.value;
+  if (picked.length < 2) return picked[0]?.name ?? "";
+  const nouns = new Set(picked.map((item) => item.noun));
+  return `${picked.length.toLocaleString()} ${
+    nouns.size === 1 ? picked[0].noun : "selected"
+  }`;
+});
+
+// The same act as the toolbar toggle, so it persists. The handle unmounts as
+// the rail opens, so focus is handed to the rail's active tab rather than
+// dropping to `body`.
+function openRailFromTab() {
+  sidebarStore.setModelsRailOpen(true);
+  nextTick(() => document.querySelector(".mrail .inspector-tab--active")?.focus());
+}
+
+// A NEW selection nudges the rail: the handle bounces and the toolbar's rail
+// glyph flashes, both only while the rail is closed. Keyed on the selection's
+// identity, so re-clicking what is selected is not news, and clearing it is
+// not either.
 watch(
-  () => store.openSetKey,
-  (key) => {
-    if (railNudged || sidebarStore.modelsRailOpen) return;
-    if (!key?.startsWith("hand:")) return;
-    railNudged = true;
-    railNudge.value += 1;
+  () =>
+    railPicked.value
+      .map((item) => item.key)
+      .sort()
+      .join("\n"),
+  (identity) => {
+    if (identity) sidebarStore.inspectorNudge += 1;
   },
 );
 // The date column is stamped in the reader's own format, through the same
