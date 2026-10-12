@@ -518,6 +518,26 @@ def test_the_prompt_is_the_one_that_ran_not_the_editors_longest_string():
     assert info["negative_prompt"] == "blurry"
 
 
+def test_a_prompt_wired_from_a_builder_is_the_builders_own_text():
+    """The executed graph of a builder-fed encoder holds a link, not a literal:
+    the builder's text is all the file says, and the Recipe tab showed nothing."""
+    executed = json.loads(json.dumps(_EXECUTED))
+    executed["6"]["inputs"]["text"] = ["9", 0]
+    executed["9"] = {
+        "class_type": "LoRACharacterPromptBuilder",
+        "inputs": {
+            "seed": 5,
+            "character_trigger_word": "",
+            "character_description": "a plump gnome in a garden",
+            "facial_expression": "Random",
+            "outfit": ["7", 0],
+        },
+    }
+    info = extract_comfy_workflow_info({"png": {"prompt": json.dumps(executed)}})
+    assert info["positive_prompt"] == "a plump gnome in a garden"
+    assert info["negative_prompt"] == "blurry"
+
+
 def test_the_models_and_seed_come_from_the_executed_graph_too():
     """The same defect, and the reason the fix is not scoped to the prompt: the
     editor's view surrenders these entirely."""

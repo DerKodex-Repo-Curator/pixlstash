@@ -393,7 +393,11 @@ def _resolve_text_api(value: Any, workflow: dict, depth: int = 0) -> str | None:
     """Resolve a text input value in API format, following single-hop references.
 
     Handles both plain strings and references to primitive/text passthrough nodes
-    (e.g. ``PrimitiveStringMultiline``).
+    (e.g. ``PrimitiveStringMultiline``). A node that names its text otherwise
+    (``LoRACharacterPromptBuilder``) answers with its longest string, as
+    :func:`_extract_text_from_node_ui` reads the same node: what it builds from
+    that is not in the graph, and its own text is the prompt as far as the
+    file says.
     """
     if depth > _MAX_FOLLOW_DEPTH:
         return None
@@ -408,6 +412,18 @@ def _resolve_text_api(value: Any, workflow: dict, depth: int = 0) -> str | None:
             v = inputs.get(key)
             if v is not None:
                 return _resolve_text_api(v, workflow, depth + 1)
+        # ponytail: longest string, so a text node whose longest widget is a
+        # path or a name reads as that; type the output from object_info if
+        # one turns up.
+        candidates = [
+            v.strip()
+            for v in inputs.values()
+            if isinstance(v, str)
+            and v.strip()
+            and v.strip().lower() not in _TEXT_CONTROL_VALUES
+        ]
+        if candidates:
+            return max(candidates, key=len)
     return None
 
 
