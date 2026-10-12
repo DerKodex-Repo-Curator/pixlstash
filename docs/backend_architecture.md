@@ -1462,7 +1462,7 @@ are load-bearing:
   and not a field on `GET /taggers`: the list route was `ANY_TOKEN` at the time, so a field there handed
   the owner's home directory to every share-link holder. The same sweep took `plugin_dirs`
   **and** `plugin_errors` off `GET /pictures/plugins` and `workflow_dirs` off
-  `GET /comfyui/workflows`, both `ANY_TOKEN` and both carrying the same directory; nothing
+  `GET /comfyui/workflows`, both `ANY_TOKEN` then and both carrying the same directory; nothing
   read any of them, so they are deleted rather than moved.
 
 A broken plugin never aborts the load: each entry is wrapped, logged with its path, and

@@ -3491,31 +3491,59 @@ def test_the_workflow_list_says_which_files_have_a_lora_loader(
     assert slots["plain.json"] == []
 
 
-def test_a_share_link_sees_no_lora_filenames_on_the_workflow_list(
-    workflow_env, lora_workflow
+def test_the_workflow_list_is_the_owners_alone(
+    workflow_env, lora_workflow, monkeypatch
 ):
-    """The list is open to share tokens, and a slot's value is the owner's inventory.
+    """No share token lists the stored workflows; each layer refuses by itself.
 
-    /models/ and /adapters/ keep the model inventory from those tokens, so the
-    list must not hand the same filenames and digests out through its slots.
-    The scoped token still reads the list, because over-blocking is its own
-    regression.
+    The list names every stored workflow, whatever the Workflows view hides,
+    so it is refused the way ``GET /workflows`` is. The owner still reading it
+    is the control that keeps the refusals from being a dead path.
     """
     server = workflow_env.server
-    token = _mint(
-        workflow_env.owner,
-        "lora slot probe",
-        resource_type="character",
-        resource_id=workflow_env.character_id,
+    path = f"{API}/comfyui/workflows"
+    assert_real_route(server.api, "GET", path, path)
+    clients = (
+        _bearer(server, _mint(workflow_env.owner, "list probe unscoped")),
+        _bearer(
+            server,
+            _mint(
+                workflow_env.owner,
+                "list probe scoped",
+                resource_type="character",
+                resource_id=workflow_env.character_id,
+            ),
+        ),
     )
-    client = _bearer(server, token)
-    r = client.get(f"{API}/comfyui/workflows")
-    assert r.status_code == 200, r.text
-    row = next(w for w in r.json()["workflows"] if w["name"] == "lora.json")
-    assert [s["node_id"] for s in row["lora_slots"]] == ["2", "3"]
-    assert all("value" not in slot for slot in row["lora_slots"])
-    assert "whatever-is-there.safetensors" not in r.text
-    assert "0" * 64 not in r.text
+
+    def refused_everywhere(detail: str) -> None:
+        for client in clients:
+            assert client.get(f"{API}/pictures").status_code == 200, (
+                "the token is dead; the refusal below would prove nothing"
+            )
+            r = client.get(path)
+            assert r.status_code == 403, f"{r.status_code} {r.text}"
+            assert detail in r.text, r.text
+        r = workflow_env.owner.get(path)
+        assert r.status_code == 200, r.text
+        row = next(w for w in r.json()["workflows"] if w["name"] == "lora.json")
+        # The list says where the loaders are; the values are the card's.
+        assert row["lora_slots"]
+        assert all("value" not in slot for slot in row["lora_slots"])
+        assert "whatever-is-there.safetensors" not in r.text
+
+    previously_enforcing = server.authz._enforcing
+    try:
+        # The belt alone: the gate rolled back.
+        server.authz._enforcing = False
+        refused_everywhere("Token is read-only")
+        # The gate alone: both belts emptied.
+        server.authz._enforcing = True
+        monkeypatch.setattr(auth, "READ_BLOCKED_GET_PATHS", frozenset())
+        monkeypatch.setattr(auth, "READ_BLOCKED_GET_PREFIXES", ())
+        refused_everywhere("Owner-level")
+    finally:
+        server.authz._enforcing = previously_enforcing
 
 
 # ===========================================================================

@@ -1358,11 +1358,11 @@ written into the stored file.
 `GET /api/v1/comfyui/workflows` reports `lora_slots` as `{node_id, class_type,
 field, by}`, `by` being `filename` for a core loader and `digest` for a
 ComfyUI-PixlStash one; a stacker's slots share a `node_id` and differ by
-`field`, and an empty list means the graph has no loader. That route is
-`ANY_TOKEN` and deliberately readable by share-link tokens, and a slot's value
-is a LoRA filename or digest - the owner's model inventory, which `/models/`
-and `/adapters/` keep from those tokens. The owner-only card detail read and
-the picture-scoped `GET /api/v1/comfyui/pictures/{id}/recipe` carry the values.
+`field`, and an empty list means the graph has no loader. The values are on
+the card detail read and on the picture-scoped
+`GET /api/v1/comfyui/pictures/{id}/recipe`. The list is `OWNER_ONLY`, like
+`GET /api/v1/workflows`: it names every stored workflow file, whatever the
+Workflows view hides, so no share-link token reads it.
 
 `GET /api/v1/comfyui/workflows` carries `has_selection_input` and `runnable`
 (a save node, in API format). The selection path offers a runnable workflow
