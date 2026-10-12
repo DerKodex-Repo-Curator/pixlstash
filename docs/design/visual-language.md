@@ -987,17 +987,18 @@ adopted by Workflows). The inspector is open by default so the grid is laid
 out around it from the first paint. The Models rail lists the shelf rather than
 describing a selection and starts closed, but closed it wears the same handle:
 it names the shelf's selection and takes the same nudge, and with nothing
-selected its chevron handle carries the rail's count. Closed, it is **never re-opened by itself**
+selected it is the same tab reading `All models`, without the selection stripe,
+which also bounces when a card's tray opens. Closed, it is **never re-opened by itself**
 — opening the docked rail takes a column away under the pointer — so the
 closed state has to say what it is hiding:
 
 | Part | Value |
 |---|---|
-| Width · max height | 34px · 260px, label ellipsised; a 20×52 chevron handle when nothing is selected |
+| Width · max height | 34px · 260px, label ellipsised; a 20×52 chevron handle when nothing is selected (Workflows) |
 | Label | `writing-mode: vertical-rl`, `--text-sm`, `--weight-medium`, chevron-left above it. One item: its name. Several: `N workflows` (on Models: `N models`, `N sets`, `N missing models`, or `N selected` for a mix) |
 | Surface | `--panel`, `--border` on all but the right edge, `--elevation-2` |
 | Corners | `--radius-md`, left corners only |
-| Selection stripe | 3px `--active-bar` on the left edge |
+| Selection stripe | 3px `--active-bar` on the left edge; none on a label that names no selection (`plain`) |
 | Placement | the content's right edge, vertically centred, `--z-floating` |
 
 - **Click only**, never hover: the content's scrollbar is on that edge. It is a

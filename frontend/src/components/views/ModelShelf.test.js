@@ -4709,20 +4709,22 @@ describe("the closed Models rail's handle", () => {
   const handle = (wrapper) => wrapper.find('[data-testid="models-rail-handle"]');
   const rowAt = (wrapper, i) => wrapper.findAll(".shelf-row")[i];
 
-  it("is the plain handle until something is selected, then names it", async () => {
+  it("says All models, unstriped, until something is selected, then names it", async () => {
     const wrapper = await mountShelf([
       adapter({ id: 1 }),
       adapter({ id: 2, display_name: "Mossy Ink" }),
     ]);
-    expect(handle(wrapper).classes()).not.toContain(
-      "inspector-edge-tab--labelled",
+    expect(handle(wrapper).classes()).toContain("inspector-edge-tab--labelled");
+    expect(handle(wrapper).classes()).toContain("inspector-edge-tab--plain");
+    expect(handle(wrapper).find(".inspector-edge-tab__label").text()).toBe(
+      "All models",
     );
-    expect(handle(wrapper).find(".inspector-edge-tab__label").exists()).toBe(
-      false,
+    expect(handle(wrapper).attributes("aria-label")).toBe(
+      `Show all models (${useModelShelfStore().railRows.length})`,
     );
 
     await rowAt(wrapper, 1).trigger("click");
-    expect(handle(wrapper).classes()).toContain("inspector-edge-tab--labelled");
+    expect(handle(wrapper).classes()).not.toContain("inspector-edge-tab--plain");
     expect(handle(wrapper).find(".inspector-edge-tab__label").text()).toBe(
       "Mossy Ink",
     );
@@ -4757,6 +4759,28 @@ describe("the closed Models rail's handle", () => {
     store.clearSelection();
     await wrapper.vm.$nextTick();
     expect(sidebar.inspectorNudge).toBe(start + 2);
+  });
+
+  it("nudges when a card's tray opens with nothing selected, not when it closes", async () => {
+    const wrapper = await mountShelf([adapter({ id: 1 })]);
+    const sidebar = useSidebarStore();
+    const store = useModelShelfStore();
+    const start = sidebar.inspectorNudge;
+
+    store.toggleSet("set:a");
+    await wrapper.vm.$nextTick();
+    expect(store.selectedRows).toEqual([]);
+    expect(sidebar.inspectorNudge).toBe(start + 1);
+    expect(handle(wrapper).find(".inspector-edge-tab__label").text()).toBe(
+      "All models",
+    );
+    expect(handle(wrapper).classes().join(" ")).toContain(
+      "inspector-edge-tab--nudge-",
+    );
+
+    store.toggleSet("set:a");
+    await wrapper.vm.$nextTick();
+    expect(sidebar.inspectorNudge).toBe(start + 1);
   });
 
   it("opens the rail on a click, and is gone while it is open", async () => {
