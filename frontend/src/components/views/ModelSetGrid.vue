@@ -2275,8 +2275,27 @@ function onKeyDown(event) {
   padding: 0 0 var(--space-4);
 }
 
-/* The New workflow set tile: a dashed card-sized target, the design's ＋. */
+/* The New workflow set tile: a dashed card-sized target, the design's ＋. It
+   is as tall as the row it sits in: the grid top-aligns its cards, so the
+   tile's row opts back into stretching and hands the height down to the tile.
+   `aspect-ratio` is what is left when nothing in the row is taller: the
+   tile's whole height in a row it has to itself, its floor beside a card. */
+.msg__newrow {
+  display: flex;
+  align-self: stretch;
+}
+
+.msg__newrow .msg__cell {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+}
+
+/* `min-width: 0` or the ratio works backwards: a stretched tile would claim
+   the width its new height implies and spill over the next column. */
 .msg__new {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
