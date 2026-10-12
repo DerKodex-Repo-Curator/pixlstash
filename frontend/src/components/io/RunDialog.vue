@@ -590,6 +590,16 @@
             @keydown.stop
           />
         </div>
+        <p
+          v-if="repeatsPicture"
+          class="rund-f rund-f--4 rund-note"
+          role="status"
+          data-testid="rund-repeats-picture"
+        >
+          Same recipe and same seed, so this makes the picture you already
+          have, and an exact duplicate is not added again. Change the seed or a
+          setting to get a new one.
+        </p>
 
         <!-- Per run and never remembered (#1457, decision 4): the default
              follows whether a selected picture is actually fed into the graph,
@@ -1688,6 +1698,22 @@ const coverUrl = computed(() => {
   return cover ? workflowCoverUrl(cover) : "";
 });
 const seedText = computed(() => recipe.value?.seed_text || "");
+/**
+ * Whether this run would make the picture it is run from again: its own
+ * recipe on its own workflow, nothing changed, its seed, and no model or
+ * choice replaced for one this ComfyUI lacks. The library keeps no exact
+ * duplicate, so such a run adds nothing, and the form says so first.
+ */
+const repeatsPicture = computed(() => {
+  if (!runsOwnWorkflow.value || dirty.value || !seedText.value) return false;
+  if (modelFixes.value.length || choiceFixes.value.length || checkpointFix.value) {
+    return false;
+  }
+  return (
+    seedMode.value === "keep" ||
+    (seedMode.value === "fixed" && String(seed.value).trim() === seedText.value)
+  );
+});
 
 const sourceKindLine = computed(() => {
   const many = pictureIds.value.length;
