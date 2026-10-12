@@ -3120,9 +3120,10 @@ describe("the person a workflow run alone is of", () => {
     expect(tile(wrapper, 7).find("img").attributes("src")).toBe(
       "/api/v1/characters/7/thumbnail",
     );
-    // Noor's LoRA is for another base model: said, not offered.
+    // Noor's LoRA is for another base model: said, not offered. The tiles
+    // need no sentence of their own, so that is the whole note.
     expect(tile(wrapper, 8).exists()).toBe(false);
-    expect(wrapper.text()).toContain(
+    expect(wrapper.find('[data-testid="rund-person"] .rund-note').text()).toBe(
       "Not listed: 1 whose LoRA is for another base model.",
     );
     // Nobody picked: the run says nothing about a person.
@@ -3361,6 +3362,18 @@ describe("the person a workflow run alone is of", () => {
     expect(tile(wrapper, 8).exists()).toBe(false);
     expect(wrapper.text()).toContain(
       "Not listed: 1 whose LoRA has no base model recorded.",
+    );
+  });
+
+  it("says why nobody is offered, in the server's words", async () => {
+    listAdapters.mockImplementation(async ({ fileKind } = {}) =>
+      fileKind ? [] : [KREA_ONLY],
+    );
+    const wrapper = await mountRun(fromCard);
+    expect(tile(wrapper, 8).exists()).toBe(false);
+    expect(wrapper.find('[data-testid="rund-person"] .rund-note').text()).toBe(
+      "No person has a LoRA for this workflow's base model, so it runs with " +
+        "no one's. Not listed: 1 whose LoRA is for another base model.",
     );
   });
 

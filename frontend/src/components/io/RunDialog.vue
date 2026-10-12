@@ -2566,10 +2566,11 @@ const personNote = computed(() => {
   const parts = [];
   if (clash) parts.push(`${clash} whose LoRA is for another base model`);
   if (unknown) parts.push(`${unknown} whose LoRA has no base model recorded`);
-  const left = parts.length ? ` Not listed: ${parts.join(", ")}.` : "";
+  const left = parts.length ? `Not listed: ${parts.join(", ")}.` : "";
+  // The tiles say who can be picked; only who was left out needs words.
   return people.length
-    ? `A workflow runs without a person's LoRA. Pick people to add theirs.${left}`
-    : `No person has a LoRA for this workflow's base model, so it runs with no one's.${left}`;
+    ? left
+    : `No person has a LoRA for this workflow's base model, so it runs with no one's. ${left}`.trim();
 });
 
 function personName(id) {
