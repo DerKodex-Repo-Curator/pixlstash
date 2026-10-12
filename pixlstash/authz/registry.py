@@ -1514,7 +1514,12 @@ ROUTE_POLICIES: dict[tuple[str, str], RoutePolicy] = {
         "/api/v1/pictures/guest-scores",
     ): _LIST_AWARE,  # READ_SAFE; scope-filters ids
     # ── comfyui.py ──────────────────────────────────────────────────────────
-    ("GET", "/api/v1/comfyui/workflows"): RoutePolicy(_ANY),
+    # Every stored workflow file by name, whatever the Workflows view hides, so
+    # it sits on that view's tier rather than open to share tokens.
+    ("GET", "/api/v1/comfyui/workflows"): RoutePolicy(
+        _OWNER,
+        justification="Names every stored workflow file, hidden workflows included; owner only like GET /workflows",
+    ),
     ("DELETE", "/api/v1/comfyui/workflows/{workflow_name}"): RoutePolicy(
         _OWNER,
         justification="Delete workflow; DELETE blocked for READ tokens; owner only",
