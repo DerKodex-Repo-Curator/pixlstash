@@ -38,6 +38,8 @@
       @pointerdown="
         pressedBackground = $event.button === 0 && isBackground($event)
       "
+      @click.capture="swallowAfterTrayMove"
+      @dblclick.capture="swallowAfterTrayMove"
       @click="onBackgroundClick"
     >
       <!-- No evidence to draw, said above a grid that still holds the New
@@ -958,15 +960,47 @@ function onBackgroundClick(event) {
 function onRowClick(entry, event) {
   cursorId.value = entry.id;
   if (targetOwnsTheGesture(event)) return;
-  if (entry.hand) {
-    selectSetEntry(entry, event);
+  if (entry.hand) selectSetEntry(entry, event);
+  else if (entry.missingKey) selectMissingEntry(entry, event);
+  else selectEntry(entry, event);
+  followWithTray(entry, event);
+}
+
+/**
+ * With a tray open, a plain click on another card moves the tray to it.
+ *
+ * Opening the first tray is still a double click (or ▸, or Enter): a click on a
+ * closed grid only selects. Ctrl and Shift are left out because they build a
+ * selection across cards, and the tray would follow none of them in particular.
+ */
+let trayMovedByClick = false;
+
+function followWithTray(entry, event) {
+  if (!store.openSetKey || store.openSetKey === entry.key) return;
+  if (event.ctrlKey || event.metaKey || event.shiftKey) return;
+  store.toggleSet(entry.key);
+  trayMovedByClick = true;
+  // A tray closing above the card pulls it up, possibly out of view.
+  nextTick(() => rowElement(entry)?.scrollIntoView?.({ block: "nearest" }));
+}
+
+/**
+ * The rest of a double click whose first press moved the tray: nothing.
+ *
+ * Moving the tray moves every row below it, so the second press lands on
+ * whatever slid under the pointer - another card, a tray row, a tray button -
+ * and the `dblclick` would close the tray the first press just opened.
+ * Listened for in the capture phase so it is stopped before any of them.
+ */
+function swallowAfterTrayMove(event) {
+  if (!trayMovedByClick) return;
+  if (event.type === "click" && event.detail <= 1) {
+    trayMovedByClick = false;
     return;
   }
-  if (entry.missingKey) {
-    selectMissingEntry(entry, event);
-    return;
-  }
-  selectEntry(entry, event);
+  if (event.type === "dblclick") trayMovedByClick = false;
+  event.stopPropagation();
+  event.preventDefault();
 }
 
 /** The missing-base card keys in drawn order, which a Shift-range spans. */

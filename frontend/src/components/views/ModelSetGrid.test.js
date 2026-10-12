@@ -1046,6 +1046,82 @@ describe("selection and the verbs", () => {
     expect(keys()).toEqual([]);
   });
 
+  describe("a click with a tray open", () => {
+    async function twoCards() {
+      const state = await mountGrid({
+        rows: [
+          row(1, "realvisXL_v5", "checkpoint"),
+          row(3, "filmgrain_xl"),
+          row(4, "Juggernaut_XL", "checkpoint"),
+        ],
+        combinations: [
+          combination("1,3", [CKPT, LORA]),
+          combination("4,3", [member(4, "Juggernaut_XL", "checkpoint"), LORA]),
+        ],
+      });
+      const cards = state.wrapper.findAll(".msg__row[data-key^='model:']");
+      const key = (card) => card.attributes("data-key");
+      const headOf = (card) => Number(key(card).split(":")[1]);
+      return { ...state, cards, key, headOf };
+    }
+
+    it("moves the tray to the card clicked, and selects it", async () => {
+      const { store, cards, key, headOf } = await twoCards();
+
+      // Nothing open: a click selects and opens nothing.
+      await cards[0].trigger("click");
+      expect(store.openSetKey).toBe("");
+
+      store.toggleSet(key(cards[0]));
+      await cards[1].trigger("click");
+      expect(store.openSetKey).toBe(key(cards[1]));
+      expect([...store.selectedIds]).toEqual([headOf(cards[1])]);
+
+      // The open card itself stays open under a click.
+      await cards[1].trigger("click");
+      expect(store.openSetKey).toBe(key(cards[1]));
+    });
+
+    it("leaves the tray where it is under Ctrl and Shift", async () => {
+      const { store, cards, key } = await twoCards();
+      store.toggleSet(key(cards[0]));
+
+      await cards[1].trigger("click", { ctrlKey: true });
+      await cards[1].trigger("click", { shiftKey: true });
+      expect(store.openSetKey).toBe(key(cards[0]));
+    });
+
+    it("swallows the rest of a double click that moved the tray", async () => {
+      const { wrapper, store, cards, key, headOf } = await twoCards();
+      // `trigger` cannot set `detail`, which is what tells the presses apart.
+      const press = async (card, type, detail) => {
+        card.element.dispatchEvent(
+          new MouseEvent(type, { bubbles: true, cancelable: true, detail }),
+        );
+        await wrapper.vm.$nextTick();
+      };
+      store.toggleSet(key(cards[0]));
+
+      // The second press lands on whatever slid under the pointer.
+      await press(cards[1], "click", 1);
+      await press(cards[0], "click", 2);
+      await press(cards[0], "dblclick", 2);
+      expect(store.openSetKey).toBe(key(cards[1]));
+      expect([...store.selectedIds]).toEqual([headOf(cards[1])]);
+
+      // A move with no second press owes nothing: the next click is its own.
+      await press(cards[0], "click", 1);
+      await press(cards[1], "click", 1);
+      expect(store.openSetKey).toBe(key(cards[1]));
+
+      // And a double click on the open card still closes it.
+      await press(cards[1], "click", 1);
+      await press(cards[1], "click", 2);
+      await press(cards[1], "dblclick", 2);
+      expect(store.openSetKey).toBe("");
+    });
+  });
+
   it("adds an unlit card with Ctrl or Space rather than toggling its model out", async () => {
     const { wrapper, store } = await openTray();
     const card = () => wrapper.find('[data-testid="model-set-card"]');

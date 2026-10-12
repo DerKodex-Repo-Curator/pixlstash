@@ -1582,6 +1582,15 @@ proves ran together, with a model free to appear in more than one.
   a disclosure control that replaced the selection would arm a model the reader
   never pointed at, so `targetOwnsTheGesture` — the same test `onKeyDown`
   already used for a press aimed at a button — now filters clicks too.
+- **With a tray open, a plain click on another card moves the tray to it**
+  (`followWithTray`), as well as selecting it, whichever kind of card it is
+  (hand-made, from pictures, or named after a missing file). Opening the first tray is still a
+  double click, ▸ or Enter, and Ctrl and Shift clicks leave the tray alone
+  because they build a selection across cards. Moving the tray moves every row
+  below it, so the second press of a double click lands on whatever slid under
+  the pointer: `swallowAfterTrayMove`, a capture listener on the scroller, stops
+  that press and the `dblclick` after it, which would otherwise close the tray
+  the first press had just opened.
 - **`screenRows` is what "on screen" means, and it is the one place the two
   views are told apart.** `selectedRows`, `selectVisible` and `modelsBehind` all
   read it, so the rules they encode — a verb may only act on what the reader can
