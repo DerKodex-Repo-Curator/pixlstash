@@ -1974,8 +1974,10 @@ the shelf's workflow sets section) and served as `hand_made` on
   have. Add it?") until the owner adds or keeps it separate: nothing is a
   toast, nothing is one-time. The word "merge" is never shown: the button adds
   files to the set. With **one** model the panel names it (kind · name · precision) and is
-  answered in place: *Add to set* is `addToHandMadeSet` with `joined`, *Not
-  this one* is Keep separate, and the cursor lands back on the card. With
+  answered in place: *Add to set* is `addToHandMadeSet` with `joined`, *Stop
+  asking* is Keep separate (the same label for one model or several, on the
+  card and the strip; its tooltip says the answer keeps out only the models
+  offered, so a picture needing another model still asks), and the cursor lands back on the card. With
   **several**, *Review N…* opens the tray with the cursor on the **offer
   strip**, which repeats the card's sentence. The panel's buttons are
   mouse-only (the grid owns Tab); the card's accessible name carries the

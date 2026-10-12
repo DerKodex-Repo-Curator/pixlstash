@@ -192,7 +192,7 @@
           tabindex="-1"
           :tooltip="`Keep this set separate from ${offerThose}. The set's menu can suggest them again.`"
           @click.stop="emit('keep-separate')"
-          >{{ set.offer.models.length === 1 ? "Not this one" : "Not these" }}</AppButton
+          >Stop asking</AppButton
         >
         <AppButton
           variant="primary"
