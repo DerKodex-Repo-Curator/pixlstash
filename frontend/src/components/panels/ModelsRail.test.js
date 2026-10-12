@@ -225,6 +225,40 @@ describe("what the rail lists", () => {
     expect(modelsTab.text()).toContain("3");
   });
 
+  it("lists a stack as its leader alone, and hides it whole", async () => {
+    setModelsHidden.mockImplementation(async (ids, hidden) => (hidden ? ids : []));
+    // The leader comes last and has the highest id: only its position names it.
+    const { wrapper } = await mountRail({
+      rows: [
+        ...ROWS,
+        row(21, "Portrait-000004", "adapter", { stack_id: 9, stack_position: 2 }),
+        row(22, "Portrait-000008", "adapter", { stack_id: 9, stack_position: 1 }),
+        row(23, "Portrait", "adapter", { stack_id: 9, stack_position: 0 }),
+      ],
+    });
+    const stacked = () =>
+      wrapper.findAll('[role="option"]').filter((o) => o.text().includes("Portrait"));
+    expect(stacked().map((o) => o.attributes("data-model-id"))).toEqual(["23"]);
+    expect(wrapper.findAll(".inspector-tab")[0].text()).toContain("4");
+
+    // A member's own filename finds the stack, still as its leader.
+    const search = wrapper.find('[data-testid="mrail-search"] input');
+    await search.setValue("Portrait-000004");
+    expect(
+      wrapper.findAll('[role="option"]').map((o) => o.attributes("data-model-id")),
+    ).toEqual(["23"]);
+    await search.setValue("");
+
+    // The leader alone would only hand its place to the next member.
+    await stacked()[0].trigger("contextmenu");
+    const hideRow = wrapper.find('.mrail-menu [data-testid="mrail-hide"]');
+    expect(hideRow.text()).toContain("Hide 3 models");
+    await hideRow.trigger("click");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(setModelsHidden).toHaveBeenCalledWith([23, 22, 21], true);
+    expect(stacked()).toHaveLength(0);
+  });
+
   it("says where each model already is", async () => {
     const { wrapper } = await mountRail({
       handMade: [
@@ -358,6 +392,27 @@ describe("what the rail lists", () => {
     expect(store.railFitsSetId).toBe(10);
     // The set's own checkpoint is held, so Fits leaves it out.
     expect(option(wrapper, "RealVis")).toBeFalsy();
+  });
+
+  it("counts a stack once on the set panel's Models fit, as the rail lists it", async () => {
+    const { wrapper } = await mountRail({
+      handMade: [handSet(10, [member(1, "RealVisXL_v5", "checkpoint")])],
+      open: "hand:10",
+      rows: [
+        ...ROWS,
+        row(21, "Portrait-000004", "adapter", { stack_id: 9, stack_position: 1 }),
+        row(23, "Portrait", "adapter", { stack_id: 9, stack_position: 0 }),
+      ],
+    });
+    const grid = mountGrid();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await grid.vm.$nextTick();
+    await wrapper.find('[data-testid="mrail-fits"]').trigger("click");
+    const listedCount = wrapper.findAll('[role="option"]').length;
+    expect(listedCount).toBe(3);
+    expect(grid.find('[data-testid="models-fit"]').text()).toContain(
+      `Models · ${listedCount} fit`,
+    );
   });
 });
 

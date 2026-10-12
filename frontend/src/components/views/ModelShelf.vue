@@ -1685,7 +1685,7 @@ import ShelfShowPanel from "../panels/ShelfShowPanel.vue";
 import ShelfSortPanel from "../panels/ShelfSortPanel.vue";
 import ShelfSelectionBar from "../panels/ShelfSelectionBar.vue";
 import WorkflowSetRenameDialog from "../panels/WorkflowSetRenameDialog.vue";
-import { handMadeName, railListed } from "../../utils/workflowSets";
+import { handMadeName } from "../../utils/workflowSets";
 import WorkflowSetSelectionBar from "../panels/WorkflowSetSelectionBar.vue";
 import MissingSetSelectionBar from "../panels/MissingSetSelectionBar.vue";
 import ReplaceMissingDialog from "../io/ReplaceMissingDialog.vue";
@@ -1793,9 +1793,7 @@ const reviewSessionsStore = useReviewSessionsStore();
 const sidebarStore = useSidebarStore();
 
 /** Every model the Models rail can offer: what its closed handle counts. */
-const railCount = computed(
-  () => store.offeredRows.filter(railListed).length,
-);
+const railCount = computed(() => store.railRows.length);
 
 // One nudge of the closed rail's handle per session, never a glyph flash (the
 // toolbar glyph is busy showing tasks): the first hand-made set opened while
