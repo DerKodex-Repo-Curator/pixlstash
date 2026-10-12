@@ -13,7 +13,12 @@ from typing import Any
 
 from pixlstash.pixl_logging import get_logger
 from pixlstash.services.comfyui_recipe_service import model_filename_fields
-from pixlstash.services.workflow_hash import SHELF_ID_FIELD, is_link
+from pixlstash.services.workflow_hash import (
+    IMAGE_EXTENSIONS,
+    MODEL_EXTENSIONS,
+    SHELF_ID_FIELD,
+    is_link,
+)
 
 logger = get_logger(__name__)
 
@@ -412,18 +417,20 @@ def _resolve_text_api(value: Any, workflow: dict, depth: int = 0) -> str | None:
             v = inputs.get(key)
             if v is not None:
                 return _resolve_text_api(v, workflow, depth + 1)
-        # Only a string with a space in it: a file name, a path, a model or a
-        # choice (``Random``) is one word, and this answer is stored as the
+        # Only a string with a space in it that does not end as a model or a
+        # picture file does: a file name, a path or a choice (``Random``) is
+        # one word or carries its extension, and this answer is stored as the
         # picture's prompt.
         # ponytail: a one-word prompt on such a node reads as no prompt, and a
-        # path with spaces as one; type the output from object_info if either
-        # turns up.
+        # spaced path to any other kind of file as one; type the output from
+        # object_info if either turns up.
         candidates = [
             v.strip()
             for v in inputs.values()
             if isinstance(v, str)
             and len(v.split()) > 1
             and v.strip().lower() not in _TEXT_CONTROL_VALUES
+            and not v.strip().lower().endswith(MODEL_EXTENSIONS + IMAGE_EXTENSIONS)
         ]
         if candidates:
             return max(candidates, key=len)

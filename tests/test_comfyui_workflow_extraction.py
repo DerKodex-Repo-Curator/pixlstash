@@ -541,7 +541,12 @@ def test_a_prompt_wired_from_a_builder_is_the_builders_own_text():
     # longest string is a path, and that would be stored as the prompt.
     executed["9"] = {
         "class_type": "LoadTextFile",
-        "inputs": {"file_path": "prompts/portraits/long_list_v3.txt", "mode": "Random"},
+        "inputs": {
+            "file_path": "prompts/portraits/long_list_v3.txt",
+            "mode": "Random",
+            # Several words, and still a file.
+            "lora_name": "Realistic Vision v5 detail.safetensors",
+        },
     }
     info = extract_comfy_workflow_info({"png": {"prompt": json.dumps(executed)}})
     assert info["positive_prompt"] is None
