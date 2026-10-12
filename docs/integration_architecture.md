@@ -947,6 +947,15 @@ change the identity of the very card being run.
 tier 3 does not, because a stored instance document nulls its seeds by design,
 so `keep` there is a 400 rather than `count` identical images at seed 0.
 
+**`seed_mode: "keep"` on a recipe keeps the recipe's seed, not the graph's.**
+Run for one picture that no input reads (`picture_ids` of one, the group's
+source), the seeds are read off that picture's own embedded graph and written
+by node id and input, whichever tier supplied the graph: a workflow's saved
+document stores no seed, and a card's best picture is another picture. An
+input the picture's graph numbers otherwise takes the picture's first seed.
+With `saved_recipe_id` it is the row's kept seed. Only a run with neither
+keeps the seed of the graph it resolved.
+
 **A failure part way through the submissions answers `status: "partial"`** with
 the prompt ids already queued. They are running in ComfyUI whatever the request
 returns, and an id nobody was told about is a generation the owner cannot find,

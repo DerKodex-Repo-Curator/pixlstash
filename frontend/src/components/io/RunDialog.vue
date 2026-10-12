@@ -1645,9 +1645,9 @@ const subtitle = computed(() => card.value?.name || "");
  *
  * A clone is one picture's recipe on its own workflow, nothing on the form
  * changed, run with THAT picture's seed. Typed as the fixed one, this form
- * knows. With "Keep the original's" only the server does: it is a clone when
- * the graph that runs was read from this picture, and kept on another
- * picture's graph the seed is that picture's. So that one is left to it.
+ * knows. With "Keep the original's" only the server does: the seed it keeps
+ * is this picture's, and it is a clone when the graph that runs was read from
+ * this picture too. So that one is left to it.
  */
 function taskLabel() {
   // `runsOwnWorkflow` is only ever true of ONE picture: no recipe is read

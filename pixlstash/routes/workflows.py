@@ -6002,14 +6002,16 @@ def create_router(server) -> APIRouter:
                 or [],
             },
         )
-        # The seed, and ONLY when the caller left the choice open. A request
-        # that says `seed_mode` meant it: the recipe filling in a mode nobody
-        # asked for is the row winning over the gesture, which is the wrong way
-        # round and what this function's own contract says it does not do.
+        # The seed, and ONLY when the caller left the choice open or asked to
+        # keep it. A request that says "new" or "fixed" meant it: the recipe
+        # filling in a mode nobody asked for is the row winning over the
+        # gesture, which is the wrong way round and what this function's own
+        # contract says it does not do.
         # `seed` is compared against None, never truthiness: a kept seed of 0 is
         # a seed somebody kept.
         asked = "seed_mode" in (body.model_fields_set or set())
-        if body.seed is None and not asked and stored["keep_seed"]:
+        open_or_keep = not asked or body.seed_mode == "keep"
+        if body.seed is None and open_or_keep and stored["keep_seed"]:
             try:
                 merged = _revalidated(
                     merged, {"seed": int(stored["seed"]), "seed_mode": "fixed"}
@@ -7166,6 +7168,15 @@ def create_router(server) -> APIRouter:
                 and group.source_picture_id in group.picture_ids
                 else names.get(group.workflow_id)
             )
+            if (
+                body.seed_mode == "keep"
+                and not per_picture
+                and len(group.picture_ids) == 1
+            ):
+                # One picture's recipe: the seed to keep is that picture's. The
+                # graph that runs is the workflow's, whose own seed is a saved
+                # document's (none) or its best picture's.
+                _keep_seeds_of(graph, seed_targets, group.picture_ids[0], object_info)
             for selected in passes or [None]:
                 # Hoisted out of the loop below: it is a WRITE task, idempotent,
                 # and `count` runs of one pass all land in the one stack.
@@ -7249,6 +7260,31 @@ def create_router(server) -> APIRouter:
                     prompts.append(
                         {"workflow_id": group.workflow_id, "prompt_id": prompt_id}
                     )
+
+    def _keep_seeds_of(
+        graph: dict, targets: list[dict], picture_id: int, object_info: dict | None
+    ) -> None:
+        """Write the seeds *picture_id* was made with into *graph*'s seed inputs.
+
+        By node id and input, so a graph with several samplers gets each its
+        own seed back: a "new" run draws one per input. An input the picture's
+        graph numbers otherwise takes the picture's first seed, the one its
+        recipe shows. A picture with no seed to read leaves the graph's own,
+        logged.
+        """
+        own = _embedded_graph(picture_id, object_info)
+        made_with = run_service.run_seed_targets(own, object_info) if own else []
+        if not made_with:
+            logger.warning(
+                "[workflows] Picture %s has no seed to read, so its run keeps "
+                "the seed of the workflow's graph.",
+                picture_id,
+            )
+            return
+        seeds = {(t["node_id"], t["field"]): t["value"] for t in made_with}
+        for target in targets:
+            address = (target["node_id"], target["field"])
+            apply_seeds(graph, [target], seeds.get(address, made_with[0]["value"]))
 
     def _tag_for_stack(graph: dict, stack_id: int, source_id: int) -> None:
         """Tag the save node so its outputs join the source's stack however they

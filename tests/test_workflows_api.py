@@ -13126,6 +13126,56 @@ def test_a_saved_seed_never_overrides_a_seed_mode_the_caller_sent(runnable):
     assert 4242 not in seeds, seeds
     assert len(set(seeds)) == 2, seeds
 
+    # "keep" on a recipe is the recipe's seed, not the workflow graph's.
+    runnable.submitted.clear()
+    run = runnable.owner.post(
+        f"{API}/workflows/run",
+        json={"saved_recipe_id": recipe_id, "seed_mode": "keep"},
+    )
+    assert run.status_code == 200, run.text
+    assert runnable.submitted[0]["graph"]["3"]["inputs"]["seed"] == 4242
+
+
+def test_keeping_the_seed_of_a_pictures_recipe_keeps_that_pictures(
+    runnable, monkeypatch
+):
+    """`seed_mode: "keep"` on one picture is THAT picture's seed, whatever
+    graph the workflow runs: here its linked file, which carries another."""
+    from_file = json.loads(json.dumps(RUN_DOCUMENT))
+    from_file["3"]["inputs"]["seed"] = 5
+    from_file["1"]["inputs"]["ckpt_name"] = "realvisxl.safetensors"
+    from_file["2"]["inputs"]["lora_name"] = "add_detail.safetensors"
+    embedded = json.loads(json.dumps(from_file))
+    embedded["3"]["inputs"]["seed"] = 2**64 - 7
+    monkeypatch.setattr(
+        workflows_routes,
+        "_resolve_workflow_path",
+        lambda name: ("/authored.json", "user"),
+    )
+    monkeypatch.setattr(workflows_routes, "_load_workflow_json", lambda path: from_file)
+    monkeypatch.setattr(
+        workflows_routes,
+        "_load_embedded_api_prompt",
+        lambda server, pid, object_info=None: (embedded, []),
+    )
+    with runnable.server.hub.transaction() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO workflow_file "
+            "(workflow_name, workflow_key, topology_hash, structural_hash) "
+            "VALUES (?, ?, ?, ?)",
+            ("authored.json", RUN_CARD, RUN_TOPOLOGY, RUN_RECIPE),
+        )
+    r = runnable.owner.post(
+        f"{API}/workflows/run",
+        json={"picture_ids": [runnable.picture_id], "seed_mode": "keep", "count": 2},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["groups"][0]["source"] == "file", r.json()
+    assert [e["graph"]["3"]["inputs"]["seed"] for e in runnable.submitted] == [
+        2**64 - 7,
+        2**64 - 7,
+    ]
+
 
 def test_a_failure_part_way_through_still_reports_what_was_queued(runnable):
     """A prompt id nobody was told about is a generation nobody can find.
