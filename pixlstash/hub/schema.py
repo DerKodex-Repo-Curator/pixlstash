@@ -1537,6 +1537,18 @@ CREATE TABLE IF NOT EXISTS workflow_layout (
 )
 """
 
+# This shelf's own id (#1912): what a graph names beside a shelf row id, so
+# the id can be told from another PixlStash's when the graph is read back out
+# of a picture. A row id alone cannot say: ids start at 1 on every shelf. One
+# row, written the first time it is asked for (``model_shelf_service.
+# shelf_uuid``) and never again, so it moves with the file and its ids do.
+_V2_SHELF_IDENTITY = """
+CREATE TABLE IF NOT EXISTS shelf_identity (
+    id    INTEGER PRIMARY KEY CHECK (id = 1),
+    uuid  TEXT NOT NULL
+)
+"""
+
 _V2_WORKFLOW_INDEXES = (
     # "Which recipes are variants of this workflow" - the library view's expand
     # interaction, and the only query here that is not a primary-key lookup.
@@ -1618,6 +1630,7 @@ _V2_WORKFLOW_TABLES = (
     _V2_WORKFLOW_CHANGE,
     _V2_WORKFLOW_KEPT_VARIANT,
     _V2_WORKFLOW_LAYOUT,
+    _V2_SHELF_IDENTITY,
     *_V2_WORKFLOW_INDEXES,
 )
 

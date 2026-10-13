@@ -45,7 +45,13 @@ from pixlstash.services import import_dedup_service
 from pixlstash.services.layout_move_service import resolve_placement
 from pixlstash.services.move_reconciliation_service import add_person
 from pixlstash.services.comfyui_recipe_service import (
+    CHECKPOINT_LOADER_ID,
+    CHECKPOINT_LOADER_SHELF,
     PACK_SAVERS,
+    PICTURE_LOADER_IDS,
+    PICTURE_LOADER_LIBRARY,
+    PIXLSTASH_CHECKPOINT_LOADER,
+    PIXLSTASH_PICTURE_LOADER,
     VIDEO_SAVE_CLASSES,
     format_prompt_rejection,
 )
@@ -740,12 +746,21 @@ PIXLSTASH_ALLOWED_NODES = frozenset(
         "PixlStashPictureLikenessGate",
     }
 )
-# Sources its own input: baked ``picture_ids``, or its own sort and filters
-# when that is empty. Allowed only where the run writes the ids in itself.
-PIXLSTASH_PICTURE_LOADER = "PixlStashPictureLoader"
-# Names a shelf row id, which is per-hub. Allowed only from a stored workflow
-# file, which was authored against this hub's shelf.
-PIXLSTASH_CHECKPOINT_LOADER = "PixlStashCheckpointLoader"
+# The picture loader sources its own input: baked ``picture_ids``, or its own
+# sort and filters when that is empty. Allowed only where the run writes the
+# ids in itself, or where the ids are this library's own
+# (``PICTURE_LOADER_LIBRARY``).
+#
+# The checkpoint loader names a shelf row id, which is per-hub. Allowed from a
+# stored workflow file, which was authored against this hub's shelf, and
+# wherever the id is this shelf's own (``CHECKPOINT_LOADER_SHELF``).
+#
+# What an id may be: the node's own rule (`str.isdigit`), and no longer than a
+# row id can be (`workflow_hash._MAX_SHELF_ID_LENGTH`).
+_ROW_ID_RE = re.compile(r"[0-9]{1,12}")
+# A shelf row id as the checkpoint loader matches it, which is as text
+# against the row's own: no padding, so `007` is no row's id there.
+_SHELF_ROW_ID_RE = re.compile(r"[1-9][0-9]{0,11}")
 
 # The pack's own rule for reading the id out of a loader's choice.
 _LIBRARY_ID_RE = re.compile(r"#(\d+)\s*$")
@@ -799,12 +814,51 @@ def library_ids_named(workflow: dict) -> dict[str, set[int]]:
     return named
 
 
+def own_picture_ids(node: dict, library_uuid: str | None) -> list[int]:
+    """The pictures a picture loader names, when it says they are this library's.
+
+    Empty for a loader that names no library or another one, that holds no id
+    (it would pick pictures by its own sort), or whose ids do not read. Whether
+    the library still has each picture is the caller's to look up.
+    """
+    inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+    raw = inputs.get(PICTURE_LOADER_IDS)
+    if (
+        not library_uuid
+        or inputs.get(PICTURE_LOADER_LIBRARY) != library_uuid
+        or not isinstance(raw, str)
+    ):
+        return []
+    ids = [part.strip() for part in raw.split(",") if part.strip()]
+    if not all(_ROW_ID_RE.fullmatch(part) for part in ids):
+        return []
+    return [int(part) for part in ids]
+
+
+def own_checkpoint_id(node: dict, shelf_uuid: str | None) -> str | None:
+    """The shelf row a checkpoint loader names, when it says the id is this
+    shelf's; ``None`` for no shelf named, another's, or an id that does not
+    read. Whether the shelf still has the row is the caller's to look up."""
+    inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+    shelf_id = inputs.get(CHECKPOINT_LOADER_ID)
+    if (
+        not shelf_uuid
+        or inputs.get(CHECKPOINT_LOADER_SHELF) != shelf_uuid
+        or not isinstance(shelf_id, str)
+        or not _SHELF_ROW_ID_RE.fullmatch(shelf_id.strip())
+    ):
+        return None
+    return shelf_id.strip()
+
+
 def pixlstash_node_refusals(
     workflow: dict,
     *,
     library_ids: dict[str, dict[int, str]] | None = None,
     picture_loader: bool = False,
     from_file: bool = False,
+    library_uuid: str | None = None,
+    shelf_uuid: str | None = None,
 ) -> list[dict]:
     """Every ComfyUI-PixlStash node in *workflow* that may not run, and why.
 
@@ -826,6 +880,10 @@ def pixlstash_node_refusals(
             (a card run's picture inputs). The caller then owns refusing a
             loader it did not feed.
         from_file: Whether the graph is a stored workflow file.
+        library_uuid: This library's uuid. A picture loader that names it
+            beside its ids runs on them, fed or not.
+        shelf_uuid: This shelf's own id. A checkpoint loader that names it
+            beside its row id runs whatever the graph's source.
     """
     present = library_ids or {}
     refused = []
@@ -844,10 +902,10 @@ def pixlstash_node_refusals(
             ):
                 why = {"why": "not_in_library", "kind": kind, "id": library_id}
         elif class_type == PIXLSTASH_PICTURE_LOADER:
-            if not picture_loader:
+            if not picture_loader and not own_picture_ids(node, library_uuid):
                 why = {"why": "picks_its_own_picture"}
         elif class_type == PIXLSTASH_CHECKPOINT_LOADER:
-            if not from_file:
+            if not from_file and own_checkpoint_id(node, shelf_uuid) is None:
                 why = {"why": "per_hub_checkpoint"}
         elif class_type in PIXLSTASH_SAVER_CLASSES:
             # Never submitted: swap_pixlstash_savers takes it out first.

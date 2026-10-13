@@ -591,14 +591,16 @@ def drop_layout(conn: sqlite3.Connection, workflow_id: str) -> None:
     conn.execute("DELETE FROM workflow_layout WHERE workflow_id = ?", (workflow_id,))
 
 
-def layout_for(hub: HubDatabase, workflow_id: str, structure: str) -> Optional[dict]:
-    """*workflow_id*'s layout when it was saved over a graph wired as
-    *structure*, else ``None`` (also for one that will not read, logged)."""
+def layout_for(
+    hub: HubDatabase, workflow_id: str, structures: set[str]
+) -> Optional[dict]:
+    """*workflow_id*'s layout when it was saved over a graph wired as one of
+    *structures*, else ``None`` (also for one that will not read, logged)."""
     row = hub.fetchone(
         "SELECT document, structure FROM workflow_layout WHERE workflow_id = ?",
         (workflow_id,),
     )
-    if row is None or row["structure"] != structure:
+    if row is None or row["structure"] not in structures:
         return None
     try:
         document = json.loads(row["document"])

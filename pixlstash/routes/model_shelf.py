@@ -128,6 +128,7 @@ from pixlstash.services.model_shelf_service import (
     replace_attachments,
     served_family,
     set_models_hidden,
+    shelf_uuid,
     update_models,
 )
 from pixlstash.services.model_workflow_sets import (
@@ -1466,6 +1467,14 @@ class CheckpointListResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     checkpoints: list[ModelResponse]
+    shelf: str = Field(
+        description=(
+            "This shelf's own id. A row `id` means nothing on another "
+            "PixlStash, so whatever keeps one where it may be read back "
+            "somewhere else (the ComfyUI-PixlStash checkpoint loader, in a "
+            "picture's workflow) keeps this beside it."
+        )
+    )
 
 
 def _present_copy(locations: list[dict]) -> Optional[str]:
@@ -1918,6 +1927,7 @@ def create_router(server) -> APIRouter:
     ):
         server.auth.ensure_secure_when_required(request)
         return CheckpointListResponse(
+            shelf=shelf_uuid(server.hub),
             checkpoints=_build_list(
                 (FILE_CHECKPOINT,),
                 base_model=base_model,
@@ -1927,7 +1937,7 @@ def create_router(server) -> APIRouter:
                 set_id=None,
                 sort=sort,
                 direction=direction,
-            )
+            ),
         )
 
     @router.get(

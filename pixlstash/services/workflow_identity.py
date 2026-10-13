@@ -211,6 +211,12 @@ _V3_PLUMBING_CLASSES = frozenset(
     }
 )
 # The same sampler and the same save, other spellings (core rule v3).
+#
+# `PixlStashVideoSaver` is `SaveVideo`'s twin and is not here (#1912): adding
+# it regroups every graph that holds the node, which is a new core rule and
+# its data step, and nothing is misfiled without it. A video queued from a
+# canvas PixlStash opened is filed by the workflow's tag, not by its core.
+# It goes in with the next rule that is cut for a reason of its own.
 _V3_CANONICAL_CLASSES = {
     "KSamplerAdvanced": "KSampler",
     "PixlStashPictureSaver": "SaveImage",
