@@ -14470,8 +14470,11 @@ def test_a_video_workflow_takes_only_sets_that_start_where_it_does(cloneable):
             (RUN_TOPOLOGY,),
         )
     assert "LoadImage" in {node["class_type"] for node in cloneable.graph.values()}
-    # A video recipe with no graph stored says nothing about where it starts.
+    # A video recipe with no graph stored says nothing about where it starts,
+    # and neither does one whose stored document is no graph: the plans are
+    # still answered (`_plans` asserts the 200), with nothing refused.
     _ran_in(cloneable, "video", CLONE_CHECKPOINT, "krea-unread")
+    _ran_in(cloneable, "video", CLONE_CHECKPOINT, "krea-garbled", ["not a graph"])
     _body, plans = _plans(cloneable, krea=[cloneable.checkpoint_id])
     assert (plans["krea"]["fit"], plans["krea"]["reason"]) == ("other", None)
 
