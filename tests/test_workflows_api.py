@@ -20385,6 +20385,37 @@ def test_the_picture_loader_goes_in_only_on_a_picture_the_library_holds(id_loade
     assert loader(env.manual)["class_type"] == "LoadImage"
 
 
+def test_a_held_run_opens_on_the_picture_it_put_in_not_on_the_pin(id_loaders):
+    """The Run popup's pick for an input beats the picture pinned to it, in a
+    run and so in the run held for ComfyUI. Wrong if the loader that opens
+    names the pinned picture: that is another picture than the popup shows."""
+    env = id_loaders
+    env.monkeypatch.setattr(
+        workflows_routes, "_upload_image_to_comfyui", lambda url, path, name=None: name
+    )
+    document = _picture_document("subject.png")
+    address = {"slot_label": _label_of(document, "7"), "input_name": "image"}
+    r = env.owner.put(
+        f"{API}/workflows/{env.manual}/inputs",
+        json={"inputs": [{**address, "mode": "fixed", "picture_id": env.picture}]},
+    )
+    assert r.status_code == 200, r.text
+    picked = _add_picture(env.server, env.tmp_path, "picked.png")
+    library = env.server.vault.library_uuid
+
+    def loader(**body):
+        held = _hold_run(env, workflow_id=env.manual, **body)
+        assert held.status_code == 200, held.text
+        return _opened(env, env.manual, run=held.json()["opening"])["workflow"]["7"]
+
+    assert loader(inputs=[{**address, "picture_id": picked}]) == {
+        "class_type": "PixlStashPictureLoader",
+        "inputs": {"picture_ids": str(picked), "library": library},
+    }
+    # Nothing picked: the pin is the picture, as from the Workflow tab's Open.
+    assert loader()["inputs"]["picture_ids"] == str(env.picture)
+
+
 def test_a_graph_opened_on_pixlstashs_own_ids_and_saved_untouched_stores_nothing(
     id_loaders,
 ):

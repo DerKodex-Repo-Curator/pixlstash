@@ -8081,6 +8081,7 @@ def create_router(server) -> APIRouter:
         graph: dict,
         bindings: list | None,
         object_info: dict | None,
+        filled: dict[str, int] | None = None,
     ) -> list[dict]:
         """Swap ComfyUI-PixlStash nodes into *graph* for opening in ComfyUI.
 
@@ -8095,6 +8096,11 @@ def create_router(server) -> APIRouter:
         Asked of the same graph, it answers the same until the shelf, the
         library or a pin changes: ``PUT …/graph`` runs it again to know a
         graph saved untouched.
+
+        *filled* is ``{node_id: picture id}`` for the picture inputs a run
+        held for ComfyUI filled itself (``POST /workflows/run/opening``):
+        that picture is the one loaded there, over a pin the run's own pick
+        took the place of.
         """
         if not object_info:
             return []
@@ -8110,7 +8116,10 @@ def create_router(server) -> APIRouter:
             graph,
             object_info,
             _shelf_digest(hub, FILE_ADAPTER),
-            pictures=_known_pictures(workflow_id, graph, bindings, object_info)
+            pictures={
+                **_known_pictures(workflow_id, graph, bindings, object_info),
+                **(filled or {}),
+            }
             if PIXLSTASH_PICTURE_LOADER in object_info
             and _holds_class(graph, "LoadImage")
             else None,
@@ -8162,8 +8171,8 @@ def create_router(server) -> APIRouter:
             "The same body as POST /workflows/run, submitting nothing: builds "
             "the graph that run would submit, as `GET "
             "/workflows/{workflow_id}/graph` builds the workflow's own (none "
-            "of Run's repairs, PixlStash savers and adapter loaders in place "
-            "of the stock nodes), and holds it for a few minutes. `opening` "
+            "of Run's repairs, ComfyUI-PixlStash nodes in place of the stock "
+            "ones), and holds it for a few minutes. `opening` "
             "is what that route answers it for (`?run=`), which is what the "
             "Run popup's *Open in ComfyUI* sends ComfyUI to. The run's prompt, "
             "values, models, LoRAs and stages are in the graph, and so is its "
@@ -8213,6 +8222,8 @@ def create_router(server) -> APIRouter:
         # The pictures put in, as a run fills them. Only where the run would
         # go ahead: a refused one has no feeds, and opens with the graph's own.
         uploaded: dict[int, str] = {}
+        # Which picture each input was filled with, for the swap below.
+        filled: dict[str, int] = {}
         for feed in feeds:
             picture_id = feed.picture_id if feed.picture_id is not None else first
             if picture_id is None:
@@ -8229,8 +8240,22 @@ def create_router(server) -> APIRouter:
                     {workflow_bindings.IMAGE: [target]},
                     {workflow_bindings.IMAGE: value},
                 )
-        # A picture queued by hand comes back, as from the Workflow tab's Open.
-        _with_pack_nodes(graph, plan.object_info)
+                node_id = workflow_bindings.target_node(graph, target.get("path"))
+                if node_id is not None:
+                    filled[str(node_id)] = picture_id
+        # ComfyUI-PixlStash nodes in place of the stock ones, as the Workflow
+        # tab's Open puts them: a picture queued by hand comes back, and a
+        # picture input opens on the picture this run put there. The layout
+        # is matched on the graph as it was before them too.
+        own_nodes = deepcopy(graph)
+        _with_pack_nodes(
+            request,
+            workflow.workflow_id,
+            graph,
+            source.bindings,
+            plan.object_info,
+            filled,
+        )
         opening = _hold_run_opening(
             workflow.workflow_id,
             WorkflowRunnableGraph(
@@ -8240,7 +8265,7 @@ def create_router(server) -> APIRouter:
                 seedless=False,
                 forgotten=source.forgotten,
                 version=source.workflow_version,
-                editor=_layout_for(hub, workflow.workflow_id, graph),
+                editor=_layout_for(hub, workflow.workflow_id, graph, own_nodes),
                 people_loader=_people_loader_place(
                     workflow.workflow_id, graph, plan.object_info
                 ),
