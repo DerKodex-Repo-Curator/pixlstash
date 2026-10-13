@@ -5063,6 +5063,8 @@ def create_router(server) -> APIRouter:
             # A name two shelf models share is no answer about either.
             base_models[name] = None if name in base_models else model.base_model
         flags = []
+        # A base loader given another file -> the family of that file.
+        families: dict[str, str] = {}
         for model in models:
             slot_label, _, widget = model.address.rpartition(OVERRIDE_ADDRESS_SEPARATOR)
             now = model.filename or by_digest.get(str(model.sha256).lower())
@@ -5170,6 +5172,30 @@ def create_router(server) -> APIRouter:
                                 "now_base_model": now_base,
                             }
                         )
+                    if slot_kind(widget) not in BASE_MODEL_KINDS:
+                        continue
+                    family = family_of(now_base)
+                    if family:
+                        families[str(node_id)] = family
+                    else:
+                        logger.info(
+                            "[workflows] %s has no known base model family "
+                            "(%r), so a text encoder feeding node %s keeps "
+                            "its type.",
+                            entry["now"],
+                            now_base,
+                            node_id,
+                        )
+        # As a clone does: a base model of another family loads nothing its
+        # text encoder encoded for the old one (the sampler refuses it).
+        for row in retype_text_encoders(graph, families, object_info):
+            logger.info(
+                "[workflows] The text encoder on node %s loads as %r, not %r, "
+                "for the model now picked at its sampler.",
+                row["node_id"],
+                row["now"],
+                row["was"],
+            )
         return flags
 
     def _swapped_to_digest_loader(

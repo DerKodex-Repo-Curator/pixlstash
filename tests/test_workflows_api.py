@@ -11998,6 +11998,104 @@ def test_a_pinned_checkpoint_of_another_family_is_flagged_and_still_runs(runnabl
             )
 
 
+_ZIMAGE_UNET = "test-z-image-turbo.safetensors"
+_KREA_UNET = "test-krea2.safetensors"
+
+
+def test_a_picked_model_of_another_family_retypes_its_text_encoder(runnable):
+    """Use a set, then Run: the CLIP loader's `type` follows the model picked,
+    or the sampler refuses the prompt it encoded for the old one."""
+    info = json.loads(json.dumps(RUN_OBJECT_INFO))
+    info["UNETLoader"] = {
+        "input": {"required": {"unet_name": [[_ZIMAGE_UNET, _KREA_UNET], {}]}}
+    }
+    info["CLIPLoader"] = {
+        "input": {
+            "required": {
+                "clip_name": [["test-encoder.safetensors"], {}],
+                "type": [["lumina2", "krea2"], {}],
+            }
+        }
+    }
+    info["CLIPTextEncode"] = {"input": {"required": {"text": ["STRING", {}]}}}
+    runnable.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url: (info, None)
+    )
+    hub = runnable.server.hub
+    with hub.transaction() as conn:
+        for filename, base_model in (
+            (_ZIMAGE_UNET, "Z-Image Turbo"),
+            (_KREA_UNET, "Krea 2"),
+        ):
+            conn.execute(
+                "INSERT INTO model (file_kind, filename, sha256, base_model, "
+                "provenance) VALUES ('checkpoint', ?, ?, ?, 'scanned')",
+                (filename, _h(filename), base_model),
+            )
+    made: list[str] = []
+    try:
+        for was, was_type, now, now_type in (
+            (_ZIMAGE_UNET, "lumina2", _KREA_UNET, "krea2"),
+            (_KREA_UNET, "krea2", _ZIMAGE_UNET, "lumina2"),
+        ):
+            graph = {
+                "1": {"class_type": "UNETLoader", "inputs": {"unet_name": was}},
+                "2": {
+                    "class_type": "CLIPLoader",
+                    "inputs": {
+                        "clip_name": "test-encoder.safetensors",
+                        "type": was_type,
+                    },
+                },
+                "3": {
+                    "class_type": "CLIPTextEncode",
+                    "inputs": {"text": "a fox", "clip": ["2", 0]},
+                },
+                "4": {
+                    "class_type": "KSampler",
+                    "inputs": {
+                        "seed": 1,
+                        "steps": 8,
+                        "cfg": 1.0,
+                        "model": ["1", 0],
+                        "positive": ["3", 0],
+                    },
+                },
+                "5": {
+                    "class_type": "SaveImage",
+                    "inputs": {"filename_prefix": "x", "images": ["4", 0]},
+                },
+            }
+            manual = create_manual_workflow(hub, f"From {was_type}", graph, "import")
+            made.append(manual)
+            detail = runnable.owner.get(f"{API}/workflows/{manual}").json()
+            (address,) = [
+                m["address"]
+                for m in detail["card"]["default_recipe"]["models"]
+                if m["address"].endswith("/unet_name")
+            ]
+            runnable.submitted.clear()
+            r = runnable.owner.post(
+                f"{API}/workflows/run",
+                json={
+                    "workflow_id": manual,
+                    "models": [{"address": address, "filename": now}],
+                },
+            )
+            assert r.status_code == 200, r.text
+            sent = runnable.submitted[0]["graph"]
+            assert sent["1"]["inputs"]["unet_name"] == now
+            assert sent["2"]["inputs"]["type"] == now_type
+    finally:
+        for manual in made:
+            delete_manual_workflow(hub, manual)
+        with hub.transaction() as conn:
+            conn.execute(
+                "DELETE FROM model WHERE filename IN (?, ?)",
+                (_ZIMAGE_UNET, _KREA_UNET),
+            )
+
+
 def test_the_prompt_lands_in_the_graph_and_not_in_the_stored_document(runnable):
     document = json.loads(json.dumps(RUN_DOCUMENT))
     document["5"] = {
