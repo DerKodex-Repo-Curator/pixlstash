@@ -1980,6 +1980,50 @@ def place_recipe_loras(
     return placements, unplaced
 
 
+def slots_recipe_names(
+    slots: list[dict],
+    recipe_loras: list[dict],
+    slot_digests: dict[tuple[str, str], Optional[str]],
+) -> set[tuple[str, str]]:
+    """Every slot already loading a LoRA *recipe_loras* names.
+
+    **Every** such slot, where :func:`place_recipe_loras` places one slot per
+    LoRA: a recipe names a file once however many loaders load it, so a graph
+    holding one LoRA in eight loaders has all eight named, and "the loaders
+    the recipe leaves out" must not count seven of them.
+
+    By digest where the shelf knows the slot's and the recipe has one, else by
+    basename - the Run popup's own rule for which loaders get a row
+    (``loaderOf``). A slot the shelf identifies as another file of the same
+    name is not the recipe's.
+
+    Returns:
+        ``{(node_id, field), …}``.
+    """
+    wanted = [
+        (
+            str(saved.get("sha256") or "").strip().lower(),
+            normalized_filename(str(saved.get("filename") or "").strip()),
+        )
+        for saved in recipe_loras
+    ]
+    named = set()
+    for slot in slots:
+        key = (str(slot.get("node_id")), str(slot.get("field")))
+        held = slot_digests.get(key)
+        name = (
+            normalized_filename(str(slot.get("value") or "").strip())
+            if slot.get("by") != "digest"
+            else ""
+        )
+        if any(
+            digest == held if digest and held else bool(name) and name == filename
+            for digest, filename in wanted
+        ):
+            named.add(key)
+    return named
+
+
 def _side_fields(detected: WorkflowIO, side: str, node_id: str) -> tuple[str, ...]:
     """The inputs a prompt node may keep *side*'s text in.
 

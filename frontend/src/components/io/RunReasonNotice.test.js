@@ -224,7 +224,7 @@ describe("a LoRA the owner removed, and one that cannot be removed", () => {
     });
     const said = wrapper.text().replace(/\s+/g, " ");
     expect(said).toContain("Removed from this run: mira_v2.safetensors.");
-    expect(said).not.toContain("not on this ComfyUI");
+    expect(said).not.toContain("not in this ComfyUI");
     expect(said).not.toMatch(/skip|delet/i);
     expect(said).not.toContain("can't run");
     expect(rail(wrapper)).toContain("rrn--notice");

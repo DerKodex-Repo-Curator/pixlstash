@@ -164,7 +164,7 @@ export function readReason(reason) {
       const files = (reason.models || []).filter(Boolean);
       const count = files.length;
       return read(
-        `${count === 1 ? "A LoRA this workflow uses is" : `${count} LoRAs this workflow uses are`} not on this ComfyUI, so ${count === 1 ? "its loader is" : "their loaders are"} skipped and the run goes ahead without ${count === 1 ? "it" : "them"}. The result will look different.`,
+        `${count === 1 ? "A LoRA this workflow uses is" : `${count} LoRAs this workflow uses are`} not in this ComfyUI, so ${count === 1 ? "its loader is" : "their loaders are"} skipped and the run goes ahead without ${count === 1 ? "it" : "them"}. The result will look different.`,
         null,
         files,
         false,
@@ -217,7 +217,7 @@ export function readReason(reason) {
         );
       }
       return read(
-        `${files.length === 1 ? `${files[0]} is` : `${files.join(", ")} are`} not on this ComfyUI, so ${files.length === 1 ? "it loads" : "they load"} through the ComfyUI-PixlStash LoRA loader, which fetches ${files.length === 1 ? "it" : "them"} by hash.`,
+        `${files.length === 1 ? `${files[0]} is` : `${files.join(", ")} are`} not in this ComfyUI, so ${files.length === 1 ? "it loads" : "they load"} through the ComfyUI-PixlStash LoRA loader, which fetches ${files.length === 1 ? "it" : "them"} by hash.`,
         null,
         [],
         false,
@@ -413,7 +413,9 @@ export function bypassNotice(group) {
   const all = (group?.bypassed_loras || []).filter(Boolean);
   // `requested` absent is the server's own bypass: that is what the list
   // meant before the owner could skip anything, and it must keep its warning.
-  const missing = all.filter((model) => !model.requested);
+  // Not `recipe`: a loader the default recipe leaves out is not a missing
+  // file, and has no row in the popup to say anything about.
+  const missing = all.filter((model) => !model.requested && !model.recipe);
   const skipped = all.filter((model) => model.requested);
   return [
     ...(missing.length ? [{ code: LORAS_BYPASSED, models: missing }] : []),

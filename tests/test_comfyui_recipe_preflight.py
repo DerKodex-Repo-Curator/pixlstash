@@ -115,7 +115,7 @@ class TestPreflightFinds:
                 "class_type": "CheckpointLoaderSimple",
                 "field": "ckpt_name",
                 "value": "deleted_model.safetensors",
-                "note": "not available on this ComfyUI",
+                "note": "not available in this ComfyUI",
             }
         ]
 
@@ -924,7 +924,7 @@ class TestApplyAdapter:
     def test_a_lora_this_comfyui_does_not_have_is_refused(self):
         graph = {"1": self._graph()["1"]}
         adapter = {"sha256": "b" * 64, "filenames": ["elsewhere.safetensors"]}
-        with pytest.raises(LookupError, match="not on the ComfyUI"):
+        with pytest.raises(LookupError, match="not in the ComfyUI"):
             apply_adapter(graph, detect_lora_targets(graph), adapter, self.INFO)
         assert graph["1"]["inputs"]["lora_name"] == "old.st"
 
@@ -1269,7 +1269,7 @@ class TestLoraInsertion:
         # Neither: refused, saying why the core loader could not.
         graph = self._checkpoint_graph()
         with pytest.raises(
-            LookupError, match="not on this ComfyUI.*ComfyUI-PixlStash"
+            LookupError, match="not in this ComfyUI.*ComfyUI-PixlStash"
         ) as refused:
             insert_adapter(graph, plan, elsewhere, self.INFO)
         assert str(refused.value).endswith(PIXLSTASH_PACK_INSTALL_HINT)

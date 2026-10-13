@@ -533,7 +533,7 @@ describe("a refusal the popup offers to fix", () => {
     expect(wrapper.vm.reasons).toEqual([]);
     expect(wrapper.vm.canRun).toBe(true);
     const row = wrapper.find("[data-testid='rund-choice']");
-    expect(row.text()).toContain("res_2s is not on this ComfyUI");
+    expect(row.text()).toContain("res_2s is not in this ComfyUI");
 
     wrapper.vm.choiceFixes[0].chosen = "dpmpp_2m";
     await wrapper.vm.submit();
@@ -1245,7 +1245,7 @@ describe("removing a graph LoRA", () => {
       .findAll("[data-testid='rund-lora-flag']")
       .map((flag) => flag.text().replace(/mdi-\S+/, "").trim());
     expect(flags).toEqual([
-      "Not on this ComfyUI. The run leaves this loader out.",
+      "Not in this ComfyUI. The run leaves this loader out.",
     ]);
   });
 
@@ -1784,7 +1784,7 @@ describe("the body it sends", () => {
       const wrapper = await mountRun({ kind: "card", workflowId: KEY });
       // Nothing suggested while the read is out.
       expect(wrapper.vm.checkpointFixNote).toBe(
-        "realvisXL_v5.safetensors is not on this ComfyUI.",
+        "realvisXL_v5.safetensors is not in this ComfyUI.",
       );
       wrapper.vm.setCheckpoint("typed.safetensors");
       answer({ replacements: [{ id: 7, filename: "juggernautXL.safetensors" }] });
@@ -1850,7 +1850,7 @@ describe("the body it sends", () => {
         { value: "dreamshaperXL.safetensors", label: "dreamshaperXL" },
       ]);
       expect(wrapper.vm.checkpointFixNote).toContain(
-        "RealVisXL_V5.safetensors is not on this ComfyUI, so this workflow loads juggernautXL.safetensors in its place",
+        "RealVisXL_V5.safetensors is not in this ComfyUI, so this workflow loads juggernautXL.safetensors in its place",
       );
       await wrapper.vm.submit();
       await flushPromises();
