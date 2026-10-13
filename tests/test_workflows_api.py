@@ -14389,6 +14389,102 @@ def test_a_set_plan_names_the_swap_and_the_loader_before_and_after(cloneable):
     assert _manual_ids(cloneable) == []
 
 
+def _ran_in(env, kind: str, filename: str, name: str, graph: dict | None = None):
+    """A recipe of a *kind* workflow that names *filename* as its checkpoint."""
+    with env.server.hub.transaction() as conn:
+        conn.execute(
+            "INSERT INTO workflow_topology "
+            "(topology_hash, hash_version, node_count, first_seen_at) "
+            "VALUES (?, 'v1', 1, '2026-09-02T00:00:00Z')",
+            (_h(f"{name}-topology"),),
+        )
+        conn.execute(
+            "INSERT INTO workflow_topology_core "
+            "(topology_hash, core_hash, core_version, workflow_type, slots, "
+            "specials, traits) VALUES (?, ?, ?, ?, '[]', '', '')",
+            (_h(f"{name}-topology"), _h(f"{name}-core"), CORE_RULE_VERSION, kind),
+        )
+        conn.execute(
+            "INSERT INTO workflow_recipe "
+            "(structural_hash, topology_hash, hash_version, node_count, first_seen_at) "
+            "VALUES (?, ?, 'v1', 1, '2026-09-02T00:00:00Z')",
+            (_h(name), _h(f"{name}-topology")),
+        )
+        conn.execute(
+            "INSERT INTO workflow_recipe_asset "
+            "(structural_hash, widget_name, normalized_filename) "
+            "VALUES (?, 'ckpt_name', ?)",
+            (_h(name), filename),
+        )
+        if graph is not None:
+            conn.execute(
+                "INSERT INTO workflow_recipe_graph "
+                "(structural_hash, document_sha256, document, created_at) "
+                "VALUES (?, 'x', ?, '2026-09-02T00:00:00Z')",
+                (_h(name), json.dumps(graph)),
+            )
+
+
+def test_a_set_is_offered_only_to_the_kind_of_workflow_it_has_run_in(cloneable):
+    """RUN_WF is Text to Image, so a set that only ever made videos is refused.
+
+    Wrong if a set no recipe names is refused too (nothing is known about it),
+    or if one that has run both ways is.
+    """
+    _body, plans = _plans(cloneable, krea=[cloneable.checkpoint_id])
+    assert (plans["krea"]["fit"], plans["krea"]["reason"]) == ("other", None)
+
+    start_frame = {"1": {"class_type": "LoadImage", "inputs": {"image": None}}}
+    _ran_in(cloneable, "video", CLONE_CHECKPOINT, "krea-i2v", start_frame)
+    _body, plans = _plans(cloneable, krea=[cloneable.checkpoint_id])
+    krea = plans["krea"]
+    assert krea["fit"] == "wont_load"
+    assert krea["reason"] == "Used for Image to Video, not Text to Image"
+    assert krea["maps_cleanly"] is False
+
+    # From the prompt alone is another kind again, and both are named.
+    _ran_in(cloneable, "video", CLONE_CHECKPOINT, "krea-t2v", {"1": {}})
+    _body, plans = _plans(cloneable, krea=[cloneable.checkpoint_id])
+    assert plans["krea"]["reason"] == (
+        "Used for Image to Video and Text to Video, not Text to Image"
+    )
+
+    # One Text to Image recipe is enough: it has run in this kind too.
+    _ran_in(cloneable, "txt2img", CLONE_CHECKPOINT, "krea-t2i")
+    _body, plans = _plans(cloneable, krea=[cloneable.checkpoint_id])
+    assert (plans["krea"]["fit"], plans["krea"]["reason"]) == ("other", None)
+
+
+def test_a_set_that_ran_in_another_image_workflow_is_refused_by_name(cloneable):
+    _ran_in(cloneable, "img2img", CLONE_CHECKPOINT, "krea-i2i")
+    _body, plans = _plans(cloneable, krea=[cloneable.checkpoint_id])
+    assert plans["krea"]["reason"] == "Used for Image to Image, not Text to Image"
+
+
+def test_a_video_workflow_takes_only_sets_that_start_where_it_does(cloneable):
+    """The card says Video either way; its graph loads a start frame."""
+    with cloneable.server.hub.transaction() as conn:
+        conn.execute(
+            "UPDATE workflow_topology_core SET workflow_type = 'video' "
+            "WHERE topology_hash = ?",
+            (RUN_TOPOLOGY,),
+        )
+    assert "LoadImage" in {node["class_type"] for node in cloneable.graph.values()}
+    # A video recipe with no graph stored says nothing about where it starts.
+    _ran_in(cloneable, "video", CLONE_CHECKPOINT, "krea-unread")
+    _body, plans = _plans(cloneable, krea=[cloneable.checkpoint_id])
+    assert (plans["krea"]["fit"], plans["krea"]["reason"]) == ("other", None)
+
+    _ran_in(cloneable, "video", CLONE_CHECKPOINT, "krea-t2v", {"1": {}})
+    _body, plans = _plans(cloneable, krea=[cloneable.checkpoint_id])
+    assert plans["krea"]["reason"] == "Used for Text to Video, not Image to Video"
+
+    start_frame = {"1": {"class_type": "LoadImage", "inputs": {"image": None}}}
+    _ran_in(cloneable, "video", CLONE_CHECKPOINT, "krea-i2v", start_frame)
+    _body, plans = _plans(cloneable, krea=[cloneable.checkpoint_id])
+    assert (plans["krea"]["fit"], plans["krea"]["reason"]) == ("other", None)
+
+
 def test_a_set_plan_is_read_off_the_graph_with_the_owners_replacements(cloneable):
     """#1850 W5: the Workflow tab finds a row in the plan by the file it shows.
 

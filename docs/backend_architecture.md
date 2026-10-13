@@ -10405,7 +10405,17 @@ map, or a type ComfyUI does not list for that class keeps the graph's own.
 `POST /workflows/{id}/set-clone-plans` runs that same `_swap_files` on a copy
 per set asked, so the dialog's diff is the clone's own rewrite. The copy is
 the graph with the owner's model fixes applied, so each file it names is the
-one a run loads (§13, "A model pick at a loader that holds a model fix"). `_set_swaps`
+one a run loads (§13, "A model pick at a loader that holds a model fix").
+**A set is offered like for like only.** A set is for the kind of workflow its
+checkpoints have run in (`model_shelf_service.model_workflow_types`: the
+`workflow_type` of every recipe naming the checkpoint, in any library), and
+the kind is `workflow_identity.match_type`: the type, with `video` told apart
+by whether the graph loads a picture (`img2vid`, `txt2vid`), because a model
+that continues a picture does not load where one that starts from the prompt
+does and the card calls both Video. A set whose kinds do not include the
+workflow's is `wont_load` with `Used for <types>, not <type>`; a checkpoint no
+recipe names, and a workflow whose type is unknown, are refused nothing, since
+nothing is known. `_set_swaps`
 maps a set to the graph: the base slots take the checkpoints the caller names (`checkpoint_ids`, checkpoints or unclassified files, never guessed from the members), paired by `_pair_bases` - one base slot takes the first, and each slot of a two-model graph the untaken one whose filename is closest to its own, so a high-noise expert replaces the high-noise one; a slot left over keeps its file. The VAE and the text-encoder slots are each
 paired with the set's files of that kind in four passes, a file taken once
 (#1831): the owner's own pairing (`picks`, graph filename -> a model of
