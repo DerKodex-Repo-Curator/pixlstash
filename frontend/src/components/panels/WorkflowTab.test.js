@@ -4517,12 +4517,46 @@ describe("the tab as the editor (#1850)", () => {
         expect(count(wrapper)).toBe("2 unsaved changes");
         expect(arrival(wrapper).text()).toBe("");
         expect(pulsing(wrapper)).toBe(true);
+
+        // Back to one: the same number as the arrival, and still not said
+        // again. The bar never left, so nothing has arrived.
+        await picker(wrapper).setValue("");
+        await flush(wrapper);
+        expect(count(wrapper)).toBe("1 unsaved change");
+        expect(arrival(wrapper).text()).toBe("");
+        expect(pulsing(wrapper)).toBe(true);
       });
 
       it("is not played for changes that were already waiting", async () => {
         waitingOnServer = { ...WAITING };
         const { wrapper } = await mountEditor();
         await settle(wrapper);
+        expect(count(wrapper)).toBe("1 unsaved change");
+        expect(pulsing(wrapper)).toBe(false);
+        expect(arrival(wrapper).text()).toBe("");
+      });
+
+      it("is not played again when the workflow is left and come back to", async () => {
+        const cards = twoWorkflows();
+        getWorkflowChanges.mockImplementation((key) =>
+          Promise.resolve(
+            key === OTHER
+              ? changesState(null, { workflow_id: OTHER })
+              : changesState(waitingOnServer),
+          ),
+        );
+        const { wrapper, store } = await mountEditor(cards);
+        await settle(wrapper);
+        await stage(wrapper, "upscale").setValue(true);
+        await flush(wrapper);
+        expect(pulsing(wrapper)).toBe(true);
+
+        store.selectedKeys = [OTHER];
+        await settle(wrapper);
+        expect(bar(wrapper).exists()).toBe(false);
+        store.selectedKeys = [KEY];
+        await settle(wrapper);
+        // The change still waits, and finding it there is not it arriving.
         expect(count(wrapper)).toBe("1 unsaved change");
         expect(pulsing(wrapper)).toBe(false);
         expect(arrival(wrapper).text()).toBe("");

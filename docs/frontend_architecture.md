@@ -2585,10 +2585,11 @@ can no longer see.
     Run… stays the one amber button. **The bar arrives once**: `arrival` holds
     the count as the first change left it, set by a watcher only when a set
     already read as empty gains a change (selecting a workflow whose changes
-    were waiting is a read, not an arrival) and cleared when the bar leaves.
-    While it is set the bar plays the one-shot landing pulse and an
-    `role="status"` outside the bar says that text until the count moves on,
-    so a second change moves the count and announces nothing. **Which verbs are offered,
+    were waiting is a read, not an arrival). The same watcher sets `arrived`,
+    which is the one-shot landing pulse and lasts until the bar leaves, and
+    empties `arrival` as soon as the count moves: a `role="status"` outside
+    the bar prints it, so a second change announces nothing, and neither does
+    a count that comes back to the arrival's own number. **Which verbs are offered,
     and the sentence saying why one is not, are the server's** (`save` and
     `save_as_new`, each `{open, reason}`, on every changes read and write). A
     closed verb is not drawn greyed out: its `reason` is printed as sent,

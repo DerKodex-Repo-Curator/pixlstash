@@ -900,7 +900,7 @@
            announces nothing. Emptied once the count has moved on, so nobody
            reading the page finds an old number here. -->
       <p class="visually-hidden" role="status" data-testid="wftab-draft-arrival">
-        {{ arrival === unsavedText(changeCount) ? arrival : "" }}
+        {{ arrival }}
       </p>
       <!-- The unsaved changes of the graph, and the two verbs that keep them
            (#1850). Above Run…, and only while something waits. A count, never
@@ -914,7 +914,7 @@
       <div
         v-if="barOf"
         ref="draftBar"
-        :class="['wftab-draft', { 'wftab-draft--arrived': arrival }]"
+        :class="['wftab-draft', { 'wftab-draft--arrived': arrived }]"
         role="group"
         aria-label="Unsaved changes"
         data-testid="wftab-draft"
@@ -3044,10 +3044,12 @@ function unsavedText(count) {
 }
 
 /**
- * The bar has just arrived: the count as the first change left it, or "".
- * While it is set the bar plays its one landing pulse, and the live region
- * says this text until the count moves on, so both happen once: a second
- * change moves the bar's count and repeats neither.
+ * The bar has just arrived, in two parts that end at different times.
+ * `arrived` is the landing pulse, and lasts as long as the bar. `arrival` is
+ * what the live region says, the count as the first change left it: emptied
+ * the moment the count moves and never filled again while the bar is up, so
+ * a count that comes back to the same number (one, two, one) is not said
+ * twice.
  *
  * Only a change made to a set already read as empty is an arrival, wherever
  * it was made: here, or in another window while this workflow is on screen.
@@ -3058,11 +3060,15 @@ function unsavedText(count) {
  * again.
  */
 const arrival = ref("");
+const arrived = ref(false);
 watch(
   () => [selectedKey.value, Boolean(shownChanges.value), changeCount.value],
   ([key, , count], [wasKey, wasRead, wasCount] = []) => {
     if (count && !wasCount && wasRead && key === wasKey && barOf.value) {
       arrival.value = unsavedText(count);
+      arrived.value = true;
+    } else if (count !== wasCount) {
+      arrival.value = "";
     }
   },
 );
@@ -3086,7 +3092,10 @@ function focusInBar() {
 // ends (`AppButton`), or from the rows' lock (the watcher on `canEdit`), is
 // in the bar again, and is covered when the bar then goes.
 watch(barOf, async (now, was) => {
-  if (was) arrival.value = "";
+  if (was) {
+    arrival.value = "";
+    arrived.value = false;
+  }
   if (now || !was) return;
   if (!focusInBar() && !settling.get(was)?.fromBar) return;
   await nextTick();
