@@ -1600,6 +1600,9 @@ def _assign_outputs_to_lora_person(
 ) -> None:
     """Say the run's pictures are of the person whose LoRA it loaded.
 
+    Or of the person the run named (``RunRequest.character_id``), where its
+    LoRAs named nobody: the caller decides which, and both are linked alike.
+
     A fresh output has no faces yet, so this is the deferral a drop onto a
     person uses (``Picture.pending_character_id``, which face extraction turns
     into the largest face it finds, and drops when it finds none). One whose
@@ -1638,8 +1641,8 @@ def _assign_outputs_to_lora_person(
         server.vault.notify(EventType.CHANGED_CHARACTERS)
         server.vault.notify(EventType.CHANGED_FACES)
     logger.info(
-        "Person %s, whose LoRA the run loaded: %s of its %s picture(s) linked "
-        "now, %s when their faces are read",
+        "Person %s, whom the run's LoRA or its request named: %s of its %s "
+        "picture(s) linked now, %s when their faces are read",
         character_id,
         named,
         len(new_ids),
@@ -1772,8 +1775,8 @@ def _process_comfyui_outputs(
     before this poller sees it is filed by the tag ``_tag_for_workflow`` put
     in its filename instead.
 
-    *lora_character_id* is the person whose LoRA the run loaded, whom its
-    pictures are then of (``_assign_outputs_to_lora_person``). Like the
+    *lora_character_id* is the person whose LoRA the run loaded, or the one
+    its request named where no LoRA did, whom its pictures are then of (``_assign_outputs_to_lora_person``). Like the
     workflow, only what this run imported or its saver reported: a duplicate
     keeps the people it has.
 

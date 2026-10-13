@@ -2547,7 +2547,12 @@ and drops when it finds none, or the largest unassigned face of one already
 extracted. A duplicate keeps the people it has, as it keeps its workflow, and
 projects are not touched: the run's destination decides those. **LoRAs of two
 or more people name nobody**: a picture holds one pending person, so the run
-is logged and its pictures are left for the owner to assign. `DELETE
+is logged and its pictures are left for the owner to assign. **Where the
+LoRAs name nobody, the request may**: `RunRequest.character_id` (the Run
+popup's *Assign to person*) is handed on in the same argument and linked the
+same way, for each graph of the run that `_lora_person` answered `None` for.
+A LoRA's one person always wins over it, and an id naming nobody is logged
+by `_assign_outputs_to_lora_person` and links nothing. `DELETE
 /characters/{id}` deletes the person's `adapter_attachment` rows and clears
 the `pending_character_id` naming them, because `Character.id` is reused by
 the next person created.

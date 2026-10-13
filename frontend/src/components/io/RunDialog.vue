@@ -60,6 +60,25 @@
               :options="setOptions"
             />
           </dd>
+          <!-- Who the pictures are of. One person's LoRA says so by itself
+               (the server links the run's pictures to them), so the choice
+               is offered only where no LoRA does. -->
+          <template v-if="loraPerson">
+            <dt>Assign to person</dt>
+            <dd data-testid="rund-of">{{ loraPerson.name }}, by their LoRA</dd>
+          </template>
+          <template v-else-if="entityLists.characters.length">
+            <dt>Assign to person</dt>
+            <dd>
+              <AppSelect
+                v-model="ofPersonId"
+                label="Assign to person"
+                hide-label
+                compact
+                :options="ofPersonOptions"
+              />
+            </dd>
+          </template>
           <template v-if="seedText">
             <dt>Seed of the original</dt>
             <dd class="rund-mono">{{ seedText }}</dd>
@@ -1296,6 +1315,12 @@ const attachedLoras = ref([]);
 /** The owner's hand-made workflow sets, which rank the picker. */
 const handMadeSets = ref([]);
 const destinationSetId = ref("");
+/**
+ * "Assign to person": the id picked, as the select holds it; "" is no one.
+ * Never remembered between popups, unlike the set: a wrong person on a later
+ * run's pictures is worse than one more pick.
+ */
+const ofPersonId = ref("");
 
 // ── Picture inputs (#1457) ───────────────────────────────────────────────
 /**
@@ -2769,6 +2794,46 @@ const setOptions = computed(() => [
 ]);
 
 /**
+ * The one person whose LoRA this run loads, `{id, name}`, else null: the
+ * server links the run's pictures to them by itself (`_lora_person`,
+ * `routes/workflows.py`), and reads it as this does. A row taken off or at
+ * strength zero loads nobody, and LoRAs of two people name neither.
+ *
+ * ponytail: read off the form's rows, so a loader no output reads still
+ * counts here and not on the server: such a run says "by their LoRA" and
+ * links nobody. Have the pre-flight answer the person if that is ever met.
+ */
+const loraPerson = computed(() => {
+  const owners = new Map();
+  for (const lora of [...adapters.value, ...unknownLoras.value]) {
+    for (const entry of lora.attachments || []) {
+      if (entry.entity_type !== "character" || !lora.sha256) continue;
+      const digest = lora.sha256.toLowerCase();
+      owners.set(digest, [...(owners.get(digest) || []), Number(entry.entity_id)]);
+    }
+  }
+  const ids = new Set();
+  for (const row of [...loras.value, ...addedLoras.value]) {
+    if (row.skipped || !row.sha256 || row.strength === 0) continue;
+    // A picked person's row is theirs whatever the shelf read answered.
+    if (row.person != null) ids.add(row.person);
+    for (const id of owners.get(row.sha256.toLowerCase()) || []) ids.add(id);
+  }
+  if (ids.size !== 1) return null;
+  const [id] = ids;
+  const row = entityLists.characters.find((item) => Number(item.id) === id);
+  return { id, name: row?.name || personName(id) };
+});
+
+const ofPersonOptions = computed(() => [
+  { value: "", label: "No one" },
+  ...entityLists.characters.map((row) => ({
+    value: String(row.id),
+    label: row.name,
+  })),
+]);
+
+/**
  * Where the output is filed, said as it will actually happen.
  *
  * The run carries the grid's own view context, so with a set in view the new
@@ -3730,6 +3795,11 @@ function runBody() {
     // be read, and the server reads it for itself.
     if (seen.value) body.waited = seen.value;
   }
+  // Only where no LoRA says it: the server would not read it otherwise, and
+  // a pick made before a person's LoRA was added is not what the form shows.
+  if (!loraPerson.value && ofPersonId.value) {
+    body.character_id = Number(ofPersonId.value);
+  }
   const setId = picksDestination.value ? destinationSetId.value : props.context?.set_id;
   if (loraSource.value?.entityType === "character") {
     // The person the popup was opened on, never the view behind it.
@@ -4263,7 +4333,10 @@ async function loadLoraSource() {
     : [];
 }
 
-/** The picker's two reads, neither of which holds the popup up. */
+/**
+ * The people and the shelf's unclassified files, for the person picker and
+ * "Assign to person"; neither read holds the popup up.
+ */
 async function loadPeople() {
   void entityLists.refresh("characters");
   try {
@@ -4493,7 +4566,9 @@ async function load() {
     // means anyway.
     await loadAdapters();
     if (!mine()) return;
-    if (offersPerson.value) void loadPeople();
+    // Every run reads them: "Assign to person" lists the people, and says
+    // whose LoRA the run loads.
+    void loadPeople();
     if (runsWorkflowItself.value && key) {
       await loadOwn(key, ask);
       if (!mine()) return;
