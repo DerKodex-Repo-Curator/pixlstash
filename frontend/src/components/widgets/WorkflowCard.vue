@@ -161,7 +161,7 @@
            One badge however many wait: the Workflow tab counts them. -->
       <span
         v-if="card.unsaved_changes > 0"
-        class="wf-card__badge"
+        class="wf-card__badge wf-card__badge--unsaved"
         data-testid="wf-card-unsaved"
         >Unsaved</span
       >
@@ -536,6 +536,17 @@ const accessibleName = computed(() =>
 /* The row places them; the shared badge rule would stack them on one spot. */
 .wf-card__start > .wf-card__badge {
   position: static;
+}
+
+/* The Workflow tab's mark of what is not saved yet: its teal dot, before the
+   word. The chip is dark in both themes, so the dark-surface teal. */
+.wf-card__badge--unsaved::before {
+  content: "";
+  width: var(--badge-size-dot);
+  height: var(--badge-size-dot);
+  margin-right: var(--space-1);
+  border-radius: var(--radius-pill);
+  background: rgb(var(--v-theme-dark-surface-tertiary));
 }
 
 /* Hoverable, for its tooltip. */

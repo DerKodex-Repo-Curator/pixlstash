@@ -264,7 +264,10 @@
         >
           <span class="wftab-labelcol">
             <span v-if="row.first" class="wftab-label">{{ row.heading }}</span>
-            <span v-if="row.edited" class="wftab-yours" data-testid="wftab-edited"
+            <span
+              v-if="row.edited"
+              class="wftab-yours wftab-yours--unsaved"
+              data-testid="wftab-edited"
               >Edited</span
             >
             <span v-else-if="row.yours" class="wftab-yours">Yours</span>
@@ -482,7 +485,7 @@
             <span class="wftab-label">Stages</span>
             <span
               v-if="stageRows.some((stage) => stage.edited)"
-              class="wftab-yours"
+              class="wftab-yours wftab-yours--unsaved"
               data-testid="wftab-stages-edited"
               >Edited</span
             >
@@ -560,12 +563,15 @@
         >
           <span class="wftab-labelcol">
             <span v-if="!index" class="wftab-label">Default</span>
-            <span v-if="lora.removed" class="wftab-yours" data-testid="wftab-lora-removed"
+            <span
+              v-if="lora.removed"
+              class="wftab-yours wftab-yours--unsaved"
+              data-testid="wftab-lora-removed"
               >Removed</span
             >
             <span
               v-else-if="lora.strengthEdited"
-              class="wftab-yours"
+              class="wftab-yours wftab-yours--unsaved"
               data-testid="wftab-lora-edited"
               >Edited</span
             >
@@ -888,24 +894,36 @@
     <!-- The Workflow tab's, and only its: Recipes runs a recipe from its own
          row and Tasks is the app's business, so neither wants this footer. -->
     <template #footer>
+      <!-- The first change is said once, politely, and focus stays on the row
+           that made it. Outside the bar, so it is in the page before its
+           text is: a live region that arrives with its text already in it
+           announces nothing. Emptied once the count has moved on, so nobody
+           reading the page finds an old number here. -->
+      <p class="visually-hidden" role="status" data-testid="wftab-draft-arrival">
+        {{ arrival === unsavedText(changeCount) ? arrival : "" }}
+      </p>
       <!-- The unsaved changes of the graph, and the two verbs that keep them
            (#1850). Above Run…, and only while something waits. A count, never
            a list: the rows above show which. Which verbs are offered, and the
            sentence saying why one is not, are the server's, so this bar, the
-           Run popup and the Tasks tab cannot disagree. -->
+           Run popup and the Tasks tab cannot disagree.
+
+           Teal is "not saved yet": the band, the filled Save and the dot
+           before a row's Edited are one mark, so the eye is led from the row
+           just changed to the place that keeps it. Amber stays Run…'s. -->
       <div
         v-if="barOf"
         ref="draftBar"
-        class="wftab-draft"
+        :class="['wftab-draft', { 'wftab-draft--arrived': arrival }]"
         role="group"
         aria-label="Unsaved changes"
         data-testid="wftab-draft"
       >
         <div class="wftab-draft__line">
-          <span class="wftab-draft__count" data-testid="wftab-draft-count"
-            >{{ changeCount }} unsaved
-            {{ changeCount === 1 ? "change" : "changes" }}</span
-          >
+          <span class="wftab-draft__count" data-testid="wftab-draft-count">
+            <v-icon size="16" aria-hidden="true">mdi-pencil</v-icon>
+            {{ unsavedText(changeCount) }}
+          </span>
           <AppButton
             size="sm"
             variant="ghost"
@@ -936,7 +954,6 @@
           />
           <div class="wftab-draft__verbs">
             <AppButton
-              size="sm"
               variant="ghost"
               data-testid="wftab-new-name-back"
               @click="stopNaming"
@@ -944,7 +961,7 @@
               Back
             </AppButton>
             <AppButton
-              size="sm"
+              variant="save"
               :disabled="!newName.trim() || Boolean(settlingShown)"
               :loading="settlingShown === 'save-as-new'"
               data-testid="wftab-save-as-new-confirm"
@@ -958,20 +975,27 @@
           v-else-if="saveOpen || saveAsNewOpen"
           class="wftab-draft__verbs"
         >
+          <!-- The other verb: an outline, its border in the shelf's teal. Where
+               Save is closed it is the one verb that keeps, and is drawn as
+               that one. -->
           <AppButton
             v-if="saveAsNewOpen"
             ref="saveAsNewButton"
-            size="sm"
+            :variant="saveOpen ? 'outline' : 'save'"
+            :class="saveOpen ? 'wftab-draft__other' : 'wftab-draft__save'"
             :disabled="Boolean(settlingShown)"
             data-testid="wftab-save-as-new"
             @click="startNaming"
           >
             Save as new…
           </AppButton>
-          <!-- Neutral, at the small size: Run… stays the one amber button. -->
+          <!-- The ordinary verb: filled, at the full control height, and as
+               wide as the row leaves it. Teal, never amber: Run… stays the
+               one amber button. -->
           <AppButton
             v-if="saveOpen"
-            size="sm"
+            variant="save"
+            class="wftab-draft__save"
             icon-left="content-save-outline"
             :disabled="Boolean(settlingShown)"
             :loading="settlingShown === 'save'"
@@ -3013,6 +3037,36 @@ const barOf = computed(() =>
     : "",
 );
 const draftBar = ref(null);
+
+/** The bar's count, in words: what it prints and what is announced. */
+function unsavedText(count) {
+  return `${count} unsaved ${count === 1 ? "change" : "changes"}`;
+}
+
+/**
+ * The bar has just arrived: the count as the first change left it, or "".
+ * While it is set the bar plays its one landing pulse, and the live region
+ * says this text until the count moves on, so both happen once: a second
+ * change moves the bar's count and repeats neither.
+ *
+ * Only a change made to a set already read as empty is an arrival, wherever
+ * it was made: here, or in another window while this workflow is on screen.
+ * Selecting a workflow that has changes waiting takes the same count from
+ * nothing to three, and that is the rail being read, not a change being
+ * made. It follows the bar, which is drawn before the change's write has
+ * answered. Gone with the bar, so coming back to this tab does not play it
+ * again.
+ */
+const arrival = ref("");
+watch(
+  () => [selectedKey.value, Boolean(shownChanges.value), changeCount.value],
+  ([key, , count], [wasKey, wasRead, wasCount] = []) => {
+    if (count && !wasCount && wasRead && key === wasKey && barOf.value) {
+      arrival.value = unsavedText(count);
+    }
+  },
+);
+
 function focusInBar() {
   return Boolean(draftBar.value?.contains(document.activeElement));
 }
@@ -3032,6 +3086,7 @@ function focusInBar() {
 // ends (`AppButton`), or from the rows' lock (the watcher on `canEdit`), is
 // in the bar again, and is covered when the bar then goes.
 watch(barOf, async (now, was) => {
+  if (was) arrival.value = "";
   if (now || !was) return;
   if (!focusInBar() && !settling.get(was)?.fromBar) return;
   await nextTick();
@@ -4333,6 +4388,19 @@ async function checkInstalled(key, { quiet = false } = {}) {
   color: rgb(var(--v-theme-on-surface));
 }
 
+/* Edited and Removed are not saved yet, and say so with the shelf's teal: a
+   dot before the word, which still carries the meaning by itself. Not on
+   "Yours": that value is saved. */
+.wftab-yours--unsaved::before {
+  content: "";
+  display: inline-block;
+  width: var(--badge-size-dot);
+  height: var(--badge-size-dot);
+  margin-right: var(--space-2);
+  border-radius: var(--radius-pill);
+  background: rgb(var(--v-theme-surface-tertiary));
+}
+
 .wftab-col {
   display: flex;
   flex-direction: column;
@@ -4504,15 +4572,38 @@ async function checkInstalled(key, { quiet = false } = {}) {
   border-top: 1px solid rgb(var(--v-theme-border));
 }
 
-/* The bar of unsaved changes: the count and Discard on one line, the two
-   verbs right-aligned on the next (the mock-up's `.draft`). */
+/* The shelf of unsaved changes: the count and Discard on one line, the two
+   verbs on the next. A teal band, so the footer has two coloured regions with
+   two meanings: teal keeps, amber runs. The wash is `tertiary` at 26% over
+   the rail, the ground `surface-tertiary` is measured on
+   (`UNSAVED_WASH`, contrastAudit.js). */
 .wftab-draft {
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
-  border-top: 1px solid rgb(var(--v-theme-border));
+  padding: var(--space-3) var(--space-4) var(--space-4);
+  border-top: var(--rail-w) solid rgb(var(--v-theme-tertiary));
+  background: rgba(var(--v-theme-tertiary), 0.26);
+}
+
+/* The landing pulse (visual-language.md §10), once, when the first change is
+   made: a glow up the rail toward the row that made it, then rest. */
+.wftab-draft--arrived {
+  animation: wftab-draft-arrive 2.2s ease-out;
+}
+
+@keyframes wftab-draft-arrive {
+  35% {
+    box-shadow: 0 calc(-1 * var(--space-3)) var(--space-6)
+      rgba(var(--v-theme-surface-tertiary), 0.28);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wftab-draft--arrived {
+    animation: none;
+  }
 }
 
 .wftab-draft__line {
@@ -4525,9 +4616,16 @@ async function checkInstalled(key, { quiet = false } = {}) {
 }
 
 .wftab-draft__count {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
   font-size: var(--text-sm);
   font-weight: var(--weight-medium);
   font-variant-numeric: tabular-nums;
+}
+
+.wftab-draft__count > .v-icon {
+  color: rgb(var(--v-theme-surface-tertiary));
 }
 
 .wftab-draft__name {
@@ -4540,6 +4638,17 @@ async function checkInstalled(key, { quiet = false } = {}) {
   display: flex;
   justify-content: flex-end;
   gap: var(--space-3);
+}
+
+/* Save takes what the row leaves, so it is plainly the default of the two. */
+.wftab-draft__save {
+  flex: 1;
+}
+
+/* The theme's `border` is under 1.1:1 on the wash: the outline takes the teal
+   ink instead, and the two verbs that keep are the two teal things here. */
+.wftab-draft .wftab-draft__other {
+  border-color: rgb(var(--v-theme-surface-tertiary));
 }
 
 .wftab-draft__input,

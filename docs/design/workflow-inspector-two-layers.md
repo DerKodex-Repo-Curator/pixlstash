@@ -626,7 +626,9 @@ Reference chrome is the shipped Vue (`WorkflowTab.vue`, `WorkflowDefaultRow.vue`
   sized against that figure.
 - Hue budget. Amber (`accent`): footer Run… and the confirm dialog's primary
   only. Olive (`primary` / `selected-ink`): the checkbox tick in §2.5 and §2.7,
-  nothing else. No raspberry or teal. Status hues: the existing missing-model
+  nothing else. Teal: what is not saved yet, and only that (the footer's shelf
+  of unsaved changes, its *Save*, and the dot before a row's *Edited*;
+  `visual-language.md` §4). No raspberry. Status hues: the existing missing-model
   `surface-warning` flag and inline failure text in `surface-error`.
 - Hover is `--hover-wash`. Focus is the global ink ring (`--focus-width`
   `--focus-stroke` `--focus-offset`). Pending means the AppButton spinner with no dimming.

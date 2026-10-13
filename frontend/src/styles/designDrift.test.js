@@ -225,7 +225,7 @@ describe("design drift", () => {
   // An unknown variant has no rule in AppButton, so it would render as a bare
   // label with no fill.
   it("gives AppButton one of its variants", () => {
-    const known = ["primary", "secondary", "outline", "danger", "ghost"];
+    const known = ["primary", "secondary", "outline", "danger", "ghost", "save"];
     expect(
       appButtonVariants().filter((hit) => !known.includes(hit.split(": ")[1])),
     ).toEqual([]);
@@ -233,12 +233,18 @@ describe("design drift", () => {
 
   // Outline is for page surfaces; inside a dialog or a popover (`.tbm`) the
   // neutral is the filled `secondary` (buttons.md, #1673). Read per file.
+  //
+  // One exception, counted: the Workflow tab's shelf of unsaved changes is in
+  // the inspector's footer, a page surface, and its Save as new… is the
+  // outline beside the filled Save. The same file holds the Open menu's
+  // popover, so it is read here. Counted, not located: the file is read
+  // whole, so this holds it to one outline and cannot say where that one is.
   it("keeps the outline button out of dialogs and popovers", () => {
     expect(
       appButtonVariants(({ text }) =>
         /<AppDialog\b|class="tbm[\s"]/.test(text),
       ).filter((hit) => hit.endsWith(": outline")),
-    ).toEqual([]);
+    ).toEqual(["components/panels/WorkflowTab.vue: outline"]);
   });
 
   // A layer picks a rung, not a number (visual-language.md §14), and not a
