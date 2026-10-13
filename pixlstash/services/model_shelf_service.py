@@ -61,7 +61,7 @@ from pixlstash.services.workflow_hash import (
     normalized_filename,
     reduce_api_graph,
 )
-from pixlstash.services.workflow_identity import CHECKPOINT_WIDGETS
+from pixlstash.services.workflow_identity import CHECKPOINT_WIDGETS, match_type
 from pixlstash.services.workflow_library_service import (
     cover_order,
     recipe_picture_counts,
@@ -891,6 +891,71 @@ def resolve_recipe_models(
         if matched:
             recipe_models.setdefault(recipe, set()).update(matched)
     return recipe_models, ambiguous, unresolved, namesakes
+
+
+def model_workflow_types(
+    hub, model_ids, index: Optional[tuple] = None
+) -> dict[int, set[str]]:
+    """The kinds of workflow each of *model_ids* has run in, by its recipes.
+
+    ``{model_id: {match type, ...}}`` (:func:`match_type`), read off the type
+    of every recipe naming the model, in any library. A model no recipe names,
+    or only ones whose type is unknown, is absent: nothing is known about it,
+    which is not the same as it fitting nowhere.
+
+    *index* is :func:`resolve_recipe_models`'s.
+    """
+    wanted = set(model_ids)
+    recipes = {
+        recipe: models & wanted
+        for recipe, models in resolve_recipe_models(hub, index)[0].items()
+        if models & wanted
+    }
+    found: dict[int, set[str]] = {}
+    if not recipes:
+        return found
+    # Every recipe of a topology has its node classes, so one document read
+    # answers for all of them. One that could not be read answers for none.
+    video: dict[str, str] = {}
+    for row in hub.fetchall(
+        "SELECT r.structural_hash, r.topology_hash, c.workflow_type "
+        "FROM workflow_recipe r JOIN workflow_topology_core c "
+        "ON c.topology_hash = r.topology_hash WHERE c.workflow_type IS NOT NULL"
+    ):
+        members = recipes.get(row["structural_hash"])
+        if not members:
+            continue
+        kind = row["workflow_type"]
+        if kind == "video":
+            topology = row["topology_hash"]
+            kind = video.get(topology) or _video_match_type(hub, row["structural_hash"])
+            if kind is None:
+                continue
+            video[topology] = kind
+        for model_id in members:
+            found.setdefault(model_id, set()).add(kind)
+    return found
+
+
+def _video_match_type(hub, structural_hash: str) -> Optional[str]:
+    """A video recipe's :func:`match_type`, or None when its graph is unread."""
+    row = hub.fetchone(
+        "SELECT document FROM workflow_recipe_graph WHERE structural_hash = ?",
+        (structural_hash,),
+    )
+    try:
+        if row is None:
+            raise ValueError("no graph is stored for it")
+        nodes = json.loads(row["document"]).values()
+        return match_type("video", [node.get("class_type") or "" for node in nodes])
+    except (ValueError, AttributeError) as exc:
+        logger.warning(
+            "Could not read the graph of video recipe %s to tell what it "
+            "starts from, so it types no model: %s",
+            structural_hash,
+            exc,
+        )
+        return None
 
 
 def fetch_companions(hub, ids: list[int]) -> dict:
