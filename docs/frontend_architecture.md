@@ -2233,8 +2233,9 @@ can no longer see.
   workflow id, with `pixlstash_original=1` the one thing allowed beside it
   (`electron/src/urlPolicy.ts::comfyuiOpenTarget`). **What opens holds
   ComfyUI-PixlStash nodes** in place of the stock savers and single LoRA
-  loaders (the node asks `GET …/graph?pixlstash_nodes=true`), so a picture
-  queued in ComfyUI comes back. **Open original in ComfyUI**, in the ⋯ menu
+  loaders, and of Load Image and Load Checkpoint where PixlStash holds the
+  picture or the file (the node asks `GET …/graph?pixlstash_nodes=true`), so
+  a picture queued in ComfyUI comes back. **Open original in ComfyUI**, in the ⋯ menu
   above Hide, opens the same link with `pixlstash_original=1`, which tells the
   node to ask for the workflow's own nodes; it is offered only where the
   button would open (an address, one workflow, a node that can). An

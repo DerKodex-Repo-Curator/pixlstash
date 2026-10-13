@@ -8,6 +8,7 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
+    Response,
 )
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import (
@@ -1578,16 +1579,28 @@ def select_pictures_for_listing(
     return result
 
 
+# The response header that says which library a listing's picture ids are of
+# (#1912). An id means nothing in another library, so what keeps one where it
+# may be read back somewhere else keeps this beside it: the ComfyUI-PixlStash
+# picture picker lists through this route and writes it into its loader.
+LIBRARY_HEADER = "X-PixlStash-Library"
+
+
 def register_routes(router, server):
     @router.get(
         "/pictures",
         summary="List pictures",
-        description="Lists pictures with filtering, sort, pagination, and optional grid field projection.",
+        description=(
+            "Lists pictures with filtering, sort, pagination, and optional grid "
+            "field projection. For the owner, the `X-PixlStash-Library` "
+            "response header names the library the ids are of."
+        ),
         response_model=list[GridPicture],
         responses={400: {"description": "Invalid sort mechanism."}},
     )
     def list_pictures(
         request: Request,
+        response: Response,
         sort: str = Query(
             None,
             description="Sort mechanism. One of: DATE, IMPORTED_AT, SCORE, "
@@ -1620,6 +1633,11 @@ def register_routes(router, server):
         ),
         filters: PictureListFilters = Depends(),
     ):
+        # The owner only (ComfyUI's link key is the owner here): a share link
+        # has no use for it, and two links are not told they are one library.
+        library_uuid = getattr(server.vault, "library_uuid", None)
+        if library_uuid and server.auth.is_unscoped_owner_request(request):
+            response.headers[LIBRARY_HEADER] = library_uuid
         if fields == "grid":
             metadata_fields = list(Picture.grid_fields())
         elif fields:

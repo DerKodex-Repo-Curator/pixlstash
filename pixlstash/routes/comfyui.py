@@ -69,6 +69,7 @@ from pixlstash.services.model_shelf_service import (
     fetch_locations,
     fetch_model_by_hash,
     lora_owners,
+    shelf_uuid,
 )
 from pixlstash.services.picture_recipe_service import (
     describe_recipe,
@@ -111,6 +112,7 @@ from pixlstash.services.comfyui_service import (
     _comfyui_abort,
     PACK_OPENS_WORKFLOWS,
     PACK_SAVES_BACK,
+    PIXLSTASH_CHECKPOINT_LOADER,
     comfyui_pixlstash_scripts,
     library_ids_named,
     probe_comfyui,
@@ -2634,7 +2636,9 @@ def create_router(server) -> APIRouter:
         # A ComfyUI-PixlStash node that may not run in a variant of this
         # picture (#1521): the picture loader would not read this picture, a
         # checkpoint loader names another hub's shelf row, and a loader's
-        # project, set or character must be one this library has. The run
+        # project, set or character must be one this library has. A picture
+        # or checkpoint id that says it is this library's or this shelf's is
+        # one (#1912): what a graph opened in ComfyUI from here holds. The run
         # swaps a saver for SaveImage, so it is judged as swapped. Reported
         # here so the dialog can say so before the user commits to a run, and
         # offer the workflow to paste into ComfyUI instead.
@@ -2645,12 +2649,25 @@ def create_router(server) -> APIRouter:
         # scoped reader is told every id is unchecked, and cannot run it anyway.
         as_run = json.loads(json.dumps(graph))
         swap_pixlstash_savers(as_run)
+        owner = server.auth.is_unscoped_owner_request(request)
         refused_nodes = pixlstash_node_refusals(
             as_run,
             library_ids=(
                 read_library_ids(server.vault, library_ids_named(as_run))
-                if server.auth.is_unscoped_owner_request(request)
+                if owner
                 else {}
+            ),
+            library_uuid=getattr(server.vault, "library_uuid", None) if owner else None,
+            # Made the first time it is read, so only where a loader asks.
+            shelf_uuid=(
+                shelf_uuid(server.hub)
+                if owner
+                and any(
+                    isinstance(node, dict)
+                    and node.get("class_type") == PIXLSTASH_CHECKPOINT_LOADER
+                    for node in as_run.values()
+                )
+                else None
             ),
         )
         has_pixlstash_nodes = bool(refused_nodes)

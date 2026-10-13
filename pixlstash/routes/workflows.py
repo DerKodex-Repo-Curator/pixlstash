@@ -142,6 +142,9 @@ from pixlstash.services.comfyui_recipe_service import (
     read_lora_chain,
     read_lora_chain_untyped,
     retype_text_encoders,
+    PICTURE_LOADER_LIBRARY,
+    PIXLSTASH_CHECKPOINT_LOADER,
+    SWAPPED_CLASSES,
     swap_in_pack_nodes,
     swap_target,
     swap_to_adapter_loader,
@@ -155,6 +158,7 @@ from pixlstash.services.comfyui_service import (
     _submit_comfyui_prompt,
     _upload_image_to_comfyui,
     library_ids_named,
+    own_picture_ids,
     follow_run,
     run_outcome,
     swap_pixlstash_savers,
@@ -193,7 +197,9 @@ from pixlstash.services.model_shelf_service import (
     model_workflow_types,
     propose_companions,
     recipe_asset_index,
+    shelf_uuid,
 )
+from pixlstash.services.comfyui_link_service import locate
 from pixlstash.services.workflow_events import announce_changed_workflows
 from pixlstash.routes.comfyui import (
     MAX_RUNS_PER_REQUEST,
@@ -2984,6 +2990,51 @@ def _shelf_digest(hub, kind: str):
     return digest_of
 
 
+def _shelf_checkpoint(hub):
+    """A ``ckpt_name`` -> the shelf row of that checkpoint, or ``None``.
+
+    :func:`_shelf_digest`'s rule, by row id: a checkpoint has one from the
+    moment it is scanned and a digest only once it is hashed. Only a row with
+    a copy present, and ``None`` for a name two rows share.
+    """
+
+    def row_of(filename: str) -> str | None:
+        rows = hub.fetchall(
+            "SELECT DISTINCT m.id FROM model m "
+            "JOIN model_file f ON f.model_id = m.id AND f.state = 'present' "
+            "WHERE lower(m.filename) = ? AND m.file_kind = ?",
+            (normalized_filename(filename), FILE_CHECKPOINT),
+        )
+        return str(rows[0][0]) if len(rows) == 1 else None
+
+    return row_of
+
+
+def _holds_class(graph: dict, class_type: str) -> bool:
+    return any(
+        isinstance(node, dict) and node.get("class_type") == class_type
+        for node in graph.values()
+    )
+
+
+def _as_a_canvas_writes(value):
+    """*value* with every whole float as the integer a browser writes it as.
+
+    A graph that went out to ComfyUI's page and came back has been through
+    JavaScript, which has one kind of number: the ``1.0`` PixlStash sent
+    returns as ``1``. Two graphs are compared after this, or a value
+    PixlStash wrote itself (a node's default out of ``object_info``, a
+    parameter typed in the Workflow tab) would read as changed by the owner.
+    """
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {key: _as_a_canvas_writes(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_as_a_canvas_writes(item) for item in value]
+    return value
+
+
 def _stored_value(value: bool | int | float | str) -> str:
     """An override as the hub keeps it. ``workflow_default_override.value`` is
     TEXT and the read side hands it back verbatim, so a bool is written the way
@@ -5732,14 +5783,16 @@ def create_router(server) -> APIRouter:
                     # rather than filled somewhere else, which would be a run
                     # that never read the picture it was given.
                     how = None
-            elif (
-                not (item.mode == "fixed" and item.pixel_sha)
-                # A PixlStash picture loader's own ids are frozen, and empty
-                # it picks pictures by its own sort (#1521): never run as is.
-                and item.class_type != PIXLSTASH_PICTURE_LOADER
-            ) and all(
-                _graph_names_a_live_file(graph, node_id, item.input_name, missing)
-                for node_id in item.node_ids
+            elif not (item.mode == "fixed" and item.pixel_sha) and (
+                # A PixlStash picture loader's ids are frozen from wherever
+                # the graph was made, and empty it picks pictures by its own
+                # sort (#1521): run as is only on ids that are this library's.
+                _holds_own_pictures(graph, item.node_ids)
+                if item.class_type == PIXLSTASH_PICTURE_LOADER
+                else all(
+                    _graph_names_a_live_file(graph, node_id, item.input_name, missing)
+                    for node_id in item.node_ids
+                )
             ):
                 # Never for a pin whose picture has gone: the owner chose a
                 # picture for this input, and quietly running the file the
@@ -5798,12 +5851,13 @@ def create_router(server) -> APIRouter:
         run names every picture it uploads by its content (`_upload_files`),
         so a loader still holding such a name says what it read, and the
         oldest kept picture with that content is the one a pin would resolve
-        to. Nothing
+        to. A PixlStash picture loader holding one id that says it is this
+        library's read that picture (`own_picture_ids`, #1912). Nothing
         else is certain - a file the owner put in ComfyUI's input folder, an
-        upload made before the picture was hashed, the ids a PixlStash picture
-        loader holds (another library's, for all the graph says), a wired
-        input, a picture since binned or whose file has gone - and those
-        inputs are absent, to be filled as on any other run.
+        upload made before the picture was hashed, the ids of a picture
+        loader that names no library or another one, a wired input, a picture
+        since binned or whose file has gone - and those inputs are absent, to
+        be filled as on any other run.
 
         Matched by address and nothing else. A loader's label comes from
         what feeds it, which is nothing, so a lone input keeps its address on
@@ -5825,6 +5879,8 @@ def create_router(server) -> APIRouter:
             )
             return {}
         loaded: dict[tuple[str, str], str] = {}
+        by_id: dict[tuple[str, str], int] = {}
+        library = _library_uuid()
         for item in own:
             # One name across the loaders sharing the address, or none: a
             # link is a list, and two different names are not one answer.
@@ -5839,11 +5895,28 @@ def create_router(server) -> APIRouter:
             )
             if named:
                 loaded[item.address] = named.group(1)
+            elif item.class_type == PIXLSTASH_PICTURE_LOADER:
+                # One picture, the same in every loader sharing the address:
+                # an input takes one, and a batch is not one answer.
+                held = {
+                    tuple(own_picture_ids(graph.get(node_id) or {}, library))
+                    for node_id in item.node_ids
+                }
+                if len(held) == 1 and len(next(iter(held))) == 1:
+                    by_id[item.address] = next(iter(held))[0]
         kept = read_oldest_kept_by_pixel_sha(server.vault, sorted(set(loaded.values())))
+        originals = {
+            **{
+                address: kept[pixel_sha]
+                for address, pixel_sha in loaded.items()
+                if pixel_sha in kept
+            },
+            **by_id,
+        }
         # Only a picture a run could hand over. `_upload_files` refuses one
         # whose file is gone, and here that would refuse a run over a picture
         # the owner never chose.
-        files = read_kept_picture_files(server.vault, sorted(kept.values()))
+        files = read_kept_picture_files(server.vault, sorted(set(originals.values())))
         on_disk = {
             found_id
             for found_id, (file_path, _sha) in files.items()
@@ -5853,10 +5926,25 @@ def create_router(server) -> APIRouter:
             )
         }
         return {
-            address: kept[pixel_sha]
-            for address, pixel_sha in loaded.items()
-            if kept.get(pixel_sha) in on_disk
+            address: found_id
+            for address, found_id in originals.items()
+            if found_id in on_disk
         }
+
+    def _holds_own_pictures(graph: dict, node_ids: tuple[str, ...]) -> bool:
+        """Whether picture loaders nobody filled can run on the ids they hold.
+
+        Only where every one of them names this library beside its ids
+        (`own_picture_ids`) and the library still keeps every picture named.
+        """
+        library = _library_uuid()
+        held = [
+            own_picture_ids(graph.get(node_id) or {}, library) for node_id in node_ids
+        ]
+        if not held or not all(held):
+            return False
+        wanted = sorted({picture_id for ids in held for picture_id in ids})
+        return set(wanted) <= read_kept_picture_files(server.vault, wanted).keys()
 
     def _graph_names_a_live_file(
         graph: dict, node_id: str, input_name: str, missing: set[str]
@@ -6791,6 +6879,11 @@ def create_router(server) -> APIRouter:
                 "library_ids": read_library_ids(server.vault, library_ids_named(graph)),
                 "picture_loader": True,
                 "from_file": source.origin == run_service.FROM_FILE,
+                # Only where a loader names a shelf: the id is made the
+                # first time it is asked for, and a read should not make it.
+                "shelf_uuid": shelf_uuid(hub)
+                if _holds_class(graph, PIXLSTASH_CHECKPOINT_LOADER)
+                else None,
             }
             judged, preflight = run_service.judge(
                 graph,
@@ -7269,6 +7362,16 @@ def create_router(server) -> APIRouter:
                             {workflow_bindings.IMAGE: [target]},
                             {workflow_bindings.IMAGE: value},
                         )
+                        loader = workflow_bindings.target_node(
+                            filled, target.get("path")
+                        )
+                        if feed.by_id and loader in filled:
+                            # With the id and never apart from it: whose it
+                            # is, for whoever reads this graph back out of
+                            # the picture (`own_picture_ids`).
+                            filled[loader]["inputs"][PICTURE_LOADER_LIBRARY] = (
+                                _library_uuid() or ""
+                            )
                 for _ in range(body.count):
                     instance = deepcopy(filled)
                     if body.seed_mode == "fixed":
@@ -7760,18 +7863,31 @@ def create_router(server) -> APIRouter:
                     inputs[name] = ""
         return graph, source, card, unsaved.count() > 0, plan.object_info
 
-    def _layout_for(hub, workflow_id: str, graph: dict) -> dict | None:
+    def _layout_for(
+        hub, workflow_id: str, graph: dict, own_nodes: dict | None = None
+    ) -> dict | None:
         """The layout *workflow_id* opens with over *graph*, or ``None``.
 
         A layout only over the wiring it was saved with: its values are the
-        graph's to give, its connections are not. **Never an error**, as when
-        it is kept: this read answered before there were layouts, so a graph
-        or a row that will not compare opens auto-arranged, and says so in
-        the log.
+        graph's to give, its connections are not. A node Open in ComfyUI may
+        put in a stock one's place counts as that stock node
+        (``SWAPPED_CLASSES``): which of the two the graph holds follows what
+        the shelf and the library hold that day, and the node that opens the
+        layout replaces one with the other on the canvas
+        (``open_workflow.js``). *own_nodes* is the graph before that swap,
+        which is what layouts were matched on before they were kept this way. **Never an error**, as when it is kept: this read answered
+        before there were layouts, so a graph or a row that will not compare
+        opens auto-arranged, and says so in the log.
         """
         try:
             return workflow_versions.layout_for(
-                hub, workflow_id, run_service.graph_structure(graph)
+                hub,
+                workflow_id,
+                {
+                    run_service.graph_structure(graph, SWAPPED_CLASSES),
+                    run_service.graph_structure(graph),
+                    run_service.graph_structure(own_nodes or graph),
+                },
             )
         except (
             RecursionError,
@@ -7864,17 +7980,102 @@ def create_router(server) -> APIRouter:
             ),
         )
 
-    def _with_pack_nodes(graph: dict, object_info: dict | None) -> list[dict]:
+    def _known_pictures(
+        workflow_id: str, graph: dict, bindings: list | None, object_info: dict
+    ) -> dict[str, int]:
+        """``{node_id: picture id}`` for each ``LoadImage`` of *graph* whose
+        picture this library is known to hold.
+
+        Two ways it is known. The owner pinned one to the input (Fixed), which
+        is the picture a run loads there whatever the graph names. Otherwise
+        the graph names a file a run of PixlStash uploaded, which carries the
+        picture's content (`_upload_files`). Either way the oldest kept
+        picture with that content, as a pin resolves. A file the owner put in
+        ComfyUI's input folder is no picture of the library, and stays.
+        """
+        wanted: dict[str, str] = {}
+        for node_id, node in graph.items():
+            inputs = node.get("inputs") if isinstance(node, dict) else None
+            if not isinstance(inputs, dict) or node.get("class_type") != "LoadImage":
+                continue
+            named = (
+                _UPLOAD_NAME_RE.fullmatch(inputs["image"])
+                if isinstance(inputs.get("image"), str)
+                else None
+            )
+            if named:
+                wanted[str(node_id)] = named.group(1)
+        for item in _card_inputs(
+            _hub(), workflow_id, graph, False, bindings, object_info
+        ):
+            if item.mode == "fixed" and item.pixel_sha:
+                wanted.update(dict.fromkeys(item.node_ids, item.pixel_sha))
+        kept = (
+            read_oldest_kept_by_pixel_sha(server.vault, sorted(set(wanted.values())))
+            if wanted
+            else {}
+        )
+        return {
+            node_id: kept[pixel_sha]
+            for node_id, pixel_sha in wanted.items()
+            if pixel_sha in kept
+        }
+
+    def _comfyui_is_here(request: Request) -> bool:
+        """Whether the owner's ComfyUI runs on this computer, where it reads
+        the shelf's files by the shelf's own paths."""
+        try:
+            return locate(_comfyui_url(_user(request)))[0] == "this_computer"
+        except ValueError as exc:
+            logger.info(
+                "[workflows] ComfyUI's address does not read, so it is not "
+                "taken to be on this computer: %s",
+                exc,
+            )
+            return False
+
+    def _with_pack_nodes(
+        request: Request,
+        workflow_id: str,
+        graph: dict,
+        bindings: list | None,
+        object_info: dict | None,
+    ) -> list[dict]:
         """Swap ComfyUI-PixlStash nodes into *graph* for opening in ComfyUI.
 
-        :func:`swap_in_pack_nodes`, with a LoRA loaded by digest only where
-        the shelf holds a copy of the file for the pack's loader to fetch.
-        Nothing is swapped when ComfyUI did not say which nodes it has.
+        :func:`swap_in_pack_nodes`, each swap only where what it needs is
+        here: a LoRA by digest where the shelf holds a copy of the file for
+        the pack's loader to fetch; a picture by id where the library is
+        known to hold it (:func:`_known_pictures`); a checkpoint by shelf row
+        where the shelf holds one copy of it and ComfyUI is on this computer,
+        since that loader cannot fetch its file. Nothing is swapped when
+        ComfyUI did not say which nodes it has.
+
+        Asked of the same graph, it answers the same until the shelf, the
+        library or a pin changes: ``PUT …/graph`` runs it again to know a
+        graph saved untouched.
         """
         if not object_info:
             return []
+        hub = _hub()
+        # Asked for only where a swap would use it: the shelf's id is made
+        # the first time it is read.
+        by_row = (
+            _holds_class(graph, "CheckpointLoaderSimple")
+            and PIXLSTASH_CHECKPOINT_LOADER in object_info
+            and _comfyui_is_here(request)
+        )
         return swap_in_pack_nodes(
-            graph, object_info, _shelf_digest(_hub(), FILE_ADAPTER)
+            graph,
+            object_info,
+            _shelf_digest(hub, FILE_ADAPTER),
+            pictures=_known_pictures(workflow_id, graph, bindings, object_info)
+            if PIXLSTASH_PICTURE_LOADER in object_info
+            and _holds_class(graph, "LoadImage")
+            else None,
+            library_uuid=_library_uuid(),
+            checkpoint_id=_shelf_checkpoint(hub) if by_row else None,
+            shelf_uuid=shelf_uuid(hub) if by_row else None,
         )
 
     @router.get(
@@ -7902,8 +8103,13 @@ def create_router(server) -> APIRouter:
             "(`forgotten`). With `pixlstash_nodes`, ComfyUI-PixlStash nodes "
             "stand in for the stock ones where this ComfyUI has them: Save "
             "Image and Save Video become the PixlStash savers, so what is "
-            "queued by hand comes back, and a single LoRA loader whose file "
-            "the shelf holds loads it by its hash. The ComfyUI-PixlStash node "
+            "queued by hand comes back; a single LoRA loader whose file the "
+            "shelf holds loads it by its hash; a Load Image whose picture the "
+            "library is known to hold (one pinned to the input, or one a run "
+            "uploaded) becomes the PixlStash Picture Loader on that picture; "
+            "and, where ComfyUI is on this computer, a Load Checkpoint whose "
+            "file the shelf holds one copy of becomes the PixlStash "
+            "Checkpoint Loader. The ComfyUI-PixlStash node "
             "reads it when ComfyUI is opened with "
             "`?pixlstash_workflow=<workflow_id>`. Export instead to give it "
             "away."
@@ -7939,9 +8145,10 @@ def create_router(server) -> APIRouter:
         pixlstash_nodes: bool = Query(
             False,
             description=(
-                "Put ComfyUI-PixlStash nodes in place of the stock savers and "
-                "single LoRA loaders, where this ComfyUI has them. Without "
-                "it the graph holds the workflow's own nodes."
+                "Put ComfyUI-PixlStash nodes in place of the stock savers, "
+                "single LoRA loaders, Load Image and Load Checkpoint, where "
+                "this ComfyUI has them and PixlStash holds what each needs. "
+                "Without it the graph holds the workflow's own nodes."
             ),
         ),
     ):
@@ -7951,13 +8158,14 @@ def create_router(server) -> APIRouter:
         graph, source, card, waiting_applied, object_info = _opening_graph(
             request, workflow, waiting=waiting, all_stages=all_stages
         )
+        # A layout kept from before workflows opened with ComfyUI-PixlStash
+        # nodes was matched on the workflow's own classes: still that layout,
+        # so the graph is read for it as it was before the swap too.
+        own_nodes = deepcopy(graph) if pixlstash_nodes else None
         if pixlstash_nodes:
-            # Last, and before the layout is looked for: a layout saved from
-            # what this opens names these nodes. One kept from before a
-            # workflow opened with them names the stock ones, so it is not
-            # used and the workflow opens auto-arranged until it is saved
-            # from ComfyUI again.
-            swapped = _with_pack_nodes(graph, object_info)
+            swapped = _with_pack_nodes(
+                request, workflow.workflow_id, graph, source.bindings, object_info
+            )
             if swapped:
                 logger.info(
                     "[workflows] Workflow %s opens with ComfyUI-PixlStash "
@@ -7973,7 +8181,7 @@ def create_router(server) -> APIRouter:
             forgotten=source.forgotten,
             version=source.workflow_version,
             waiting_applied=waiting_applied,
-            editor=_layout_for(hub, workflow.workflow_id, graph),
+            editor=_layout_for(hub, workflow.workflow_id, graph, own_nodes),
             people_loader=_people_loader_place(
                 workflow.workflow_id, graph, object_info
             ),
@@ -11078,7 +11286,9 @@ def create_router(server) -> APIRouter:
                     key: "" if isinstance(value, str) and value in held else value
                     for key, value in values.items()
                 }
-        return without_peoples_picks(editor, people), run_service.graph_structure(graph)
+        return without_peoples_picks(editor, people), run_service.graph_structure(
+            graph, SWAPPED_CLASSES
+        )
 
     def _keep_layout(
         workflow_id: str,
@@ -11344,14 +11554,22 @@ def create_router(server) -> APIRouter:
                         if d.provenance == EDITED
                     ],
                 )
-                sent = workflow_inbox.content_hash(graph)
                 # Each also as it opens with ComfyUI-PixlStash nodes in it
                 # (`pixlstash_nodes`): saved untouched, that is this graph too.
                 with_pack_nodes = [deepcopy(before.graph), deepcopy(opened)]
                 for candidate in with_pack_nodes:
-                    _with_pack_nodes(candidate, object_info)
-                unchanged = sent in {
-                    workflow_inbox.content_hash(candidate)
+                    _with_pack_nodes(
+                        request, workflow_id, candidate, before.bindings, object_info
+                    )
+
+                # As the canvas writes numbers: what was opened has been
+                # through ComfyUI's page, and a default the swap wrote as
+                # `1.0` comes back `1` (seen on a real canvas, #1912).
+                def content(document: dict) -> str:
+                    return workflow_inbox.content_hash(_as_a_canvas_writes(document))
+
+                unchanged = content(graph) in {
+                    content(candidate)
                     for candidate in (before.graph, opened, *with_pack_nodes)
                 }
                 if not unchanged:

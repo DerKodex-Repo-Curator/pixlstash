@@ -35,6 +35,7 @@ import hashlib
 import itertools
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -497,6 +498,17 @@ def test_unknown_is_neither_adapter_nor_checkpoint_by_default(shelf_env):
     checkpoints = shelf_env.owner.get(f"{API}/checkpoints").json()["checkpoints"]
     assert "mystery.safetensors" not in _names(checkpoints)
     assert all(row["file_kind"] == "checkpoint" for row in checkpoints)
+
+
+def test_the_checkpoint_list_says_which_shelf_its_ids_are_of(shelf_env):
+    """A row id means nothing on another PixlStash, so the list names the
+    shelf beside it (#1912): one id, made once and the same from then on."""
+    first = shelf_env.owner.get(f"{API}/checkpoints").json()["shelf"]
+    assert re.fullmatch(r"[0-9a-f]{32}", first), first
+    assert shelf_env.owner.get(f"{API}/checkpoints").json()["shelf"] == first
+    assert model_shelf_service.shelf_uuid(shelf_env.server.hub) == first
+    rows = shelf_env.server.hub.fetchall("SELECT uuid FROM shelf_identity")
+    assert [row["uuid"] for row in rows] == [first]
 
     r = shelf_env.owner.get(f"{API}/adapters", params={"file_kind": "unknown"})
     assert r.status_code == 200, r.text

@@ -48,6 +48,7 @@ from pixlstash.db_models import Picture, Project
 from pixlstash.hub.workflow_cards import CORE_RULE_VERSION, auto_workflow_id
 from pixlstash.db_models.generation import Generation, GenerationInput
 from pixlstash.server import Server
+from pixlstash.services.model_shelf_service import shelf_uuid
 from pixlstash.services.workflow_identity import WORKFLOW_KEY_VERSION
 from tests.authz_guard import no_spa_fallback  # noqa: F401
 from tests.utils import upload_pictures_and_wait
@@ -303,6 +304,27 @@ def test_generate_variants_judges_each_pixlstash_node_on_its_own(env, monkeypatc
     assert body["reason"] == "pixlstash_nodes"
     assert [(n["node_id"], n["why"]) for n in body["pixlstash_nodes"]] == [
         ("12", "picks_its_own_picture")
+    ], body
+
+    # Ids that say they are this library's and this shelf's are what a graph
+    # opened in ComfyUI from here holds (#1912): a variant of its picture runs.
+    graph["12"]["inputs"] = {"picture_ids": "1", "library": server.vault.library_uuid}
+    graph["13"] = {
+        "class_type": "PixlStashCheckpointLoader",
+        "inputs": {"checkpoint_id": "1", "shelf": shelf_uuid(server.hub)},
+    }
+    own = _upload_one(client, "pack-own.png", _recipe_png_bytes(graph, (7, 8, 9)))
+    body = client.get(f"{API}/comfyui/pictures/{own}/recipe").json()
+    assert (body["available"], body["pixlstash_nodes"]) == (True, []), body
+
+    # Another library's and another shelf's are not.
+    graph["12"]["inputs"]["library"] = "another-library"
+    graph["13"]["inputs"]["shelf"] = "another-shelf"
+    other = _upload_one(client, "pack-other.png", _recipe_png_bytes(graph, (1, 1, 2)))
+    body = client.get(f"{API}/comfyui/pictures/{other}/recipe").json()
+    assert sorted((n["node_id"], n["why"]) for n in body["pixlstash_nodes"]) == [
+        ("12", "picks_its_own_picture"),
+        ("13", "per_hub_checkpoint"),
     ], body
 
 
@@ -1579,3 +1601,11 @@ def test_a_scoped_token_cannot_ask_which_projects_exist(env, monkeypatch):
     # The same answer an absent project would get: nothing to tell them apart.
     assert r.json()["available"] is False
     assert [n["why"] for n in r.json()["pixlstash_nodes"]] == ["not_in_library"]
+
+    # The picture list names its library to the owner and to nobody else
+    # (#1912): a share link has no use for it.
+    r = client.get(f"{API}/pictures")
+    assert r.headers["X-PixlStash-Library"] == server.vault.library_uuid
+    r = scoped.get(f"{API}/pictures")
+    assert r.status_code == 200, r.text
+    assert "X-PixlStash-Library" not in r.headers

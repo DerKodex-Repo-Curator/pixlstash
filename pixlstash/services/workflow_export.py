@@ -57,8 +57,12 @@ from typing import Any, Callable, Iterable
 
 from pixlstash.pixl_logging import get_logger
 from pixlstash.services.comfyui_recipe_service import (
+    CHECKPOINT_LOADER_SHELF,
     LORA_DIGEST_FIELD_RE,
     LORA_FILENAME_FIELD_RE,
+    PICTURE_LOADER_LIBRARY,
+    PIXLSTASH_CHECKPOINT_LOADER,
+    PIXLSTASH_PICTURE_LOADER,
 )
 from pixlstash.services.workflow_hash import (
     IMAGE_EXTENSIONS,
@@ -122,6 +126,16 @@ MODEL_FOLDERS = "the folders your models are filed in"
 CREDENTIALS = "values in fields named like a key or a password"
 
 
+# The widget beside a row id that says whose the id is (#1912), per loader. It
+# goes with the id: it is this library's uuid or this shelf's, which names the
+# owner's own PixlStash to whoever is handed the file and vouches for nothing
+# there. Under no category of its own: the id beside it is what is reported.
+_WHOSE_THE_ID_IS = {
+    PIXLSTASH_PICTURE_LOADER: PICTURE_LOADER_LIBRARY,
+    PIXLSTASH_CHECKPOINT_LOADER: CHECKPOINT_LOADER_SHELF,
+}
+
+
 def scrub_for_export(
     graph: dict,
     *,
@@ -178,8 +192,12 @@ def scrub_for_export(
         class_type = str(node.get("class_type") or "")
         pictures = picture_fields(class_type) if is_picture_loader(class_type) else ()
         raw_string = class_type in PRIMITIVE_STRING_CLASSES
+        whose = _WHOSE_THE_ID_IS.get(class_type)
         for widget in list(inputs):
             name = str(widget)
+            if name == whose:
+                inputs[widget] = BLANK
+                continue
             # A LoRA slot is one BY BOTH SPELLINGS: the ComfyUI-PixlStash
             # loaders name their adapter by digest, and `workflow_identity`
             # already records that missing the numbered digest form is how a

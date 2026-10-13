@@ -173,8 +173,11 @@ from tests.authz_guard import (  # noqa: F401
 from tests.network_vectors import LAN_IPV4, PRIVATE_10_IPV4
 from pixlstash.db_models.adapter_attachment import AdapterAttachment
 from pixlstash.services.comfyui_recipe_service import detect_lora_targets
-from pixlstash.services.comfyui_service import pixlstash_node_refusals
-from pixlstash.services.model_shelf_service import people_who_fit
+from pixlstash.services.comfyui_service import (
+    pixlstash_node_refusals,
+    swap_pixlstash_savers,
+)
+from pixlstash.services.model_shelf_service import people_who_fit, shelf_uuid
 from pixlstash.hub import workflow_group_writes
 
 API = "/api/v1"
@@ -2585,7 +2588,10 @@ def test_a_comfyui_token_made_by_hand_is_held_to_the_same_scope(
     token, token_id = r.json()["token"], r.json()["token_id"]
     try:
         client = _bearer(server, token)
-        assert client.get(f"{API}/pictures").status_code == 200
+        r = client.get(f"{API}/pictures")
+        assert r.status_code == 200
+        # Whose the listed ids are, for the picker to write beside a pick.
+        assert r.headers["X-PixlStash-Library"] == server.vault.library_uuid
         r = client.get(f"{API}/users/me/config")
         assert r.status_code == 403, r.text
         assert r.json()["detail"] == auth.COMFYUI_SCOPE_REFUSAL
@@ -10395,6 +10401,10 @@ def test_a_pack_graph_runs_from_a_file_with_the_picture_fed_by_id(pack):
     assert r.json()["status"] == "success", r.json()
     [submitted] = pack.submitted
     assert submitted["graph"]["5"]["inputs"]["picture_ids"] == str(subject)
+    # With the id, whose it is: what a replay of the result reads (#1912).
+    assert (
+        submitted["graph"]["5"]["inputs"]["library"] == pack.server.vault.library_uuid
+    )
     assert submitted["graph"]["4"]["class_type"] == "SaveImage"
     assert submitted["graph"]["4"]["inputs"] == {
         "images": ["3", 0],
@@ -10414,6 +10424,86 @@ def test_a_pack_picture_loader_nothing_feeds_does_not_run(pack):
     pack.graph["pixlstash_bindings"] = []
     payload = _preflight(pack.owner, workflow_id=RUN_WF)
     assert _pack_refusals(payload) == {"5": "picks_its_own_picture"}, payload
+
+
+def test_a_pack_picture_loader_runs_on_ids_that_say_they_are_this_librarys(pack):
+    """What Open in ComfyUI and the node's picker write (#1912): the ids, and
+    the library they are of. Read back, such a loader runs on them unfed.
+
+    Wrong if it runs on another library's ids, on a picture this library no
+    longer keeps, or with no id at all (it would pick by its own sort).
+    """
+    held = _add_picture(pack.server, pack.tmp_path, "pack-held.png")
+    library = pack.server.vault.library_uuid
+    pack.graph = _pack_graph()
+    label = _label_of(pack.graph, "5")
+    pack.graph["5"]["inputs"].update(picture_ids=str(held), library=library)
+    payload = _preflight(pack.owner, workflow_id=RUN_WF)
+    assert _reasons(payload) == set(), payload
+    assert _inputs_of(payload)[label]["fill"] == "graph", payload
+
+    for inputs in (
+        {"library": "another-library"},
+        {"library": ""},
+        {"picture_ids": f"{held},{held + 1000}"},
+        {"picture_ids": ""},
+    ):
+        pack.graph["5"]["inputs"].update(picture_ids=str(held), library=library)
+        pack.graph["5"]["inputs"].update(inputs)
+        payload = _preflight(pack.owner, workflow_id=RUN_WF)
+        assert "picture_input_unfilled" in _reasons(payload), (inputs, payload)
+        assert _inputs_of(payload)[label]["fill"] is None, inputs
+
+
+def test_a_replay_reads_the_original_off_a_picture_loader_of_this_library(
+    pack, monkeypatch
+):
+    """A run feeds the picture loader an id and says whose it is, so a replay
+    of what it made finds the original. Wrong if another library's id does."""
+    original = _add_picture(pack.server, pack.tmp_path, "pack-original.png")
+    made = _add_picture(pack.server, pack.tmp_path, "pack-made.png")
+    pack.graph = _pack_graph()
+    label = _label_of(pack.graph, "5")
+    graph = _made_by_a_run_over(pack, monkeypatch, original, made)
+    assert graph["5"]["inputs"]["picture_ids"] == str(original)
+
+    row = _inputs_of(_replay(pack, made))[label]
+    assert (row["fill"], row["picture_id"]) == ("original", original), row
+
+    for inputs in ({"library": "another-library"}, {"picture_ids": f"{original},7"}):
+        other = json.loads(json.dumps(graph))
+        other["5"]["inputs"].update(inputs)
+        _embed_in(monkeypatch, {made: other})
+        assert _inputs_of(_replay(pack, made))[label]["fill"] == "selection", inputs
+
+
+def test_a_pack_checkpoint_loader_runs_on_an_id_of_this_shelf(runnable):
+    """From any source, where the id says it is this shelf's (#1912): what
+    Open in ComfyUI puts in, read back out of the picture queued there."""
+    info = json.loads(json.dumps(RUN_OBJECT_INFO))
+    info["PixlStashCheckpointLoader"] = {"input": {"required": {}}}
+    runnable.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url: (info, None)
+    )
+
+    def refused(shelf):
+        instance = json.loads(json.dumps(RUN_DOCUMENT))
+        instance["3"]["inputs"].update({"steps": 24, "cfg": 6.5})
+        instance["5"] = {
+            "class_type": "PixlStashCheckpointLoader",
+            "inputs": {"checkpoint_id": "12", "shelf": shelf},
+        }
+        with runnable.server.hub.transaction() as conn:
+            conn.execute(
+                "UPDATE workflow_recipe_instance SET document = ? "
+                "WHERE instance_hash = ?",
+                (json.dumps(instance), RUN_INSTANCE),
+            )
+        return _pack_refusals(_preflight(runnable.owner, workflow_id=RUN_WF))
+
+    assert refused(shelf_uuid(runnable.server.hub)) == {}
+    assert refused("another-shelf") == {"5": "per_hub_checkpoint"}
+    assert refused("") == {"5": "per_hub_checkpoint"}
 
 
 def test_a_pack_project_loader_runs_only_on_a_project_this_library_has(pack):
@@ -17788,6 +17878,48 @@ def test_a_lora_named_by_digest_is_a_lora_slot_too():
     assert "LoRA slots that are part of the look" in removed
 
 
+def test_whose_a_row_id_is_does_not_leave_with_the_file():
+    """The two pack loaders that name a row by id say whose the id is, with
+    the library's uuid or the shelf's (#1912). That is for this PixlStash to
+    read back; in a file given away it names the owner's own.
+
+    Wrong if either survives, in any shape, or if a widget of that name on
+    some other node is taken for one.
+    """
+    library, shelf = "1" * 32, "2" * 32
+    graph = _sdxl_graph()
+    graph["8"] = {
+        "class_type": "PixlStashPictureLoader",
+        "inputs": {"picture_ids": "41,42", "library": library},
+    }
+    graph["9"] = {
+        "class_type": "PixlStashCheckpointLoader",
+        "inputs": {"checkpoint_id": "7", "shelf": shelf},
+    }
+    graph["10"] = {"class_type": "SomeOtherNode", "inputs": {"library": "fonts"}}
+    exported, removed = scrub_for_export(graph)
+    assert exported["8"]["inputs"] == {"picture_ids": "", "library": ""}
+    assert exported["9"]["inputs"] == {"checkpoint_id": "", "shelf": ""}
+    assert library not in json.dumps(exported)
+    assert shelf not in json.dumps(exported)
+    assert {"picture file names", "model names this machine does not hold"} <= set(
+        removed
+    )
+    assert exported["10"]["inputs"] == {"library": "fonts"}
+
+    # Whatever it holds: a value of another shape is not kept for being odd.
+    # And with no id beside it, nothing is said to have been taken out: the
+    # owner is told about names, and this is not one.
+    graph["8"]["inputs"] = {"picture_ids": "", "library": [library]}
+    graph["9"]["inputs"] = {"checkpoint_id": "", "shelf": {"id": shelf}}
+    exported, removed = scrub_for_export(graph)
+    assert "picture file names" not in removed
+    assert (exported["8"]["inputs"]["library"], exported["9"]["inputs"]["shelf"]) == (
+        "",
+        "",
+    )
+
+
 def test_a_model_the_shelf_vouches_for_travels_without_its_folder():
     """ComfyUI files models in folders, and a person names a folder.
 
@@ -19975,6 +20107,357 @@ def test_a_graph_opened_with_pixlstash_nodes_and_saved_untouched_stores_nothing(
     assert r.status_code == 200 and r.json()["unchanged"] is False, r.text
     stored = _versions_of(with_pack, with_pack.manual)[-1][2]
     assert stored["4"]["class_type"] == "PixlStashPictureSaver"
+
+
+# What a ComfyUI with a current pack lists for the two loaders that name a row
+# by its id, each with the widget that says whose the id is (#1912).
+ID_LOADER_OBJECT_INFO = {
+    "LoadImage": {
+        "input": {"required": {"image": [["subject.png"], {}]}},
+        "output": ["IMAGE", "MASK"],
+    },
+    "PixlStashPictureLoader": {
+        "input": {
+            "required": {"picture_ids": ["STRING", {"default": ""}]},
+            "optional": {
+                "library": ["STRING", {"default": ""}],
+                "pixlstash_set": ["PIXLSTASH_SET", {"forceInput": True}],
+            },
+        },
+        "output": ["IMAGE", "MASK", "PIXLSTASH_PROJECT"],
+    },
+    "PixlStashCheckpointLoader": {
+        "input": {
+            "required": {"checkpoint_id": ["STRING", {"default": ""}]},
+            "optional": {"shelf": ["STRING", {"default": ""}]},
+        },
+        "output": ["MODEL", "CLIP", "VAE"],
+    },
+}
+
+
+def _picture_document(image: str) -> dict:
+    """CHAIN_DOCUMENT, plus a picture it loads and saves a copy of."""
+    graph = json.loads(json.dumps(CHAIN_DOCUMENT))
+    graph["7"] = {"class_type": "LoadImage", "inputs": {"image": image}}
+    graph["8"] = {
+        "class_type": "SaveImage",
+        "inputs": {"filename_prefix": "copy", "images": ["7", 0]},
+    }
+    return graph
+
+
+@pytest.fixture
+def id_loaders(with_pack):
+    """``with_pack`` on a pack with the id loaders, ComfyUI on this computer.
+
+    The shelf holds a copy of the graph's checkpoint, the library a picture
+    (``picture``), and ``manual`` is a workflow whose ``LoadImage`` names the
+    file a run uploaded that picture as.
+    """
+    env = with_pack
+    info = json.loads(
+        json.dumps({**CHAIN_OBJECT_INFO, **PACK_OBJECT_INFO, **ID_LOADER_OBJECT_INFO})
+    )
+    env.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url, **_: (info, None)
+    )
+    env.monkeypatch.setattr(
+        workflows_routes, "locate", lambda url: ("this_computer", url)
+    )
+    hub = env.server.hub
+    picture = _add_picture(env.server, env.tmp_path, "held.png")
+    with hub.transaction() as conn:
+        checkpoint = conn.execute(
+            "SELECT id FROM model WHERE filename = ? AND file_kind = 'checkpoint'",
+            (_SHELF_FILENAME,),
+        ).fetchone()[0]
+        folder_id = conn.execute(
+            "SELECT id FROM model_folder WHERE path = '/models/test-swap'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO model_file (model_id, model_folder_id, relpath, state) "
+            "VALUES (?, ?, ?, 'present')",
+            (checkpoint, folder_id, _SHELF_FILENAME),
+        )
+    manual = workflows_routes.store_manual_workflow(
+        hub,
+        "Held picture",
+        _picture_document(_upload_name(env.server, picture, _h("pixels-held.png"))),
+        "import",
+    )
+    try:
+        yield SimpleNamespace(
+            **{
+                **vars(env),
+                "manual": manual,
+                "picture": picture,
+                "checkpoint": checkpoint,
+            }
+        )
+    finally:
+        with hub.transaction() as conn:
+            conn.execute("DELETE FROM model_file WHERE model_id = ?", (checkpoint,))
+
+
+def test_a_graph_opens_on_the_picture_and_the_checkpoint_pixlstash_holds(id_loaders):
+    """Load Image and Load Checkpoint become the pack's loaders, each on the
+    row PixlStash holds and each saying whose the id is (#1912).
+
+    Wrong if an id goes in without that: read back out of a picture queued
+    there, it would be one PixlStash does not trust, and the run refused.
+    """
+    env = id_loaders
+    plain = _opened(env, env.manual)["workflow"]
+    assert [plain[n]["class_type"] for n in ("1", "7")] == [
+        "CheckpointLoaderSimple",
+        "LoadImage",
+    ]
+    graph = _opened(env, env.manual, pixlstash_nodes="true")["workflow"]
+    library = env.server.vault.library_uuid
+    shelf = shelf_uuid(env.server.hub)
+    assert graph["1"] == {
+        "class_type": "PixlStashCheckpointLoader",
+        "inputs": {"checkpoint_id": str(env.checkpoint), "shelf": shelf},
+    }
+    assert graph["7"] == {
+        "class_type": "PixlStashPictureLoader",
+        "inputs": {"picture_ids": str(env.picture), "library": library},
+    }
+    # What read them reads them where it did.
+    assert graph["2"]["inputs"]["model"] == ["1", 0]
+    assert graph["8"]["inputs"]["images"] == ["7", 0]
+    # And a run takes the two ids back, which it would not without whose
+    # they are.
+    as_run = json.loads(json.dumps(graph))
+    swap_pixlstash_savers(as_run)
+    assert pixlstash_node_refusals(as_run, library_uuid=library, shelf_uuid=shelf) == []
+    assert {n["why"] for n in pixlstash_node_refusals(as_run)} == {
+        "picks_its_own_picture",
+        "per_hub_checkpoint",
+    }
+
+
+def test_the_checkpoint_loader_goes_in_only_where_it_can_read_the_file(id_loaders):
+    """It cannot fetch a checkpoint: ComfyUI has to be on this computer, and
+    the shelf has to hold a copy. The picture loader fetches, so it goes in
+    wherever ComfyUI is."""
+    env = id_loaders
+
+    def opened():
+        graph = _opened(env, env.manual, pixlstash_nodes="true")["workflow"]
+        return [graph[n]["class_type"] for n in ("1", "7")]
+
+    assert opened() == ["PixlStashCheckpointLoader", "PixlStashPictureLoader"]
+    env.monkeypatch.setattr(
+        workflows_routes, "locate", lambda url: ("local_network", url)
+    )
+    assert opened() == ["CheckpointLoaderSimple", "PixlStashPictureLoader"]
+
+    def unreadable(url):
+        raise ValueError("test-not-an-address")
+
+    env.monkeypatch.setattr(workflows_routes, "locate", unreadable)
+    assert opened() == ["CheckpointLoaderSimple", "PixlStashPictureLoader"]
+
+    env.monkeypatch.setattr(
+        workflows_routes, "locate", lambda url: ("this_computer", url)
+    )
+    with env.server.hub.transaction() as conn:
+        conn.execute(
+            "UPDATE model_file SET state = 'missing' WHERE model_id = ?",
+            (env.checkpoint,),
+        )
+    assert opened() == ["CheckpointLoaderSimple", "PixlStashPictureLoader"]
+
+
+def test_the_picture_loader_goes_in_only_on_a_picture_the_library_holds(id_loaders):
+    """A pin (Fixed) or a file a run uploaded says which picture. A file the
+    owner put in ComfyUI's input folder is no picture of the library.
+
+    Wrong if the loader goes in empty: it would pick pictures by its own sort.
+    """
+    env = id_loaders
+    document = _picture_document("subject.png")
+    own_file = workflows_routes.store_manual_workflow(
+        env.server.hub, "Own file", document, "import"
+    )
+
+    def loader(workflow_id):
+        return _opened(env, workflow_id, pixlstash_nodes="true")["workflow"]["7"]
+
+    assert loader(own_file) == document["7"]
+
+    r = env.owner.put(
+        f"{API}/workflows/{own_file}/inputs",
+        json={
+            "inputs": [
+                {
+                    "slot_label": _label_of(document, "7"),
+                    "input_name": "image",
+                    "mode": "fixed",
+                    "picture_id": env.picture,
+                }
+            ]
+        },
+    )
+    assert r.status_code == 200, r.text
+    held = {
+        "class_type": "PixlStashPictureLoader",
+        "inputs": {
+            "picture_ids": str(env.picture),
+            "library": env.server.vault.library_uuid,
+        },
+    }
+    assert loader(own_file) == held
+    assert loader(env.manual) == held
+
+    # A picture since binned is not one the library holds, pinned or uploaded.
+    _bin_picture(env.server, env.picture)
+    assert loader(own_file) == document["7"]
+    assert loader(env.manual)["class_type"] == "LoadImage"
+
+
+def test_a_graph_opened_on_pixlstashs_own_ids_and_saved_untouched_stores_nothing(
+    id_loaders,
+):
+    """Ctrl+S on what was just opened, the two id loaders in it. Wrong if a
+    version appears, or if a real change there is stored as another workflow:
+    the checkpoint loader names the model the workflow had."""
+    env = id_loaders
+    graph = _opened(env, env.manual, pixlstash_nodes="true")["workflow"]
+    assert [graph[n]["class_type"] for n in ("1", "7")] == [
+        "PixlStashCheckpointLoader",
+        "PixlStashPictureLoader",
+    ]
+    r = _put_graph(env, env.manual, graph, read_version=1)
+    assert r.status_code == 200 and r.json()["unchanged"] is True, r.text
+    assert len(_versions_of(env, env.manual)) == 1
+
+    other = _add_picture(env.server, env.tmp_path, "another-held.png")
+    graph["7"]["inputs"]["picture_ids"] = str(other)
+    r = _put_graph(env, env.manual, graph, read_version=1)
+    assert r.status_code == 200, r.text
+    assert (r.json()["unchanged"], r.json()["new_workflow"]) == (False, False), r.text
+    stored = _versions_of(env, env.manual)[-1][2]
+    assert stored["1"] == graph["1"] and stored["7"] == graph["7"]
+
+
+def test_a_layout_is_kept_across_the_nodes_open_puts_in(with_pack):
+    """A layout is of a graph whichever of a pair each node is: the stock
+    node, or the one Open in ComfyUI puts in its place. Which it is follows
+    the shelf and the library on the day, and a layout dropped each time that
+    changed would rarely be there (#1912).
+
+    Wrong if a layout saved with the workflow's own nodes opens auto-arranged
+    with ComfyUI-PixlStash nodes, or the other way round.
+    """
+    env = with_pack
+    r = _put_graph(env, env.manual, _strength(0.7), editor=_editor())
+    assert r.status_code == 200 and r.json()["version"] == 2, r.text
+
+    def opened(**params):
+        return _opened(env, env.manual, all_stages="true", **params)
+
+    with_nodes = opened(pixlstash_nodes="true")
+    assert with_nodes["workflow"]["4"]["class_type"] == "PixlStashPictureSaver"
+    assert with_nodes["editor"]["nodes"][0]["pos"] == [100, 40]
+    assert opened()["editor"] == with_nodes["editor"]
+
+    # Saved from the canvas that held the pack's nodes: no version, and the
+    # layout opens with the workflow's own nodes too.
+    r = _put_graph(env, env.manual, with_nodes["workflow"], editor=_editor(moved=500))
+    assert r.status_code == 200 and r.json()["unchanged"] is True, r.text
+    assert opened()["editor"]["nodes"][0]["pos"] == [600, 40]
+    assert opened(pixlstash_nodes="true")["editor"]["nodes"][0]["pos"] == [600, 40]
+
+    # Rewired, it is another graph whatever its classes.
+    _put_changes(env, env.manual, **SKIP_FIVE)
+    assert _save(env, env.manual).status_code == 200
+    assert opened(pixlstash_nodes="true")["editor"] is None
+
+
+def _model_only(env) -> str:
+    """A manual workflow whose LoRA is in a model-only loader, on a ComfyUI
+    that lists that loader."""
+    info = json.loads(json.dumps({**CHAIN_OBJECT_INFO, **PACK_OBJECT_INFO}))
+    info["LoraLoaderModelOnly"] = {
+        "input": {
+            "required": {
+                "model": ["MODEL", {}],
+                "lora_name": [[RUN_ADAPTER_FILENAME], {}],
+                "strength_model": ["FLOAT", {"default": 1.0}],
+            }
+        },
+        "output": ["MODEL"],
+    }
+    env.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url, **_: (info, None)
+    )
+    document = _without_five()
+    document["2"] = {
+        "class_type": "LoraLoaderModelOnly",
+        "inputs": {
+            "lora_name": RUN_ADAPTER_FILENAME,
+            "strength_model": 0.8,
+            "model": ["1", 0],
+        },
+    }
+    document["6"]["inputs"]["clip"] = ["1", 1]
+    return workflows_routes.store_manual_workflow(
+        env.server.hub, "Model only", document, "import"
+    )
+
+
+def test_an_untouched_save_is_known_by_the_numbers_a_canvas_writes(with_pack):
+    """What was opened has been through ComfyUI's page, where `1.0` is `1`.
+    The pack's loader put in for a model-only one gets a CLIP strength the
+    workflow never had, from ComfyUI's own default: `1.0`, back as `1`.
+
+    Seen on a real canvas (#1912). Wrong if that Ctrl+S stores a version.
+    """
+    env = with_pack
+    manual = _model_only(env)
+    opened = _opened(env, manual, pixlstash_nodes="true")["workflow"]
+    assert opened["2"]["class_type"] == "PixlStashAdapterLoader"
+    assert repr(opened["2"]["inputs"]["strength_clip"]) == "1.0"
+
+    def whole(text):
+        number = float(text)
+        return int(number) if number.is_integer() else number
+
+    canvas = json.loads(json.dumps(opened), parse_float=whole)
+    assert repr(canvas["2"]["inputs"]["strength_clip"]) == "1"
+    r = _put_graph(env, manual, canvas, read_version=1)
+    assert r.status_code == 200 and r.json()["unchanged"] is True, r.text
+    assert len(_versions_of(env, manual)) == 1
+
+    # A strength the owner did change there is still a change.
+    canvas["2"]["inputs"]["strength_clip"] = 2
+    r = _put_graph(env, manual, canvas, read_version=1)
+    assert r.status_code == 200 and r.json()["unchanged"] is False, r.text
+
+
+def test_a_layout_kept_before_the_nodes_went_in_is_still_that_layout(with_pack):
+    """Layouts were first matched on the workflow's classes as they stood, so
+    one kept then names a model-only LoRA loader as itself. The pack's loader
+    takes that node's place and reads as the full loader's.
+
+    Wrong if such a layout opens auto-arranged until it is saved again.
+    """
+    env = with_pack
+    hub = env.server.hub
+    manual = _model_only(env)
+    plain = _opened(env, manual, all_stages="true")["workflow"]
+    assert plain["2"]["class_type"] == "LoraLoaderModelOnly"
+    with hub.transaction() as conn:
+        workflow_versions.write_layout(
+            conn, manual, _editor(), run_service.graph_structure(plain)
+        )
+    opened = _opened(env, manual, all_stages="true", pixlstash_nodes="true")
+    assert opened["workflow"]["2"]["class_type"] == "PixlStashAdapterLoader"
+    assert opened["editor"]["nodes"][0]["pos"] == [100, 40]
+    assert _opened(env, manual, all_stages="true")["editor"] == opened["editor"]
 
 
 def test_a_graph_read_with_the_waiting_changes_clears_them(saving):

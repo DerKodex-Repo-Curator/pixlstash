@@ -138,6 +138,25 @@ _LORA_STRENGTH_FIELDS = (("model", "strength_model"), ("clip", "strength_clip"))
 # digest, so it can go where ComfyUI does not have the file by name (#1376).
 PIXLSTASH_ADAPTER_LOADER = "PixlStashAdapterLoader"
 
+# The two loaders of the pack that name a row by its id: a picture of a
+# library, a checkpoint of a shelf. Ids start at 1 in every library and on
+# every shelf, so beside each id is a widget that says whose it is (#1912),
+# and an id read back out of a picture is trusted only when that names this
+# library or this shelf (`comfyui_service.own_picture_ids`,
+# `own_checkpoint_id`). Both widgets are written by the node's picker and by
+# PixlStash wherever it writes the id (`swap_in_pack_nodes`, a run's own
+# feed), and by nothing else.
+PIXLSTASH_PICTURE_LOADER = "PixlStashPictureLoader"
+PICTURE_LOADER_IDS = "picture_ids"
+# The uuid of the library the ids are from.
+PICTURE_LOADER_LIBRARY = "library"
+PIXLSTASH_CHECKPOINT_LOADER = "PixlStashCheckpointLoader"
+CHECKPOINT_LOADER_ID = "checkpoint_id"
+# The id of the shelf the row is on (`model_shelf_service.shelf_uuid`). Never
+# the file's name: a widget holding `x.safetensors` reads as a second model to
+# every walker that finds models by their extension.
+CHECKPOINT_LOADER_SHELF = "shelf"
+
 # How to get the ComfyUI-PixlStash node pack, ending every sentence that
 # refuses for want of it. The frontend's copy is PIXLSTASH_PACK_INSTALL in
 # frontend/src/utils/runReasons.js.
@@ -2084,10 +2103,50 @@ PACK_SAVERS = {
 }
 
 
+# The stock loaders a graph opened in ComfyUI gets one of the pack's id
+# loaders for, each with the outputs its consumers read, in order.
+_PACK_ID_LOADERS = {
+    "LoadImage": (PIXLSTASH_PICTURE_LOADER, ("IMAGE", "MASK")),
+    "CheckpointLoaderSimple": (PIXLSTASH_CHECKPOINT_LOADER, ("MODEL", "CLIP", "VAE")),
+}
+
+
+# Every class `swap_in_pack_nodes` puts in or takes the place of, as the stock
+# node it stands for. What a layout is matched on (`graph_structure`): which
+# of a pair a graph holds follows what the shelf and the library hold on the
+# day, and the layout is of either. A model-only LoRA loader reads as the full
+# one, since the pack's loader stands in for both; their wiring tells them
+# apart.
+SWAPPED_CLASSES = {
+    **{pack: stock for stock, (pack, _carried) in PACK_SAVERS.items()},
+    **{pack: stock for stock, (pack, _outputs) in _PACK_ID_LOADERS.items()},
+    PIXLSTASH_ADAPTER_LOADER: "LoraLoader",
+    "LoraLoaderModelOnly": "LoraLoader",
+}
+
+
+def _stands_in(spec: Any, outputs: tuple[str, ...], inputs: dict) -> bool:
+    """Whether the pack node *spec* can take a stock loader's place: it hands
+    on *outputs* first, and has a widget for every one of *inputs*. A pack
+    from before the widget that says whose an id is has no place for it, and
+    an id put in without it is one PixlStash would not trust again."""
+    if not isinstance(spec, dict):
+        return False
+    offered = spec.get("output") if isinstance(spec.get("output"), list) else []
+    return tuple(offered[: len(outputs)]) == outputs and all(
+        find_input_spec(spec, name) is not None for name in inputs
+    )
+
+
 def swap_in_pack_nodes(
     prompt_graph: dict,
     object_info: dict,
     lora_digest: Callable[[str], str | None],
+    *,
+    pictures: dict[str, int] | None = None,
+    library_uuid: str | None = None,
+    checkpoint_id: Callable[[str], str | None] | None = None,
+    shelf_uuid: str | None = None,
 ) -> list[dict]:
     """Put ComfyUI-PixlStash nodes where a graph has the stock ones, in place.
 
@@ -2098,19 +2157,32 @@ def swap_in_pack_nodes(
     file *lora_digest* can name becomes ``PixlStashAdapterLoader``
     (:func:`swap_to_adapter_loader`). Every node keeps its id and its wiring.
 
-    A node is left as it is where this ComfyUI lacks the pack's class, where
-    the stock node holds an input the pack's has no place for (a Save Video
-    from before the pack's saver was written against it), and where nothing
-    is wired into a saver. The loaders that name a library's own ids (the
-    picture loader, the checkpoint loader) are never swapped in. Those ids
-    are not trusted in a graph read back out of a picture (#1521), and a
-    picture queued from the opened graph is one the workflow may run from
-    next: the checkpoint loader is refused there, and a replay cannot tell
-    which picture the picture loader read.
+    The two loaders that name a row by its id are swapped in only with the
+    widget that says whose the id is, since an id without it is not trusted
+    in a graph read back out of a picture (#1521), and a picture queued from
+    the opened graph is one the workflow may run from next:
+
+    * ``LoadImage`` becomes ``PixlStashPictureLoader`` on the picture
+      *pictures* names for the node, of library *library_uuid*. Never with no
+      picture: empty, that loader picks pictures by its own sort.
+    * ``CheckpointLoaderSimple`` becomes ``PixlStashCheckpointLoader`` on the
+      row *checkpoint_id* names for its file, of shelf *shelf_uuid*.
+
+    A node is left as it is where this ComfyUI lacks the pack's class or has
+    one that cannot stand in (:func:`_stands_in`), where the stock node holds
+    an input the pack's has no place for (a Save Video from before the pack's
+    saver was written against it), and where nothing is wired into a saver.
 
     Args:
         lora_digest: A ``lora_name`` -> the SHA-256 the pack's loader can
             load it by, or ``None``.
+        pictures: ``{node_id: picture id}`` for each ``LoadImage`` whose
+            picture this library is known to hold.
+        library_uuid: The library those ids are of.
+        checkpoint_id: A ``ckpt_name`` -> the shelf row the pack's loader can
+            load it by, or ``None``. The caller answers only where that
+            loader can read the file: it cannot fetch one.
+        shelf_uuid: The shelf those rows are on.
 
     Returns:
         ``[{node_id, was, now}]`` for every node swapped.
@@ -2156,6 +2228,33 @@ def swap_in_pack_nodes(
                 )
                 continue
             now = PIXLSTASH_ADAPTER_LOADER
+        elif was in _PACK_ID_LOADERS:
+            now, outputs = _PACK_ID_LOADERS[was]
+            owned = None
+            if was == "LoadImage":
+                picture_id = (pictures or {}).get(str(node_id))
+                if picture_id is not None and library_uuid:
+                    owned = {
+                        PICTURE_LOADER_IDS: str(picture_id),
+                        PICTURE_LOADER_LIBRARY: library_uuid,
+                    }
+            else:
+                name = old.get("ckpt_name")
+                row = (
+                    checkpoint_id(name)
+                    if checkpoint_id and shelf_uuid and isinstance(name, str)
+                    else None
+                )
+                if row:
+                    owned = {
+                        CHECKPOINT_LOADER_ID: str(row),
+                        CHECKPOINT_LOADER_SHELF: shelf_uuid,
+                    }
+            spec = object_info.get(now)
+            if owned is None or not _stands_in(spec, outputs, owned):
+                continue
+            node["class_type"] = now
+            node["inputs"] = {**_widget_defaults(spec), **owned}
         else:
             continue
         # A title that was only the stock node's name would call the new node

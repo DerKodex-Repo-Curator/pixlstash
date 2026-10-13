@@ -27,6 +27,7 @@ thing that differs.
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -322,6 +323,24 @@ def fetch_models(
         f"WHERE {' AND '.join(where)} {_order_by(sort, direction)}"
     )
     return [dict(row) for row in hub.fetchall(sql, tuple(params))]
+
+
+def shelf_uuid(hub) -> str:
+    """This shelf's own id, made the first time it is asked for.
+
+    What a graph names beside a shelf row id (the checkpoint loader's
+    ``shelf``), so the id is known for this shelf's when the graph comes back.
+    """
+    row = hub.fetchone("SELECT uuid FROM shelf_identity WHERE id = 1")
+    if row is None:
+        with hub.transaction() as conn:
+            # Another process may have got there first: its id stands.
+            conn.execute(
+                "INSERT OR IGNORE INTO shelf_identity (id, uuid) VALUES (1, ?)",
+                (uuid.uuid4().hex,),
+            )
+        row = hub.fetchone("SELECT uuid FROM shelf_identity WHERE id = 1")
+    return row["uuid"]
 
 
 def fetch_distinct_base_models(hub) -> list[str]:

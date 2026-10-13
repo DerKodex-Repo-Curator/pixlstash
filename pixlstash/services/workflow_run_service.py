@@ -556,6 +556,7 @@ def judge(
     library_ids: Optional[dict[str, dict[int, str]]] = None,
     picture_loader: bool = False,
     from_file: bool = False,
+    shelf_uuid: Optional[str] = None,
 ) -> tuple[list[Reason], dict]:
     """Every reason this graph would not run, and the pre-flight behind them.
 
@@ -569,8 +570,8 @@ def judge(
     reporting ``no_lora_loader`` for one would make every plain card look
     broken.
 
-    ``library_ids``, ``picture_loader`` and ``from_file`` are what the
-    ComfyUI-PixlStash node policy needs to know about this run (#1521, see
+    ``library_ids``, ``picture_loader``, ``from_file`` and ``shelf_uuid`` are
+    what the ComfyUI-PixlStash node policy needs to know about this run (#1521, see
     :func:`~pixlstash.services.comfyui_service.pixlstash_node_refusals`); the
     defaults refuse.
 
@@ -589,6 +590,7 @@ def judge(
         library_ids=library_ids,
         picture_loader=picture_loader,
         from_file=from_file,
+        shelf_uuid=shelf_uuid,
     )
     if refused:
         reasons.append(Reason(PIXLSTASH_NODES, {"nodes": refused}))
@@ -1650,18 +1652,22 @@ def take_out_empty_adapter_loaders(graph: dict) -> list[str]:
     return sorted(through)
 
 
-def graph_structure(graph: dict) -> str:
+def graph_structure(graph: dict, classes: Optional[dict[str, str]] = None) -> str:
     """A digest of how an API-format *graph* is wired, whatever its values.
 
     Each node's id and class and every connection it reads. Two graphs with
     one structure differ only in widget values, so an editor document laid
     out for one fits the other once those values are written over it; that is
     what decides whether a ComfyUI layout may open (#1852).
+
+    *classes* names classes to read as another, so two graphs that differ
+    only in which of a pair a node is have one structure.
     """
+    classes = classes or {}
     wiring = sorted(
         (
             str(node_id),
-            str(node.get("class_type")),
+            str(classes.get(node.get("class_type"), node.get("class_type"))),
             sorted(
                 (name, str(value[0]), value[1])
                 for name, value in (

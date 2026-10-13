@@ -12,6 +12,7 @@ dedups to nothing and so loses the stack placement, the source lineage and the
 import event. Both are covered here.
 """
 
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -21,6 +22,8 @@ import pixlstash.services.comfyui_service as comfyui_service
 from pixlstash.services import comfyui_recipe_service
 from pixlstash.services import workflow_run_service
 from pixlstash.event_types import EventType
+
+CKPT = "PixlStashCheckpointLoader"
 
 SAVER_GRAPH = {
     "3": {"class_type": "KSampler", "inputs": {"seed": 1}},
@@ -128,6 +131,44 @@ class TestNodePolicy:
         assert _why(graph, **{**OPEN, "from_file": False}) == {
             "9": "per_hub_checkpoint"
         }
+
+    def test_a_picture_loader_runs_on_ids_that_say_they_are_this_librarys(self):
+        # Unfed, from any source: what Open in ComfyUI and the node's picker
+        # write, read back out of a picture (#1912).
+        def loader(**inputs):
+            return {"9": _node("PixlStashPictureLoader", **inputs)}
+
+        own = loader(picture_ids="7, 12", library="lib-here")
+        assert comfyui_service.own_picture_ids(own["9"], "lib-here") == [7, 12]
+        assert _why(own, library_uuid="lib-here") == {}
+        refused = {"9": "picks_its_own_picture"}
+        # Another library's ids, ids that name no library, and no library to
+        # be: an id alone starts at 1 everywhere.
+        assert _why(own, library_uuid="lib-other") == refused
+        assert _why(loader(picture_ids="7"), library_uuid="lib-here") == refused
+        assert _why(loader(picture_ids="7", library=""), library_uuid="") == refused
+        assert _why(own, library_uuid=None) == refused
+        # No id at all picks pictures by the loader's own sort, whoever's.
+        for ids in ("", " , ", "7,x", "-3", ["4", 0], None):
+            graph = loader(picture_ids=ids, library="lib-here")
+            assert comfyui_service.own_picture_ids(graph["9"], "lib-here") == [], ids
+            assert _why(graph, library_uuid="lib-here") == refused, ids
+
+    def test_a_checkpoint_loader_runs_on_an_id_that_says_it_is_this_shelfs(self):
+        def loader(**inputs):
+            return {"9": _node("PixlStashCheckpointLoader", **inputs)}
+
+        own = loader(checkpoint_id="12", shelf="shelf-here")
+        assert comfyui_service.own_checkpoint_id(own["9"], "shelf-here") == "12"
+        assert _why(own, shelf_uuid="shelf-here") == {}
+        refused = {"9": "per_hub_checkpoint"}
+        assert _why(own, shelf_uuid="shelf-other") == refused
+        assert _why(own) == refused
+        assert _why(loader(checkpoint_id="12"), shelf_uuid="shelf-here") == refused
+        assert _why(loader(checkpoint_id="12", shelf=""), shelf_uuid="") == refused
+        for row in ("", "x", "1 2", "007", "0", ["4", 0]):
+            graph = loader(checkpoint_id=row, shelf="shelf-here")
+            assert _why(graph, shelf_uuid="shelf-here") == refused, row
 
     def test_the_saver_is_refused_until_swapped_and_runs_as_save_image(self):
         graph = {
@@ -303,18 +344,131 @@ class TestOpeningWithPackNodes:
         }
         assert {key: graph[key] for key in ("5", "6")} == untouched
 
-    def test_the_loaders_that_name_a_librarys_ids_are_never_swapped_in(self):
-        # A graph holding one cannot be run again from a picture it made.
-        graph = {
+    ID_LOADERS = {
+        "LoadImage": {"display_name": "Load Image"},
+        "PixlStashPictureLoader": {
+            "input": {
+                "required": {"picture_ids": ["STRING", {"default": ""}]},
+                "optional": {
+                    "library": ["STRING", {"default": ""}],
+                    "pixlstash_set": ["PIXLSTASH_SET", {"forceInput": True}],
+                },
+            },
+            "output": ["IMAGE", "MASK", "PIXLSTASH_PROJECT"],
+            "display_name": "PixlStash Picture Loader",
+        },
+        "PixlStashCheckpointLoader": {
+            "input": {
+                "required": {"checkpoint_id": ["STRING", {"default": ""}]},
+                "optional": {"shelf": ["STRING", {"default": ""}]},
+            },
+            "output": ["MODEL", "CLIP", "VAE"],
+        },
+    }
+
+    @staticmethod
+    def _stock():
+        return {
             "1": _node("CheckpointLoaderSimple", ckpt_name="a.safetensors"),
-            "2": _node("LoadImage", image="a.png"),
+            "2": {
+                **_node("LoadImage", image="a.png", upload="image"),
+                "_meta": {"title": "Load Image"},
+            },
+            "3": _node("VAEEncode", pixels=["2", 0], vae=["1", 2]),
         }
-        info = {
-            **self.INFO,
-            "PixlStashCheckpointLoader": {"input": {"required": {}}},
-            "PixlStashPictureLoader": {"input": {"required": {}}},
+
+    def _swap_ids(self, graph, info=None, **known):
+        known = {
+            "pictures": {"2": 41},
+            "library_uuid": "lib-here",
+            "checkpoint_id": {"a.safetensors": "7"}.get,
+            "shelf_uuid": "shelf-here",
+            **known,
         }
-        assert self._swap(graph, info=info) == []
+        return comfyui_recipe_service.swap_in_pack_nodes(
+            graph,
+            {**self.INFO, **self.ID_LOADERS} if info is None else info,
+            {}.get,
+            **known,
+        )
+
+    def test_the_id_loaders_are_swapped_in_with_whose_the_id_is(self):
+        graph = self._stock()
+        assert self._swap_ids(graph) == [
+            {"node_id": "1", "was": "CheckpointLoaderSimple", "now": CKPT},
+            {"node_id": "2", "was": "LoadImage", "now": "PixlStashPictureLoader"},
+        ]
+        assert graph["1"] == _node(CKPT, checkpoint_id="7", shelf="shelf-here")
+        # The file it named and its upload widget go; the wired filters the
+        # pack's loader also takes are not made up.
+        assert graph["2"] == {
+            **_node("PixlStashPictureLoader", picture_ids="41", library="lib-here"),
+            "_meta": {"title": "PixlStash Picture Loader"},
+        }
+        # What read them reads them where it did.
+        assert graph["3"] == self._stock()["3"]
+        # And what was put in is what a run accepts back.
+        assert (
+            comfyui_service.pixlstash_node_refusals(
+                graph, library_uuid="lib-here", shelf_uuid="shelf-here"
+            )
+            == []
+        )
+
+    def test_an_id_loader_is_never_swapped_in_without_what_it_needs(self):
+        stock = self._stock()
+        # Nothing known about the picture or the file: an empty picture
+        # loader would pick pictures by its own sort.
+        for known in (
+            {"pictures": {}, "checkpoint_id": {}.get},
+            {"pictures": None, "checkpoint_id": None},
+            {"library_uuid": None, "shelf_uuid": None},
+            {"library_uuid": "", "shelf_uuid": ""},
+        ):
+            graph = self._stock()
+            assert self._swap_ids(graph, **known) == [], known
+            assert graph == stock
+        # A pack from before the widget that says whose the id is: the id
+        # would not be trusted again, so the stock node stays.
+        old_pack = json.loads(json.dumps({**self.INFO, **self.ID_LOADERS}))
+        del old_pack["PixlStashPictureLoader"]["input"]["optional"]["library"]
+        del old_pack["PixlStashCheckpointLoader"]["input"]["optional"]
+        # One whose outputs are not the stock node's, and a ComfyUI without.
+        other = json.loads(json.dumps({**self.INFO, **self.ID_LOADERS}))
+        other["PixlStashPictureLoader"]["output"] = ["MASK", "IMAGE"]
+        other["PixlStashCheckpointLoader"]["output"] = ["MODEL"]
+        for info in (old_pack, other, self.INFO):
+            graph = self._stock()
+            assert self._swap_ids(graph, info=info) == []
+            assert graph == stock
+
+    def test_every_swap_reads_as_the_stock_node_for_a_layout(self):
+        # A layout is matched on the stock classes, so which of a pair the
+        # graph holds on the day does not drop it.
+        stock = {
+            **self._stock(),
+            "4": _node("LoraLoader", lora_name="x.safetensors", model=["1", 0]),
+            "9": _node("SaveImage", images=["3", 0], filename_prefix="v"),
+        }
+        swapped = json.loads(json.dumps(stock))
+        info = {**self.INFO, **self.ID_LOADERS}
+        done = comfyui_recipe_service.swap_in_pack_nodes(
+            swapped,
+            info,
+            {"x.safetensors": "d" * 64}.get,
+            pictures={"2": 41},
+            library_uuid="lib-here",
+            checkpoint_id={"a.safetensors": "7"}.get,
+            shelf_uuid="shelf-here",
+        )
+        assert {s["node_id"] for s in done} == {"1", "2", "4", "9"}
+        classes = comfyui_recipe_service.SWAPPED_CLASSES
+        structure = workflow_run_service.graph_structure
+        assert structure(swapped) != structure(stock)
+        assert structure(swapped, classes) == structure(stock, classes)
+        # Wired another way it is another layout, whatever the classes.
+        swapped["3"]["inputs"]["vae"] = ["1", 0]
+        assert structure(swapped, classes) != structure(stock, classes)
 
 
 class TestHistoryExtraction:
