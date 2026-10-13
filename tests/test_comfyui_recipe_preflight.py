@@ -1038,7 +1038,7 @@ class TestLoraInsertion:
         ]
 
         added = insert_adapter(graph, plan, self.ADAPTER, info)
-        assert added == {"node_id": "9", "class_type": "LoraLoader"}
+        assert added == {"node_id": "9", "class_type": "LoraLoader", "also": []}
         loader = graph["9"]["inputs"]
         assert loader["model"] == ["4", 0] and loader["clip"] == ["4", 1]
         assert loader["lora_name"] == "subject-v2.safetensors"
@@ -1083,9 +1083,16 @@ class TestLoraInsertion:
         assert graph["2"]["inputs"]["model"] == [added["node_id"], 0]
 
     def test_two_model_sources_are_refused_rather_than_picked_between(self):
+        """A base and a refiner: which one the LoRA is for is the owner's call."""
         graph = {
-            "1": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
-            "2": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+            "1": {
+                "class_type": "CheckpointLoaderSimple",
+                "inputs": {"ckpt_name": "Base.safetensors"},
+            },
+            "2": {
+                "class_type": "CheckpointLoaderSimple",
+                "inputs": {"ckpt_name": "Refiner.safetensors"},
+            },
             "3": {"class_type": "KSampler", "inputs": {"model": ["1", 0]}},
             "4": {"class_type": "KSampler", "inputs": {"model": ["2", 0]}},
         }
@@ -1094,6 +1101,122 @@ class TestLoraInsertion:
         # The control: one sampler fewer and there is exactly one source.
         del graph["4"]
         assert plan_lora_insertion(graph, self.INFO)["model"]["node_id"] == "1"
+
+    @staticmethod
+    def _pipeline_copies(*first_ids, unet="Edit.safetensors"):
+        """One UNET pipeline per id: loader, CLIP loader, encoder, sampler."""
+        graph = {}
+        for n in first_ids:
+            graph[str(n)] = {
+                "class_type": "UnetLoaderGGUF",
+                "inputs": {"unet_name": unet},
+            }
+            graph[str(n + 1)] = {
+                "class_type": "DualCLIPLoader",
+                "inputs": {"clip_name1": "te.safetensors"},
+            }
+            graph[str(n + 2)] = {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"clip": [str(n + 1), 0]},
+            }
+            graph[str(n + 3)] = {
+                "class_type": "KSampler",
+                "inputs": {"model": [str(n), 0], "positive": [str(n + 2), 0]},
+            }
+        return graph
+
+    def test_the_same_model_loaded_again_gets_a_loader_after_every_copy(self):
+        """Copies of one pipeline: a LoRA for the model is for each of them.
+
+        Wrong if only the first copy is spliced (the others would run without
+        the LoRA and say nothing), or if a copy's loader takes another copy's
+        CLIP. Ids 9 and 10 put string order and node order at odds.
+        """
+        graph = self._pipeline_copies(9, 20, 30)
+        plan = plan_lora_insertion(graph, self.INFO)
+        splices = [plan, *plan["also"]]
+        assert [(s["model"]["node_id"], s["clip"]["node_id"]) for s in splices] == [
+            ("9", "10"),
+            ("20", "21"),
+            ("30", "31"),
+        ]
+        assert [
+            sorted((r["node_id"], r["field"]) for r in s["rewires"]) for s in splices
+        ] == [
+            [("11", "clip"), ("12", "model")],
+            [("22", "clip"), ("23", "model")],
+            [("32", "clip"), ("33", "model")],
+        ]
+
+        added = insert_adapter(graph, plan, self.ADAPTER, self.INFO)
+        loaders = [added["node_id"], *(more["node_id"] for more in added["also"])]
+        assert loaders == ["34", "35", "36"]
+        for loader, first in zip(loaders, (9, 20, 30)):
+            inputs = graph[loader]["inputs"]
+            assert graph[loader]["class_type"] == "LoraLoader"
+            assert inputs["lora_name"] == "subject-v2.safetensors"
+            assert inputs["model"] == [str(first), 0]
+            assert inputs["clip"] == [str(first + 1), 0]
+            assert graph[str(first + 3)]["inputs"]["model"] == [loader, 0]
+            assert graph[str(first + 2)]["inputs"]["clip"] == [loader, 1]
+
+    def test_copies_of_a_model_that_differ_in_a_value_are_still_refused(self):
+        """The same loader class is not the same model: the file says which."""
+        graph = self._pipeline_copies(9, 20)
+        graph["20"]["inputs"] = {"unet_name": "Other.safetensors"}
+        with pytest.raises(LookupError, match="loads 2 models"):
+            plan_lora_insertion(graph, self.INFO)
+
+    def test_copies_sharing_one_clip_patch_it_once(self):
+        """Two passes of one model, one text encoder: the CLIP takes one loader."""
+        graph = self._pipeline_copies(9, 20)
+        del graph["21"]
+        graph["22"]["inputs"]["clip"] = ["10", 0]
+        plan = plan_lora_insertion(graph, self.INFO)
+        assert plan["clip"]["node_id"] == "10"
+        assert [s["clip"] for s in plan["also"]] == [None]
+        added = insert_adapter(graph, plan, self.ADAPTER, self.INFO)
+        assert added["class_type"] == "LoraLoader"
+        assert [more["class_type"] for more in added["also"]] == ["LoraLoaderModelOnly"]
+        # Both encoders read the one patched CLIP, each sampler its own model.
+        assert graph["11"]["inputs"]["clip"] == [added["node_id"], 1]
+        assert graph["22"]["inputs"]["clip"] == [added["node_id"], 1]
+        assert graph["23"]["inputs"]["model"] == [added["also"][0]["node_id"], 0]
+
+    def test_identical_checkpoints_each_keep_their_own_clip(self):
+        graph = {
+            "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "A"}},
+            "2": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "A"}},
+            "3": {"class_type": "KSampler", "inputs": {"model": ["1", 0]}},
+            "4": {"class_type": "KSampler", "inputs": {"model": ["2", 0]}},
+            "5": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 1]}},
+        }
+        plan = plan_lora_insertion(graph, self.INFO)
+        # Nothing reads checkpoint 1's CLIP, so its loader is model-only.
+        assert (plan["model"]["node_id"], plan["clip"]) == ("1", None)
+        assert plan["also"][0]["clip"] == {
+            "node_id": "2",
+            "class_type": "CheckpointLoaderSimple",
+            "output": 1,
+        }
+
+    def test_more_text_encoders_than_models_are_refused(self):
+        """One loader takes one CLIP: the second encoder would go without."""
+        graph = self._pipeline_copies(9, 20)
+        graph["23"]["inputs"]["model"] = ["9", 0]
+        del graph["20"]
+        with pytest.raises(LookupError, match="2 text encoders .* for 1 model,"):
+            plan_lora_insertion(graph, self.INFO)
+
+    def test_a_copy_that_diverged_refuses_the_whole_plan_untouched(self):
+        """Every splice is checked before the first is made."""
+        graph = self._pipeline_copies(9, 20)
+        plan = plan_lora_insertion(graph, self.INFO)
+        graph["23"]["inputs"]["model"] = ["9", 0]
+        before = json.dumps(graph, sort_keys=True)
+        with pytest.raises(LookupError, match="Node 23 no longer reads its MODEL"):
+            insert_adapter(graph, plan, self.ADAPTER, self.INFO)
+        assert json.dumps(graph, sort_keys=True) == before
 
     def test_a_node_this_comfyui_lacks_is_refused_not_read_as_untyped(self):
         graph = self._checkpoint_graph()

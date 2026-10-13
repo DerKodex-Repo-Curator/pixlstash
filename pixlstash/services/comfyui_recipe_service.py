@@ -1679,6 +1679,25 @@ def _source_of(graph: dict, links: list[dict], kind: str) -> dict | None:
     }
 
 
+def _same_loader(graph: dict, roots: list[tuple]) -> bool:
+    """Whether every source in *roots* is one loader set the same way.
+
+    The same class handing on the same output, holding the same values: the
+    same file loaded again, as a graph made of copies of one pipeline does.
+    ponytail: the same file, not the same family; two files of one family (a
+    finetune per pass) still differ here, and telling them alike needs the
+    shelf, which this graph-only planner does not read.
+    """
+    first_id, first_output = roots[0]
+    first = graph[first_id]
+    return all(
+        output == first_output
+        and graph[node_id].get("class_type") == first.get("class_type")
+        and graph[node_id].get("inputs") == first.get("inputs")
+        for node_id, output in roots
+    )
+
+
 def plan_lora_insertion(prompt_graph: dict, object_info: dict) -> dict:
     """Where a LoRA loader would go in a graph that has none (#1376).
 
@@ -1700,10 +1719,20 @@ def plan_lora_insertion(prompt_graph: dict, object_info: dict) -> dict:
     node (a UNET graph with its own CLIP loader) or none at all (a graph whose
     conditioning does not come from a CLIP), when a model-only loader goes in.
 
+    **A graph that loads the same model several times gets a loader after
+    each.** Copies of one pipeline each carry their own loader of the same
+    file (:func:`_same_loader`), and a LoRA for that model is for every one
+    of them: a loader after only the first would run the rest without it.
+    Each takes the CLIP its own node hands out, or else the next CLIP loader
+    standing apart, in node order; a model left with none gets a model-only
+    loader.
+
     Returns:
         ``{"model": {"node_id", "class_type", "output"}, "clip": … or None,
         "rewires": [{"node_id", "class_type", "field", "type"}, …],
-        "pixlstash_loader": bool}`` - the last being whether the loader that
+        "also": [{"model", "clip", "rewires"}, …], "pixlstash_loader": bool}``
+        - ``also`` being the same splice after every further copy of the
+        model (empty for the usual one), and the last whether the loader that
         resolves by digest could be the one inserted, which is what makes a
         picture from that run unreplayable by "Generate variants".
 
@@ -1714,8 +1743,9 @@ def plan_lora_insertion(prompt_graph: dict, object_info: dict) -> dict:
 
     Raises:
         LookupError: When the graph cannot be spliced honestly - no model
-            source, more than one (a refiner, a merge: which one the LoRA is
-            for is the owner's call), a CLIP source that reads the model
+            source, several that differ (a refiner, a merge: which one the
+            LoRA is for is the owner's call), more text encoders than there
+            are loaders to take them, a CLIP source that reads the model
             (splicing would make a cycle), or a link neither end can type, so
             what it carries is unknown. Another kind of model (an upscaler's,
             ``WANVIDEOMODEL``) is on a path of its own and changes nothing.
@@ -1723,41 +1753,85 @@ def plan_lora_insertion(prompt_graph: dict, object_info: dict) -> dict:
     graph = _live_graph(prompt_graph or {}, object_info)
     links = _model_links(graph, object_info)
 
-    def source_of(kind: str) -> dict | None:
-        return _source_of(graph, links, kind)
+    def sources_of(kind: str) -> list[dict]:
+        roots = _sources(links, kind)
+        if len(roots) < 2 or not _same_loader(graph, roots):
+            # One source, none, or several that differ: the refusal is here.
+            lone = _source_of(graph, links, kind)
+            return [lone] if lone else []
+        return sorted(
+            (
+                {
+                    "node_id": node_id,
+                    "class_type": graph[node_id].get("class_type"),
+                    "output": output,
+                }
+                for node_id, output in roots
+            ),
+            key=lambda source: _node_order_key(source["node_id"]),
+        )
 
-    model = source_of("MODEL")
-    if model is None:
+    models = sources_of("MODEL")
+    if not models:
         raise LookupError(
             "PixlStash could not find the model this workflow loads, so there is "
             "nowhere to put a LoRA."
         )
-    clip = source_of("CLIP")
-    if clip is not None and clip["node_id"] in {
-        link["node_id"] for link in links if link["type"] == "MODEL"
-    }:
-        # The loader would feed a node its own CLIP input comes through: a cycle
-        # ComfyUI refuses, after the run is queued.
-        raise LookupError(
-            f"#{clip['node_id']} {clip['class_type']} hands out this workflow's "
-            "CLIP and reads its model, so a LoRA loader cannot sit in front of "
-            "both. Add the loader in ComfyUI."
-        )
-    sources = {"MODEL": model, "CLIP": clip}
-    rewires = [
-        {key: link[key] for key in ("node_id", "class_type", "field", "type")}
-        for link in links
-        if sources[link["type"]] is not None
-        and link["source"]
-        == (sources[link["type"]]["node_id"], sources[link["type"]]["output"])
+    clips = sources_of("CLIP")
+    model_readers = {link["node_id"] for link in links if link["type"] == "MODEL"}
+    for clip in clips:
+        if clip["node_id"] in model_readers:
+            # The loader would feed a node its own CLIP input comes through: a
+            # cycle ComfyUI refuses, after the run is queued.
+            raise LookupError(
+                f"#{clip['node_id']} {clip['class_type']} hands out this "
+                "workflow's CLIP and reads its model, so a LoRA loader cannot "
+                "sit in front of both. Add the loader in ComfyUI."
+            )
+    # A loader takes one model and one CLIP. A node handing out both (a
+    # checkpoint) keeps its own CLIP; the CLIP loaders that stand apart go to
+    # the models that have none, one each.
+    # ponytail: paired in node order, which is how copies of one pipeline are
+    # numbered; pair by the sampler they meet at if a graph ever interleaves.
+    own = {clip["node_id"]: clip for clip in clips}
+    model_nodes = {model["node_id"] for model in models}
+    apart = [clip for clip in clips if clip["node_id"] not in model_nodes]
+    pairs = [
+        (model, own.get(model["node_id"]) or (apart.pop(0) if apart else None))
+        for model in models
     ]
-    # Numeric where the id is a number, so the owner-facing sentence reads
-    # #3 before #10; a subgraph id ("75:83") keeps its place after them.
-    rewires.sort(key=lambda r: (r["type"], _node_order_key(r["node_id"]), r["field"]))
+    if apart or len(own) != len(clips):
+        # A text encoder no loader is left for would run without the LoRA.
+        named = ", ".join(f"#{c['node_id']} {c['class_type']}" for c in clips)
+        raise LookupError(
+            f"This workflow loads {len(clips)} text encoders ({named}) for "
+            f"{len(models)} {'model' if len(models) == 1 else 'models'}, so "
+            "PixlStash cannot tell which one the LoRA is for. Add the loader in "
+            "ComfyUI."
+        )
+
+    def splice(model: dict, clip: dict | None) -> dict:
+        ends = {
+            (source["node_id"], source["output"])
+            for source in (model, clip)
+            if source is not None
+        }
+        rewires = [
+            {key: link[key] for key in ("node_id", "class_type", "field", "type")}
+            for link in links
+            if link["source"] in ends
+        ]
+        # Numeric where the id is a number, so the owner-facing sentence reads
+        # #3 before #10; a subgraph id ("75:83") keeps its place after them.
+        rewires.sort(
+            key=lambda r: (r["type"], _node_order_key(r["node_id"]), r["field"])
+        )
+        return {"model": model, "clip": clip, "rewires": rewires}
+
+    first, *rest = (splice(model, clip) for model, clip in pairs)
     return {
-        "model": model,
-        "clip": clip,
-        "rewires": rewires,
+        **first,
+        "also": rest,
         # Whether _inserted_loader *could* reach for the digest loader: which
         # one it takes depends on the adapter, which is not chosen yet, and the
         # owner is owed the worse case before they choose.
@@ -1830,9 +1904,10 @@ def insert_adapter(
 
     The loader is chosen by :func:`_inserted_loader`, starts at its widgets'
     own defaults (strength 1.0), takes the planned sources, and every planned
-    input is rewired to it. The plan is checked against the graph first, so a
-    graph that no longer reads what the plan saw is refused whole rather than
-    half rewired.
+    input is rewired to it. A plan for a model loaded several times
+    (``also``) gets one loader after each. The whole plan is checked against
+    the graph first, so a graph that no longer reads what the plan saw is
+    refused whole rather than half rewired.
 
     Args:
         prompt_graph: The graph to mutate in place.
@@ -1841,17 +1916,42 @@ def insert_adapter(
         object_info: The map the plan was made with.
 
     Returns:
-        ``{"node_id", "class_type"}`` of the loader added.
+        ``{"node_id", "class_type", "also": [{"node_id", "class_type"}, …]}``:
+        the loader added, and the ones added for the plan's ``also``.
 
     Raises:
         LookupError: When no loader can carry the adapter on this ComfyUI, or
             the graph has diverged from the plan.
     """
-    clip = plan.get("clip")
+    splices = [plan, *(plan.get("also") or [])]
+    loaders = [
+        _checked_loader(prompt_graph, splice, adapter, object_info)
+        for splice in splices
+    ]
+    first, *rest = (
+        _splice_loader(prompt_graph, splice, object_info, *loader)
+        for splice, loader in zip(splices, loaders)
+    )
+    return {**first, "also": rest}
+
+
+def _checked_loader(
+    prompt_graph: dict, splice: dict, adapter: dict, object_info: dict
+) -> tuple[str, str, str]:
+    """The loader :func:`_inserted_loader` picks for *splice*, once it fits.
+
+    Nothing is changed here: the loader's wiring and every planned input are
+    checked, so :func:`insert_adapter` can refuse before its first edit.
+
+    Raises:
+        LookupError: When no loader can carry the adapter on this ComfyUI, or
+            the graph has diverged from the plan.
+    """
+    clip = splice.get("clip")
     loader, field, value = _inserted_loader(adapter, object_info, clip is not None)
     spec = object_info.get(loader) or {}
     outputs = spec.get("output") if isinstance(spec.get("output"), list) else []
-    sources = {"MODEL": plan["model"], "CLIP": clip}
+    sources = {"MODEL": splice["model"], "CLIP": clip}
     for kind, wire in (("MODEL", "model"), ("CLIP", "clip"))[: 2 if clip else 1]:
         if kind not in outputs:
             raise LookupError(
@@ -1867,7 +1967,7 @@ def insert_adapter(
                 f"{loader} on this ComfyUI takes no {wire} input, so PixlStash "
                 "cannot wire it in."
             )
-    for rewire in plan.get("rewires") or []:
+    for rewire in splice.get("rewires") or []:
         source = sources.get(rewire["type"])
         node = prompt_graph.get(rewire["node_id"])
         inputs = node.get("inputs") if isinstance(node, dict) else None
@@ -1880,12 +1980,27 @@ def insert_adapter(
                 f"Node {rewire['node_id']} no longer reads its {rewire['type']} "
                 "where PixlStash planned the LoRA loader."
             )
+    return loader, field, value
+
+
+def _splice_loader(
+    prompt_graph: dict,
+    splice: dict,
+    object_info: dict,
+    loader: str,
+    field: str,
+    value: str,
+) -> dict:
+    """Add *loader* where *splice* says; ``{"node_id", "class_type"}`` of it."""
+    clip = splice.get("clip")
+    spec = object_info.get(loader) or {}
+    outputs = spec["output"]
     node_id = str(
         max((int(k) for k in prompt_graph if str(k).isdigit()), default=0) + 1
     )
     inputs = _widget_defaults(spec)
     inputs[field] = value
-    inputs["model"] = [plan["model"]["node_id"], plan["model"]["output"]]
+    inputs["model"] = [splice["model"]["node_id"], splice["model"]["output"]]
     if clip:
         inputs["clip"] = [clip["node_id"], clip["output"]]
     prompt_graph[node_id] = {
@@ -1893,7 +2008,7 @@ def insert_adapter(
         "inputs": inputs,
         "_meta": {"title": "LoRA (added by PixlStash)"},
     }
-    for rewire in plan.get("rewires") or []:
+    for rewire in splice.get("rewires") or []:
         prompt_graph[rewire["node_id"]]["inputs"][rewire["field"]] = [
             node_id,
             outputs.index(rewire["type"]),

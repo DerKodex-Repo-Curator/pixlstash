@@ -16038,6 +16038,57 @@ def test_a_run_adds_a_lora_in_a_loader_of_its_own(loaderless):
     assert graph["2"]["inputs"]["model"] == [added[0], 0]
 
 
+def _two_copies() -> dict:
+    """LOADERLESS_DOCUMENT twice over: nodes 11 to 13 are a copy of 1 to 3."""
+    document = json.loads(json.dumps(LOADERLESS_DOCUMENT))
+    document["11"] = json.loads(json.dumps(document["1"]))
+    document["12"] = {
+        "class_type": "KSampler",
+        "inputs": {"steps": 20, "cfg": 7.0, "seed": 1, "model": ["11", 0]},
+    }
+    document["13"] = {
+        "class_type": "SaveImage",
+        "inputs": {"filename_prefix": "Q", "images": ["12", 0]},
+    }
+    return document
+
+
+def test_an_added_lora_goes_after_every_copy_of_the_model(loaderless):
+    """A graph loading the same checkpoint twice: both passes get the LoRA.
+
+    Wrong if one sampler still reads its checkpoint (that pass would run
+    without the LoRA and say nothing), or if only the first loader is at the
+    strength asked for.
+    """
+    document = _two_copies()
+    loaderless.monkeypatch.setattr(
+        workflows_routes,
+        "_load_embedded_api_prompt",
+        lambda server, pid, object_info=None: (json.loads(json.dumps(document)), []),
+    )
+    _serve_the_adapter_on(loaderless, LOADERLESS_OBJECT_INFO)
+    r = loaderless.owner.post(
+        f"{API}/workflows/run",
+        json={
+            "workflow_id": RUN_WF,
+            "add_loras": [{"sha256": RUN_ADAPTER_DIGEST, "strength_model": 0.6}],
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert loaderless.submitted, [g["reasons"] for g in r.json()["groups"]]
+    graph = loaderless.submitted[0]["graph"]
+    read = {
+        graph[sampler]["inputs"]["model"][0]: checkpoint
+        for sampler, checkpoint in (("2", "1"), ("12", "11"))
+    }
+    assert len(read) == 2, graph
+    for loader, checkpoint in read.items():
+        assert graph[loader]["class_type"] == "LoraLoaderModelOnly", graph
+        assert graph[loader]["inputs"]["model"] == [checkpoint, 0]
+        assert graph[loader]["inputs"]["lora_name"] == RUN_ADAPTER_FILENAME
+        assert graph[loader]["inputs"]["strength_model"] == 0.6
+
+
 def test_an_added_lora_replaces_none_of_the_workflows_own(runnable):
     """The graph's own loader keeps its LoRA; the added one goes in beside it."""
     info = json.loads(json.dumps({**RUN_OBJECT_INFO, **LOADERLESS_OBJECT_INFO}))
@@ -20773,6 +20824,9 @@ def test_open_says_where_the_people_loader_goes(a_persons_lora):
         {"node_id": "1", "output": 1},
         None,
     )
+    # The one place again, as a node that reads `places` finds it.
+    (only,) = place["places"]
+    assert only == {key: place[key] for key in ("model", "clip", "rewires")}
     # Loader 2 holds the person's LoRA, so the graph opens without it and
     # loader 5 is what reads the checkpoint.
     assert sorted((r["node_id"], r["field"]) for r in place["rewires"]) == [
@@ -20781,6 +20835,41 @@ def test_open_says_where_the_people_loader_goes(a_persons_lora):
     ]
     note = env.owner.get(f"{API}/workflows/{env.manual}/people").json()["note"]
     assert note.startswith("This workflow's base model is not known")
+
+
+def test_open_places_a_people_loader_after_every_copy_of_the_model(
+    a_persons_lora, monkeypatch
+):
+    """Every copy's place reaches ComfyUI-PixlStash, in `places`.
+
+    Wrong if `places` holds one, or if `model` is set beside several: a node
+    from before `places` reads `model` alone and would put the loader on the
+    first copy only. The plan is the planner's own for a graph of two copies
+    (the workflow stored here has one model), so this is what the planner
+    answers, handed on in the shape the node reads.
+    """
+    env = a_persons_lora
+    planner = workflows_routes.plan_lora_insertion
+    monkeypatch.setattr(
+        workflows_routes,
+        "plan_lora_insertion",
+        lambda graph, object_info: planner(_two_copies(), LOADERLESS_OBJECT_INFO),
+    )
+    place = _opened(env, env.manual)["people_loader"]
+    assert place["places"] == [
+        {
+            "model": {"node_id": "1", "output": 0},
+            "clip": None,
+            "rewires": [{"node_id": "2", "field": "model", "type": "MODEL"}],
+        },
+        {
+            "model": {"node_id": "11", "output": 0},
+            "clip": None,
+            "rewires": [{"node_id": "12", "field": "model", "type": "MODEL"}],
+        },
+    ]
+    assert (place["model"], place["rewires"]) == (None, [])
+    assert "the same model 2 times" in place["reason"]
 
 
 def test_no_people_loader_where_nobody_has_a_lora(saving):
