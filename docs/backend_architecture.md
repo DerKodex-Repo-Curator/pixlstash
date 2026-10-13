@@ -785,6 +785,7 @@ Public guest scoring and shared-link endpoints.
 | POST   | /api/v1/telemetry/install-id/recreate                                         | telemetry       | Recreate the anonymous install ID                           |
 | GET    | /api/v1/workflows                                                             | workflows       | The Workflows grid                                          |
 | POST   | /api/v1/workflows/run                                                         | workflows       | Run a workflow                                              |
+| POST   | /api/v1/workflows/run/opening                                                 | workflows       | Hold a run for ComfyUI to open                              |
 | POST   | /api/v1/workflows/run/preflight                                               | workflows       | Check what a run would do                                   |
 | GET    | /api/v1/workflows/runs/{prompt_id}                                            | workflows       | How a run ended                                             |
 | GET    | /api/v1/workflows/{workflow_id}                                               | workflows       | One workflow                                                |

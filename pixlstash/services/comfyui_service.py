@@ -2146,9 +2146,11 @@ def comfyui_pixlstash_scripts(base_url: str) -> set[str] | None:
 
 # The pack's scripts PixlStash asks ComfyUI for: the one that reads a
 # ``?pixlstash_workflow=<key>`` link, and the one that saves a workflow opened
-# that way back to PixlStash (#1852; a pack from before it opens a copy).
+# that way back to PixlStash (#1852; a pack from before it opens a copy), and
+# the one that reads a ``?pixlstash_run=<opening>`` link from the Run popup.
 PACK_OPENS_WORKFLOWS = "open_workflow.js"
 PACK_SAVES_BACK = "save_workflow.js"
+PACK_OPENS_RUNS = "open_run.js"
 
 
 def comfyui_can_open_workflows(base_url: str) -> bool | None:

@@ -110,6 +110,7 @@ from pixlstash.utils.workflow_ids import MANUAL_PREFIX
 # stay thin and delegate to it. See pixlstash/services/comfyui_service.py.
 from pixlstash.services.comfyui_service import (
     _comfyui_abort,
+    PACK_OPENS_RUNS,
     PACK_OPENS_WORKFLOWS,
     PACK_SAVES_BACK,
     PIXLSTASH_CHECKPOINT_LOADER,
@@ -1668,6 +1669,9 @@ class ComfyUIPixlstashNodeResponse(BaseModel):
     # pack's `save_workflow.js` is loaded. False for an older pack, which
     # opens a copy; null when ComfyUI cannot be asked.
     saves_back: Optional[bool] = None
+    # Whether it can open a run from the Run popup, which it saves as a new
+    # workflow: the pack's `open_run.js` is loaded. False for an older pack.
+    opens_runs: Optional[bool] = None
 
 
 class ComfyUIProbeRequest(BaseModel):
@@ -2081,7 +2085,8 @@ def create_router(server) -> APIRouter:
             "Asks the configured ComfyUI's /extensions whether the "
             "ComfyUI-PixlStash node's open_workflow.js is loaded, the script "
             "that reads ?pixlstash_workflow=<key>. can_open_workflows is null "
-            "when ComfyUI cannot be asked."
+            "when ComfyUI cannot be asked. opens_runs says the same of "
+            "open_run.js, which reads the Run popup's ?pixlstash_run=<opening>."
         ),
         response_model=ComfyUIPixlstashNodeResponse,
     )
@@ -2089,10 +2094,11 @@ def create_router(server) -> APIRouter:
         comfyui_url = _comfyui_url(server.auth.get_user_for_request(request))
         scripts = comfyui_pixlstash_scripts(comfyui_url)
         if scripts is None:
-            return {"can_open_workflows": None, "saves_back": None}
+            return {"can_open_workflows": None, "saves_back": None, "opens_runs": None}
         return {
             "can_open_workflows": PACK_OPENS_WORKFLOWS in scripts,
             "saves_back": PACK_SAVES_BACK in scripts,
+            "opens_runs": PACK_OPENS_RUNS in scripts,
         }
 
     @router.get(

@@ -34,6 +34,7 @@ import json
 from pathlib import Path
 import logging
 import os
+import re
 import shutil
 import socket
 import sqlite3
@@ -243,6 +244,7 @@ _WORKFLOW_WRITE_ROUTES = (
     # graph, which is what the picture-scoped run routes #1410 retired did.
     ("POST", "/api/v1/workflows/run"),
     ("POST", "/api/v1/workflows/run/preflight"),
+    ("POST", "/api/v1/workflows/run/opening"),
     # The file gestures (v1.12 B8). Each resolves the card's graph out of the
     # whole library the way the run route does, and write a file.
     ("POST", "/api/v1/workflows/{workflow_id}/duplicate"),
@@ -1501,15 +1503,35 @@ def test_the_node_check_is_owner_only(workflow_env, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "answer, expected, saves_back",
+    "answer, expected, saves_back, opens_runs",
     [
-        (["/extensions/ComfyUI-PixlStash/open_workflow.js"], True, False),
-        (["/extensions/comfyui-pixlstash/js/open_workflow.js"], True, False),
+        (["/extensions/ComfyUI-PixlStash/open_workflow.js"], True, False, False),
+        (["/extensions/comfyui-pixlstash/js/open_workflow.js"], True, False, False),
         # The pack from before Open in ComfyUI, and another pack's same name.
-        (["/extensions/ComfyUI-PixlStash/picker.js"], False, False),
-        (["/extensions/other-pack/open_workflow.js"], False, False),
-        (requests.ConnectionError("refused"), None, None),
-        ({"not": "a list"}, None, None),
+        (["/extensions/ComfyUI-PixlStash/picker.js"], False, False, False),
+        (["/extensions/other-pack/open_workflow.js"], False, False, False),
+        (requests.ConnectionError("refused"), None, None, None),
+        ({"not": "a list"}, None, None, None),
+        # A pack that opens a run from the Run popup, and another pack's
+        # script of the same name.
+        (
+            [
+                "/extensions/ComfyUI-PixlStash/open_workflow.js",
+                "/extensions/ComfyUI-PixlStash/open_run.js",
+            ],
+            True,
+            False,
+            True,
+        ),
+        (
+            [
+                "/extensions/ComfyUI-PixlStash/open_workflow.js",
+                "/extensions/other-pack/open_run.js",
+            ],
+            True,
+            False,
+            False,
+        ),
         # A pack that saves an opened workflow back (#1852), and another
         # pack's script of the same name.
         (
@@ -1519,6 +1541,7 @@ def test_the_node_check_is_owner_only(workflow_env, monkeypatch):
             ],
             True,
             True,
+            False,
         ),
         (
             [
@@ -1527,18 +1550,24 @@ def test_the_node_check_is_owner_only(workflow_env, monkeypatch):
             ],
             True,
             False,
+            False,
         ),
     ],
 )
 def test_the_node_check_reads_comfyuis_extensions(
-    workflow_env, monkeypatch, answer, expected, saves_back
+    workflow_env, monkeypatch, answer, expected, saves_back, opens_runs
 ):
     """Only the node's own scripts count; unreachable is ``null``. An older
-    node opens a workflow and does not save it back, and the app says so."""
+    node opens a workflow and does not save it back, or opens no run from the
+    Run popup, and the app says so."""
     _extensions_answer(monkeypatch, answer)
     r = workflow_env.owner.get(f"{API}/comfyui/pixlstash-node")
     assert r.status_code == 200, r.text
-    assert r.json() == {"can_open_workflows": expected, "saves_back": saves_back}
+    assert r.json() == {
+        "can_open_workflows": expected,
+        "saves_back": saves_back,
+        "opens_runs": opens_runs,
+    }
 
 
 def _system_stats_answer(monkeypatch, answer) -> list[str]:
@@ -2298,8 +2327,15 @@ _COMFYUI_SCOPE_REFUSED = (
     ("GET", f"{API}/filesystem/browse", f"{API}/filesystem/browse", None),
     ("GET", f"{API}/libraries", f"{API}/libraries", None),
     ("GET", f"{API}/snapshots", f"{API}/snapshots", None),
-    # Running a workflow is PixlStash's, not the nodes'.
+    # Running a workflow is PixlStash's, not the nodes', and so is holding a
+    # run for ComfyUI to open: the nodes only read what was held.
     ("POST", f"{API}/workflows/run", f"{API}/workflows/run", {}),
+    (
+        "POST",
+        f"{API}/workflows/run/opening",
+        f"{API}/workflows/run/opening",
+        {},
+    ),
     # The shape of an admitted template (a character's field), another route.
     (
         "GET",
@@ -6492,6 +6528,7 @@ def test_no_scoped_token_can_write_a_workflow_card(workflow_env):
         ("PUT", f"{API}/workflows/{BUSY_WF}/inputs", {"inputs": []}),
         ("POST", f"{API}/workflows/run", {"workflow_id": BUSY_WF}),
         ("POST", f"{API}/workflows/run/preflight", {"workflow_id": BUSY_WF}),
+        ("POST", f"{API}/workflows/run/opening", {"workflow_id": BUSY_WF}),
         (
             "POST",
             f"{API}/workflows/run",
@@ -6677,6 +6714,12 @@ _EVERY_WORKFLOW_ROUTE = (
         {"workflow_id": BUSY_WF},
     ),
     ("POST", "/workflows/run", "/workflows/run", {"workflow_id": BUSY_WF}),
+    (
+        "POST",
+        "/workflows/run/opening",
+        "/workflows/run/opening",
+        {"workflow_id": BUSY_WF},
+    ),
     ("DELETE", "/workflows/{workflow_id}", f"/workflows/{BUSY_WF}", None),
 )
 
@@ -11015,6 +11058,30 @@ def test_a_lone_picture_input_takes_the_selection_with_nothing_in_the_body(i2i):
     assert upload["path"] == str(i2i.tmp_path / "cat.png")
     assert i2i.submitted[0]["graph"]["5"]["inputs"]["image"] == upload["name"]
     assert _inputs_of(r.json())[_label_of(i2i.graph, "5")]["fill"] == "selection"
+
+
+def test_a_run_held_for_comfyui_has_the_picture_the_run_would_load(i2i):
+    """Open in ComfyUI from a run over a picture: the picture is uploaded as a
+    run uploads it, and the graph that opens loads it. Only the first of a
+    selection: there is one canvas."""
+    subject = _add_picture(i2i.server, i2i.tmp_path, "cat.png")
+    other = _add_picture(i2i.server, i2i.tmp_path, "dog.png")
+    r = i2i.owner.post(
+        f"{API}/workflows/run/opening",
+        json={"picture_ids": [subject, other], "target": RUN_WF},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["workflow_id"] == RUN_WF
+    [upload] = i2i.uploads
+    assert upload["name"] == _upload_name(i2i.server, subject, _h("pixels-cat.png"))
+    opened = i2i.owner.get(
+        f"{API}/workflows/{RUN_WF}/graph", params={"run": r.json()["opening"]}
+    ).json()
+    assert opened["workflow"]["5"]["inputs"]["image"] == upload["name"]
+    assert i2i.submitted == []
+    # The workflow's own graph still loads what it named.
+    plain = i2i.owner.get(f"{API}/workflows/{RUN_WF}/graph").json()
+    assert plain["workflow"]["5"]["inputs"]["image"] != upload["name"]
 
 
 def _embed_in(monkeypatch, graphs: dict[int, dict]) -> None:
@@ -20318,6 +20385,37 @@ def test_the_picture_loader_goes_in_only_on_a_picture_the_library_holds(id_loade
     assert loader(env.manual)["class_type"] == "LoadImage"
 
 
+def test_a_held_run_opens_on_the_picture_it_put_in_not_on_the_pin(id_loaders):
+    """The Run popup's pick for an input beats the picture pinned to it, in a
+    run and so in the run held for ComfyUI. Wrong if the loader that opens
+    names the pinned picture: that is another picture than the popup shows."""
+    env = id_loaders
+    env.monkeypatch.setattr(
+        workflows_routes, "_upload_image_to_comfyui", lambda url, path, name=None: name
+    )
+    document = _picture_document("subject.png")
+    address = {"slot_label": _label_of(document, "7"), "input_name": "image"}
+    r = env.owner.put(
+        f"{API}/workflows/{env.manual}/inputs",
+        json={"inputs": [{**address, "mode": "fixed", "picture_id": env.picture}]},
+    )
+    assert r.status_code == 200, r.text
+    picked = _add_picture(env.server, env.tmp_path, "picked.png")
+    library = env.server.vault.library_uuid
+
+    def loader(**body):
+        held = _hold_run(env, workflow_id=env.manual, **body)
+        assert held.status_code == 200, held.text
+        return _opened(env, env.manual, run=held.json()["opening"])["workflow"]["7"]
+
+    assert loader(inputs=[{**address, "picture_id": picked}]) == {
+        "class_type": "PixlStashPictureLoader",
+        "inputs": {"picture_ids": str(picked), "library": library},
+    }
+    # Nothing picked: the pin is the picture, as from the Workflow tab's Open.
+    assert loader()["inputs"]["picture_ids"] == str(env.picture)
+
+
 def test_a_graph_opened_on_pixlstashs_own_ids_and_saved_untouched_stores_nothing(
     id_loaders,
 ):
@@ -20602,6 +20700,144 @@ def test_a_graph_stored_as_a_new_workflow_leaves_nothing_waiting_behind(saving):
     r = _put_graph(saving, saving.manual, opened["workflow"], name="On Krea again")
     assert r.json()["new_workflow"] is True, r.text
     assert _changes(saving, saving.manual)["count"] == 1
+
+
+def _hold_run(env, **body):
+    return env.owner.post(f"{API}/workflows/run/opening", json=body)
+
+
+def test_a_run_held_for_comfyui_opens_with_what_the_run_popup_changed(saving):
+    """The Run popup's Open in ComfyUI: the workflow with this run's prompt and
+    seed in it, and nothing queued. Wrong if the workflow's own graph opens."""
+    r = _hold_run(
+        saving,
+        workflow_id=saving.manual,
+        prompt="a dog on a held run",
+        seed_mode="fixed",
+        seed=4242,
+    )
+    assert r.status_code == 200, r.text
+    held = r.json()
+    assert held["workflow_id"] == saving.manual
+    assert re.fullmatch(r"[0-9a-f]{32}", held["opening"]), held
+
+    opened = _opened(saving, saving.manual, run=held["opening"])
+    assert opened["workflow"]["6"]["inputs"]["text"] == "a dog on a held run"
+    assert opened["workflow"]["3"]["inputs"]["seed"] == 4242
+    assert opened["waiting_applied"] is False
+    # Asked for twice, it answers twice: ComfyUI asks through a proxy.
+    assert _opened(saving, saving.manual, run=held["opening"]) == opened
+    # The workflow itself is as it was, and nothing ran.
+    assert _opened(saving, saving.manual)["workflow"]["6"]["inputs"]["text"] == "a cat"
+    assert saving.submitted == []
+    assert _manual_ids(saving) == [saving.manual]
+
+
+def test_a_held_run_that_keeps_its_seed_opens_with_the_graphs_own(saving):
+    """`keep` is the form's choice like any other: the seed is not re-rolled
+    behind it. Wrong if what opens holds another seed than the workflow's."""
+    held = _hold_run(saving, workflow_id=saving.manual, seed_mode="keep")
+    assert held.status_code == 200, held.text
+    opened = _opened(saving, saving.manual, run=held.json()["opening"])
+    own = CHAIN_DOCUMENT["3"]["inputs"]["seed"]
+    assert opened["workflow"]["3"]["inputs"]["seed"] == own
+    # The control: a new seed is another one.
+    fresh = _hold_run(saving, workflow_id=saving.manual, seed_mode="new")
+    opened = _opened(saving, saving.manual, run=fresh.json()["opening"])
+    assert opened["workflow"]["3"]["inputs"]["seed"] != own
+
+
+def test_a_held_run_cannot_keep_a_seed_its_source_does_not_have(runnable):
+    """Refused where it is asked, as the run is: a stored recipe holds no
+    seed, so there is no placeholder for ComfyUI to queue again and again."""
+    r = runnable.owner.post(
+        f"{API}/workflows/run/opening",
+        json={"workflow_id": RUN_WF, "seed_mode": "keep"},
+    )
+    assert r.status_code == 400 and "keeps no seed" in r.json()["detail"], r.text
+
+
+def test_a_held_run_is_answered_for_its_own_workflow_and_only_while_held(
+    saving, monkeypatch
+):
+    held = _hold_run(saving, workflow_id=saving.manual).json()["opening"]
+    path = f"{API}/workflows/{{}}/graph"
+    assert (
+        saving.owner.get(path.format(saving.manual), params={"run": held}).status_code
+        == 200
+    )
+    # Another workflow, an id nobody was handed, and one that is not an id.
+    for workflow_id, run, status in (
+        (RUN_WF, held, 404),
+        (saving.manual, "0" * 32, 404),
+        (saving.manual, "nope", 422),
+    ):
+        r = saving.owner.get(path.format(workflow_id), params={"run": run})
+        assert r.status_code == status, (workflow_id, run, r.text)
+
+    monkeypatch.setattr(workflows_routes, "RUN_OPENING_SECONDS", -1)
+    late = _hold_run(saving, workflow_id=saving.manual).json()["opening"]
+    r = saving.owner.get(path.format(saving.manual), params={"run": late})
+    assert r.status_code == 404 and "no longer waiting" in r.json()["detail"], r.text
+
+
+def test_only_so_many_runs_are_held_at_once(saving, monkeypatch):
+    """A held graph is megabytes: the oldest goes when another is held."""
+    monkeypatch.setattr(workflows_routes, "RUN_OPENINGS_HELD", 2)
+    first, second, third = (
+        _hold_run(saving, workflow_id=saving.manual).json()["opening"] for _ in range(3)
+    )
+    answers = [
+        saving.owner.get(
+            f"{API}/workflows/{saving.manual}/graph", params={"run": run}
+        ).status_code
+        for run in (first, second, third)
+    ]
+    assert answers == [404, 200, 200]
+
+
+def test_a_run_with_no_graph_is_refused_when_it_is_held_not_in_comfyui(
+    workflow_env, monkeypatch
+):
+    """The Run popup is where the refusal is read, so it is said there."""
+    monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url, **_: (None, "refused")
+    )
+    r = workflow_env.owner.post(
+        f"{API}/workflows/run/opening", json={"workflow_id": BINNED_WF}
+    )
+    assert r.status_code == 409 and "no graph" in r.json()["detail"].lower(), r.text
+
+
+def test_a_graph_sent_as_new_is_a_new_workflow_and_the_old_one_is_untouched(saving):
+    """What ComfyUI saves from a run opened there. Wrong if the workflow it
+    was opened from gets a version."""
+    graph = _opened(saving, saving.manual)["workflow"]
+    graph["6"]["inputs"]["text"] = "a dog"
+    r = _put_graph(saving, saving.manual, graph, as_new=True)
+    assert r.status_code == 200, r.text
+    made = r.json()
+    assert made["new_workflow"] is True and made["workflow_id"] != saving.manual
+    assert made["name"].endswith("(from a run)"), made
+    assert sorted(_manual_ids(saving)) == sorted([saving.manual, made["workflow_id"]])
+    assert len(_versions_of(saving, saving.manual)) == 1
+    assert _opened(saving, saving.manual)["workflow"]["6"]["inputs"]["text"] == "a cat"
+    # Taken as sent: the run's prompt is the new workflow's own.
+    assert (
+        _opened(saving, made["workflow_id"])["workflow"]["6"]["inputs"]["text"]
+        == "a dog"
+    )
+
+    # The same graph without the flag is this workflow's next version.
+    r = _put_graph(saving, saving.manual, _without_five())
+    assert r.json()["new_workflow"] is False and r.json()["version"] == 2, r.text
+
+    # Untouched in ComfyUI and saved: still a workflow of its own.
+    r = _put_graph(
+        saving, saving.manual, _opened(saving, saving.manual)["workflow"], as_new=True
+    )
+    assert r.json()["new_workflow"] is True, r.text
+    assert len(_versions_of(saving, saving.manual)) == 2
 
 
 def test_a_shelf_loader_swapped_for_another_model_is_a_new_workflow(saving):

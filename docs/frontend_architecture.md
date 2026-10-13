@@ -2230,7 +2230,8 @@ can no longer see.
   `pixlstashDesktop.openComfyui`** (`desktop:openComfyui`), because the shell's
   `openExternalSafely` refuses `http:` and ComfyUI is plain `http:`: the channel
   is app-window-only and opens nothing but an `http(s)` URL whose query is a
-  workflow id, with `pixlstash_original=1` the one thing allowed beside it
+  workflow id, with `pixlstash_original=1` the one thing allowed beside it,
+  or the Run popup's pair, `pixlstash_run` and `pixlstash_of` (below)
   (`electron/src/urlPolicy.ts::comfyuiOpenTarget`). **What opens holds
   ComfyUI-PixlStash nodes** in place of the stock savers and single LoRA
   loaders, and of Load Image and Load Checkpoint where PixlStash holds the
@@ -2258,6 +2259,33 @@ can no longer see.
   answers `saves_back: false`: no `save_workflow.js` in ComfyUI's extensions)
   what opens is a copy that never comes back, and the tooltip reads *Open a
   copy in ComfyUI*. Only on a definite no.
+
+- **The Run popup has an Open in ComfyUI button of its own**, in its footer
+  beside *Save as recipe*: a labelled secondary `AppButton` with the ComfyUI
+  mark, drawn while there is a ComfyUI to open (`comfyuiUrl`, and on the
+  desktop the bridge). It opens **the run**, not the workflow: the form's body
+  (`runBody()`, the one Run and the pre-flight send) goes to
+  `POST /workflows/run/opening`, which builds that run's graph and holds it,
+  and ComfyUI is opened at `?pixlstash_run=<opening>&pixlstash_of=<workflow
+  id>` (`utils/comfyuiLink.js`, which the Workflow tab's button builds its
+  link with too). **What ComfyUI saves from there is a new workflow**, never a
+  version of the one it came from, and the tooltip says so. Its own
+  parameters rather than `pixlstash_workflow` with one more beside it: a node
+  from before this would open the workflow itself from that and save over it.
+  So the popup asks `GET /comfyui/pixlstash-node` per address (when it
+  mounts, and again if the address arrives or changes while it is open), and on
+  `opens_runs: false` (no `open_run.js` in ComfyUI's extensions) the button is
+  `aria-disabled` with the reason as its tooltip; an invalid seed refuses it
+  the same way, and a ComfyUI that cannot be asked leaves it to try. It is
+  natively disabled where *Save as recipe* is (no workflow, a form still being
+  read, a run or a save out). **In a browser the tab is opened before the
+  request and sent on after it** (`window.open("", "_blank")`, `opener = null`,
+  then `location.replace`): a `window.open` after an await is a blocked popup,
+  and the handle needed to send it on is what `noopener` would withhold. A
+  refusal is said in the form, where a run's is, and the tab is closed. On the
+  desktop the link goes through `pixlstashDesktop.openComfyui`, whose policy
+  (`comfyuiOpenTarget`) takes this second shape and nothing else. The popup
+  stays open: the run is still to make.
 
 - **Tasks is the shared `TasksPanel`, and always last.** This view replaces
   the grid, and its rail replaces the grid's, so without the tab a run started

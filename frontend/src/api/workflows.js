@@ -232,6 +232,22 @@ export async function preflightWorkflowRun(body, { cached = false } = {}) {
 }
 
 /**
+ * Hold a run for ComfyUI to open: the Run popup's *Open in ComfyUI*.
+ *
+ * The server builds the graph this run would submit and keeps it for a few
+ * minutes; ComfyUI is then opened at `?pixlstash_run=<opening>&pixlstash_of=
+ * <workflow_id>`, where the ComfyUI-PixlStash nodes fetch it. Nothing is
+ * queued and nothing is stored: what ComfyUI saves from it comes back as a new
+ * workflow. Pictures the run puts in are uploaded to ComfyUI, as a run does.
+ *
+ * @param {Object} body - see `runWorkflowCard`.
+ * @returns {Promise<{opening: string, workflow_id: string}>}
+ */
+export async function openWorkflowRun(body) {
+  return unwrap(apiClient.post("/workflows/run/opening", body));
+}
+
+/**
  * Run a workflow card.
  *
  * Exactly ONE source: `picture_ids` ("run what made these"), `saved_recipe_id`

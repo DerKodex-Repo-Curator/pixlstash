@@ -1389,6 +1389,9 @@ _PROJECT_REFS_IN_TYPED_BODY = frozenset(
         # here.
         ("POST", "/api/v1/workflows/run", "body.destination.project_id"),
         ("POST", "/api/v1/workflows/run/preflight", "body.destination.project_id"),
+        # The same body again, held for ComfyUI to open: `destination` is read
+        # by nothing there, and the route is OWNER_ONLY like the two above.
+        ("POST", "/api/v1/workflows/run/opening", "body.destination.project_id"),
     }
 )
 

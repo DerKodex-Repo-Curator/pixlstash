@@ -844,6 +844,14 @@
         <p v-if="submitError" class="rund-f rund-f--4 rund-note rund-note--bad" role="alert">
           {{ submitError }}
         </p>
+        <p
+          v-if="openError"
+          class="rund-f rund-f--4 rund-note rund-note--bad"
+          role="alert"
+          data-testid="rund-open-error"
+        >
+          {{ openError }}
+        </p>
       </div>
     </div>
 
@@ -1002,6 +1010,27 @@
       >
         {{ keptAs ? "Saved" : "Save as recipe" }}
       </AppButton>
+      <!-- This run in the owner's ComfyUI: the workflow with what the form
+           holds in it, which ComfyUI saves as a NEW workflow. Beside the
+           other thing to do with the form that is not running it, and only
+           where there is a ComfyUI to open. Disabled as Save as recipe is,
+           while there is no form to send; refused with `aria-disabled`, and
+           the tooltip saying why, where ComfyUI's nodes cannot open a run or
+           the seed is not one. The tooltip otherwise says what a save there
+           does, which the label has no room for. -->
+      <AppButton
+        v-if="canOpenComfyui"
+        data-testid="rund-open-comfyui"
+        :tooltip="openTip"
+        :loading="opening"
+        :disabled="!activeKey || !formRead || submitting || Boolean(saving)"
+        :class="{ 'run-refused': Boolean(openRefusal) }"
+        :aria-disabled="openRefusal ? 'true' : undefined"
+        @click="openInComfyui"
+      >
+        <template #icon="{ size }"><ComfyuiIcon :size="size" /></template>
+        Open in ComfyUI
+      </AppButton>
       <span class="rund-sp" />
       <AppButton :disabled="submitting || Boolean(saving)" @click="close">Cancel</AppButton>
       <!-- `aria-disabled`, not `disabled`: a natively-disabled button is out of
@@ -1088,7 +1117,7 @@ import {
 import { useRoute, useRouter } from "vue-router";
 import { VIcon } from "vuetify/components";
 
-import { getPictureRecipe } from "../../api/comfyui";
+import { getPictureRecipe, getPixlstashNode } from "../../api/comfyui";
 import { fetchWorkflowSets, listAdapters } from "../../api/modelShelf";
 import { pictureThumbnailUrl } from "../../api/pictures";
 import { stackMemberIds } from "../../utils/stackMembers";
@@ -1099,6 +1128,7 @@ import {
   getWorkflowChanges,
   getWorkflowFormInputs,
   listWorkflowCards,
+  openWorkflowRun,
   preflightWorkflowRun,
   readModelSwap,
   runWorkflowCard,
@@ -1109,9 +1139,11 @@ import {
   workflowCoverUrl,
 } from "../../api/workflows";
 import { useEntityListsStore } from "../../stores/useEntityListsStore";
+import { useFilterStore } from "../../stores/useFilterStore";
 import { useRunDialogStore } from "../../stores/useRunDialogStore";
 import { useWorkflowsStore } from "../../stores/useWorkflowsStore";
 import { errorMessage } from "../../utils/apiError";
+import { comfyuiLink } from "../../utils/comfyuiLink";
 import { focusLater } from "../../utils/dom";
 import { editLorasRoute, loraBase, loraStem } from "../../utils/loraChain";
 import { fitPeople, fitWorkflows } from "../../utils/loraWorkflows";
@@ -1155,6 +1187,7 @@ import AppDialog from "../widgets/AppDialog.vue";
 import AppInput from "../widgets/AppInput.vue";
 import AppSelect from "../widgets/AppSelect.vue";
 import AppTextarea from "../widgets/AppTextarea.vue";
+import ComfyuiIcon from "../widgets/ComfyuiIcon.vue";
 import PicturePicker from "../widgets/PicturePicker.vue";
 import Tooltip from "../widgets/Tooltip.vue";
 import RunReasonNotice from "./RunReasonNotice.vue";
@@ -4676,6 +4709,110 @@ function close() {
  */
 function onEscape(event) {
   if (close()) event.stopPropagation();
+}
+
+/**
+ * The desktop shell's bridge, when there is one: its window opens ComfyUI's
+ * plain `http:` only through `desktop:openComfyui`, as on the Workflow tab.
+ */
+const desktop = typeof window !== "undefined" ? window.pixlstashDesktop : null;
+const filterStore = useFilterStore();
+/** Whether there is a ComfyUI to open, and a way to open it from here. */
+const canOpenComfyui = computed(
+  () => Boolean(filterStore.comfyuiUrl) && (!desktop || !!desktop.openComfyui),
+);
+/**
+ * ComfyUI answered that its ComfyUI-PixlStash nodes are from before they
+ * opened a run (`open_run.js`): the link would open whatever ComfyUI had last.
+ * Only a definite no refuses; a ComfyUI that cannot be asked is left to try.
+ */
+const comfyuiOpensNoRuns = ref(false);
+// Asked per address, as the Workflow tab asks: the address can arrive after
+// the popup does (the store still loading, or Settings opened from a notice
+// here), and the answer about one ComfyUI says nothing of the next.
+let nodeCheck = 0;
+watch(
+  () => canOpenComfyui.value && filterStore.comfyuiUrl,
+  async (url) => {
+    const check = ++nodeCheck;
+    comfyuiOpensNoRuns.value = false;
+    if (!url) return;
+    try {
+      const node = await getPixlstashNode();
+      if (check !== nodeCheck) return;
+      comfyuiOpensNoRuns.value = node?.opens_runs === false;
+    } catch (err) {
+      console.warn("[run] could not ask ComfyUI for the PixlStash nodes", err);
+    }
+  },
+  { immediate: true },
+);
+const opening = ref(false);
+const openError = ref("");
+/** Why Open in ComfyUI does nothing, or "". */
+const openRefusal = computed(() => {
+  if (comfyuiOpensNoRuns.value) {
+    return "Update the ComfyUI-PixlStash nodes in ComfyUI, then restart it, to open a run there.";
+  }
+  return seedError.value;
+});
+const openTip = computed(
+  () =>
+    openRefusal.value ||
+    "Opens the workflow with these settings in it. Saving it in ComfyUI makes a new workflow.",
+);
+
+/**
+ * Open ComfyUI on this run: the workflow with what the form holds in it.
+ *
+ * A link cannot carry a run, so the server builds its graph and holds it
+ * (`POST /workflows/run/opening`, the run's own body), and ComfyUI is sent to
+ * fetch it by the id that answers. What ComfyUI saves from there comes back
+ * as a new workflow; the popup stays open, since the run is still to make.
+ *
+ * In a browser the tab is opened BEFORE the request and sent on after it: a
+ * `window.open` after an await is what popup blockers refuse. That needs the
+ * window's handle, so it is opened without `noopener` and cut loose
+ * (`opener = null`) before it goes anywhere.
+ */
+async function openInComfyui() {
+  if (openRefusal.value || opening.value) return;
+  openError.value = "";
+  // Read once: the address can change while the request is out (Settings
+  // opens from a notice here), and the tab goes where this press checked.
+  const address = filterStore.comfyuiUrl;
+  // Before anything is asked of the server: the request uploads pictures.
+  if (!comfyuiLink(address, {})) {
+    openError.value = "The ComfyUI address in Settings is not a web address.";
+    return;
+  }
+  const tab = desktop?.openComfyui ? null : window.open("", "_blank");
+  if (!tab && !desktop?.openComfyui) {
+    openError.value =
+      "The browser blocked the new tab. Allow pop-ups for PixlStash, then try again.";
+    return;
+  }
+  if (tab) tab.opener = null;
+  opening.value = true;
+  try {
+    // One graph opens however many runs the form asks for, so a count the
+    // form is still refusing does not stop it.
+    const held = await openWorkflowRun({ ...runBody(), count: 1 });
+    const link = comfyuiLink(address, {
+      pixlstash_run: held.opening,
+      pixlstash_of: held.workflow_id,
+    });
+    if (tab) tab.location.replace(link);
+    else if (!(await desktop.openComfyui(link))) {
+      throw new Error("Could not open ComfyUI.");
+    }
+  } catch (err) {
+    tab?.close();
+    console.warn("[run] could not open this run in ComfyUI", err);
+    openError.value = errorMessage(err, "Could not open this run in ComfyUI.");
+  } finally {
+    opening.value = false;
+  }
 }
 
 async function submit() {
