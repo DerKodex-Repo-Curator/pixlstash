@@ -1564,7 +1564,8 @@ class RunRequest(BaseModel):
     destination: RunDestination | None = None
     # Who the run's pictures are of, where its LoRAs do not say: a graph
     # loading exactly one person's LoRA names that person itself
-    # (`_lora_person`) and this is not read for it.
+    # (`_lora_person`) and this is not read for it. Bounded as every id here
+    # is: `MAX_PICTURE_ID` is SQLite's INTEGER ceiling, not a count of pictures.
     character_id: int | None = Field(None, ge=1, le=MAX_PICTURE_ID)
     # What fills each picture input of the workflow (#1457), first answer wins:
     # an entry here, a `fixed` pin whose picture is still kept, a stored

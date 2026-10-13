@@ -1318,7 +1318,9 @@ const destinationSetId = ref("");
 /**
  * "Assign to person": the id picked, as the select holds it; "" is no one.
  * Never remembered between popups, unlike the set: a wrong person on a later
- * run's pictures is worse than one more pick.
+ * run's pictures is worse than one more pick. Nothing has to reset it: every
+ * opening is a new instance (App.vue keys the popup on `runOpened`) and it is
+ * written nowhere else.
  */
 const ofPersonId = ref("");
 
