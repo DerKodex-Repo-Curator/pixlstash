@@ -81,7 +81,14 @@ VIDEO_SAVE_CLASSES = frozenset(
 # ComfyUI-PixlStash saver that uploads into the vault itself. A graph with none
 # of these produces no importable output no matter how long it runs.
 SAVE_IMAGE_CLASSES = (
-    frozenset({"SaveImage", "SaveImageWebsocket", "PixlStashPictureSaver"})
+    frozenset(
+        {
+            "SaveImage",
+            "SaveImageWebsocket",
+            "PixlStashPictureSaver",
+            "PixlStashVideoSaver",
+        }
+    )
     | VIDEO_SAVE_CLASSES
 )
 
@@ -1950,6 +1957,100 @@ def swap_to_adapter_loader(
         inputs["strength_clip"] = old["strength_clip"]
     node["class_type"] = PIXLSTASH_ADAPTER_LOADER
     node["inputs"] = inputs
+
+
+# The stock savers a graph opened in ComfyUI gets a ComfyUI-PixlStash saver
+# for, each with the input that carries what it saves. The PixlStash saver
+# takes the stock node's own inputs under the same names.
+PACK_SAVERS = {
+    "SaveImage": ("PixlStashPictureSaver", "images"),
+    "SaveVideo": ("PixlStashVideoSaver", "video"),
+}
+
+
+def swap_in_pack_nodes(
+    prompt_graph: dict,
+    object_info: dict,
+    lora_digest: Callable[[str], str | None],
+) -> list[dict]:
+    """Put ComfyUI-PixlStash nodes where a graph has the stock ones, in place.
+
+    For a graph that is opened in ComfyUI and queued there by hand: a stock
+    saver writes a file PixlStash never hears of, where the pack's saver sends
+    the picture or video back. ``SaveImage`` and ``SaveVideo`` become the
+    pack's savers on the same inputs, and a core single-slot LoRA loader whose
+    file *lora_digest* can name becomes ``PixlStashAdapterLoader``
+    (:func:`swap_to_adapter_loader`). Every node keeps its id and its wiring.
+
+    A node is left as it is where this ComfyUI lacks the pack's class, where
+    the stock node holds an input the pack's has no place for (a Save Video
+    from before the pack's saver was written against it), and where nothing
+    is wired into a saver. The loaders that name a library's own ids (the
+    picture loader, the checkpoint loader) are never swapped in. Those ids
+    are not trusted in a graph read back out of a picture (#1521), and a
+    picture queued from the opened graph is one the workflow may run from
+    next: the checkpoint loader is refused there, and a replay cannot tell
+    which picture the picture loader read.
+
+    Args:
+        lora_digest: A ``lora_name`` -> the SHA-256 the pack's loader can
+            load it by, or ``None``.
+
+    Returns:
+        ``[{node_id, was, now}]`` for every node swapped.
+    """
+    swapped = []
+    for node_id, node in prompt_graph.items():
+        if not isinstance(node, dict):
+            continue
+        was = node.get("class_type")
+        old = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+        if was in PACK_SAVERS:
+            now, carried = PACK_SAVERS[was]
+            spec = object_info.get(now)
+            declared = (spec.get("input") if isinstance(spec, dict) else None) or {}
+            takes = {
+                name
+                for group in ("required", "optional")
+                for name in (declared.get(group) or {})
+            }
+            # A nested input ("format.codec") is its root's to declare.
+            if not is_link(old.get(carried)) or not all(
+                str(name).split(".")[0] in takes for name in old
+            ):
+                continue
+            node["class_type"] = now
+            node["inputs"] = {**_widget_defaults(spec), **old}
+        elif was in _SWAPPABLE_LORA_LOADERS:
+            name = old.get("lora_name")
+            sha256 = lora_digest(name) if isinstance(name, str) else None
+            if not sha256:
+                continue
+            try:
+                swap_to_adapter_loader(prompt_graph, node_id, sha256, object_info)
+            except LookupError as exc:
+                logger.warning(
+                    "LoRA loader %s (%s) keeps its file %s rather than load it "
+                    "through %s: %s",
+                    node_id,
+                    was,
+                    name,
+                    PIXLSTASH_ADAPTER_LOADER,
+                    exc,
+                )
+                continue
+            now = PIXLSTASH_ADAPTER_LOADER
+        else:
+            continue
+        # A title that was only the stock node's name would call the new node
+        # by the old one's: it takes the name ComfyUI gives the new node.
+        meta = node.get("_meta")
+        titles = {was, (object_info.get(was) or {}).get("display_name")}
+        if isinstance(meta, dict) and meta.get("title") in titles:
+            shown = (object_info.get(now) or {}).get("display_name")
+            node["_meta"] = {**meta, "title": shown if shown else now}
+        swapped.append({"node_id": str(node_id), "was": was, "now": now})
+    return swapped
 
 
 def bypass_node(prompt_graph: dict, node_id: str, object_info: dict) -> None:

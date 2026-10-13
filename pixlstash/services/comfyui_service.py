@@ -45,6 +45,7 @@ from pixlstash.services import import_dedup_service
 from pixlstash.services.layout_move_service import resolve_placement
 from pixlstash.services.move_reconciliation_service import add_person
 from pixlstash.services.comfyui_recipe_service import (
+    PACK_SAVERS,
     VIDEO_SAVE_CLASSES,
     format_prompt_rejection,
 )
@@ -63,7 +64,12 @@ SEED_NODE_CLASSES = {"RandomNoise", "KSampler", "KSamplerAdvanced"}
 # instead of writing a file for PixlStash to collect. Their history entry
 # carries the ids they created under PIXLSTASH_IDS_KEY, and the images they do
 # report are `type: "temp"` previews of pictures that are already imported.
-PIXLSTASH_SAVER_CLASSES = frozenset({"PixlStashPictureSaver"})
+# Each with the stock saver a run submits in its place, and the input that
+# carries what it saves (`swap_pixlstash_savers`).
+_PIXLSTASH_SAVER_RUNS_AS = {
+    pack: (stock, carried) for stock, (pack, carried) in PACK_SAVERS.items()
+}
+PIXLSTASH_SAVER_CLASSES = frozenset(_PIXLSTASH_SAVER_RUNS_AS)
 PIXLSTASH_IDS_KEY = "picture_ids"
 
 # Every class in the ComfyUI-PixlStash pack starts with this.
@@ -880,14 +886,15 @@ def unfed_picture_loaders(workflow: dict, fed: set[str]) -> list[dict]:
 
 
 def swap_pixlstash_savers(workflow: dict) -> list[str]:
-    """Replace every ComfyUI-PixlStash saver with ``SaveImage``, in place.
+    """Replace every ComfyUI-PixlStash saver with the stock one, in place.
 
     The saver imports its outputs itself, which competes with the import the
     run is already doing and applies the project, set and character ids baked
-    into the file. ``SaveImage`` on the same images and prefix leaves the run's
-    own import as the only one. The node keeps its id and title, so an explicit
-    ``pixlstash_output_nodes`` still names it. A saver whose output another
-    node reads is left alone, since ``SaveImage`` has none to hand on.
+    into the file. ``SaveImage`` on the same images and prefix (``SaveVideo``
+    on the same video, format and prefix, for the video saver) leaves the
+    run's own import as the only one. The node keeps its id and title, so an
+    explicit ``pixlstash_output_nodes`` still names it. A saver whose output
+    another node reads is left alone, since the stock one has none to hand on.
 
     Returns:
         The ids of the nodes swapped.
@@ -904,18 +911,26 @@ def swap_pixlstash_savers(workflow: dict) -> list[str]:
         if node["class_type"] not in PIXLSTASH_SAVER_CLASSES:
             continue
         if node_id in read:
-            # Something reads its `picture_ids` output, which SaveImage does
-            # not have: left as it is, and refused as `imports_itself`.
+            # Something reads its `picture_ids` output, which the stock
+            # saver does not have: left as it is, and refused as
+            # `imports_itself`.
             continue
+        stock, carried = _PIXLSTASH_SAVER_RUNS_AS[node["class_type"]]
         inputs = node.get("inputs") or {}
-        if inputs.get("images") is None:
-            # Nothing to hand to SaveImage: left as it is, and refused as
-            # `imports_itself` rather than queued as a SaveImage ComfyUI
-            # then rejects.
+        if inputs.get(carried) is None:
+            # Nothing to hand to the stock saver: left as it is, and refused
+            # as `imports_itself` rather than queued as a saver ComfyUI then
+            # rejects.
             continue
-        node["class_type"] = "SaveImage"
+        node["class_type"] = stock
+        # Everything but what only the PixlStash saver has: where the result
+        # is filed, and whether the workflow is embedded in it.
         node["inputs"] = {
-            "images": inputs.get("images"),
+            **{
+                name: value
+                for name, value in inputs.items()
+                if name != "save_workflow" and not name.startswith("pixlstash_")
+            },
             "filename_prefix": inputs.get("filename_prefix") or "PixlStash",
         }
         swapped.append(node_id)
