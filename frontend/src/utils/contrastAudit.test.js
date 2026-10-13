@@ -91,6 +91,9 @@ describe('main.js status tokens', () => {
       expect(themes[theme]['selected-ink'], `${theme}.selected-ink`).toMatch(
         /^#[0-9a-f]{6}$/i,
       )
+      for (const key of ['surface-tertiary', 'dark-surface-tertiary']) {
+        expect(themes[theme][key], `${theme}.${key}`).toMatch(/^#[0-9a-f]{6}$/i)
+      }
     }
   })
 
@@ -110,7 +113,7 @@ describe('main.js status tokens', () => {
   it('keeps dark-surface-<status> identical across the two themes', () => {
     // A dark-surface stays dark in both themes, so its status hues have no
     // reason to differ. Divergence here means someone edited one theme only.
-    for (const level of ['error', 'warning', 'success', 'info']) {
+    for (const level of ['error', 'warning', 'success', 'info', 'tertiary']) {
       expect(
         themes.dark[`dark-surface-${level}`],
         `dark-surface-${level} differs between themes`,
@@ -131,8 +134,10 @@ describe('main.js status tokens', () => {
 
   it('measures every pair it claims to', () => {
     // 2 themes x (4 levels x (fill label + notice rail + 3 status-text grounds
-    // + dark-chrome text + dark-chrome rail) + 2 selected-ink grounds) = 60.
+    // + dark-chrome text + dark-chrome rail) + 2 selected-ink grounds
+    // + 4 teal pairs: the Save label, the ink on the rail and on the unsaved
+    // wash, the dot on dark chrome) = 68.
     // Guards against a loop silently skipping a family.
-    expect(auditContrast(themes)).toHaveLength(60)
+    expect(auditContrast(themes)).toHaveLength(68)
   })
 })

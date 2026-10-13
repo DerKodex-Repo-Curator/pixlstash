@@ -95,10 +95,22 @@ const pixlStashLight = {
     // to the token whose whole job is the former. 5.50:1 on the light theme's
     // `dark-surface` #242628, 6.25:1 on the dark theme's #181b20.
     "dark-surface-primary": "#8EA604",
+    // The sixth: teal as a mark on a dark chip. The Workflows card's *Unsaved*
+    // badge is a photo scrim, dark in both themes, so the theme's own
+    // `surface-tertiary` is the light theme's wrong value there. 7.36:1 on
+    // #242628, 8.37:1 on #181b20.
+    "dark-surface-tertiary": "#8fbcc6",
     // Olive as a FOREGROUND (a selected option's glyph or label) on this
     // theme's own surfaces - design system `--selected-ink`. A light ground
     // takes the deep olive; the dark theme lifts it.
     "selected-ink": "#567309",
+    // Teal as a FOREGROUND, where it has one meaning: NOT SAVED YET (the dot
+    // before a row's *Edited*, the glyph beside the count of unsaved changes,
+    // the outline of *Save as new…*). The `tertiary` fill is a glyph at only
+    // 2.73:1 on the dark rail, so the hue is deepened here and lifted in dark,
+    // the same shape as `surface-<status>`. 5.87:1 on `sidebar`, 4.21:1 on the
+    // unsaved shelf's wash (`tertiary` at 26% over `sidebar`).
+    "surface-tertiary": "#3b606a",
     surface: "#ffffff",
     "on-surface": "#23211d",
     background: "#faf9f7",
@@ -219,9 +231,15 @@ const pixlStashDark = {
     // Identical in both themes, like the four above. Keeps the retired bright
     // olive in service as a dark-card foreground (6.25:1 on #181b20).
     "dark-surface-primary": "#8EA604",
+    // Identical in both themes too: teal as a mark on a dark chip (8.37:1 on
+    // #181b20). See the light theme.
+    "dark-surface-tertiary": "#8fbcc6",
     // The deep olive measures 2.72:1 on `surface`, so olive as a foreground
     // takes the lifted value here (5.37:1). See the light theme.
     "selected-ink": "#8EA604",
+    // Teal as a foreground, lifted: 7.19:1 on `sidebar`, 5.63:1 on the
+    // unsaved shelf's wash. See the light theme.
+    "surface-tertiary": "#8fbcc6",
     surface: "#23282f",
     "on-surface": "#f2e5da",
     background: "#1b1f24",

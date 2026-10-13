@@ -57,11 +57,19 @@ const FLOOR_TEXT = 4.5
 const FLOOR_RAIL = 2.5
 /**
  * The app's own text floor (design system `tokens/colors.css`: "text 4:1"),
- * for the foreground families `surface-<status>` and `selected-ink`. A hovered
+ * for the foreground families `surface-<status>`, `selected-ink` and
+ * `surface-tertiary`. A hovered
  * row costs a lifted hue most of its margin, which is why this is 4 and not
  * the 4.5 the older pairs above were authored against.
  */
 const FLOOR_SURFACE_TEXT = 4
+
+/**
+ * The teal wash of the Workflow tab's shelf of unsaved changes: `tertiary` at
+ * this alpha over the rail (`.wftab-draft`, WorkflowTab.vue). The tightest
+ * ground `surface-tertiary` is drawn on.
+ */
+const UNSAVED_WASH = 0.26
 
 /** `#rrggbb` → `{r,g,b}`. Tolerates stray whitespace in the source value. */
 export function parseHex(value) {
@@ -244,6 +252,38 @@ export function auditContrast(themes = readThemeColors()) {
         FLOOR_SURFACE_TEXT,
       )
     }
+
+    // Teal, the hue of "not saved yet": the Save label on its fill, the ink
+    // on the rail and on the shelf's wash, and the dot on a dark chip.
+    add(
+      `${theme} · unsaved teal`,
+      'on-tertiary on tertiary',
+      need('on-tertiary'),
+      need('tertiary'),
+      FLOOR_TEXT,
+    )
+    for (const [where, ground] of [
+      ['sidebar', need('sidebar')],
+      [
+        'unsaved wash',
+        composite(need('tertiary'), need('sidebar'), UNSAVED_WASH),
+      ],
+    ]) {
+      add(
+        `${theme} · unsaved teal`,
+        `surface-tertiary on ${where}`,
+        need('surface-tertiary'),
+        ground,
+        FLOOR_SURFACE_TEXT,
+      )
+    }
+    add(
+      `${theme} · on dark chrome (${chrome})`,
+      'dark-surface-tertiary text',
+      need('dark-surface-tertiary'),
+      chrome,
+      FLOOR_TEXT,
+    )
 
     // The foreground family, on the chrome that stays dark in this theme.
     for (const level of LEVELS) {
