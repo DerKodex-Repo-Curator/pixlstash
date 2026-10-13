@@ -10416,9 +10416,13 @@ paired with the set's files of that kind in four passes, a file taken once
 `model_ids`; one naming another model, or one model twice, is a 422); then a
 slot that already loads one of the set's files keeps it, so a set holding the
 very files the workflow loads changes none of them; then a slot takes the
-set's file of its own layout (`family`); and when the set holds exactly as
+set's file of its own layout (`family`); and when the set holds at least as
 many files of the kind as the graph has slots, every slot left takes one
-whatever its layout: a set's files go with its checkpoint. The last two pair
+whatever its layout: a set's files go with its checkpoint. A set holding two
+builds of its encoder therefore fills a single loader with one of them (the
+closer name), never with neither, since the old model's encoder is the one
+file known not to go with it; a set holding fewer files than the graph has
+slots still fills none in this pass. The last two pair
 by filename, closest pair first (`_closest_pairs`, which `_pair_bases` uses
 too), never in order: in order, a set listing its audio VAE before its video
 one crossed the two loaders of an image-to-video graph. The plan answers with

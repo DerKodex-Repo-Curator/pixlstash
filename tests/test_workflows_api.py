@@ -14808,7 +14808,7 @@ def test_a_set_vae_of_another_layout_replaces_the_graphs_only_one(cloneable):
         _body, plans = _plans(
             cloneable,
             wan=[cloneable.checkpoint_id, ids[1]],
-            # Two VAEs for one slot: no fill by order, nothing it could guess.
+            # Two VAEs for one slot: it takes one of them, by name.
             two=[cloneable.checkpoint_id, ids[1], ids[2]],
             bare=[cloneable.checkpoint_id],
         )
@@ -14820,7 +14820,12 @@ def test_a_set_vae_of_another_layout_replaces_the_graphs_only_one(cloneable):
         "ae.safetensors": "wan-video-vae.safetensors",
     }
     assert plans["wan"]["maps_cleanly"] is True
-    assert plans["two"]["swaps"] == {_SHELF_FILENAME: CLONE_CHECKPOINT}
+    # Never the graph's own, which is the one known not to go with the set;
+    # and not a clean fit, since the set holds a file no loader took.
+    assert plans["two"]["swaps"] == {
+        _SHELF_FILENAME: CLONE_CHECKPOINT,
+        "ae.safetensors": "other-vae.safetensors",
+    }
     assert plans["two"]["maps_cleanly"] is False
     # The graph's VAE would be left beside another model's checkpoint.
     assert plans["bare"]["maps_cleanly"] is False
@@ -15007,6 +15012,57 @@ def test_a_set_of_another_family_fits_only_when_its_encoder_is_retyped(cloneable
     mystery = plans["mystery"]
     assert mystery["fit"] == "other"
     assert mystery["maps_cleanly"] is False
+
+
+def test_a_set_with_two_builds_of_its_encoder_fills_the_one_loader(cloneable):
+    """Two quants of the Krea 2 encoder and one CLIP loader: the loader takes
+    one of them and its type, never the Z-Image encoder it held."""
+    graph = _embedded_export_graph()
+    graph["8"] = {
+        "class_type": "CLIPLoader",
+        "inputs": {"clip_name": "qwen_3_4b.safetensors", "type": "lumina2"},
+    }
+    graph["5"]["inputs"]["clip"] = ["8", 0]
+    graph["6"]["inputs"]["clip"] = ["8", 0]
+    cloneable.monkeypatch.setattr(
+        workflows_routes,
+        "_load_embedded_api_prompt",
+        lambda server, pid, object_info=None: (graph, []),
+    )
+    cloneable.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url: (None, "down")
+    )
+    hub = cloneable.server.hub
+    with hub.transaction() as conn:
+        encoders = [
+            conn.execute(
+                "INSERT INTO model (file_kind, filename, family, provenance) "
+                "VALUES ('text_encoder', ?, 'qwen3_vl', 'scanned')",
+                (filename,),
+            ).lastrowid
+            for filename in (
+                "qwen3vl_4b_fp8_scaled.safetensors",
+                "qwen3vl_4b_bf16.safetensors",
+            )
+        ]
+        conn.execute(
+            "UPDATE model SET base_model = 'Krea 2' WHERE filename = ?",
+            (CLONE_CHECKPOINT,),
+        )
+    try:
+        _body, plans = _plans(cloneable, krea=[cloneable.checkpoint_id, *encoders])
+    finally:
+        with hub.transaction() as conn:
+            conn.executemany("DELETE FROM model WHERE id = ?", [(i,) for i in encoders])
+            conn.execute(
+                "UPDATE model SET base_model = 'FLUX.1 dev' WHERE filename = ?",
+                (CLONE_CHECKPOINT,),
+            )
+    krea = plans["krea"]
+    # The closer name, wherever the set lists it.
+    assert krea["swaps"]["qwen_3_4b.safetensors"] == "qwen3vl_4b_bf16.safetensors"
+    clip = next(row for row in krea["loaders"] if row["node_id"] == "8")
+    assert (clip["was_type"], clip["now_type"]) == ("lumina2", "krea2")
 
 
 def test_a_generic_name_in_another_folder_is_not_read_as_the_sets_file(cloneable):
