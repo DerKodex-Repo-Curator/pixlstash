@@ -72,7 +72,7 @@ vi.mock("../../api/recipes", () => ({
 vi.mock("../../api/pictureSets", () => ({
   listPictureSets: vi.fn().mockResolvedValue([]),
 }));
-// The person picker reads the people the same way, on a workflow run alone.
+// The person picker and "Assign to person" read the people the same way.
 const listCharacters = vi.fn();
 vi.mock("../../api/characters", () => ({
   listCharacters: (...args) => listCharacters(...args),
@@ -926,6 +926,42 @@ describe("the LoRAs a graph already loads", () => {
     expect(
       wrapper.vm.optionsFor(wrapper.vm.loras[0]).map((o) => o.value),
     ).toEqual([hidden, shown]);
+  });
+
+  it("says whose LoRA a recipe runs, and offers a person only with it taken off", async () => {
+    listCharacters.mockResolvedValue([
+      { id: 7, name: "Mira" },
+      { id: 8, name: "Noor" },
+    ]);
+    listAdapters.mockImplementation(async ({ fileKind } = {}) =>
+      fileKind
+        ? []
+        : [
+            {
+              sha256: "s".repeat(64),
+              filename: "mira_v2.safetensors",
+              attachments: [{ entity_type: "character", entity_id: 7 }],
+            },
+          ],
+    );
+    getPictureRecipe.mockResolvedValue({
+      available: true,
+      workflow_id: KEY,
+      settings: {},
+      lora_slots: [filenameSlot("mira_v2.safetensors")],
+    });
+    const wrapper = await mountRun();
+    const assign = () =>
+      wrapper
+        .findAllComponents({ name: "AppSelect" })
+        .find((select) => select.props("label") === "Assign to person");
+    expect(wrapper.find('[data-testid="rund-of"]').text()).toBe("Mira, by their LoRA");
+    expect(assign()).toBeUndefined();
+
+    wrapper.vm.loras[0].skipped = true;
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('[data-testid="rund-of"]').exists()).toBe(false);
+    expect(assign().props("modelValue")).toBe("");
   });
 
   it("shows the ordinary filename slots, which are all of them in practice", async () => {
@@ -2944,6 +2980,8 @@ describe("Create with LoRA", () => {
       character_id: 3,
     });
     expect(wrapper.text()).toContain("Example's reference pictures");
+    // And are theirs, which their LoRA says by itself.
+    expect(wrapper.find('[data-testid="rund-of"]').text()).toBe("Example, by their LoRA");
   });
 
   it("draws the person chosen and fixed, with no way to take their LoRA off", async () => {
@@ -3164,6 +3202,50 @@ describe("the person a workflow run alone is of", () => {
     await wrapper.find('[data-person="null"]').trigger("click");
     await wrapper.vm.submit();
     expect(runWorkflowCard.mock.calls[1][0].add_loras).toBeUndefined();
+  });
+
+  const assignSelect = (wrapper) =>
+    wrapper
+      .findAllComponents({ name: "AppSelect" })
+      .find((select) => select.props("label") === "Assign to person");
+
+  it("assigns the run to the person picked, where no LoRA names one", async () => {
+    const wrapper = await mountRun(fromCard);
+    // Everyone, whether or not a LoRA of theirs is for this checkpoint.
+    expect(assignSelect(wrapper).props("options")).toEqual([
+      { value: "", label: "No one" },
+      { value: "7", label: "Mira" },
+      { value: "8", label: "Noor" },
+    ]);
+    await wrapper.vm.submit();
+    expect(runWorkflowCard.mock.calls[0][0].character_id).toBeUndefined();
+
+    await assignSelect(wrapper).vm.$emit("update:modelValue", "8");
+    await wrapper.vm.submit();
+    expect(runWorkflowCard.mock.calls[1][0].character_id).toBe(8);
+  });
+
+  it("leaves it to the LoRA once one person's is picked", async () => {
+    const wrapper = await mountRun(fromCard);
+    await assignSelect(wrapper).vm.$emit("update:modelValue", "8");
+    await tile(wrapper, 7).trigger("click");
+    // Said, not offered: the run's pictures are Mira's by her LoRA.
+    expect(assignSelect(wrapper)).toBeUndefined();
+    expect(wrapper.find('[data-testid="rund-of"]').text()).toBe("Mira, by their LoRA");
+    await wrapper.vm.submit();
+    expect(runWorkflowCard.mock.calls[0][0].character_id).toBeUndefined();
+
+    // Her LoRA off again and the pick is back, as the form shows it.
+    await wrapper.find('[data-person="null"]').trigger("click");
+    await wrapper.vm.submit();
+    expect(runWorkflowCard.mock.calls[1][0].character_id).toBe(8);
+  });
+
+  it("offers nobody to assign to in a library with no people", async () => {
+    listCharacters.mockResolvedValue([]);
+    const wrapper = await mountRun(fromCard);
+    expect(assignSelect(wrapper)).toBeUndefined();
+    expect(wrapper.text()).not.toContain("Assign to person");
   });
 
   it("keeps the picked person's LoRA in a recipe saved from the run", async () => {

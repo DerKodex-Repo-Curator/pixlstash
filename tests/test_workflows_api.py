@@ -16220,6 +16220,22 @@ def test_a_run_that_leaves_the_persons_lora_out_names_nobody(runnable, person_lo
     assert _whose_lora(runnable, workflow_id=RUN_WF) is None
 
 
+def test_a_run_names_the_person_asked_for_where_no_lora_does(runnable, person_lora):
+    """`character_id` is the Run popup's "Assign to person"; a LoRA still wins."""
+    asked = person_lora + 1
+    assert _whose_lora(runnable, workflow_id=RUN_WF, character_id=asked) == asked
+    runnable.submitted.clear()
+    assert (
+        _whose_lora(
+            runnable,
+            workflow_id=RUN_WF,
+            add_loras=[{"sha256": PERSON_LORA_DIGEST}],
+            character_id=asked,
+        )
+        == person_lora
+    )
+
+
 def test_a_persons_lora_at_strength_zero_names_nobody(runnable, person_lora):
     whose = _whose_lora(
         runnable,

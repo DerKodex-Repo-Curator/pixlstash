@@ -1516,7 +1516,8 @@ class RunRequest(BaseModel):
     # base topology's graph with its DEFAULT RECIPE applied by the server, and
     # this body's values, models, LoRAs and skipped stages over that. Only this
     # source goes without a LoRA attached to a person: who a picture is of is
-    # a recipe's business, and `add_loras` is how such a run names somebody.
+    # a recipe's business, and `add_loras` is how such a run names somebody
+    # by their LoRA (`character_id`, below, names one without).
     workflow_id: str | None = Field(None, max_length=MAX_LABEL_LENGTH)
 
     # A workflow to run instead of the source's, over its pictures; with its
@@ -1561,6 +1562,11 @@ class RunRequest(BaseModel):
     seed_mode: Literal["new", "keep", "fixed"] = "new"
     seed: int | None = Field(None, ge=0, le=MAX_SEED_64)
     destination: RunDestination | None = None
+    # Who the run's pictures are of, where its LoRAs do not say: a graph
+    # loading exactly one person's LoRA names that person itself
+    # (`_lora_person`) and this is not read for it. Bounded as every id here
+    # is: `MAX_PICTURE_ID` is SQLite's INTEGER ceiling, not a count of pictures.
+    character_id: int | None = Field(None, ge=1, le=MAX_PICTURE_ID)
     # What fills each picture input of the workflow (#1457), first answer wins:
     # an entry here, a `fixed` pin whose picture is still kept, a stored
     # `selection` fed from `picture_ids`, and - once those have been applied
@@ -7197,7 +7203,7 @@ def create_router(server) -> APIRouter:
                 else None
             )
             run_workflow_version = group.workflow_version if run_workflow_id else None
-            lora_character_id = _lora_person(graph, object_info)
+            lora_character_id = _lora_person(graph, object_info) or body.character_id
             # A selection feeding an input is the run's repeat axis: one pass
             # per picture, each its own source and, with `stack`, its own
             # stack. Otherwise one pass, and the group's first picture is the
