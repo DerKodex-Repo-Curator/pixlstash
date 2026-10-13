@@ -2564,7 +2564,11 @@ names every one of its LoRAs; otherwise every loader keeps its LoRA. A
 stage the recipe has off stays in for a run that names it in `keep_stages`. `models: [{address, filename | sha256}]` goes through
 `apply_filename_swap`; a model made for another family or modality than the one
 it replaces is **flagged, never blocked** (`RunGroup.flags`, `family_mismatch`;
-`model_shelf_service.families_clash` makes the call). `target` names a workflow to run instead, over the pictures selected,
+`model_shelf_service.families_clash` makes the call). A base loader given a
+file of a known family has its text encoders retyped the way a clone's are
+(`retype_text_encoders`, under "Hand-made workflow sets"), from the loaders
+picked: a set used in the inspector runs, opens and saves with its encoders
+typed for the models it put in. `target` names a workflow to run instead, over the pictures selected,
 with its default recipe applied the same way. A run of pictures alone runs each
 picture's own graph with no workflow default, and reports the workflow its
 variant is in (`RunGroup.workflow_id`); `workflow_key` is no longer a source.
@@ -10422,9 +10426,13 @@ paired with the set's files of that kind in four passes, a file taken once
 `model_ids`; one naming another model, or one model twice, is a 422); then a
 slot that already loads one of the set's files keeps it, so a set holding the
 very files the workflow loads changes none of them; then a slot takes the
-set's file of its own layout (`family`); and when the set holds exactly as
+set's file of its own layout (`family`); and when the set holds at least as
 many files of the kind as the graph has slots, every slot left takes one
-whatever its layout: a set's files go with its checkpoint. The last two pair
+whatever its layout: a set's files go with its checkpoint. A set holding two
+builds of its encoder therefore fills a single loader with one of them (the
+closer name), never with neither, since the old model's encoder is the one
+file known not to go with it; a set holding fewer files than the graph has
+slots still fills none in this pass. The last two pair
 by filename, closest pair first (`_closest_pairs`, which `_pair_bases` uses
 too), never in order: in order, a set listing its audio VAE before its video
 one crossed the two loaders of an image-to-video graph. The plan answers with

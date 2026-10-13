@@ -1011,6 +1011,7 @@ CLIP_TYPE_BY_FAMILY = {
     "qwen": "qwen_image",
     "sd35": "sd3",
     "wan": "wan",
+    "zimage": "lumina2",
 }
 # The inputs a prompt reaches a sampler or guider through, and the ones a CLIP
 # reaches its encode node through. Never the picture or latent stream, which

@@ -5080,6 +5080,8 @@ def create_router(server) -> APIRouter:
             # A name two shelf models share is no answer about either.
             base_models[name] = None if name in base_models else model.base_model
         flags = []
+        # A base loader given another file -> the family of that file.
+        families: dict[str, str] = {}
         for model in models:
             slot_label, _, widget = model.address.rpartition(OVERRIDE_ADDRESS_SEPARATOR)
             now = model.filename or by_digest.get(str(model.sha256).lower())
@@ -5187,6 +5189,30 @@ def create_router(server) -> APIRouter:
                                 "now_base_model": now_base,
                             }
                         )
+                    if slot_kind(widget) not in BASE_MODEL_KINDS:
+                        continue
+                    family = family_of(now_base)
+                    if family:
+                        families[str(node_id)] = family
+                    else:
+                        logger.info(
+                            "[workflows] %s has no known base model family "
+                            "(%r), so a text encoder feeding node %s keeps "
+                            "its type.",
+                            entry["now"],
+                            now_base,
+                            node_id,
+                        )
+        # As a clone does: a base model of another family loads nothing its
+        # text encoder encoded for the old one (the sampler refuses it).
+        for row in retype_text_encoders(graph, families, object_info):
+            logger.info(
+                "[workflows] The text encoder on node %s loads as %r, not %r, "
+                "for the model now picked at its sampler.",
+                row["node_id"],
+                row["now"],
+                row["was"],
+            )
         return flags
 
     def _swapped_to_digest_loader(
@@ -9009,10 +9035,12 @@ def create_router(server) -> APIRouter:
            (:func:`_loads`), so a set holding the very files the workflow
            loads changes none of them;
         3. a slot takes the set's file of its own layout (``family``);
-        4. when the set holds exactly as many files of the kind as the graph
+        4. when the set holds at least as many files of the kind as the graph
            has slots, every slot left takes one: the set's files go with the
            set's checkpoint, so a Krea 2 text encoder replaces a Z-Image one
-           whatever their layouts.
+           whatever their layouts. A set holding two builds of its encoder
+           fills a single loader with one of them, never with neither: the
+           old model's encoder is the one file known not to go with it.
 
         Where a pass leaves a choice (two files of one layout, or the fill of
         pass 4) it pairs by filename, closest pair first
@@ -9053,7 +9081,7 @@ def create_router(server) -> APIRouter:
             pair(lambda slot, model: picks.get(slot.filename) == model.id)
             pair(_loads)
             pair(_same_layout)
-            if len(files) == len(slots):
+            if len(files) >= len(slots):
                 pair(None)
         ignored = {
             filename: model_id
