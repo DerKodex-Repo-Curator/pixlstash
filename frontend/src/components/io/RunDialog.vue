@@ -4778,8 +4778,11 @@ const openTip = computed(
 async function openInComfyui() {
   if (openRefusal.value || opening.value) return;
   openError.value = "";
+  // Read once: the address can change while the request is out (Settings
+  // opens from a notice here), and the tab goes where this press checked.
+  const address = filterStore.comfyuiUrl;
   // Before anything is asked of the server: the request uploads pictures.
-  if (!comfyuiLink(filterStore.comfyuiUrl, {})) {
+  if (!comfyuiLink(address, {})) {
     openError.value = "The ComfyUI address in Settings is not a web address.";
     return;
   }
@@ -4795,7 +4798,7 @@ async function openInComfyui() {
     // One graph opens however many runs the form asks for, so a count the
     // form is still refusing does not stop it.
     const held = await openWorkflowRun({ ...runBody(), count: 1 });
-    const link = comfyuiLink(filterStore.comfyuiUrl, {
+    const link = comfyuiLink(address, {
       pixlstash_run: held.opening,
       pixlstash_of: held.workflow_id,
     });

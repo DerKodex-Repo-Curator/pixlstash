@@ -5654,6 +5654,20 @@ describe("Open in ComfyUI", () => {
     );
   });
 
+  it("sends the tab to the address it checked, whatever the setting is by then", async () => {
+    const wrapper = await mountRun(fromCard);
+    let answer;
+    openWorkflowRun.mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    await openButton(wrapper).trigger("click");
+    // Cleared while the request is out: no link could be made of it now.
+    useFilterStore().comfyuiUrl = "";
+    answer({ opening: RUN, workflow_id: KEY });
+    await flushPromises();
+    expect(tab.location.replace).toHaveBeenCalledTimes(1);
+    expect(tab.location.replace).toHaveBeenCalledWith(LINK);
+    expect(tab.close).not.toHaveBeenCalled();
+  });
+
   it("is refused, and says why, when ComfyUI's nodes open no run", async () => {
     getPixlstashNode.mockResolvedValue({
       can_open_workflows: true,
