@@ -6699,8 +6699,10 @@ def create_router(server) -> APIRouter:
                 # each was placed in: a graph loading one LoRA in eight
                 # loaders keeps all eight.
                 taken = (
-                    run_service.slots_recipe_names(
-                        slots_before_skip, recipe_loras, digests_before_skip
+                    set(
+                        run_service.slots_recipe_names(
+                            slots_before_skip, recipe_loras, digests_before_skip
+                        )
                     )
                     | {
                         (str(target["node_id"]), str(target["field"]))
@@ -6763,13 +6765,32 @@ def create_router(server) -> APIRouter:
                 # order (#1478) - and one with nowhere to go is reported in
                 # `unplaced_loras` rather than dropped. A positional zip put a
                 # recipe stored in the other order onto the wrong loaders.
-                placements, group.unplaced_loras = run_service.place_recipe_loras(
-                    slots_before_skip,
-                    recipe_loras,
+                recipe_digests = (
                     _slot_digests(slots_before_skip, shelf_index)
                     if slots_before_skip
-                    else {},
+                    else {}
                 )
+                placements, group.unplaced_loras = run_service.place_recipe_loras(
+                    slots_before_skip, recipe_loras, recipe_digests
+                )
+                # A LoRA the graph loads in several loaders is the recipe's in
+                # each of them: the others take its strength too, where a
+                # placement is one slot per LoRA.
+                placed_slots = {
+                    (str(target["node_id"]), str(target["field"]))
+                    for target, _ in placements
+                }
+                also = run_service.slots_recipe_names(
+                    slots_before_skip, recipe_loras, recipe_digests
+                )
+                placements += [
+                    (target, also[slot])
+                    for target in slots_before_skip
+                    for slot in [(str(target["node_id"]), str(target["field"]))]
+                    if slot in also
+                    and slot not in placed_slots
+                    and also[slot].get("sha256")
+                ]
                 # A recipe LoRA matched to a skipped slot is not applied: the
                 # owner skipped that loader for this run, and the skip is
                 # already reported in `bypassed_loras`.
@@ -7701,10 +7722,12 @@ def create_router(server) -> APIRouter:
         targets = detect_lora_targets(graph)
         keep: set[tuple[str, str]] = set()
         if recipe.loras_decided and targets:
-            keep = run_service.slots_recipe_names(
-                targets,
-                recipe.recipe_loras(),
-                _slot_digests(targets, adapter_digest_index(_hub())),
+            keep = set(
+                run_service.slots_recipe_names(
+                    targets,
+                    recipe.recipe_loras(),
+                    _slot_digests(targets, adapter_digest_index(_hub())),
+                )
             )
         skip = [
             (str(target["node_id"]), str(target["field"]))

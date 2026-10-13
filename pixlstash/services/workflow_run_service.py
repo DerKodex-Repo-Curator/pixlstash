@@ -1984,8 +1984,8 @@ def slots_recipe_names(
     slots: list[dict],
     recipe_loras: list[dict],
     slot_digests: dict[tuple[str, str], Optional[str]],
-) -> set[tuple[str, str]]:
-    """Every slot already loading a LoRA *recipe_loras* names.
+) -> dict[tuple[str, str], dict]:
+    """Every slot already loading a LoRA *recipe_loras* names, with that LoRA.
 
     **Every** such slot, where :func:`place_recipe_loras` places one slot per
     LoRA: a recipe names a file once however many loaders load it, so a graph
@@ -1998,16 +1998,18 @@ def slots_recipe_names(
     name is not the recipe's.
 
     Returns:
-        ``{(node_id, field), …}``.
+        ``{(node_id, field): saved LoRA, …}``, the first of *recipe_loras*
+        that names the slot's.
     """
     wanted = [
         (
             str(saved.get("sha256") or "").strip().lower(),
             normalized_filename(str(saved.get("filename") or "").strip()),
+            saved,
         )
         for saved in recipe_loras
     ]
-    named = set()
+    named = {}
     for slot in slots:
         key = (str(slot.get("node_id")), str(slot.get("field")))
         held = slot_digests.get(key)
@@ -2016,11 +2018,10 @@ def slots_recipe_names(
             if slot.get("by") != "digest"
             else ""
         )
-        if any(
-            digest == held if digest and held else bool(name) and name == filename
-            for digest, filename in wanted
-        ):
-            named.add(key)
+        for digest, filename, saved in wanted:
+            if digest == held if digest and held else bool(name) and name == filename:
+                named[key] = saved
+                break
     return named
 
 

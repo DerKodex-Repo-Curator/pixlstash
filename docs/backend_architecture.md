@@ -2567,8 +2567,9 @@ is skipped best effort: one that cannot be taken out runs whole and is logged,
 never refused. A LoRA loader the recipe leaves empty is bypassed, best effort
 too, and only when the recipe was read off at least one picture and the shelf
 names every one of its LoRAs; otherwise every loader keeps its LoRA. Every
-loader of a LoRA the recipe names is kept, however many load it
-(`slots_recipe_names`, which the export shares): the recipe lists a file once.
+loader of a LoRA the recipe names is kept and takes the recipe's strength,
+however many load it (`slots_recipe_names`, which the export shares): the
+recipe lists a file once.
 A stage the recipe has off stays in for a run that names it in `keep_stages`. `models: [{address, filename | sha256}]` goes through
 `apply_filename_swap`; a model made for another family or modality than the one
 it replaces is **flagged, never blocked** (`RunGroup.flags`, `family_mismatch`;
