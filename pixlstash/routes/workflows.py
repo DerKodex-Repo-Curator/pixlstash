@@ -2196,11 +2196,17 @@ class PeopleLoaderPlace(BaseModel):
     The place a run from PixlStash splices a person's LoRA
     (``plan_lora_insertion``): straight after the model source, every reader
     of that MODEL (and CLIP) output reading the loader's instead. So what is
-    tried on somebody in ComfyUI is what a run of them would do.
+    tried on somebody in ComfyUI is what a run of them would do. A graph that
+    loads the same model several times has one place per copy (``places``).
     """
 
     model: dict | None = Field(
-        None, description="`{node_id, output}`: the MODEL output it reads."
+        None,
+        description=(
+            "`{node_id, output}`: the MODEL output it reads. With `clip` and "
+            "`rewires`, the one place of `places`, as a node from before "
+            "`places` reads it; null where there are several."
+        ),
     )
     clip: dict | None = Field(
         None, description="`{node_id, output}` of the CLIP it reads, if any."
@@ -2209,12 +2215,21 @@ class PeopleLoaderPlace(BaseModel):
         default_factory=list,
         description="`{node_id, field, type}`: each input that reads it instead.",
     )
+    places: list[dict] = Field(
+        default_factory=list,
+        description=(
+            "`{model, clip, rewires}` of each loader to place: one, or one "
+            "after every copy where the graph loads the same model several "
+            "times. Empty where none can be placed."
+        ),
+    )
     reason: str | None = Field(
         None,
         description=(
-            "Why no loader can be placed (two model sources, a text encoder "
-            "that reads the model), in the Run popup's words. `model` is then "
-            "null."
+            "Why no loader can be placed (two different model sources, a text "
+            "encoder that reads the model), in the Run popup's words. `model` "
+            "is then null. Beside several `places` it is what a node from "
+            "before `places` says, which would otherwise place the first alone."
         ),
     )
 
@@ -5445,14 +5460,16 @@ def create_router(server) -> APIRouter:
                     )
                 )
                 continue
-            inputs = (graph.get(loader["node_id"]) or {}).get("inputs") or {}
-            if item.strength_model is not None:
-                for name in ("strength_model", "strength"):
-                    if name in inputs:
-                        inputs[name] = item.strength_model
-                        break
-            if item.strength_clip is not None and "strength_clip" in inputs:
-                inputs["strength_clip"] = item.strength_clip
+            # One loader after every copy of the model, each at the strengths.
+            for added in (loader, *loader["also"]):
+                inputs = (graph.get(added["node_id"]) or {}).get("inputs") or {}
+                if item.strength_model is not None:
+                    for name in ("strength_model", "strength"):
+                        if name in inputs:
+                            inputs[name] = item.strength_model
+                            break
+                if item.strength_clip is not None and "strength_clip" in inputs:
+                    inputs["strength_clip"] = item.strength_clip
         return refused
 
     def _leave_out_character_loras(
@@ -7818,13 +7835,27 @@ def create_router(server) -> APIRouter:
                 else None
             )
 
+        def splice(planned: dict) -> dict:
+            return {
+                "model": at(planned["model"]),
+                "clip": at(planned["clip"]),
+                "rewires": [
+                    {key: rewire[key] for key in ("node_id", "field", "type")}
+                    for rewire in planned["rewires"]
+                ],
+            }
+
+        places = [splice(place), *(splice(more) for more in place["also"])]
+        if len(places) == 1:
+            return PeopleLoaderPlace(**places[0], places=places)
+        # No `model`: a node that reads only that would put a loader after the
+        # first copy and leave the rest to run without the person, unsaid.
         return PeopleLoaderPlace(
-            model=at(place["model"]),
-            clip=at(place["clip"]),
-            rewires=[
-                {key: rewire[key] for key in ("node_id", "field", "type")}
-                for rewire in place["rewires"]
-            ],
+            places=places,
+            reason=(
+                f"it loads the same model {len(places)} times, which takes a "
+                "loader after each. Update the ComfyUI-PixlStash nodes."
+            ),
         )
 
     def _with_pack_nodes(graph: dict, object_info: dict | None) -> list[dict]:
