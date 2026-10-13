@@ -1631,9 +1631,9 @@ function registerIpc(): void {
 
   ipcMain.handle('desktop:openLibraryFolder', () => openLibraryFolder());
   ipcMain.handle('desktop:showLogs', () => showServerLogs());
-  // The Workflow tab's Open in ComfyUI. Its own channel because ComfyUI is
-  // plain http:, which openExternalSafely refuses for every other link; the
-  // app window only, and only a URL comfyuiOpenTarget accepts.
+  // The Workflow tab's and the Run popup's Open in ComfyUI. Its own channel
+  // because ComfyUI is plain http:, which openExternalSafely refuses for every
+  // other link; the app window only, and only a URL comfyuiOpenTarget accepts.
   // One a second: a person clicks once, and a loop from a hostile page should
   // not be able to fill the OS browser with tabs.
   let lastComfyuiOpen = 0;

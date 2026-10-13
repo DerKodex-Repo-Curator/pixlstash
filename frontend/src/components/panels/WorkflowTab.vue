@@ -1237,6 +1237,7 @@ import {
   loraStem,
 } from "../../utils/loraChain";
 import { quantBadge } from "../../utils/modelShelf";
+import { comfyuiLink } from "../../utils/comfyuiLink";
 import { PIXLSTASH_PACK_URL, STAGE_LABELS } from "../../utils/runReasons";
 import { relativeDate } from "../../utils/snapshots";
 import {
@@ -4101,30 +4102,20 @@ function run() {
 function openInComfyui(original = false) {
   const target = runTarget.value;
   if (!target || !filterStore.comfyuiUrl || comfyuiLacksNode.value) return;
-  let url;
-  try {
-    url = new URL(filterStore.comfyuiUrl);
-  } catch (err) {
-    console.warn(`[workflows] bad ComfyUI address ${filterStore.comfyuiUrl}`, err);
-    url = null;
-  }
-  if (!url || !/^https?:$/.test(url.protocol)) {
+  const url = comfyuiLink(filterStore.comfyuiUrl, {
+    pixlstash_workflow: target.id,
+    ...(original ? { pixlstash_original: "1" } : {}),
+  });
+  if (!url) {
     notices.push({
       level: "error",
       text: "The ComfyUI address in Settings is not a web address.",
     });
     return;
   }
-  // `0.0.0.0` is ComfyUI listening everywhere: fine for the server, and a
-  // browser cannot navigate to it. The machine this page came from is the one.
-  if (["0.0.0.0", "[::]"].includes(url.hostname)) {
-    url.hostname = window.location.hostname;
-  }
-  url.searchParams.set("pixlstash_workflow", target.id);
-  if (original) url.searchParams.set("pixlstash_original", "1");
   if (desktop?.openComfyui) {
     desktop
-      .openComfyui(url.toString())
+      .openComfyui(url)
       .then((opened) => {
         if (!opened) throw new Error("the shell refused the link");
       })
@@ -4134,7 +4125,7 @@ function openInComfyui(original = false) {
       });
     return;
   }
-  window.open(url.toString(), "_blank", "noopener,noreferrer");
+  window.open(url, "_blank", "noopener,noreferrer");
 }
 
 /** The More menu's *Open original in ComfyUI*. */

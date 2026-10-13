@@ -134,11 +134,12 @@ export async function abortRun() {
 /**
  * Whether the configured ComfyUI can open a PixlStash workflow link: it needs
  * the ComfyUI-PixlStash node's `open_workflow.js`. Owner-only.
- * @returns {Promise<{can_open_workflows: ?boolean, saves_back: ?boolean}>}
+ * @returns {Promise<{can_open_workflows: ?boolean, saves_back: ?boolean,
+ *   opens_runs: ?boolean}>}
  *   `saves_back`: a workflow opened there saves back to PixlStash (the
  *   node's `save_workflow.js` is loaded); false for older nodes, which open a
- *   copy. Both `null` when ComfyUI
- *   cannot be asked.
+ *   copy. `opens_runs`: it opens a run from the Run popup (`open_run.js`);
+ *   false for older nodes. All `null` when ComfyUI cannot be asked.
  */
 export async function getPixlstashNode() {
   return unwrap(apiClient.get(comfyUrl("/pixlstash-node")));

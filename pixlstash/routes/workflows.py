@@ -39,7 +39,9 @@ import math
 import sqlite3
 import os
 import re
+import secrets
 import threading
+import time
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field as dataclass_field
@@ -1917,7 +1919,17 @@ class WorkflowGraphSave(BaseModel):
         max_length=MAX_LABEL_LENGTH,
         description=(
             "What to call the new workflow when the graph replaces an "
-            "installed base model and so cannot be a version of this one."
+            "installed base model and so cannot be a version of this one, or "
+            "is saved `as_new`."
+        ),
+    )
+    as_new: bool = Field(
+        False,
+        description=(
+            "Store the graph as a new workflow and leave this one as it is. "
+            "A graph opened from the Run popup (`POST /workflows/run/opening`) "
+            "is saved this way: it is this workflow with one run's changes in "
+            "it, which the owner did not ask to keep."
         ),
     )
 
@@ -1931,8 +1943,9 @@ class WorkflowGraphSaved(BaseModel):
     new_workflow: bool = Field(
         False,
         description=(
-            "The graph replaces a base model this machine has, so it was "
-            "stored as a new workflow and the one named is as it was."
+            "The graph replaces a base model this machine has, or was sent "
+            "`as_new`, so it was stored as a new workflow and the one named "
+            "is as it was."
         ),
     )
     reason: str | None = Field(None, description="Why it is a new workflow.")
@@ -2201,6 +2214,11 @@ class WorkflowExport(BaseModel):
 # nested in the hundreds cannot be serialised into.
 MAX_LAYOUT_DEPTH = 64
 
+# A run the Run popup holds for ComfyUI to open: how long, and how many at
+# once. ComfyUI asks for it as its page loads, seconds after it was held.
+RUN_OPENING_SECONDS = 600
+RUN_OPENINGS_HELD = 8
+
 
 class PeopleLoaderPlace(BaseModel):
     """Where ComfyUI-PixlStash puts its multi-adapter loader on an opened canvas.
@@ -2303,6 +2321,18 @@ class WorkflowRunnableGraph(BaseModel):
             "workflow, so no loader is put on."
         ),
     )
+
+
+class RunOpening(BaseModel):
+    """``POST /workflows/run/opening``: a run held for ComfyUI to open."""
+
+    opening: str = Field(
+        description=(
+            "What `GET /workflows/{workflow_id}/graph?run=` answers the graph "
+            "for: 32 hex characters, good for a few minutes."
+        )
+    )
+    workflow_id: str = Field(description="The workflow the run is of.")
 
 
 class WorkflowFile(BaseModel):
@@ -7800,41 +7830,7 @@ def create_router(server) -> APIRouter:
             asked = asked.model_copy(
                 update={"skip_stages": [], "keep_stages": list(get_args(Stage))}
             )
-        # Run's own plan, so what opens is what Run would submit (#1623 left a
-        # workflow several graphs; this is the one Run picks).
-        # `RecursionError` for `_card_source`'s reason: the source graph came
-        # out of a picture from somewhere else, so its depth is not ours to trust.
-        try:
-            plan = _plan(request, asked, opening=True)
-        except RecursionError as exc:
-            logger.warning(
-                "Workflow %s has a source graph too deeply nested to read: %s",
-                workflow.workflow_id,
-                exc,
-            )
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "PixlStash cannot read this workflow: its graph is nested "
-                    "too deeply to walk."
-                ),
-            ) from exc
-        if not plan.built:
-            reasons = [r for group in plan.groups for r in group.reasons]
-            logger.info(
-                "[workflows] Nothing to open for %s: no graph was built (%s).",
-                workflow.workflow_id,
-                [r["code"] for r in reasons],
-            )
-            first = reasons[0] if reasons else None
-            raise HTTPException(status_code=409, detail=_no_graph_sentence(first))
-        # One entry: a body naming a `workflow_id` resolves to exactly one
-        # group (`_groups_for`), the workflow's base card, so there is no
-        # second graph for Run to have preferred.
-        graph, source, card, swapped = plan.built[0]
-        if swapped:
-            # What ComfyUI opens is what it runs: its pictures card here too.
-            _record_loader_swaps(card, graph, swapped)
+        plan, graph, source, card = _graph_to_open(request, asked)
         # The seed is a parameter like any other, and the default recipe's is
         # already applied. A stored recipe keeps none by design, and
         # `resolve_references` stands a 0 in for each null it had: those get a
@@ -7850,6 +7846,51 @@ def create_router(server) -> APIRouter:
                 == 0
             ]
             apply_seeds(graph, placeholders, None)
+        return graph, source, card, unsaved.count() > 0, plan.object_info
+
+    def _graph_to_open(request: Request, asked: RunRequest):
+        """``(plan, graph, source, card)``: the one graph *asked* opens in ComfyUI.
+
+        Run's own plan with none of Run's workarounds (``_plan``'s
+        ``opening``), credentials blanked. Raises the 409s of a workflow with
+        no graph to open.
+        """
+        named = asked.target or asked.workflow_id
+        # Run's own plan, so what opens is what Run would submit (#1623 left a
+        # workflow several graphs; this is the one Run picks).
+        # `RecursionError` for `_card_source`'s reason: the source graph came
+        # out of a picture from somewhere else, so its depth is not ours to trust.
+        try:
+            plan = _plan(request, asked, opening=True)
+        except RecursionError as exc:
+            logger.warning(
+                "Workflow %s has a source graph too deeply nested to read: %s",
+                named,
+                exc,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "PixlStash cannot read this workflow: its graph is nested "
+                    "too deeply to walk."
+                ),
+            ) from exc
+        if not plan.built:
+            reasons = [r for group in plan.groups for r in group.reasons]
+            logger.info(
+                "[workflows] Nothing to open for %s: no graph was built (%s).",
+                named,
+                [r["code"] for r in reasons],
+            )
+            first = reasons[0] if reasons else None
+            raise HTTPException(status_code=409, detail=_no_graph_sentence(first))
+        # One entry for a body naming a `workflow_id` or a `target`: it
+        # resolves to exactly one group (`_groups_for`), the workflow's base
+        # card, so there is no second graph for Run to have preferred.
+        graph, source, card, swapped = plan.built[0]
+        if swapped:
+            # What ComfyUI opens is what it runs: its pictures card here too.
+            _record_loader_swaps(card, graph, swapped)
         # Otherwise unscrubbed, for Duplicate's reason: it stays with the owner
         # and is meant to RUN. But it travels over the network into ComfyUI's
         # page, whose own save and share would keep a key, so credentials go.
@@ -7861,7 +7902,7 @@ def create_router(server) -> APIRouter:
             for name, value in inputs.items():
                 if isinstance(value, str) and SECRET_FIELD_RE.search(name):
                     inputs[name] = ""
-        return graph, source, card, unsaved.count() > 0, plan.object_info
+        return plan, graph, source, card
 
     def _layout_for(
         hub, workflow_id: str, graph: dict, own_nodes: dict | None = None
@@ -8078,6 +8119,139 @@ def create_router(server) -> APIRouter:
             shelf_uuid=shelf_uuid(hub) if by_row else None,
         )
 
+    # Graphs the Run popup built for ComfyUI to open, by the id that goes into
+    # the link: `{opening: (held until, workflow_id, graph)}`. A link cannot
+    # carry a run's body, so it is held here for ComfyUI to ask for.
+    # ponytail: in memory, so a restart forgets them and the link answers 404;
+    # a hub table if an opening ever has to outlive one.
+    run_openings: dict[str, tuple[float, str, WorkflowRunnableGraph]] = {}
+    run_openings_lock = threading.Lock()
+
+    def _hold_run_opening(workflow_id: str, graph: WorkflowRunnableGraph) -> str:
+        """Hold *graph* for ComfyUI to ask for, and return the id it asks by."""
+        opening = secrets.token_hex(16)
+        now = time.monotonic()
+        with run_openings_lock:
+            for key in [k for k, held in run_openings.items() if held[0] <= now]:
+                del run_openings[key]
+            # Oldest first out: a graph is megabytes, and nobody opens that
+            # many runs inside the minutes one is held.
+            while len(run_openings) >= RUN_OPENINGS_HELD:
+                del run_openings[next(iter(run_openings))]
+            run_openings[opening] = (now + RUN_OPENING_SECONDS, workflow_id, graph)
+        return opening
+
+    def _held_run_opening(
+        opening: str, workflow_id: str
+    ) -> WorkflowRunnableGraph | None:
+        """The graph held as *opening* for *workflow_id*, or ``None``.
+
+        Not taken on the read: ComfyUI asks through a proxy that may ask twice,
+        and the id is 128 random bits nobody else was told.
+        """
+        with run_openings_lock:
+            held = run_openings.get(opening)
+        if held is None or held[0] <= time.monotonic() or held[1] != workflow_id:
+            return None
+        return held[2]
+
+    @router.post(
+        "/workflows/run/opening",
+        summary="Hold a run for ComfyUI to open",
+        description=(
+            "The same body as POST /workflows/run, submitting nothing: builds "
+            "the graph that run would submit, as `GET "
+            "/workflows/{workflow_id}/graph` builds the workflow's own (none "
+            "of Run's repairs, PixlStash savers and adapter loaders in place "
+            "of the stock nodes), and holds it for a few minutes. `opening` "
+            "is what that route answers it for (`?run=`), which is what the "
+            "Run popup's *Open in ComfyUI* sends ComfyUI to. The run's prompt, "
+            "values, models, LoRAs and stages are in the graph, and so is its "
+            "seed: the one typed, a fresh one, or the graph's own. The "
+            "pictures it puts in are uploaded into ComfyUI's input folder as a "
+            "run uploads them, where the run would not be refused; `count`, "
+            "`stack`, `destination` and `label` do not apply. The body must "
+            "come to one workflow. Nothing is stored: what ComfyUI saves from "
+            "the graph is sent back `as_new` (`PUT …/graph`)."
+        ),
+        response_model=RunOpening,
+        responses={
+            400: {"description": "The body does not come to one workflow."},
+            409: {"description": "There is no graph for this workflow."},
+        },
+    )
+    def hold_run_opening(request: Request, body: RunRequest = Body(...)):
+        server.auth.ensure_secure_when_required(request)
+        hub = _hub()
+        plan, graph, source, card = _graph_to_open(request, body)
+        if len(plan.groups) != 1 or not plan.groups[0].workflow_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This run is of several workflows. Open one workflow at "
+                    "a time: name it as target."
+                ),
+            )
+        group = plan.groups[0]
+        workflow, _ = _require_base(hub, group.workflow_id)
+        body = plan.body
+        feeds = next((f for g, _, f in plan.submittable if g is graph), [])
+        # A selection feeding an input opens with its first picture in it.
+        first = group.picture_ids[0] if group.picture_ids else None
+        per_picture = any(feed.picture_id is None for feed in feeds)
+        targets = run_service.run_seed_targets(graph, plan.object_info)
+        if body.seed_mode == "fixed":
+            apply_seeds(graph, targets, body.seed)
+        elif body.seed_mode == "new":
+            apply_seeds(graph, targets, None)
+        elif not per_picture and len(group.picture_ids) == 1:
+            # As a run keeps it: one picture's recipe keeps that picture's seed.
+            _keep_seeds_of(graph, targets, first, plan.object_info)
+        # Otherwise `keep` is the graph's own seed, as a run submits it: the
+        # form asked for that one. Never a placeholder: `_plan` has refused
+        # `keep` over a source that holds no seed.
+        # The pictures put in, as a run fills them. Only where the run would
+        # go ahead: a refused one has no feeds, and opens with the graph's own.
+        uploaded: dict[int, str] = {}
+        for feed in feeds:
+            picture_id = feed.picture_id if feed.picture_id is not None else first
+            if picture_id is None:
+                continue
+            if not feed.by_id and picture_id not in uploaded:
+                path, upload_name = plan.files[picture_id]
+                uploaded[picture_id] = _upload_image_to_comfyui(
+                    plan.comfyui_url, path, upload_name
+                )
+            value = str(picture_id) if feed.by_id else uploaded[picture_id]
+            for target in feed.targets:
+                workflow_bindings.fill(
+                    graph,
+                    {workflow_bindings.IMAGE: [target]},
+                    {workflow_bindings.IMAGE: value},
+                )
+        # A picture queued by hand comes back, as from the Workflow tab's Open.
+        _with_pack_nodes(graph, plan.object_info)
+        opening = _hold_run_opening(
+            workflow.workflow_id,
+            WorkflowRunnableGraph(
+                name=_file_stem(card, workflow.name),
+                workflow=graph,
+                source=source.origin,
+                seedless=False,
+                forgotten=source.forgotten,
+                version=source.workflow_version,
+                editor=_layout_for(hub, workflow.workflow_id, graph),
+                people_loader=_people_loader_place(
+                    workflow.workflow_id, graph, plan.object_info
+                ),
+            ),
+        )
+        logger.info(
+            "[workflows] A run of %s is held for ComfyUI to open.",
+            workflow.workflow_id,
+        )
+        return RunOpening(opening=opening, workflow_id=workflow.workflow_id)
+
     @router.get(
         "/workflows/{workflow_id}/graph",
         summary="A workflow's runnable graph",
@@ -8116,7 +8290,12 @@ def create_router(server) -> APIRouter:
         ),
         response_model=WorkflowRunnableGraph,
         responses={
-            404: {"description": "This machine has no such workflow."},
+            404: {
+                "description": (
+                    "This machine has no such workflow, or holds no such run "
+                    "of it to open."
+                )
+            },
             409: {"description": "There is no graph for this workflow."},
         },
     )
@@ -8151,10 +8330,31 @@ def create_router(server) -> APIRouter:
                 "Without it the graph holds the workflow's own nodes."
             ),
         ),
+        run: str | None = Query(
+            None,
+            pattern=r"^[0-9a-f]{32}$",
+            description=(
+                "Answer the graph the Run popup held for this workflow "
+                "(`POST /workflows/run/opening`'s `opening`) instead: the "
+                "workflow with that run's changes in it. The other "
+                "parameters do not apply to it. 404 once it is no longer held."
+            ),
+        ),
     ):
         server.auth.ensure_secure_when_required(request)
         hub = _hub()
         workflow, _ = _require_base(hub, workflow_id)
+        if run is not None:
+            held = _held_run_opening(run, workflow.workflow_id)
+            if held is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        "That run is no longer waiting to be opened. Open it "
+                        "from the Run popup again."
+                    ),
+                )
+            return held
         graph, source, card, waiting_applied, object_info = _opening_graph(
             request, workflow, waiting=waiting, all_stages=all_stages
         )
@@ -11533,7 +11733,7 @@ def create_router(server) -> APIRouter:
             # just emptied: off again, so it never comes back in a workflow.
             run_service.take_out_empty_adapter_loaders(graph)
             replaced = _base_model_a_graph_drops(hub, before.graph, graph, object_info)
-            if replaced is None:
+            if replaced is None and not payload.as_new:
                 # A graph stored as a new workflow is taken as sent; one saved
                 # over this workflow leaves it the prompt and seed it had.
                 not_saved, run_only = run_service.keep_run_inputs(
@@ -11605,14 +11805,15 @@ def create_router(server) -> APIRouter:
                 left_out=left_out,
                 not_saved=not_saved,
             )
-        if replaced is not None:
+        if replaced is not None or payload.as_new:
             shown = _display_names(
                 read_grid(hub, server.vault, manual_models=_manual_models).figures
             ).get(workflow_id)
             name, landed = _store_copy(
                 hub,
                 download_stem(payload.name or "")
-                or f"{_file_stem(card, workflow.name or shown)} (new checkpoint)",
+                or f"{_file_stem(card, workflow.name or shown)} "
+                + ("(new checkpoint)" if replaced is not None else "(from a run)"),
                 graph,
                 before.bindings,
                 "duplicate",
@@ -11645,6 +11846,8 @@ def create_router(server) -> APIRouter:
                     f"The graph no longer loads {os.path.basename(replaced)}, "
                     "which this machine has. A checkpoint change is a new "
                     "workflow."
+                    if replaced is not None
+                    else "It was sent to be saved as a new workflow."
                 ),
                 left_out=left_out,
             )

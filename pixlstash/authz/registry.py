@@ -1984,6 +1984,10 @@ ROUTE_POLICIES: dict[tuple[str, str], RoutePolicy] = {
         _OWNER,
         justification="Dry run of the above; same disclosure, submits nothing; owner only",
     ),
+    ("POST", "/api/v1/workflows/run/opening"): RoutePolicy(
+        _OWNER,
+        justification="Build the graph a run would submit and hold it for the owner's ComfyUI to open; resolves a graph from the whole library and may upload its pictures to ComfyUI; POST blocked for READ tokens; owner only",
+    ),
     ("GET", "/api/v1/workflows/runs/{prompt_id}"): RoutePolicy(
         _OWNER,
         justification="How a run the owner started ended: ComfyUI's error text and the ids of the pictures it added, whichever part of the library they landed in; owner only",

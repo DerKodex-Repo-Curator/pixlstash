@@ -31,6 +31,8 @@ const getLoraChain = vi.fn();
 const getWorkflowChanges = vi.fn();
 const saveWorkflow = vi.fn();
 const saveWorkflowAsNew = vi.fn();
+const openWorkflowRun = vi.fn();
+const getPixlstashNode = vi.fn();
 
 const stackMemberIds = vi.fn();
 vi.mock("../../utils/stackMembers", () => ({
@@ -50,10 +52,12 @@ vi.mock("../../api/workflows", () => ({
   getWorkflowChanges: (...args) => getWorkflowChanges(...args),
   saveWorkflow: (...args) => saveWorkflow(...args),
   saveWorkflowAsNew: (...args) => saveWorkflowAsNew(...args),
+  openWorkflowRun: (...args) => openWorkflowRun(...args),
   workflowCoverUrl: (cover) => (cover?.url ? `/api/v1${cover.url}` : ""),
 }));
 vi.mock("../../api/comfyui", () => ({
   getPictureRecipe: (...args) => getPictureRecipe(...args),
+  getPixlstashNode: (...args) => getPixlstashNode(...args),
 }));
 const listAdapters = vi.fn();
 const fetchWorkflowSets = vi.fn();
@@ -90,6 +94,7 @@ vi.mock("vuetify/components", async () => {
 });
 
 import RunDialog from "./RunDialog.vue";
+import { useFilterStore } from "../../stores/useFilterStore";
 import { useRunDialogStore } from "../../stores/useRunDialogStore";
 import { notifySessionReset } from "../../utils/apiClient";
 import { pictureThumbnailUrl } from "../../api/pictures";
@@ -5574,5 +5579,186 @@ describe("a LoRA row's ×, for the keyboard", () => {
     expect(document.activeElement).toBe(
       wrapper.find('[data-focus="add-lora"]').element,
     );
+  });
+});
+
+// The footer's Open in ComfyUI: this run, in the owner's ComfyUI, where a save
+// makes a NEW workflow. What can silently go wrong: the workflow opens without
+// the form's changes (the body is not the run's), or the tab is opened after
+// the request, which a popup blocker refuses.
+describe("Open in ComfyUI", () => {
+  const fromCard = { kind: "card", workflowId: KEY };
+  const RUN = "c".repeat(32);
+  const LINK = `http://127.0.0.1:8188/?pixlstash_run=${RUN}&pixlstash_of=${encodeURIComponent(KEY)}`;
+  let open;
+  let tab;
+  const openButton = (wrapper) =>
+    wrapper.find('[data-testid="rund-open-comfyui"]');
+  const openError = (wrapper) => wrapper.find('[data-testid="rund-open-error"]');
+
+  beforeEach(() => {
+    tab = { opener: window, location: { replace: vi.fn() }, close: vi.fn() };
+    open = vi.spyOn(window, "open").mockImplementation(() => tab);
+    getPixlstashNode.mockReset();
+    getPixlstashNode.mockResolvedValue({
+      can_open_workflows: true,
+      saves_back: true,
+      opens_runs: true,
+    });
+    openWorkflowRun.mockReset();
+    openWorkflowRun.mockResolvedValue({ opening: RUN, workflow_id: KEY });
+    useFilterStore().comfyuiUrl = "http://127.0.0.1:8188/";
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete window.pixlstashDesktop;
+  });
+
+  it("is not drawn without a ComfyUI to open", async () => {
+    useFilterStore().comfyuiUrl = "";
+    const wrapper = await mountRun(fromCard);
+    expect(openButton(wrapper).exists()).toBe(false);
+    expect(getPixlstashNode).not.toHaveBeenCalled();
+  });
+
+  it("holds the run the form would send, and sends a new tab to it", async () => {
+    const wrapper = await mountRun(fromCard);
+    wrapper.vm.setValue(wrapper.vm.scalarFields[0], 33);
+    await flushPromises();
+
+    // The server has not answered yet when the tab has to be open: a
+    // `window.open` after the answer is what a popup blocker refuses.
+    let answer;
+    openWorkflowRun.mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    await openButton(wrapper).trigger("click");
+    await flushPromises();
+    expect(open).toHaveBeenCalledWith("", "_blank");
+    // Cut loose from this page before it goes anywhere.
+    expect(tab.opener).toBeNull();
+    expect(tab.location.replace).not.toHaveBeenCalled();
+    answer({ opening: RUN, workflow_id: KEY });
+    await flushPromises();
+
+    const [body] = openWorkflowRun.mock.calls[0];
+    expect(body).toEqual({ ...wrapper.vm.runBody(), count: 1 });
+    expect(body.workflow_id).toBe(KEY);
+    expect(body.values.map((v) => v.value)).toContain(33);
+    expect(tab.location.replace).toHaveBeenCalledWith(LINK);
+    expect(tab.close).not.toHaveBeenCalled();
+    // The run is still to make: nothing is queued and the popup stays.
+    expect(runWorkflowCard).not.toHaveBeenCalled();
+    expect(wrapper.emitted("close")).toBeUndefined();
+    expect(openError(wrapper).exists()).toBe(false);
+    expect(openButton(wrapper).attributes("tooltip")).toContain(
+      "makes a new workflow",
+    );
+  });
+
+  it("is refused, and says why, when ComfyUI's nodes open no run", async () => {
+    getPixlstashNode.mockResolvedValue({
+      can_open_workflows: true,
+      saves_back: true,
+      opens_runs: false,
+    });
+    const wrapper = await mountRun(fromCard);
+    const button = openButton(wrapper);
+    expect(button.attributes("aria-disabled")).toBe("true");
+    expect(button.attributes("tooltip")).toContain(
+      "Update the ComfyUI-PixlStash nodes",
+    );
+
+    await button.trigger("click");
+    await flushPromises();
+    expect(open).not.toHaveBeenCalled();
+    expect(openWorkflowRun).not.toHaveBeenCalled();
+  });
+
+  it("asks again when the ComfyUI address arrives or changes after the popup", async () => {
+    useFilterStore().comfyuiUrl = "";
+    getPixlstashNode.mockResolvedValue({ opens_runs: false });
+    const wrapper = await mountRun(fromCard);
+    expect(getPixlstashNode).not.toHaveBeenCalled();
+
+    useFilterStore().comfyuiUrl = "http://127.0.0.1:8188/";
+    await flushPromises();
+    expect(getPixlstashNode).toHaveBeenCalledTimes(1);
+    expect(openButton(wrapper).attributes("aria-disabled")).toBe("true");
+
+    // Another ComfyUI, whose nodes do open a run: the old answer is not its.
+    getPixlstashNode.mockResolvedValue({ opens_runs: true });
+    useFilterStore().comfyuiUrl = "http://127.0.0.1:8189/";
+    await flushPromises();
+    expect(getPixlstashNode).toHaveBeenCalledTimes(2);
+    expect(openButton(wrapper).attributes("aria-disabled")).toBeUndefined();
+  });
+
+  it("is left to try when ComfyUI cannot be asked", async () => {
+    getPixlstashNode.mockResolvedValue({ opens_runs: null });
+    const wrapper = await mountRun(fromCard);
+    expect(openButton(wrapper).attributes("aria-disabled")).toBeUndefined();
+  });
+
+  it("says what the server refused, and closes the tab it opened", async () => {
+    openWorkflowRun.mockRejectedValue({
+      response: { data: { detail: "PixlStash has no graph for this workflow." } },
+    });
+    const wrapper = await mountRun(fromCard);
+    await openButton(wrapper).trigger("click");
+    await flushPromises();
+    expect(openError(wrapper).text()).toBe(
+      "PixlStash has no graph for this workflow.",
+    );
+    expect(tab.close).toHaveBeenCalled();
+    expect(tab.location.replace).not.toHaveBeenCalled();
+  });
+
+  it("asks nothing of the server when the browser blocks the tab", async () => {
+    open.mockImplementation(() => null);
+    const wrapper = await mountRun(fromCard);
+    await openButton(wrapper).trigger("click");
+    await flushPromises();
+    expect(openError(wrapper).text()).toContain("blocked the new tab");
+    expect(openWorkflowRun).not.toHaveBeenCalled();
+  });
+
+  it("asks nothing of the server for an address that is not a web address", async () => {
+    useFilterStore().comfyuiUrl = "file:///home/me/comfy";
+    const wrapper = await mountRun(fromCard);
+    await openButton(wrapper).trigger("click");
+    await flushPromises();
+    expect(openError(wrapper).text()).toContain("not a web address");
+    expect(open).not.toHaveBeenCalled();
+    expect(openWorkflowRun).not.toHaveBeenCalled();
+  });
+
+  it("goes through the desktop shell's bridge, which window.open cannot", async () => {
+    const openComfyui = vi.fn().mockResolvedValue(true);
+    window.pixlstashDesktop = { openComfyui };
+    const wrapper = await mountRun(fromCard);
+    await openButton(wrapper).trigger("click");
+    await flushPromises();
+    expect(openComfyui).toHaveBeenCalledWith(LINK);
+    expect(open).not.toHaveBeenCalled();
+    expect(openError(wrapper).exists()).toBe(false);
+
+    openComfyui.mockResolvedValue(false);
+    await openButton(wrapper).trigger("click");
+    await flushPromises();
+    expect(openError(wrapper).text()).toBe("Could not open ComfyUI.");
+  });
+
+  it("names the workflow the picker chose over a picture", async () => {
+    getPictureRecipe.mockResolvedValue({
+      available: true,
+      workflow_id: KEY,
+      settings: {},
+      lora_slots: [],
+    });
+    const wrapper = await mountRun();
+    await openButton(wrapper).trigger("click");
+    await flushPromises();
+    const [body] = openWorkflowRun.mock.calls[0];
+    expect(body.picture_ids).toEqual([42]);
+    expect(body.target).toBe(KEY);
   });
 });
