@@ -176,6 +176,7 @@ below.
 | Success / error / warning / info as a **fill** | `success` / `error` / `warning` / `info` (+ `on-*`, see below) |
 | The same four as **text, a glyph, a rail or a border** | `surface-success` / `-error` / `-warning` / `-info` |
 | Olive as a **foreground** (a selected option's glyph or label) | `selected-ink` |
+| Teal as a **foreground**: the mark of what is not saved yet | `surface-tertiary` (on a dark chip: `dark-surface-tertiary`) |
 | The same four, **inside a `dark-surface`** | `dark-surface-success` / `-error` / `-warning` / `-info` |
 | `primary` as a foreground **inside a `dark-surface`** | `dark-surface-primary` |
 | Hover / selection wash | `--hover-wash` / `--active-wash` (in `style.css`) |
@@ -347,6 +348,40 @@ Olive `#8EA604` and green `#4caf50` are adjacent on the same card; they are
 distinguishable but close, so the tallies keep their word labels ("+ 12 added" /
 "kept"). Status never rides on colour alone (below), and this is that rule applied to a
 non-status pair.
+
+### Teal marks what is not saved yet
+
+In the Workflow tab, teal has one meaning: **these changes are not saved**. The shelf
+above Run… is a teal band (`tertiary` as a `--rail-w` top edge and a 26% wash), *Save*
+is the filled teal button (`AppButton` `variant="save"`, `on-tertiary` at 4.85:1), and
+every row that differs wears a teal dot before *Edited* or *Removed*; the Workflows
+card's *Unsaved* badge wears the same dot. One mark in three places, so the eye is led
+from the row just changed to the place that keeps it. The dot never carries the
+meaning alone: the word stays. A saved value (*Yours*) takes no dot.
+
+Amber stays Run…'s: a footer with two amber buttons is the problem this solves, olive
+would read as selected, raspberry sits beside the error red, and violet is never an
+action. Teal is still a plain category and chart hue elsewhere; **as a button fill it
+means "keep what is not saved" and nothing else.**
+
+The `tertiary` fill is a glyph at only 2.73:1 on the dark rail, so the hue drawn as a
+foreground is its own token, the same shape as `surface-<status>`:
+
+| | `sidebar` | the shelf's wash (`tertiary` 26% over `sidebar`) |
+|---|---|---|
+| `surface-tertiary` light `#3b606a` | **5.87** | **4.21** |
+| `surface-tertiary` dark `#8fbcc6` | **7.19** | **5.63** |
+
+`dark-surface-tertiary` `#8fbcc6` is the sixth member of the `dark-surface-*` family,
+identical in both themes, for the dot on the card's badge (a photo scrim, dark in both
+themes): 7.36:1 on `#242628`, 8.37:1 on `#181b20`. All of these are measured by
+`npm run audit:contrast`.
+
+An outlined button on the wash takes `surface-tertiary` for its border: the theme's
+`border` is under 1.1:1 there in both themes.
+
+The Run popup and the Tasks tab offer to save a run's changes with neutral buttons.
+They are not part of this rule yet.
 
 ### Status colors, and the three ways to get them wrong
 
@@ -735,7 +770,10 @@ pattern, don't re-roll the numbers.
   lives with the pattern, not as a raw duration token.
 - **Landing pulse (one-shot)** — a single glow-and-settle when something new
   arrives. Reference: `gridNewPulse` — a one-shot `--v-theme-accent` glow ring, no
-  layout shift. This is the model for the sidebar badge's *pulse-on-landing*.
+  layout shift. This is the model for the sidebar badge's *pulse-on-landing*, and for
+  the Workflow tab's shelf of unsaved changes (`wftab-draft-arrive`: the same 2.2s, in
+  `surface-tertiary`, when the first change is made and never for changes that were
+  already waiting).
 - **Flight / FLIP** — an element travels from A to B along an arc and lands.
   Reference: `rs-sticker-fly` / `rs-sticker-land`. Travel on `--ease-standard`
   (or `--ease-decelerate` into rest) over `--dur-4`; land on `--ease-spring` for

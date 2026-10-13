@@ -2012,6 +2012,10 @@ describe("the DEFAULT RECIPE section (#1653)", () => {
     );
     const { wrapper } = await mountWith([KEY]);
     expect(loraRow(wrapper, "Bo").find(".wftab-yours").text()).toBe("Yours");
+    // Saved, so without the teal dot of what is not.
+    expect(loraRow(wrapper, "Bo").find(".wftab-yours").classes()).toEqual([
+      "wftab-yours",
+    ]);
     expect(loraRow(wrapper, "Ada").find(".wftab-yours").exists()).toBe(false);
     // LoRAs have no write yet (F-1): nothing on screen may pretend otherwise.
     expect(loraRow(wrapper, "Bo").find(".wfdef-reset").exists()).toBe(false);
@@ -4461,6 +4465,120 @@ describe("the tab as the editor (#1850)", () => {
       return button.trigger("click");
     };
 
+    // Teal is "not saved yet": the filled verb is the ordinary one, the
+    // outline the other, and neither is a second amber button beside Run….
+    it("draws Save as the teal default and Save as new… as the outline beside it", async () => {
+      waitingOnServer = { ...WAITING };
+      const { wrapper } = await mountEditor();
+      await settle(wrapper);
+      expect(save(wrapper).classes()).toEqual(
+        expect.arrayContaining(["app-btn--save", "app-btn--md"]),
+      );
+      expect(saveAsNew(wrapper).classes()).toEqual(
+        expect.arrayContaining(["app-btn--outline", "app-btn--md"]),
+      );
+      expect(bar(wrapper).findAll(".app-btn--primary")).toHaveLength(0);
+      // The same mark on the row that differs, and on nothing that is saved.
+      expect(
+        wrapper.find('[data-testid="wftab-edited"]').classes(),
+      ).toContain("wftab-yours--unsaved");
+
+      // Asking for the name, the verb that keeps is still the teal one.
+      await saveAsNew(wrapper).trigger("click");
+      await flush(wrapper);
+      expect(
+        wrapper.find('[data-testid="wftab-save-as-new-confirm"]').classes(),
+      ).toContain("app-btn--save");
+    });
+
+    describe("arriving", () => {
+      const arrival = (wrapper) =>
+        wrapper.find('[data-testid="wftab-draft-arrival"]');
+      const pulsing = (wrapper) =>
+        bar(wrapper).classes().includes("wftab-draft--arrived");
+
+      it("pulses and is announced once, when the first change is made", async () => {
+        const { wrapper } = await mountEditor();
+        await settle(wrapper);
+        // There before anything waits: a live region that arrives with its
+        // text already in it is not read out.
+        expect(arrival(wrapper).attributes("role")).toBe("status");
+        expect(arrival(wrapper).text()).toBe("");
+
+        await stage(wrapper, "upscale").setValue(true);
+        await flush(wrapper);
+        expect(pulsing(wrapper)).toBe(true);
+        expect(arrival(wrapper).text()).toBe("1 unsaved change");
+
+        // A second change moves the bar's count and says nothing: the region
+        // empties rather than keep a number that is no longer true.
+        await picker(wrapper).setValue(JUGGERNAUT.filename);
+        await flush(wrapper);
+        expect(count(wrapper)).toBe("2 unsaved changes");
+        expect(arrival(wrapper).text()).toBe("");
+        expect(pulsing(wrapper)).toBe(true);
+
+        // Back to one: the same number as the arrival, and still not said
+        // again. The bar never left, so nothing has arrived.
+        await picker(wrapper).setValue("");
+        await flush(wrapper);
+        expect(count(wrapper)).toBe("1 unsaved change");
+        expect(arrival(wrapper).text()).toBe("");
+        expect(pulsing(wrapper)).toBe(true);
+      });
+
+      it("is not played for changes that were already waiting", async () => {
+        waitingOnServer = { ...WAITING };
+        const { wrapper } = await mountEditor();
+        await settle(wrapper);
+        expect(count(wrapper)).toBe("1 unsaved change");
+        expect(pulsing(wrapper)).toBe(false);
+        expect(arrival(wrapper).text()).toBe("");
+      });
+
+      it("is not played again when the workflow is left and come back to", async () => {
+        const cards = twoWorkflows();
+        getWorkflowChanges.mockImplementation((key) =>
+          Promise.resolve(
+            key === OTHER
+              ? changesState(null, { workflow_id: OTHER })
+              : changesState(waitingOnServer),
+          ),
+        );
+        const { wrapper, store } = await mountEditor(cards);
+        await settle(wrapper);
+        await stage(wrapper, "upscale").setValue(true);
+        await flush(wrapper);
+        expect(pulsing(wrapper)).toBe(true);
+
+        store.selectedKeys = [OTHER];
+        await settle(wrapper);
+        expect(bar(wrapper).exists()).toBe(false);
+        store.selectedKeys = [KEY];
+        await settle(wrapper);
+        // The change still waits, and finding it there is not it arriving.
+        expect(count(wrapper)).toBe("1 unsaved change");
+        expect(pulsing(wrapper)).toBe(false);
+        expect(arrival(wrapper).text()).toBe("");
+      });
+
+      it("is over when the bar leaves, and comes back with the next first change", async () => {
+        const { wrapper } = await mountEditor();
+        await settle(wrapper);
+        await stage(wrapper, "upscale").setValue(true);
+        await flush(wrapper);
+        await stage(wrapper, "upscale").setValue(false);
+        await flush(wrapper);
+        expect(bar(wrapper).exists()).toBe(false);
+        expect(arrival(wrapper).text()).toBe("");
+
+        await stage(wrapper, "upscale").setValue(true);
+        await flush(wrapper);
+        expect(pulsing(wrapper)).toBe(true);
+        expect(arrival(wrapper).text()).toBe("1 unsaved change");
+      });
+    });
+
     it("says how many changes wait, never which, with the two verbs", async () => {
       waitingOnServer = { ...WAITING, stages: { upscale: true, face_detailer: true } };
       const { wrapper } = await mountEditor();
@@ -4468,8 +4586,8 @@ describe("the tab as the editor (#1850)", () => {
       expect(bar(wrapper).text()).not.toContain("juggernaut");
       expect(save(wrapper).text()).toBe("Save");
       expect(saveAsNew(wrapper).text()).toBe("Save as new…");
-      // Neutral: Run… stays the one amber button on the surface.
-      expect(save(wrapper).classes()).toContain("app-btn--secondary");
+      // Teal, not amber: Run… stays the one amber button on the surface.
+      expect(save(wrapper).classes()).toContain("app-btn--save");
       expect(wrapper.findAll(".app-btn--primary")).toHaveLength(1);
     });
 
@@ -4598,7 +4716,8 @@ describe("the tab as the editor (#1850)", () => {
       );
       const { wrapper } = await mountEditor();
       expect(save(wrapper).exists()).toBe(false);
-      expect(saveAsNew(wrapper).exists()).toBe(true);
+      // The one verb left that keeps, so it is drawn as the filled one.
+      expect(saveAsNew(wrapper).classes()).toContain("app-btn--save");
       expect(
         wrapper.findAll('[data-testid="wftab-draft-reason"]').map((p) => p.text()),
       ).toEqual([reason]);

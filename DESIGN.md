@@ -51,6 +51,8 @@ colors:
   surface-warning-light: "#755215"
   surface-success-light: "#226534"
   surface-info-light: "#30558c"
+  surface-tertiary-dark: "#8fbcc6"
+  surface-tertiary-light: "#3b606a"
 typography:
   display:
     fontFamily: "system-ui, -apple-system, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif"
@@ -174,7 +176,7 @@ The brand and status hues are **one value shared by both themes**, except amber;
 - **Amber** (`--accent` #c47a1e dark, **#9e6727 light**, label `--accent-on` **#ffffff**): **the action**. The key action fill (one per surface, including the verb that finishes something), links, the attention dot, and the "Stash" wordmark. Not selection, focus, hover, data or decoration. The only brand hue that differs by theme (owner decision, 2026-09-23, #1413): the shared #c47a1e measured 2.93:1 on the light sidebar, under the 3:1 floor for the attention dot, so light takes the deep amber (4.07:1 on the sidebar, white label 4.75:1). In dark the pure-white label measures 3.41:1, an accepted exception; do not flip the label dark. Dark panels (`dark-surface`) re-point `--v-theme-accent` at `dark-surface-accent` (#c47a1e in both themes), because the deep amber measures only 3.20:1 there. Known trade-off: under deuteranopia the deep amber sits close to the error red and the olive, so amber never carries meaning by hue alone; a label, shape or position always does.
 - **Olive** (`--primary` #567309, lifted `#8ea604` in dark as `--selected-ink` / `--active-bar`): **selection**, for items and chosen values alike. A selected tile, row, tab or focused group (`--active-bar` ring + `--active-wash`), a selected segment, an option row's check, an active bar button's icon, and the good/high end of a scale. Olive marks, words stay `--text`. **Never a button fill.** Checkbox, switch and slider are deep olive with a white mark in both themes (accepted 2.32–2.72:1 against a dark ground).
 - **Raspberry** (`--secondary` #bb3566): category / identity (person accents, grouping chips). Never an action.
-- **Teal** (`--tertiary` #46707a): quiet category, the default chart hue. Never an action.
+- **Teal** (`--tertiary` #46707a): quiet category, the default chart hue. As a button fill it has one meaning, **not saved yet**: the Workflow tab's shelf of unsaved changes and its *Save*, with a teal dot on each row that differs. Never a key action; amber is still the one per surface. Drawn as a mark or glyph it is `--surface-tertiary` (#8fbcc6 dark, #3b606a light), since the fill is 2.73:1 on the dark rail.
 - **Violet** (`--quaternary` #7c55ae): a fourth category and chart hue. Never an action or a selection. It stays apart from Info for colour-blind viewers because Info is darker; do not lighten Info toward it.
 - **Warm near-white** (`--ps-on-fill` #f7f1ea): the label on olive, raspberry, violet and the status fills (not amber, not warning).
 

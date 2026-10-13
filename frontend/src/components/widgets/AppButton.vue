@@ -60,7 +60,8 @@ import Tooltip from "./Tooltip.vue";
 
 const props = defineProps({
   // primary (amber accent, the key action) | secondary (neutral) |
-  // outline (bordered, no fill) | danger (error) | ghost (transparent).
+  // outline (bordered, no fill) | danger (error) | ghost (transparent) |
+  // save (teal, the verb that keeps unsaved changes).
   // Amber acts, olive selects: there is no olive button.
   variant: { type: String, default: "secondary" },
   size: { type: String, default: "md" }, // md | sm
@@ -234,6 +235,7 @@ defineExpose({ focus });
   color: rgb(var(--v-theme-on-accent));
 }
 .app-btn--primary:not(:disabled):not([aria-disabled="true"]):hover,
+.app-btn--save:not(:disabled):not([aria-disabled="true"]):hover,
 .app-btn--danger:not(:disabled):not([aria-disabled="true"]):hover {
   background-image: var(--hover-shade);
 }
@@ -269,6 +271,15 @@ defineExpose({ focus });
 .app-btn--danger {
   background-color: rgb(var(--v-theme-error));
   color: rgb(var(--v-theme-on-error));
+}
+
+/* Save - teal, the verb that keeps what is not saved yet. Teal means that and
+   nothing else on a button (visual-language.md §4), so this is never a second
+   key action: amber stays the one per surface, and the two sit together in
+   the Workflow tab's footer. `on-tertiary` on the fill is 4.85:1. */
+.app-btn--save {
+  background-color: rgb(var(--v-theme-tertiary));
+  color: rgb(var(--v-theme-on-tertiary));
 }
 
 /* Ghost - transparent, recedes until hovered. */

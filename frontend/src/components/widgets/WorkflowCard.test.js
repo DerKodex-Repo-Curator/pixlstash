@@ -1211,8 +1211,12 @@ describe("the Unsaved badge", () => {
     expect(badges(wrapper)).toHaveLength(1);
     const [badge] = badges(wrapper);
     expect(badge.text()).toBe("Unsaved");
-    // The shipped cover badge, not a style of its own.
-    expect(badge.classes()).toEqual(["wf-card__badge"]);
+    // The shipped cover badge, with the Workflow tab's teal dot before the
+    // word: the same mark as the rows and the shelf it points at.
+    expect(badge.classes()).toEqual([
+      "wf-card__badge",
+      "wf-card__badge--unsaved",
+    ]);
     // Words a screen reader reaches, unlike the count and the rating.
     expect(badge.attributes("aria-hidden")).toBeUndefined();
   });

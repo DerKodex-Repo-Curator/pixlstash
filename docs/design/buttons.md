@@ -218,6 +218,7 @@ Material dialect this system replaces.
 | Neutral | `secondary` | `cancel-button` | `cancel-button-text` | Cancel, Close, Copy, and every former outlined or tonal button in a dialog or popover. |
 | Destructive | `danger` | `error` | `on-error` | Deletes bytes. Never a dialog's default focus. |
 | Quiet | `ghost` | transparent | `on-surface` at 0.7 | Tertiary actions, icon-only affordances, help tips. |
+| Keep | `save` | `tertiary` | `on-tertiary` | Saves changes that wait unsaved, beside the key action and never instead of it: the Workflow tab's *Save* above *Run…* (`visual-language.md` §4, "Teal marks what is not saved yet"). |
 
 The prop names can stay as they are. What matters is that one hue means "key
 action" and that the names stop naming colours. `primary_green` retires: it was

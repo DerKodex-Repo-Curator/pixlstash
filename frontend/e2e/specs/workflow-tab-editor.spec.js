@@ -579,6 +579,13 @@ const drawnAtItsCorners = (locator) =>
 const backgroundOf = (locator) =>
   locator.evaluate((el) => getComputedStyle(el).backgroundColor);
 
+/** One computed style of *locator*, or of its `pseudo` element. */
+const styleOf = (locator, property, pseudo) =>
+  locator.evaluate(
+    (el, [name, of]) => getComputedStyle(el, of)[name],
+    [property, pseudo],
+  );
+
 async function shot(locator, name) {
   if (!SHOTS) return;
   mkdirSync(SHOTS, { recursive: true });
@@ -870,10 +877,42 @@ test.describe("the bar", () => {
     const amber = await backgroundOf(runButton(page));
     expect(await backgroundOf(save)).not.toBe(amber);
     expect(await backgroundOf(saveAsNew)).not.toBe(amber);
-    // And both are filled, not ghosts: the same neutral fill.
-    expect(await backgroundOf(save)).toBe(await backgroundOf(saveAsNew));
-    expect(await backgroundOf(save)).not.toBe("rgba(0, 0, 0, 0)");
+    // Save is the filled verb and Save as new… the outline beside it, at one
+    // height: which of the two is the ordinary one is not a guess.
+    const clear = "rgba(0, 0, 0, 0)";
+    const teal = await backgroundOf(save);
+    expect(teal).not.toBe(clear);
+    expect(await backgroundOf(saveAsNew)).toBe(clear);
+    expect((await save.boundingBox()).height).toBe(
+      (await saveAsNew.boundingBox()).height,
+    );
+    // The shelf is a band in Save's teal, not the rail's own ground.
+    expect(await styleOf(bar(page), "borderTopColor")).toBe(teal);
+    expect(await backgroundOf(bar(page))).not.toBe(clear);
+    // One teal ink for everything that says "not saved yet": the count's
+    // glyph, the outline, and the dot before the row's own Edited.
+    const ink = await styleOf(bar(page).locator(".wftab-draft__count .v-icon"), "color");
+    expect(ink).not.toBe(await styleOf(bar(page), "color"));
+    expect(await styleOf(saveAsNew, "borderTopColor")).toBe(ink);
+    const edited = checkpointRow(page).getByTestId("wftab-edited");
+    expect(await styleOf(edited, "backgroundColor", "::before")).toBe(ink);
+    expect(await styleOf(edited, "width", "::before")).toBe("8px");
+    // It arrived with the first change: the pulse is the bar's own.
+    expect(await styleOf(bar(page), "animationName")).toContain("wftab-draft-arrive");
     await shotAround(page, [rail(page)], "rail-three-changes");
+  });
+
+  test("arrives without the pulse under reduced motion, and says its first count", async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    net = await stubWorkflows(page);
+    await selectWorkflow(page);
+    const said = rail(page).getByTestId("wftab-draft-arrival");
+    await expect(said).toHaveText("");
+
+    await stage(page, "Face detailer").check();
+    await expect(said).toHaveText("1 unsaved change");
+    await expect(bar(page)).toHaveClass(/wftab-draft--arrived/);
+    expect(await styleOf(bar(page), "animationName")).toBe("none");
   });
 
   test("stays in view above Run… when the rows are taller than the window", async ({ page }) => {
@@ -908,7 +947,12 @@ test.describe("the bar", () => {
 
     await expect(bar(page)).toContainText("1 unsaved change");
     await expect(bar(page).getByRole("button", { name: "Save", exact: true })).toHaveCount(0);
-    await expect(bar(page).getByRole("button", { name: "Save as new…" })).toBeVisible();
+    const saveAsNew = bar(page).getByRole("button", { name: "Save as new…" });
+    await expect(saveAsNew).toBeVisible();
+    // The one verb that keeps, so the filled one: in the band's own teal.
+    expect(await backgroundOf(saveAsNew)).toBe(
+      await styleOf(bar(page), "borderTopColor"),
+    );
     await expect(bar(page).getByText(reason, { exact: true })).toBeVisible();
     expect(await overflows(bar(page))).toBe(false);
     await shot(bar(page), "bar-save-closed");
@@ -988,6 +1032,11 @@ test.describe("the card", () => {
 
     await stage(page, "Face detailer").check();
     await expect(unsaved(page)).toHaveText("Unsaved");
+    // With the tab's teal dot before the word.
+    expect(await styleOf(unsaved(page), "width", "::before")).toBe("8px");
+    expect(await styleOf(unsaved(page), "backgroundColor", "::before")).not.toBe(
+      "rgba(0, 0, 0, 0)",
+    );
     await expect(cardRow(page, 1).getByTestId("wf-card-unsaved")).toHaveCount(0);
     await shot(cardRow(page), "card-unsaved");
 
