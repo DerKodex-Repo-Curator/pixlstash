@@ -656,6 +656,22 @@ describe('comfyuiOpenTarget — the Open in ComfyUI channel opens only a workflo
     }
   });
 
+  it('accepts the flag Open original in ComfyUI adds, and only as the tab writes it', () => {
+    const url = new URL('http://127.0.0.1:8188/');
+    url.searchParams.set('pixlstash_workflow', `auto:${HASH}`);
+    url.searchParams.set('pixlstash_original', '1');
+    assert.equal(comfyuiOpenTarget(url.toString()), url.toString());
+    for (const bad of [
+      `http://127.0.0.1:8188/?pixlstash_original=1`,
+      `http://127.0.0.1:8188/?pixlstash_original=1&pixlstash_workflow=${KEY}`,
+      `http://127.0.0.1:8188/?pixlstash_workflow=${KEY}&pixlstash_original=http://example.com`,
+      `http://127.0.0.1:8188/?pixlstash_workflow=${KEY}&pixlstash_original=1&pixlstash_original=1`,
+      `http://127.0.0.1:8188/?pixlstash_workflow=${KEY}&pixlstash_original=1&next=1`,
+    ]) {
+      assert.equal(comfyuiOpenTarget(bad), null, bad);
+    }
+  });
+
   it('refuses anything that would make it a general open-any-link door', () => {
     for (const bad of [
       undefined,

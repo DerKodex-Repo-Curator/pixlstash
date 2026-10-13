@@ -1058,7 +1058,7 @@
           data-testid="wftab-open-comfyui"
           :aria-disabled="runTarget && !comfyuiLacksNode ? undefined : 'true'"
           :aria-describedby="openDescribedBy"
-          @click="openInComfyui"
+          @click="openInComfyui()"
         >
           <template #icon="{ size }"><ComfyuiIcon :size="size" /></template>
         </AppButton>
@@ -1081,6 +1081,20 @@
           </template>
           <div class="tbm">
             <div class="tbm-section">
+              <!-- Open in ComfyUI opens the workflow with ComfyUI-PixlStash
+                   nodes in place of its savers and LoRA loaders, so what is
+                   queued there comes back. This opens it with its own nodes.
+                   Offered only where the button beside it would open. -->
+              <button
+                v-if="canOpenComfyui && runTarget && !comfyuiLacksNode"
+                class="wftab-item"
+                type="button"
+                data-testid="wftab-open-original"
+                @click="openOriginal"
+              >
+                <ComfyuiIcon :size="16" />
+                Open original in ComfyUI
+              </button>
               <button class="wftab-item" type="button" @click="toggleHidden">
                 <v-icon size="16">{{
                   detail?.hidden ? "mdi-eye-outline" : "mdi-eye-off-outline"
@@ -4076,8 +4090,15 @@ function run() {
  * `?pixlstash_workflow=` and the ComfyUI-PixlStash node fetches the graph
  * (`GET /workflows/{id}/graph`) and loads it. Synchronous on purpose: a
  * `window.open` after an await is what popup blockers refuse.
+ *
+ * The node asks for the graph with its own savers and Adapter Loader in place
+ * of the stock nodes, so a picture queued in ComfyUI comes back here.
+ * `original` adds `pixlstash_original=1`, which tells it to ask for the
+ * workflow's own nodes instead.
+ *
+ * @param {boolean} [original]
  */
-function openInComfyui() {
+function openInComfyui(original = false) {
   const target = runTarget.value;
   if (!target || !filterStore.comfyuiUrl || comfyuiLacksNode.value) return;
   let url;
@@ -4100,6 +4121,7 @@ function openInComfyui() {
     url.hostname = window.location.hostname;
   }
   url.searchParams.set("pixlstash_workflow", target.id);
+  if (original) url.searchParams.set("pixlstash_original", "1");
   if (desktop?.openComfyui) {
     desktop
       .openComfyui(url.toString())
@@ -4113,6 +4135,12 @@ function openInComfyui() {
     return;
   }
   window.open(url.toString(), "_blank", "noopener,noreferrer");
+}
+
+/** The More menu's *Open original in ComfyUI*. */
+function openOriginal() {
+  menuOpen.value = false;
+  openInComfyui(true);
 }
 
 watch(

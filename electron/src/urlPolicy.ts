@@ -245,7 +245,9 @@ const WORKFLOW_ID_RE = /^(?:auto:[0-9a-f]{64}|manual:[0-9a-f]{32})$/;
  * out over it, and a ComfyUI almost always IS plain `http:`. So the Workflow
  * tab's *Open in ComfyUI* gets its own channel, and this is the whole of what
  * it will open: an `http(s)` address with no credentials in it, no fragment,
- * and exactly one query parameter, `pixlstash_workflow`, holding a workflow id.
+ * and one query parameter, `pixlstash_workflow`, holding a workflow id. The
+ * one thing allowed beside it is `pixlstash_original=1`, which *Open original
+ * in ComfyUI* adds: a flag the ComfyUI-PixlStash node reads, and nothing else.
  * The host is not checked: ComfyUI is wherever the owner configured it, and
  * main cannot read that setting without the renderer's session. What this
  * stops is the channel being a general "open any link" door.
@@ -261,7 +263,13 @@ export function comfyuiOpenTarget(raw: unknown): string | null {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
   if (url.username || url.password || url.hash) return null;
   const keys = [...url.searchParams.keys()];
-  if (keys.length !== 1 || keys[0] !== 'pixlstash_workflow') return null;
+  if (keys[0] !== 'pixlstash_workflow' || keys.length > 2) return null;
+  if (
+    keys.length === 2 &&
+    (keys[1] !== 'pixlstash_original' || url.searchParams.get('pixlstash_original') !== '1')
+  ) {
+    return null;
+  }
   if (!WORKFLOW_ID_RE.test(url.searchParams.get('pixlstash_workflow') ?? '')) {
     return null;
   }

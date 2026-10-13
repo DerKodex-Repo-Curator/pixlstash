@@ -142,6 +142,7 @@ from pixlstash.services.comfyui_recipe_service import (
     read_lora_chain,
     read_lora_chain_untyped,
     retype_text_encoders,
+    swap_in_pack_nodes,
     swap_target,
     swap_to_adapter_loader,
 )
@@ -281,6 +282,7 @@ from pixlstash.stacking import (
     strip_workflow_tags,
 )
 from pixlstash.utils.adapter_header import (
+    FILE_ADAPTER,
     FILE_CHECKPOINT,
     FILE_ENGINE,
     FILE_TEXT_ENCODER,
@@ -7825,6 +7827,19 @@ def create_router(server) -> APIRouter:
             ],
         )
 
+    def _with_pack_nodes(graph: dict, object_info: dict | None) -> list[dict]:
+        """Swap ComfyUI-PixlStash nodes into *graph* for opening in ComfyUI.
+
+        :func:`swap_in_pack_nodes`, with a LoRA loaded by digest only where
+        the shelf holds a copy of the file for the pack's loader to fetch.
+        Nothing is swapped when ComfyUI did not say which nodes it has.
+        """
+        if not object_info:
+            return []
+        return swap_in_pack_nodes(
+            graph, object_info, _shelf_digest(_hub(), FILE_ADAPTER)
+        )
+
     @router.get(
         "/workflows/{workflow_id}/graph",
         summary="A workflow's runnable graph",
@@ -7847,9 +7862,14 @@ def create_router(server) -> APIRouter:
             "graph could be built at all), since ComfyUI is where a missing "
             "node or model is fixed. Credential widgets are blanked. A graph "
             "from a stored recipe may name models the library forgot "
-            "(`forgotten`). The ComfyUI-PixlStash node reads it when ComfyUI "
-            "is opened with `?pixlstash_workflow=<workflow_id>`. Export instead "
-            "to give it away."
+            "(`forgotten`). With `pixlstash_nodes`, ComfyUI-PixlStash nodes "
+            "stand in for the stock ones where this ComfyUI has them: Save "
+            "Image and Save Video become the PixlStash savers, so what is "
+            "queued by hand comes back, and a single LoRA loader whose file "
+            "the shelf holds loads it by its hash. The ComfyUI-PixlStash node "
+            "reads it when ComfyUI is opened with "
+            "`?pixlstash_workflow=<workflow_id>`. Export instead to give it "
+            "away."
         ),
         response_model=WorkflowRunnableGraph,
         responses={
@@ -7879,6 +7899,14 @@ def create_router(server) -> APIRouter:
                 "could not be switched on again."
             ),
         ),
+        pixlstash_nodes: bool = Query(
+            False,
+            description=(
+                "Put ComfyUI-PixlStash nodes in place of the stock savers and "
+                "single LoRA loaders, where this ComfyUI has them. Without "
+                "it the graph holds the workflow's own nodes."
+            ),
+        ),
     ):
         server.auth.ensure_secure_when_required(request)
         hub = _hub()
@@ -7886,6 +7914,20 @@ def create_router(server) -> APIRouter:
         graph, source, card, waiting_applied, object_info = _opening_graph(
             request, workflow, waiting=waiting, all_stages=all_stages
         )
+        if pixlstash_nodes:
+            # Last, and before the layout is looked for: a layout saved from
+            # what this opens names these nodes. One kept from before a
+            # workflow opened with them names the stock ones, so it is not
+            # used and the workflow opens auto-arranged until it is saved
+            # from ComfyUI again.
+            swapped = _with_pack_nodes(graph, object_info)
+            if swapped:
+                logger.info(
+                    "[workflows] Workflow %s opens with ComfyUI-PixlStash "
+                    "nodes in place of its own: %s",
+                    workflow.workflow_id,
+                    [(s["node_id"], s["now"]) for s in swapped],
+                )
         return WorkflowRunnableGraph(
             name=_file_stem(card, workflow.name),
             workflow=graph,
@@ -11266,10 +11308,15 @@ def create_router(server) -> APIRouter:
                     ],
                 )
                 sent = workflow_inbox.content_hash(graph)
-                unchanged = sent in (
-                    workflow_inbox.content_hash(before.graph),
-                    workflow_inbox.content_hash(opened),
-                )
+                # Each also as it opens with ComfyUI-PixlStash nodes in it
+                # (`pixlstash_nodes`): saved untouched, that is this graph too.
+                with_pack_nodes = [deepcopy(before.graph), deepcopy(opened)]
+                for candidate in with_pack_nodes:
+                    _with_pack_nodes(candidate, object_info)
+                unchanged = sent in {
+                    workflow_inbox.content_hash(candidate)
+                    for candidate in (before.graph, opened, *with_pack_nodes)
+                }
                 if not unchanged:
                     changed = _parameters_a_graph_changes(recipe, graph, run_only)
         except RecursionError as exc:

@@ -19789,6 +19789,127 @@ def test_a_whole_graph_is_saved_over_a_workflow_as_its_next_version(saving):
     assert r.status_code == 422, r.text
 
 
+# What a ComfyUI with the ComfyUI-PixlStash nodes lists beside CHAIN_OBJECT_INFO.
+PACK_OBJECT_INFO = {
+    "PixlStashPictureSaver": {
+        "input": {
+            "required": {
+                "images": ["IMAGE"],
+                "filename_prefix": ["STRING", {"default": "comfyui"}],
+                "save_workflow": ["BOOLEAN", {"default": True}],
+            },
+            "optional": {"pixlstash_set": ["PIXLSTASH_SET", {"forceInput": True}]},
+        },
+        "output": ["STRING"],
+        "display_name": "PixlStash Picture Saver",
+    },
+    "PixlStashAdapterLoader": {
+        "input": {
+            "required": {
+                "model": ["MODEL", {}],
+                "adapter_sha256": ["STRING", {"default": ""}],
+            },
+            "optional": {
+                "clip": ["CLIP", {}],
+                "strength_model": ["FLOAT", {"default": 1.0}],
+                "strength_clip": ["FLOAT", {"default": 1.0}],
+            },
+        },
+        "output": ["MODEL", "CLIP", "STRING"],
+    },
+}
+
+
+@pytest.fixture
+def with_pack(saving):
+    """``saving`` on a ComfyUI that has the pack, the run's LoRA held on the shelf."""
+    info = {**json.loads(json.dumps(CHAIN_OBJECT_INFO)), **PACK_OBJECT_INFO}
+    saving.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url, **_: (info, None)
+    )
+    hub = saving.server.hub
+    with hub.transaction() as conn:
+        model_id = conn.execute(
+            "SELECT id FROM model WHERE sha256 = ?", (RUN_ADAPTER_DIGEST,)
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT OR IGNORE INTO model_folder (path, kind, movable) "
+            "VALUES ('/models/test-swap', 'user', 'per_item')"
+        )
+        folder_id = conn.execute(
+            "SELECT id FROM model_folder WHERE path = '/models/test-swap'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO model_file (model_id, model_folder_id, relpath, state) "
+            "VALUES (?, ?, ?, 'present')",
+            (model_id, folder_id, RUN_ADAPTER_FILENAME),
+        )
+    try:
+        yield saving
+    finally:
+        with hub.transaction() as conn:
+            conn.execute("DELETE FROM model_file WHERE model_id = ?", (model_id,))
+            conn.execute(
+                "DELETE FROM model_folder WHERE path = '/models/test-swap' "
+                "AND id NOT IN (SELECT model_folder_id FROM model_file)"
+            )
+
+
+def test_a_graph_opens_with_pixlstash_nodes_only_when_asked(with_pack):
+    """Open in ComfyUI's graph: the saver sends the picture back (the point of
+    it), and the LoRA the shelf holds loads by its hash. Wrong if the plain
+    read changes: the MCP server and *Open original* read that one."""
+    plain = _opened(with_pack, with_pack.manual)["workflow"]
+    assert [plain[n]["class_type"] for n in ("2", "5", "4")] == [
+        "LoraLoader",
+        "LoraLoader",
+        "SaveImage",
+    ]
+    graph = _opened(with_pack, with_pack.manual, pixlstash_nodes="true")["workflow"]
+    assert graph["4"] == {
+        "class_type": "PixlStashPictureSaver",
+        "inputs": {"filename_prefix": "P", "save_workflow": True, "images": ["3", 0]},
+    }
+    assert graph["2"]["class_type"] == "PixlStashAdapterLoader"
+    assert graph["2"]["inputs"] == {
+        "adapter_sha256": RUN_ADAPTER_DIGEST,
+        "strength_model": 0.8,
+        "strength_clip": 0.8,
+        "model": ["1", 0],
+        "clip": ["1", 1],
+    }
+    # A LoRA the shelf cannot name keeps the loader that names its file.
+    assert graph["5"] == plain["5"]
+    # Everything else is the workflow's own, wired as it was.
+    assert {n: graph[n] for n in ("1", "3", "6")} == {
+        n: plain[n] for n in ("1", "3", "6")
+    }
+
+
+def test_a_comfyui_without_the_pack_opens_the_workflows_own_nodes(saving):
+    opened = _opened(saving, saving.manual, pixlstash_nodes="true")
+    assert opened["workflow"] == _opened(saving, saving.manual)["workflow"]
+    assert opened["workflow"]["4"]["class_type"] == "SaveImage"
+
+
+def test_a_graph_opened_with_pixlstash_nodes_and_saved_untouched_stores_nothing(
+    with_pack,
+):
+    """Ctrl+S in ComfyUI on what was just opened. Wrong if a version appears:
+    the nodes Open put in are not a change the owner made."""
+    graph = _opened(with_pack, with_pack.manual, pixlstash_nodes="true")["workflow"]
+    r = _put_graph(with_pack, with_pack.manual, graph, read_version=1)
+    assert r.status_code == 200 and r.json()["unchanged"] is True, r.text
+    assert len(_versions_of(with_pack, with_pack.manual)) == 1
+
+    # A change made there is a version, and it holds the nodes it was made on.
+    graph["2"]["inputs"]["strength_model"] = 0.3
+    r = _put_graph(with_pack, with_pack.manual, graph, read_version=1)
+    assert r.status_code == 200 and r.json()["unchanged"] is False, r.text
+    stored = _versions_of(with_pack, with_pack.manual)[-1][2]
+    assert stored["4"]["class_type"] == "PixlStashPictureSaver"
+
+
 def test_a_graph_read_with_the_waiting_changes_clears_them(saving):
     _put_changes(saving, saving.manual, **SKIP_FIVE)
     r = _put_graph(saving, saving.manual, _without_five(), waiting_applied=True)

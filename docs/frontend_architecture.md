@@ -2227,8 +2227,15 @@ can no longer see.
   (one after an await is a blocked popup). **On the desktop it goes through
   `pixlstashDesktop.openComfyui`** (`desktop:openComfyui`), because the shell's
   `openExternalSafely` refuses `http:` and ComfyUI is plain `http:`: the channel
-  is app-window-only and opens nothing but an `http(s)` URL whose sole query
-  parameter is a workflow id (`electron/src/urlPolicy.ts::comfyuiOpenTarget`). An
+  is app-window-only and opens nothing but an `http(s)` URL whose query is a
+  workflow id, with `pixlstash_original=1` the one thing allowed beside it
+  (`electron/src/urlPolicy.ts::comfyuiOpenTarget`). **What opens holds
+  ComfyUI-PixlStash nodes** in place of the stock savers and single LoRA
+  loaders (the node asks `GET …/graph?pixlstash_nodes=true`), so a picture
+  queued in ComfyUI comes back. **Open original in ComfyUI**, in the ⋯ menu
+  above Hide, opens the same link with `pixlstash_original=1`, which tells the
+  node to ask for the workflow's own nodes; it is offered only where the
+  button would open (an address, one workflow, a node that can). An
   older shell without the bridge gets no button. An address of `0.0.0.0` is
   sent to the page's own host. The address is the one the *server* reaches
   ComfyUI on, so a browser on another machine resolves it against itself.
@@ -2807,7 +2814,7 @@ can no longer see.
   which is filenames, and `FEATURED_NAMES` excludes `strength_model`, and an
   empty bordered field reads as a control that is broken rather than as "not
   recorded". It arrives with the data. The ⋯ menu holds
-  Hide/Unhide alone: Duplicate and Open in ComfyUI have no route at all;
+  Hide/Unhide and *Open original in ComfyUI*: Duplicate has no route at all;
   *Export workflow* has to write a runnable ComfyUI file and the only graph
   read that existed then, a per-recipe structural read since removed, answered
   `runnable: false` by construction; *Delete* is only

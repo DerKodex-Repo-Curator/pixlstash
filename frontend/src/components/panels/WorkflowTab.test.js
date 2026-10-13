@@ -2796,6 +2796,34 @@ describe("Open in ComfyUI", () => {
     );
   });
 
+  it("opens the workflow with its own nodes from the More menu", async () => {
+    configure();
+    const { wrapper } = await mountWith([ID], [card({ id: ID })]);
+    const original = wrapper.find('[data-testid="wftab-open-original"]');
+    expect(original.text()).toBe("Open original in ComfyUI");
+
+    await original.trigger("click");
+
+    // The flag the ComfyUI-PixlStash node reads; the button's link has none.
+    expect(open).toHaveBeenCalledWith(
+      `http://127.0.0.1:8188/?pixlstash_workflow=${ID_PARAM}&pixlstash_original=1`,
+      "_blank",
+      "noopener,noreferrer",
+    );
+  });
+
+  it("offers the original only where Open in ComfyUI would open", async () => {
+    const original = (wrapper) =>
+      wrapper.find('[data-testid="wftab-open-original"]').exists();
+    const { wrapper } = await mountWith([ID], [card({ id: ID })]);
+    expect(original(wrapper)).toBe(false);
+
+    getPixlstashNode.mockResolvedValue({ can_open_workflows: false });
+    configure();
+    await flush(wrapper);
+    expect(original(wrapper)).toBe(false);
+  });
+
   it("sends a listen-everywhere address to the machine the page came from", async () => {
     configure("http://0.0.0.0:8188/");
     const { wrapper } = await mountWith([ID], [card({ id: ID })]);

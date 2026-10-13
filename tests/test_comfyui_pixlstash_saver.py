@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 import pixlstash.services.comfyui_service as comfyui_service
+from pixlstash.services import comfyui_recipe_service
 from pixlstash.services import workflow_run_service
 from pixlstash.event_types import EventType
 
@@ -176,6 +177,144 @@ class TestNodePolicy:
         }
         assert _why(graph, **STRICT) == {}
         assert comfyui_service.swap_pixlstash_savers(graph) == []
+
+
+class TestOpeningWithPackNodes:
+    """``swap_in_pack_nodes``: what Open in ComfyUI puts in a graph."""
+
+    INFO = {
+        "SaveImage": {"display_name": "Save Image"},
+        "PixlStashPictureSaver": {
+            "input": {
+                "required": {
+                    "images": ["IMAGE"],
+                    "filename_prefix": ["STRING", {"default": "comfyui"}],
+                    "save_workflow": ["BOOLEAN", {"default": True}],
+                },
+                "optional": {"pixlstash_set": ["PIXLSTASH_SET", {}]},
+            },
+            "display_name": "PixlStash Picture Saver",
+        },
+        "PixlStashVideoSaver": {
+            "input": {
+                "required": {
+                    "video": ["VIDEO", {}],
+                    "filename_prefix": ["STRING", {"default": "video/comfyui"}],
+                    "format": ["COMFY_DYNAMICCOMBO_V3", {}],
+                    "save_workflow": ["BOOLEAN", {"default": True}],
+                }
+            },
+        },
+        "PixlStashAdapterLoader": {
+            "input": {
+                "required": {"model": ["MODEL", {}], "adapter_sha256": ["STRING", {}]},
+                "optional": {"strength_model": ["FLOAT", {"default": 1.0}]},
+            },
+            "output": ["MODEL", "CLIP", "STRING"],
+        },
+    }
+
+    @staticmethod
+    def _swap(graph, info=None, digests=None):
+        return comfyui_recipe_service.swap_in_pack_nodes(
+            graph,
+            TestOpeningWithPackNodes.INFO if info is None else info,
+            (digests or {}).get,
+        )
+
+    def test_a_save_image_becomes_the_picture_saver_on_the_same_inputs(self):
+        graph = {
+            "9": {
+                **_node("SaveImage", images=["3", 0], filename_prefix="v"),
+                "_meta": {"title": "Save Image"},
+            }
+        }
+        assert self._swap(graph) == [
+            {"node_id": "9", "was": "SaveImage", "now": "PixlStashPictureSaver"}
+        ]
+        assert graph["9"] == {
+            "class_type": "PixlStashPictureSaver",
+            "inputs": {
+                "filename_prefix": "v",
+                "save_workflow": True,
+                "images": ["3", 0],
+            },
+            # The stock node's own name gives way; a title the owner wrote stays.
+            "_meta": {"title": "PixlStash Picture Saver"},
+        }
+        # And a run of it submits the stock saver again: one import, not two.
+        assert comfyui_service.swap_pixlstash_savers(graph) == ["9"]
+        assert graph["9"]["class_type"] == "SaveImage"
+        assert graph["9"]["inputs"] == {"filename_prefix": "v", "images": ["3", 0]}
+
+    def test_a_title_the_owner_wrote_is_kept(self):
+        graph = {
+            "9": {**_node("SaveImage", images=["3", 0]), "_meta": {"title": "Keep"}}
+        }
+        self._swap(graph)
+        assert graph["9"]["_meta"] == {"title": "Keep"}
+
+    def test_a_save_video_becomes_the_video_saver_and_runs_as_save_video(self):
+        inputs = {
+            "video": ["7", 0],
+            "filename_prefix": "video/v",
+            "format": "mp4",
+            "format.codec": "h264",
+        }
+        graph = {"9": _node("SaveVideo", **inputs)}
+        assert [s["now"] for s in self._swap(graph)] == ["PixlStashVideoSaver"]
+        assert graph["9"]["inputs"] == {**inputs, "save_workflow": True}
+        assert _why(graph, **OPEN) == {"9": "imports_itself"}
+        assert comfyui_service.swap_pixlstash_savers(graph) == ["9"]
+        assert graph["9"] == _node("SaveVideo", **inputs)
+        assert _why(graph, **STRICT) == {}
+
+    def test_a_saver_is_left_where_the_pack_cannot_stand_in_for_it(self):
+        # An input the pack's saver has no place for (an older Save Video),
+        # nothing wired in to save, and a ComfyUI without the pack.
+        old = _node("SaveVideo", video=["7", 0], codec="h264")
+        unwired = _node("SaveImage", filename_prefix="v")
+        graph = {"8": dict(old), "9": dict(unwired)}
+        assert self._swap(graph) == []
+        assert graph == {"8": old, "9": unwired}
+        wired = {"9": _node("SaveImage", images=["3", 0])}
+        assert self._swap(wired, info={"SaveImage": {}}) == []
+        assert wired["9"]["class_type"] == "SaveImage"
+
+    def test_a_lora_loader_loads_by_digest_only_a_file_the_shelf_can_name(self):
+        graph = {
+            "2": _node(
+                "LoraLoaderModelOnly", lora_name="a.safetensors", model=["1", 0]
+            ),
+            "5": _node(
+                "LoraLoaderModelOnly", lora_name="b.safetensors", model=["2", 0]
+            ),
+            "6": _node("LoraLoaderModelOnly", lora_name=["4", 0], model=["5", 0]),
+        }
+        untouched = {key: dict(graph[key]) for key in ("5", "6")}
+        swapped = self._swap(graph, digests={"a.safetensors": "d" * 64})
+        assert [(s["node_id"], s["now"]) for s in swapped] == [
+            ("2", "PixlStashAdapterLoader")
+        ]
+        assert graph["2"]["inputs"] == {
+            "strength_model": 1.0,
+            "adapter_sha256": "d" * 64,
+            "model": ["1", 0],
+        }
+        assert {key: graph[key] for key in ("5", "6")} == untouched
+
+    def test_the_loaders_that_name_a_librarys_ids_are_never_swapped_in(self):
+        # A graph holding one cannot be run again from a picture it made.
+        graph = {
+            "1": _node("CheckpointLoaderSimple", ckpt_name="a.safetensors"),
+            "2": _node("LoadImage", image="a.png"),
+        }
+        info = {
+            **self.INFO,
+            "PixlStashCheckpointLoader": {"input": {"required": {}}},
+            "PixlStashPictureLoader": {"input": {"required": {}}},
+        }
+        assert self._swap(graph, info=info) == []
 
 
 class TestHistoryExtraction:
