@@ -1359,6 +1359,30 @@ def reduced_workflow_type(nodes: dict[str, ReducedNode]) -> Optional[str]:
     return None
 
 
+# A video workflow by what it starts from. Not a :func:`workflow_type`: the
+# card, its name and the grid's filter say "Video" for both.
+TEXT_TO_VIDEO = "txt2vid"
+IMAGE_TO_VIDEO = "img2vid"
+
+
+def match_type(workflow_type: Optional[str], class_types) -> Optional[str]:
+    """*workflow_type*, with ``video`` told apart by what the graph starts from.
+
+    What a set of models is matched to a workflow by: a model made to continue
+    a picture into a video does not load where one made to start from the
+    prompt does, and the type alone calls both ``video``. ``img2vid`` when a
+    node of *class_types* loads a picture, ``txt2vid`` when none does; every
+    other type as it is.
+    """
+    if workflow_type != "video":
+        return workflow_type
+    return (
+        IMAGE_TO_VIDEO
+        if any(is_picture_loader(cls) for cls in class_types)
+        else TEXT_TO_VIDEO
+    )
+
+
 def _fed_by_picture(node_id: str, nodes: dict[str, ReducedNode]) -> bool:
     seen, stack = set(), [node_id]
     while stack:

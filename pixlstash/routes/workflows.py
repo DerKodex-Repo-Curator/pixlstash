@@ -189,6 +189,7 @@ from pixlstash.services.model_shelf_service import (
     lora_people,
     people_who_fit,
     model_name_aliases,
+    model_workflow_types,
     propose_companions,
     recipe_asset_index,
 )
@@ -234,6 +235,7 @@ from pixlstash.services.workflow_identity import (
     TWO_PASS,
     loader_swaps,
     core_node_labels,
+    match_type,
     model_fix_kind,
 )
 from pixlstash.services.workflow_hash import (
@@ -2798,7 +2800,14 @@ class SetClonePlan(BaseModel):
 
     key: str
     fit: Literal["same_base_model", "same_family", "other", "wont_load"]
-    reason: str | None = Field(None, description="Why it will not load.")
+    reason: str | None = Field(
+        None,
+        description=(
+            "Why it will not load. That includes a set whose checkpoints "
+            "have only run in another kind of workflow (Text to Image, Image "
+            "to Video, ...) than this one."
+        ),
+    )
     base_model: str | None = Field(None, description="The set checkpoint's.")
     keeps_loras: bool = Field(
         description=(
@@ -3067,6 +3076,14 @@ _TYPE_LABELS = {
     "outpaint": "Outpaint",
     "upscale": "Upscale",
     "video": "Video",
+}
+
+# What a set is matched to a workflow by (`match_type`), in the same words: a
+# video workflow by what it starts from, every other type as the card says it.
+_MATCH_TYPE_LABELS = {
+    **_TYPE_LABELS,
+    "txt2vid": "Text to Video",
+    "img2vid": "Image to Video",
 }
 
 
@@ -9057,6 +9074,11 @@ def create_router(server) -> APIRouter:
         }
         return swaps, chosen
 
+    def _other_type(kinds: set[str], wants: str) -> str:
+        """Why a set that has only run in other kinds of workflow is refused."""
+        ran = " and ".join(sorted(_MATCH_TYPE_LABELS.get(k, k) for k in kinds))
+        return f"Used for {ran}, not {_MATCH_TYPE_LABELS.get(wants, wants)}"
+
     def _wont_load(
         found, unswapped: list[dict], object_info: dict | None
     ) -> str | None:
@@ -9094,7 +9116,11 @@ def create_router(server) -> APIRouter:
             "class too, when a file of another type needs another loader, and "
             "the node pack that loader comes from), whether the set's "
             "checkpoint has the workflow's base model so its LoRAs are kept, "
-            "and, when the clone would be refused, why. Read off the graph a "
+            "and, when the clone would be refused, why. A set is refused "
+            "when the recipes naming its checkpoints are all of another kind "
+            "of workflow than this one (its type, a video workflow told apart "
+            "by whether it starts from a picture); a checkpoint no recipe "
+            "names is refused nothing. Read off the graph a "
             "run submits: where the owner replaced a model this machine lacks "
             "(`model-fix`), every file named for the graph (`swaps` and "
             "`takes` keys, `loaders[].was`, `base_filename`, "
@@ -9140,6 +9166,25 @@ def create_router(server) -> APIRouter:
             )
             if base is not None
             else None
+        )
+        # A set is for the kind of workflow its checkpoints have run in: a
+        # text-to-video model needs other nodes than a text-to-image graph
+        # has. Like for like only, and a checkpoint no recipe names is not
+        # known to be for anything else, so it is still offered.
+        wants = match_type(
+            card.workflow_type,
+            [
+                node.get("class_type") or ""
+                for node in graph.values()
+                if isinstance(node, dict)
+            ],
+        )
+        ran_as = (
+            model_workflow_types(
+                hub, {i for ask in body.sets for i in ask.checkpoint_ids}, index
+            )
+            if wants
+            else {}
         )
         if object_info is None:
             logger.info(
@@ -9198,6 +9243,7 @@ def create_router(server) -> APIRouter:
                 pending, _swapped_in_families(models, index, graph, swaps), object_info
             )
             rewritten = {str(row["node_id"]): row for row in loaders}
+            kinds = set().union(*(ran_as.get(m.id, ()) for m in set_checkpoints))
             # The workflow's own reason first: it applies to every set.
             reason = (
                 "This workflow loads no checkpoint"
@@ -9206,6 +9252,8 @@ def create_router(server) -> APIRouter:
                 if gone
                 else "Has no checkpoint"
                 if checkpoint is None
+                else _other_type(kinds, wants)
+                if kinds and wants not in kinds
                 else _wont_load(found, unswapped, object_info)
             )
             if reason:
