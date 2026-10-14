@@ -6931,6 +6931,10 @@ def create_router(server) -> APIRouter:
                         swap["class_type"],
                         swap["field"],
                     )
+                if not opening:
+                    # Open puts the shelf's loader in on every checkpoint it
+                    # can (`_with_pack_nodes`); a save keeps the graph's own.
+                    _swap_in_shelf_checkpoints(request, card_key, graph, object_info)
 
             # After every value, so the replacement for a sampler or scheduler
             # this ComfyUI lacks wins over the default the form also sent.
@@ -8155,6 +8159,48 @@ def create_router(server) -> APIRouter:
             checkpoint_id=_shelf_checkpoint(hub) if by_row else None,
             shelf_uuid=shelf_uuid(hub) if by_row else None,
         )
+
+    def _swap_in_shelf_checkpoints(
+        request: Request, card_key: str, graph: dict, object_info: dict
+    ) -> list[dict]:
+        """Load each checkpoint this ComfyUI lacks off the shelf, for a run.
+
+        A ``CheckpointLoaderSimple`` naming a file ComfyUI does not list
+        becomes ``PixlStashCheckpointLoader`` on the shelf's row for that file:
+        the swap *Open in ComfyUI* makes (:func:`swap_in_pack_nodes`), on the
+        same terms. The shelf holds one copy of the file, ComfyUI is on this
+        computer to read it, and its pack has the loader with the widget that
+        says whose the id is. Anywhere else the loader is left as it is, and
+        the pre-flight reports the file missing as before.
+        """
+        if PIXLSTASH_CHECKPOINT_LOADER not in object_info:
+            return []
+        missing = {
+            str(item.get("node_id"))
+            for item in detect_model_targets(graph, object_info)
+            if item and item.get("class_type") == "CheckpointLoaderSimple"
+        }
+        if not missing or not _comfyui_is_here(request):
+            return []
+        hub = _hub()
+        # Only the loaders whose file ComfyUI lacks: the swap changes each
+        # node in place, so a view of those is the graph it changes.
+        swapped = swap_in_pack_nodes(
+            {node_id: node for node_id, node in graph.items() if node_id in missing},
+            object_info,
+            lambda _name: None,
+            checkpoint_id=_shelf_checkpoint(hub),
+            shelf_uuid=shelf_uuid(hub),
+        )
+        for swap in swapped:
+            logger.info(
+                "[workflows] Card %s loads node %s's checkpoint off the shelf "
+                "through %s: this ComfyUI does not have the file.",
+                card_key,
+                swap["node_id"],
+                swap["now"],
+            )
+        return swapped
 
     # Graphs the Run popup built for ComfyUI to open, by the id that goes into
     # the link: `{opening: (held until, workflow_id, graph)}`. A link cannot
