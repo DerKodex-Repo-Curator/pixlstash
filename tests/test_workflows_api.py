@@ -20499,6 +20499,9 @@ def test_a_run_loads_a_checkpoint_comfyui_lacks_off_the_shelf(id_loaders):
         "shelf": shelf_uuid(env.server.hub),
     }
     assert graph["2"]["inputs"]["model"] == ["1", 0]
+    # Open's plan, which a save stores, keeps the graph's own loader: a shelf
+    # row id saved into a version would name this hub's shelf for good.
+    assert _opened(env, workflow)["workflow"]["1"] == CHAIN_DOCUMENT["1"]
 
     # The loader cannot fetch the file: away from this computer it is missing.
     env.monkeypatch.setattr(
