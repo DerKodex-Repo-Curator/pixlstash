@@ -6323,7 +6323,21 @@ into the dialog rather than into anything the button owns.
 
 `FolderBrowser.vue` is reused whole as the host-path picker, and
 `registeredPaths` is what stops the API's duplicate 409 rather than reporting
-it.
+it. One picker serves four verbs (Add folder, Move, Set ai-toolkit folder,
+Monitor download folder), so `addingKind` records which opened it and is
+cleared when it closes.
+
+**The registry renders as two lists** (`sections`): the folders models are
+listed from, then the Downloads folder (backend §25.10), which lists nothing and
+so sits apart under its own `section-label` with the tray glyph
+(`FOLDER_TIERS.downloads`), a `Downloads` chip, Forget and no scan, count or
+scan date. Between them sits the **Default folder** `AppSelect` with a `HelpTip`
+saying what it governs; it offers `useModelFoldersStore().defaultCandidates`
+(`user` folders and the managed store), shows the row whose `is_default` is
+true, and the default row also wears a `Default` chip. The native select hands
+its value back as a string, so the change handler compares by `Number(value)`.
+`Monitor download folder` sits in the header beside `Set ai-toolkit folder` and
+on the same rule: shown while none is set, gone once the row exists.
 
 The chip beside a path is `Managed` for the managed store and otherwise the
 server's **`tool`**, never derived from `kind`: the HuggingFace cache is

@@ -6,6 +6,19 @@
     @close="emit('close')"
   >
     <template #header-right>
+      <!-- Same shape as the ai-toolkit button beside it, for the same reason:
+           there is one Downloads folder to set, and once it is set its own row
+           carries the Forget that undoes it. -->
+      <AppButton
+        v-if="!store.downloadsFolder"
+        size="sm"
+        variant="secondary"
+        icon-left="tray-arrow-down"
+        v-bind="blockedAttrs(addReason, REMOTE_NOTE_ID)"
+        @click="onAddDownloads"
+      >
+        Monitor download folder
+      </AppButton>
       <!-- Shown only while no output root is set, because there is exactly one
            to set: ai-toolkit writes every run under a single folder. Once it is
            registered this button has nothing left to do, and the row it created
@@ -50,125 +63,164 @@
          here is selected, and interactive controls inside a `role="option"`
          are unreachable to a screen reader. Real `<button>`s in a `<ul>` give
          Tab and Enter for free. -->
-    <ul v-else class="mf-list" role="list">
-      <li
-        v-for="folder in store.folders"
-        :key="folder.id"
-        class="ps-row mf-row"
-        :aria-busy="isScanning(folder) ? 'true' : undefined"
-      >
-        <span class="mf-row__glyph">
-          <v-icon size="16">{{
-            KIND_ICON[folder.kind] || KIND_ICON.user
-          }}</v-icon>
-        </span>
+    <template v-else>
+      <template v-for="section in sections" :key="section.key">
+        <template v-if="section.key === DOWNLOADS_KIND">
+          <!-- The default folder sits between the two lists because it is the
+               link between them: it is one of the folders above, and it is where
+               the Downloads folder below sends what it finds. -->
+          <h3 class="section-label mf-section-label">Default folder</h3>
+          <div class="mf-default">
+            <AppSelect
+              class="mf-default__select"
+              :model-value="store.defaultFolder?.id ?? null"
+              :options="defaultOptions"
+              label="Default folder"
+              hide-label
+              compact
+              :disabled="Boolean(remoteReason)"
+              @update:model-value="onDefaultChange"
+            />
+            <HelpTip :reason="DEFAULT_HELP" label="What the default folder is" />
+          </div>
+          <h3
+            v-if="store.downloadsFolder"
+            class="section-label mf-section-label"
+          >
+            Downloads
+          </h3>
+        </template>
+        <ul v-if="section.folders.length" class="mf-list" role="list">
+          <li
+            v-for="folder in section.folders"
+            :key="folder.id"
+            class="ps-row mf-row"
+            :aria-busy="isScanning(folder) ? 'true' : undefined"
+          >
+            <span class="mf-row__glyph">
+              <v-icon size="16">{{
+                KIND_ICON[folder.kind] || KIND_ICON.user
+              }}</v-icon>
+            </span>
 
-        <span class="mf-row__body">
-          <span class="mf-row__pathline">
-            <!-- The path is the row's identity, so it is mono at full strength
-                 (§3) and never faded. It truncates from the LEFT because the
-                 folder name is the part that identifies it; the U+200E keeps
-                 the leading slash of a POSIX path on the left where it
-                 belongs. Click or Enter expands it, which is the only route a
-                 keyboard has to the hidden head. -->
-            <button
-              type="button"
-              class="mf-row__path"
-              :class="{ 'mf-row__path--expanded': expanded.has(folder.id) }"
-              :title="folder.path"
-              :aria-expanded="expanded.has(folder.id)"
-              :aria-label="`${expanded.has(folder.id) ? 'Collapse' : 'Show'} the full path: ${folder.path}`"
-              @click="toggleExpanded(folder.id)"
-            >
-              {{ LRM }}{{ folder.path }}
-            </button>
-            <span v-if="folder.kind === MANAGED_KIND" class="mf-chip"
-              >Managed</span
-            >
-            <!-- Whose folder it is, resolved by the server: the HuggingFace
-                 cache is only PixlStash's while it holds nothing else, and a
-                 StabilityMatrix folder is often reached through a symlink. -->
-            <span v-else-if="folder.tool" class="mf-chip">{{
-              folder.tool
-            }}</span>
-          </span>
+            <span class="mf-row__body">
+              <span class="mf-row__pathline">
+                <!-- The path is the row's identity, so it is mono at full strength
+                     (§3) and never faded. It truncates from the LEFT because the
+                     folder name is the part that identifies it; the U+200E keeps
+                     the leading slash of a POSIX path on the left where it
+                     belongs. Click or Enter expands it, which is the only route a
+                     keyboard has to the hidden head. -->
+                <button
+                  type="button"
+                  class="mf-row__path"
+                  :class="{ 'mf-row__path--expanded': expanded.has(folder.id) }"
+                  :title="folder.path"
+                  :aria-expanded="expanded.has(folder.id)"
+                  :aria-label="`${expanded.has(folder.id) ? 'Collapse' : 'Show'} the full path: ${folder.path}`"
+                  @click="toggleExpanded(folder.id)"
+                >
+                  {{ LRM }}{{ folder.path }}
+                </button>
+                <span v-if="folder.kind === MANAGED_KIND" class="mf-chip"
+                  >Managed</span
+                >
+                <span v-else-if="folder.kind === DOWNLOADS_KIND" class="mf-chip"
+                  >Downloads</span
+                >
+                <!-- Whose folder it is, resolved by the server: the HuggingFace
+                     cache is only PixlStash's while it holds nothing else, and a
+                     StabilityMatrix folder is often reached through a symlink. -->
+                <span v-else-if="folder.tool" class="mf-chip">{{
+                  folder.tool
+                }}</span>
+                <span v-if="folder.is_default" class="mf-chip">Default</span>
+              </span>
 
-          <span class="mf-row__meta">
-            <span>{{ countLabel(folder.file_count) }}</span>
-            <!-- Size sits beside the count because the count alone is
-                 misleading on the folders PixlStash declares: the HuggingFace
-                 cache is a handful of repos and 116 GB, and "26 models" reads
-                 as small. Omitted at zero rather than shown as "0 B", which
-                 would claim a measurement on a folder that has none. -->
-            <span v-if="folder.present_bytes > 0">{{
-              formatModelSize(folder.present_bytes)
-            }}</span>
-            <span
-              ><Tooltip :text="folder.last_checked || ''" activator="parent" />{{
-                scannedLabel(folder)
-              }}</span
-            >
-          </span>
+              <!-- Not on the Downloads row: it is never scanned and lists
+                 nothing, so a count and a scan date would both be noise. -->
+            <span v-if="folder.kind !== DOWNLOADS_KIND" class="mf-row__meta">
+                <span>{{ countLabel(folder.file_count) }}</span>
+                <!-- Size sits beside the count because the count alone is
+                     misleading on the folders PixlStash declares: the HuggingFace
+                     cache is a handful of repos and 116 GB, and "26 models" reads
+                     as small. Omitted at zero rather than shown as "0 B", which
+                     would claim a measurement on a folder that has none. -->
+                <span v-if="folder.present_bytes > 0">{{
+                  formatModelSize(folder.present_bytes)
+                }}</span>
+                <span
+                  ><Tooltip :text="folder.last_checked || ''" activator="parent" />{{
+                    scannedLabel(folder)
+                  }}</span
+                >
+              </span>
 
-          <!-- Visible, in the row, never a tooltip: it explains why this row
-               has no forget control, and an explanation for a missing control
-               has to sit where the missing control would be. -->
-          <span v-if="folder.kind === MANAGED_KIND" class="mf-row__note">
-            PixlStash keeps its own models here, so this folder stays.
-          </span>
-        </span>
+              <!-- Visible, in the row, never a tooltip: it explains why this row
+                   has no forget control, and an explanation for a missing control
+                   has to sit where the missing control would be. -->
+              <span v-if="folder.kind === MANAGED_KIND" class="mf-row__note">
+                PixlStash keeps its own models here, so this folder stays.
+              </span>
+              <span v-else-if="folder.kind === DOWNLOADS_KIND" class="mf-row__note">
+                New .safetensors and .gguf files saved here move to
+                {{ defaultName }} and appear on the shelf.
+              </span>
+            </span>
 
-        <!-- Three slots, always three, whatever the row's kind. A slot that
-             collapsed on one row would move every other row's buttons
-             sideways, so an absent action is hidden with `visibility` and
-             keeps its box, exactly as §5.1 requires of the glyph gutter. -->
-        <span class="mf-row__actions">
-          <AppButton
-            :class="{ 'mf-hidden': !canScan(folder) }"
-            icon-only
-            variant="ghost"
-            icon-left="refresh"
-            :loading="isScanning(folder)"
-            :tooltip="scanTitle(folder)"
-            :aria-label="`${scanVerb(folder)} ${folder.path}`"
-            v-bind="blockedAttrs(remoteReason, REMOTE_NOTE_ID)"
-            @click="onScan(folder)"
-          />
+            <!-- Three slots, always three, whatever the row's kind. A slot that
+                 collapsed on one row would move every other row's buttons
+                 sideways, so an absent action is hidden with `visibility` and
+                 keeps its box, exactly as §5.1 requires of the glyph gutter. -->
+            <span class="mf-row__actions">
+              <AppButton
+                :class="{ 'mf-hidden': !canScan(folder) }"
+                icon-only
+                variant="ghost"
+                icon-left="refresh"
+                :loading="isScanning(folder)"
+                :tooltip="scanTitle(folder)"
+                :aria-label="`${scanVerb(folder)} ${folder.path}`"
+                v-bind="blockedAttrs(remoteReason, REMOTE_NOTE_ID)"
+                @click="onScan(folder)"
+              />
 
-          <!-- Slot two is Forget on a folder the owner associated and Move on
-               one PixlStash owns, which has no association to dissolve. One
-               element either way, so the column holds. `relocatable` and not
-               `movable === 'root_only'`: the InsightFace packs say that too and
-               have no relocate route yet, so the server is asked. -->
-          <AppButton
-            v-if="folder.relocatable"
-            icon-only
-            variant="ghost"
-            icon-left="folder-move-outline"
-            :tooltip="`Move ${basename(folder.path)} to a different location. Every file in it is copied, verified and removed from here.`"
-            :aria-label="`Move ${folder.path} to a different location`"
-            v-bind="blockedAttrs(relocateReason(folder), REMOTE_NOTE_ID)"
-            @click="onRelocate(folder)"
-          />
-          <AppButton
-            v-else
-            :class="{ 'mf-hidden': !canForget(folder) }"
-            icon-only
-            variant="ghost"
-            icon-left="folder-off-outline"
-            :tooltip="`Forget ${basename(folder.path)}. Nothing on disk is deleted.`"
-            :aria-label="`Forget ${folder.path}`"
-            v-bind="blockedAttrs(forgetReason(folder), REMOTE_NOTE_ID)"
-            @click="onForget(folder)"
-          />
+              <!-- Slot two is Forget on a folder the owner associated and Move on
+                   one PixlStash owns, which has no association to dissolve. One
+                   element either way, so the column holds. `relocatable` and not
+                   `movable === 'root_only'`: the InsightFace packs say that too and
+                   have no relocate route yet, so the server is asked. -->
+              <AppButton
+                v-if="folder.relocatable"
+                icon-only
+                variant="ghost"
+                icon-left="folder-move-outline"
+                :tooltip="`Move ${basename(folder.path)} to a different location. Every file in it is copied, verified and removed from here.`"
+                :aria-label="`Move ${folder.path} to a different location`"
+                v-bind="blockedAttrs(relocateReason(folder), REMOTE_NOTE_ID)"
+                @click="onRelocate(folder)"
+              />
+              <AppButton
+                v-else
+                :class="{ 'mf-hidden': !canForget(folder) }"
+                icon-only
+                variant="ghost"
+                icon-left="folder-off-outline"
+                :tooltip="`Forget ${basename(folder.path)}. Nothing on disk is deleted.`"
+                :aria-label="`Forget ${folder.path}`"
+                v-bind="blockedAttrs(forgetReason(folder), REMOTE_NOTE_ID)"
+                @click="onForget(folder)"
+              />
 
-          <HelpTip
-            :reason="rowReason(folder)"
-            :label="`Why some actions are unavailable for ${basename(folder.path)}`"
-          />
-        </span>
-      </li>
-    </ul>
+              <HelpTip
+                :reason="rowReason(folder)"
+                :label="`Why some actions are unavailable for ${basename(folder.path)}`"
+              />
+            </span>
+          </li>
+        </ul>
+      </template>
+    </template>
 
     <p v-if="store.loaded && !hasOwnFolders" class="mf-note">
       No folders of your own yet. Add the folder where you keep your LoRAs and
@@ -212,11 +264,16 @@ import { VIcon } from "vuetify/components";
 
 import AiToolkitIcon from "../widgets/AiToolkitIcon.vue";
 import AppButton from "../widgets/AppButton.vue";
+import AppSelect from "../widgets/AppSelect.vue";
 import AppDialog from "../widgets/AppDialog.vue";
 import HelpTip from "../widgets/HelpTip.vue";
 import Tooltip from "../widgets/Tooltip.vue";
 import FolderBrowser from "../editors/FolderBrowser.vue";
-import { MANAGED_KIND, SOURCE_KIND } from "../../api/modelFolders";
+import {
+  DOWNLOADS_KIND,
+  MANAGED_KIND,
+  SOURCE_KIND,
+} from "../../api/modelFolders";
 import { useLibrariesStore } from "../../stores/useLibrariesStore";
 import { useModelMovesStore } from "../../stores/useModelMovesStore";
 import {
@@ -253,6 +310,9 @@ const MOVE_RUNNING_REASON =
 const REMOTE_REASON =
   "Only available on the machine running PixlStash, or over your local network or Tailscale.";
 
+const DEFAULT_HELP =
+  "Where a new model goes: a file you add to the shelf, and a model moved in from your Downloads folder.";
+
 const DOCKER_REASON =
   "Adding a folder needs its path on the host, which PixlStash cannot ask for from inside Docker. Add it from the command line for now.";
 
@@ -267,11 +327,12 @@ const KIND_ICON = Object.fromEntries(
 
 const browseOpen = ref(false);
 const expanded = ref(new Set());
-// Which verb opened the picker. One browser serves all three, so the pick has
+// Which verb opened the picker. One browser serves all four, so the pick has
 // to be told apart: Add registers the folder, Move empties another one into it,
-// and Set ai-toolkit folder registers it as the output root instead.
+// Set ai-toolkit folder registers it as the output root, and Monitor download
+// folder as the Downloads folder. `addingKind` is null for a plain Add.
 const relocating = ref(null);
-const addingSource = ref(false);
+const addingKind = ref(null);
 
 /**
  * Whether this session can reach the §16.3 host-capability tier.
@@ -289,6 +350,40 @@ const remoteReason = computed(() => (canManage.value ? "" : REMOTE_REASON));
 
 const addReason = computed(
   () => remoteReason.value || (inDocker.value ? DOCKER_REASON : ""),
+);
+
+/**
+ * The registry in two lists: the folders models are listed from, then the
+ * Downloads folder, which lists nothing and so sits apart under its own label.
+ * The second section is always present, because the default-folder control
+ * heads it whether or not a Downloads folder is set.
+ */
+const sections = computed(() => [
+  {
+    key: "folders",
+    folders: store.folders.filter((folder) => folder.kind !== DOWNLOADS_KIND),
+  },
+  {
+    key: DOWNLOADS_KIND,
+    folders: store.downloadsFolder ? [store.downloadsFolder] : [],
+  },
+]);
+
+/**
+ * The default folder's choices: the name first, because a native select cuts
+ * from the right, then the path, because two folders may share a name.
+ */
+const defaultOptions = computed(() =>
+  store.defaultCandidates.map((folder) => ({
+    value: folder.id,
+    label: `${basename(folder.path)}${
+      folder.kind === MANAGED_KIND ? " (managed)" : ""
+    } — ${folder.path}`,
+  })),
+);
+
+const defaultName = computed(() =>
+  store.defaultFolder ? basename(store.defaultFolder.path) : "the default folder",
 );
 
 /** `user` and `source` rows only; `managed` and `foreign` are PixlStash's own. */
@@ -309,7 +404,11 @@ function canScan(folder) {
 
 /** Only what the owner associated can be disassociated. */
 function canForget(folder) {
-  return folder.kind === "user" || folder.kind === "source";
+  return (
+    folder.kind === "user" ||
+    folder.kind === "source" ||
+    folder.kind === DOWNLOADS_KIND
+  );
 }
 
 function scanVerb(folder) {
@@ -396,19 +495,35 @@ function toggleExpanded(id) {
   expanded.value = next;
 }
 
-function onAdd() {
+function openPicker(kind) {
   if (addReason.value) return;
   relocating.value = null;
-  addingSource.value = false;
+  addingKind.value = kind;
   browseOpen.value = true;
+}
+
+function onAdd() {
+  openPicker(null);
 }
 
 /** The same picker, registering what it returns as the ai-toolkit output root. */
 function onAddSource() {
-  if (addReason.value) return;
-  relocating.value = null;
-  addingSource.value = true;
-  browseOpen.value = true;
+  openPicker(SOURCE_KIND);
+}
+
+/** The same picker, registering what it returns as the Downloads folder. */
+function onAddDownloads() {
+  openPicker(DOWNLOADS_KIND);
+}
+
+function onDefaultChange(value) {
+  if (remoteReason.value) return;
+  // A native <select> hands its value back as a string.
+  const folder = store.defaultCandidates.find(
+    (row) => row.id === Number(value),
+  );
+  if (!folder || folder.is_default) return;
+  store.setDefault(folder);
 }
 
 function onRelocate(folder) {
@@ -421,12 +536,12 @@ async function onPicked(path) {
   const folder = relocating.value;
   if (!folder) {
     if (addReason.value) return;
-    const asSource = addingSource.value;
+    const kind = addingKind.value || "user";
     // Awaited so the registry has the folder before anything acts on it: the
     // shelf answers `source-added` by showing the runs, and it can only read
     // them once `sourceFolder` resolves.
-    store.add({ path, kind: asSource ? SOURCE_KIND : "user" }).then((added) => {
-      if (added && asSource) emit("source-added");
+    store.add({ path, kind }).then((added) => {
+      if (added && kind === SOURCE_KIND) emit("source-added");
     });
     return;
   }
@@ -440,7 +555,7 @@ async function onPicked(path) {
 function closeBrowser() {
   browseOpen.value = false;
   relocating.value = null;
-  addingSource.value = false;
+  addingKind.value = null;
 }
 
 function onScan(folder) {
@@ -496,6 +611,23 @@ watch(
   list-style: none;
   padding: 0;
   margin: 0;
+}
+
+/* The global `.section-label` is the type; this is only its room. */
+.mf-section-label {
+  margin: var(--space-5) 0 var(--space-2);
+}
+
+.mf-default {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 60ch;
+}
+
+.mf-default__select {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 /* The shared row system (`SideBar.global.css`, visual-language.md §5.1) via the

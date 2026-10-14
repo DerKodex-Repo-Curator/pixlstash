@@ -3333,6 +3333,72 @@ def test_rescan_skips_a_source_folder(shelf_env, tmp_path):
     assert r.json()["status"] == "skipped"
 
 
+def test_one_downloads_folder_is_taken_from_and_never_scanned(shelf_env, tmp_path):
+    """The Downloads folder is watched, not catalogued: its models are moved
+    into the default folder, so a scan or a destination there means nothing."""
+    r = shelf_env.owner.post(
+        f"{API}/model-folders",
+        json={"path": _new_folder_path(str(tmp_path), "dl"), "kind": "downloads"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert (body["kind"], body["movable"], body["is_default"]) == (
+        "downloads",
+        "external",
+        False,
+    )
+    folder_id = body["id"]
+
+    r = shelf_env.owner.post(
+        f"{API}/model-folders",
+        json={"path": _new_folder_path(str(tmp_path), "dl2"), "kind": "downloads"},
+    )
+    assert r.status_code == 409, r.text
+    # The positive control: the refusal is about the kind, not the path.
+    r = shelf_env.owner.post(
+        f"{API}/model-folders", json={"path": _new_folder_path(str(tmp_path), "dl2")}
+    )
+    assert r.status_code == 200, r.text
+
+    r = shelf_env.owner.post(f"{API}/model-folders/{folder_id}/rescan")
+    assert r.json()["status"] == "skipped", r.text
+    r = shelf_env.owner.patch(
+        f"{API}/model-folders/{folder_id}", json={"is_default": True}
+    )
+    assert r.status_code == 400, r.text
+
+
+def test_exactly_one_folder_is_the_default_and_it_moves(shelf_env, tmp_path):
+    """Marking a folder unmarks the last one; unmarking hands it back."""
+    ids = [
+        shelf_env.owner.post(
+            f"{API}/model-folders",
+            json={"path": _new_folder_path(str(tmp_path), name)},
+        ).json()["id"]
+        for name in ("first", "second")
+    ]
+
+    def defaults():
+        rows = shelf_env.owner.get(f"{API}/model-folders").json()["folders"]
+        return [row["id"] for row in rows if row["is_default"]]
+
+    # The seeded hub has no managed store, so nothing is the default yet.
+    assert defaults() == []
+    for folder_id in (ids[0], ids[1]):
+        r = shelf_env.owner.patch(
+            f"{API}/model-folders/{folder_id}", json={"is_default": True}
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["is_default"] is True
+        assert defaults() == [folder_id]
+
+    r = shelf_env.owner.patch(
+        f"{API}/model-folders/{ids[1]}", json={"is_default": False}
+    )
+    assert r.status_code == 200, r.text
+    assert defaults() == []
+
+
 def test_unknown_folder_id_is_404_on_every_mutator(shelf_env):
     assert (
         shelf_env.owner.patch(f"{API}/model-folders/999999", json={}).status_code == 404
@@ -7381,6 +7447,57 @@ def test_a_file_already_inside_a_registered_folder_is_refused_not_duplicated(
     assert sorted(p.name for p in loose_file.store.iterdir()) == [
         "already-there.safetensors"
     ]
+
+
+def test_add_file_lands_in_the_folder_marked_default(shelf_env, loose_file, tmp_path):
+    """With a folder marked default it is the destination; unmarked, the
+    managed store is again, and the list says so on exactly one row."""
+    chosen = tmp_path / "chosen"
+    chosen.mkdir()
+    chosen_id = shelf_env.owner.post(
+        f"{API}/model-folders", json={"path": str(chosen)}
+    ).json()["id"]
+    r = shelf_env.owner.patch(
+        f"{API}/model-folders/{chosen_id}", json={"is_default": True}
+    )
+    assert r.status_code == 200, r.text
+
+    r = shelf_env.owner.post(
+        f"{API}/model-files", json={"path": str(loose_file.source)}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["folder_id"] == chosen_id
+    assert (chosen / "loose.safetensors").exists()
+
+    shelf_env.owner.patch(
+        f"{API}/model-folders/{loose_file.store_id}", json={"is_default": True}
+    )
+    rows = shelf_env.owner.get(f"{API}/model-folders").json()["folders"]
+    assert [row["id"] for row in rows if row["is_default"]] == [loose_file.store_id]
+
+
+def test_a_file_in_the_downloads_folder_can_still_be_added(shelf_env, loose_file):
+    """The Downloads folder is registered but catalogues nothing, so `Add file`
+    from it is not the duplicate the registered-folder refusal guards against."""
+    r = shelf_env.owner.post(
+        f"{API}/model-folders",
+        json={"path": str(loose_file.source.parent), "kind": "downloads"},
+    )
+    assert r.status_code == 200, r.text
+    downloads_id = r.json()["id"]
+
+    r = shelf_env.owner.post(
+        f"{API}/model-files", json={"path": str(loose_file.source)}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["folder_id"] == loose_file.store_id
+
+    # And it is never a destination.
+    r = shelf_env.owner.post(
+        f"{API}/model-files",
+        json={"path": str(loose_file.source), "destination_folder_id": downloads_id},
+    )
+    assert r.status_code == 400, r.text
 
 
 def test_a_file_that_is_not_a_model_is_refused_before_anything_is_copied(

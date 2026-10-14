@@ -14,15 +14,18 @@ const listModelFolders = vi.fn();
 const createModelFolder = vi.fn();
 const forgetModelFolder = vi.fn();
 const rescanModelFolder = vi.fn();
+const setDefaultModelFolder = vi.fn();
 
 vi.mock("../api/modelFolders", () => ({
   MANAGED_KIND: "managed",
   SOURCE_KIND: "source",
-  CREATABLE_KINDS: ["user", "source"],
+  DOWNLOADS_KIND: "downloads",
+  CREATABLE_KINDS: ["user", "source", "downloads"],
   listModelFolders: (...a) => listModelFolders(...a),
   createModelFolder: (...a) => createModelFolder(...a),
   forgetModelFolder: (...a) => forgetModelFolder(...a),
   rescanModelFolder: (...a) => rescanModelFolder(...a),
+  setDefaultModelFolder: (...a) => setDefaultModelFolder(...a),
 }));
 
 const fetchRows = vi.fn();

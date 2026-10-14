@@ -111,7 +111,7 @@ from typing import Callable, Optional
 
 from pixlstash.hub.db import HubDatabase
 from pixlstash.pixl_logging import get_logger
-from pixlstash.services.model_folder_scanner import STATE_PRESENT
+from pixlstash.services.model_folder_scanner import STATE_PRESENT, TAKEN_FROM_KINDS
 from pixlstash.utils.path_utils import resolve_path_within
 
 logger = get_logger(__name__)
@@ -766,10 +766,11 @@ class ModelMover:
         destination = self._folder(destination_folder_id)
         if destination is None:
             raise MoveRefused("No such destination folder.", status_code=404)
-        if destination["kind"] == "source":
+        if destination["kind"] in TAKEN_FROM_KINDS:
             raise MoveRefused(
-                "A source folder is an ai-toolkit output root: it is taken from, "
-                "never written into. Pick a folder the shelf catalogues.",
+                "That folder is taken from, never written into: an ai-toolkit "
+                "output root or the Downloads folder. Pick a folder the shelf "
+                "catalogues.",
             )
         destination_path = destination["path"]
         if not os.path.isdir(destination_path):

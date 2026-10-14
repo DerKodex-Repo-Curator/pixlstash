@@ -1081,6 +1081,12 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
   const rows = ref([]);
   /** Model ids the last scan added, for the `New` badge. Never persisted. */
   const newIds = ref(new Set());
+  /**
+   * Models arrived from the watched Downloads folder since the owner last
+   * looked at the shelf: the sidebar's `new` tag on Models. The sidebar clears
+   * it while the shelf is open. Never persisted.
+   */
+  const unseenArrivals = ref(false);
   const loading = ref(false);
   const error = ref("");
   /** True once a fetch has completed, so "empty" and "not asked yet" differ. */
@@ -4128,10 +4134,22 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     }
   }
 
+  /**
+   * The server moved models in from the Downloads folder (`models_arrived`).
+   *
+   * Re-read with `markNew` only when the shelf has been read: the badge is a
+   * diff against the last fetch, and against no fetch every row would be new.
+   */
+  function onModelsArrived() {
+    unseenArrivals.value = true;
+    if (loaded.value) fetchRows({ markNew: true });
+  }
+
   function resetForSession() {
     epoch += 1;
     rows.value = [];
     newIds.value = new Set();
+    unseenArrivals.value = false;
     selectedIds.value = new Set();
     railSelection.value = null;
     verbRequest.value = null;
@@ -4227,6 +4245,8 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     loaded,
     error,
     fetchRows,
+    unseenArrivals,
+    onModelsArrived,
     adapterKindOptions,
     capabilityOptions,
     baseModelOptions,

@@ -35,7 +35,7 @@
 22. [Tiered Duplicate Detection](#22-tiered-duplicate-detection)
 23. [Opt-in telemetry](#23-opt-in-telemetry-the-install-id-and-the-consent-flags)
 24. [Folder structure: read, commit, layout and moves](#24-folder-structure-read-commit-layout-and-moves) — incl. [24.1 The folder-structure read](#241-the-folder-structure-read), [24.2 The folder-structure commit](#242-the-folder-structure-commit), [24.3 The library layout](#243-the-library-layout), [24.4 The layout and the move engine](#244-the-layout-and-the-move-engine), [24.5 Reconciling moves made outside PixlStash](#245-reconciling-moves-made-outside-pixlstash)
-25. [Model Shelf](#25-model-shelf) — incl. [25.1 The shelf's five verbs (shelf plan F3)](#251-the-shelfs-five-verbs-shelf-plan-f3), [25.2 The built-in model folder: declared, never scanned](#252-the-built-in-model-folder-declared-never-scanned), [25.3 The other two roots: InsightFace packs and the HuggingFace cache](#253-the-other-two-roots-insightface-packs-and-the-huggingface-cache), [25.4 What a cached model is FOR: the feature classifier and `model_capability`](#254-what-a-cached-model-is-for-the-feature-classifier-and-model_capability), [25.5 The managed model store (shelf plan B7)](#255-the-managed-model-store-shelf-plan-b7), [25.6 `Add file`: one loose model onto the shelf (shelf plan F6)](#256-add-file-one-loose-model-onto-the-shelf-shelf-plan-f6), [25.7 A trained model's previews: `<stem>_samples/`](#257-a-trained-models-previews-stem_samples), [25.8 `Delete`: models off the shelf and off the disk (#933)](#258-delete-models-off-the-shelf-and-off-the-disk-933), [25.9 `Keep one copy`: merging duplicate models (#1439)](#259-keep-one-copy-merging-duplicate-models-1439)
+25. [Model Shelf](#25-model-shelf) — incl. [25.1 The shelf's five verbs (shelf plan F3)](#251-the-shelfs-five-verbs-shelf-plan-f3), [25.2 The built-in model folder: declared, never scanned](#252-the-built-in-model-folder-declared-never-scanned), [25.3 The other two roots: InsightFace packs and the HuggingFace cache](#253-the-other-two-roots-insightface-packs-and-the-huggingface-cache), [25.4 What a cached model is FOR: the feature classifier and `model_capability`](#254-what-a-cached-model-is-for-the-feature-classifier-and-model_capability), [25.5 The managed model store (shelf plan B7)](#255-the-managed-model-store-shelf-plan-b7), [25.6 `Add file`: one loose model onto the shelf (shelf plan F6)](#256-add-file-one-loose-model-onto-the-shelf-shelf-plan-f6), [25.7 A trained model's previews: `<stem>_samples/`](#257-a-trained-models-previews-stem_samples), [25.8 `Delete`: models off the shelf and off the disk (#933)](#258-delete-models-off-the-shelf-and-off-the-disk-933), [25.9 `Keep one copy`: merging duplicate models (#1439)](#259-keep-one-copy-merging-duplicate-models-1439), [25.10 The Downloads folder and the default folder](#2510-the-downloads-folder-and-the-default-folder)
 26. [Prompt match](#26-prompt-match)
 
 ---
@@ -9180,7 +9180,8 @@ PixlStash's own model storage, the way the vault owns picture files, and it is
 created on first run by
 [`services/managed_model_store.py`](../pixlstash/services/managed_model_store.py)
 (`ensure_managed_folder`, called from `Server.__init__` right after the hub is
-bootstrapped). It is the default destination for a drop or an ai-toolkit import.
+bootstrapped). It is the default destination for a drop or an ai-toolkit import
+until the owner marks another folder default (§25.10).
 
 - **Why `managed` rather than a seeded `user` folder.** With zero registered
   folders there is nowhere to drop or import a model, so drag-in is impossible
@@ -9227,8 +9228,9 @@ bootstrapped). It is the default destination for a drop or an ai-toolkit import.
 ([`routes/model_files.py`](../pixlstash/routes/model_files.py)) is the path for a
 single adapter or checkpoint that is **not** part of a training run and does not
 deserve a registered folder of its own — the file downloaded into `~/Downloads`
-an hour ago. It copies that file into a folder the shelf catalogues (the managed
-store above, unless another is named) and registers it there, so the row is on
+an hour ago. It copies that file into a folder the shelf catalogues (the default
+folder of §25.10 — the managed store above unless the owner marked another —
+unless another is named) and registers it there, so the row is on
 the shelf when the call returns and the owner never has to rescan.
 
 - **A copy, never a move.** The source is the owner's own file in a directory
@@ -10637,6 +10639,61 @@ names, after the only other copy was removed.
   already carried, and the row's note explains it — an ordinary `user` folder is
   forgettable without being relocatable, so a guard written only for Move left
   exactly those rows clickable and failing.
+
+### 25.10 The Downloads folder and the default folder
+
+**The default folder** is where a new model goes when nothing names a
+destination: `Add file`, a model taken in from the Downloads folder, and the
+preselected destination of a training-run import. `model_folder.is_default`
+marks it, at most one row by the partial unique index
+`ux_model_folder_single_default`, and set through `PATCH /model-folders/{id}`
+`{"is_default": true}`, which clears the old mark in the same transaction. Only
+a `user` folder or the managed store can be it. **No mark means the managed
+store**, so a hub from before the column keeps its destination, and marking the
+managed store clears every mark rather than storing one. The API reports the
+*effective* answer (`managed_model_store.find_default_folder`), so exactly one
+row reads `is_default: true` and the client never re-derives the fallback.
+
+**The Downloads folder** is a `model_folder` of `kind = 'downloads'`, at most one
+(a second `POST` answers 409). It joins `source` in
+`model_folder_scanner.TAKEN_FROM_KINDS`: never scanned (`rescan` answers
+`skipped`), never a destination for `Add file`, a move or an import. It is also
+the one registered folder `Add file` may copy *from*, because nothing in it is
+catalogued and the "rescan instead" refusal would send the owner nowhere.
+
+`DownloadsIntakeFinder` (a hub finder registered in `vault.py` beside the
+checkpoint hasher) lists its top level every two seconds and hands out what is
+finished; `DownloadsIntakeTask` calls `downloads_intake.take_in` for each file
+and announces `models_arrived` with the model ids it registered.
+
+- **Finished means three checks.** A `.safetensors`/`.gguf` regular file (never
+  a symlink) with bytes in it and no `.part`/`.crdownload`/`.download`/`.partial`
+  sibling (browsers write under a temporary name; Firefox also leaves an empty
+  file at the final name); a `(size, mtime)` unchanged for `SETTLE_SECONDS`
+  (15 s, for `curl -O` and `wget`, which write the final name directly); and,
+  for a `.safetensors`, a length of at least `8 + header + furthest data_offsets
+  end` (`safetensors_complete`), so a download that stalled longer than the
+  window is still not moved half-written. A `.gguf` states no total and gets
+  the window only.
+- **A move, unlike `Add file`'s copy**, because registering a folder as the
+  Downloads folder is the owner saying "take models out of here". The order is
+  still the one that cannot lose a file: the destination exists and is
+  registered before the source goes. Same drive: `publish_no_clobber` to the
+  destination name, `register_file`, and a file the scanner cannot read is put
+  back. Another drive: `copy_and_digest`, verify, publish, register with the
+  verified digest, then unlink. It takes the `SHELF_IO_LOCK` slot without
+  blocking.
+- **What stays, and how often it is retried.** A name already taken in the
+  default folder, a file that does not read as a model, or an unusable default
+  folder leaves the download where it is, logged, and the finder remembers its
+  signature so it is not retried every sweep, only once it changes. A file kept
+  out only by a held `SHELF_IO_LOCK` is forgotten when the task ends and goes on
+  a later pass.
+- **The sidebar's `new` tag.** `models_arrived` (integration §8) sets
+  `useModelShelfStore().unseenArrivals`, which puts the `new` tag on the
+  sidebar's Models row until the shelf is opened, and re-reads a shelf already
+  read with `markNew`, so the arrivals wear the row `New` badge. An unread shelf
+  is not fetched: against no previous fetch every row would be new.
 
 
 ---

@@ -342,6 +342,9 @@ def test_event_types_fully_classified():
             # A workflow card changed (v1.12 B4). A card is not a picture, so
             # no grid filter says anything about whether a client wants it.
             EventType.CHANGED_WORKFLOWS.name,
+            # Models moved onto the shelf from the Downloads folder. The shelf
+            # is machine-wide, so no grid filter applies.
+            EventType.MODELS_ARRIVED.name,
         }
     )
 

@@ -9,9 +9,9 @@ insists it never touches them.
 ``POST /model-files`` is the path for a single adapter or checkpoint that is
 **not** part of a training
 run and does not deserve a whole registered folder of its own: a file downloaded
-into ``~/Downloads`` an hour ago. It is copied into the managed store - the
-folder PixlStash owns, the ruled default destination for a drop or an import -
-and registered there, so it appears on the shelf without the owner having to
+into ``~/Downloads`` an hour ago. It is copied into the default folder - the
+one the owner marked default in the Model folders dialog, else the managed store
+PixlStash owns - and registered there, so it appears on the shelf without the owner having to
 rescan anything.
 
 **It is a copy, never a move.** The source is the owner's own file in the owner's
@@ -82,12 +82,17 @@ from pixlstash.services.comfyui_recipe_service import (
     advertised_model_names,
     fetch_object_info,
 )
-from pixlstash.services.managed_model_store import MANAGED_KIND, deletes_unclaimed_files
+from pixlstash.services.managed_model_store import (
+    deletes_unclaimed_files,
+    find_default_folder,
+)
 from pixlstash.services.model_folder_scanner import (
+    DOWNLOADS_FOLDER_KIND,
     SHELF_MODEL_SUFFIXES,
     STATE_PRESENT,
     STATE_REMOVED,
     STATE_UNREACHABLE,
+    TAKEN_FROM_KINDS,
     ModelFolderScanner,
 )
 from pixlstash.services.model_mover import (
@@ -111,8 +116,6 @@ from pixlstash.utils.path_utils import path_is_within, resolve_path_within
 from pixlstash.utils.system_utils import TRASH_NAME
 
 logger = get_logger(__name__)
-
-SOURCE_FOLDER_KIND = "source"
 
 # Which folders the shelf may unlink from is `deletes_unclaimed_files`, in
 # `managed_model_store` - that is where "which declared root is which" is already
@@ -145,8 +148,9 @@ class AddModelFileRequest(BaseModel):
     destination_folder_id: Optional[int] = Field(
         default=None,
         description=(
-            "A registered folder the shelf catalogues. Omit for the managed "
-            "store, which is the ruled default destination. Never a `source` one."
+            "A registered folder the shelf catalogues. Omit for the default "
+            "folder: the one marked default, else the managed store. Never a "
+            "`source` or `downloads` one."
         ),
     )
 
@@ -918,7 +922,12 @@ def create_router(server) -> APIRouter:
                     f"{os.path.basename(resolved)} is not one."
                 ),
             )
-        for row in server.hub.fetchall("SELECT id, path, kind FROM model_folder"):
+        # The Downloads folder is the one registered folder a file may be added
+        # FROM: nothing there is catalogued, so a rescan would not list it.
+        for row in server.hub.fetchall(
+            "SELECT id, path, kind FROM model_folder WHERE kind <> ?",
+            (DOWNLOADS_FOLDER_KIND,),
+        ):
             folder = os.path.normpath(row["path"])
             if resolved == folder or resolved.startswith(folder + os.sep):
                 raise HTTPException(
@@ -933,10 +942,8 @@ def create_router(server) -> APIRouter:
 
     def _destination_folder(folder_id: Optional[int]) -> dict:
         if folder_id is None:
-            row = server.hub.fetchone(
-                "SELECT id, path, kind FROM model_folder WHERE kind = ? ORDER BY id",
-                (MANAGED_KIND,),
-            )
+            # The folder the owner marked as default, else the managed store.
+            row = find_default_folder(server.hub)
             if row is None:
                 # First-run creation failed, i.e. the store's directory could not
                 # be made. Naming that beats a bare 404 on a folder the caller
@@ -956,12 +963,12 @@ def create_router(server) -> APIRouter:
                 raise HTTPException(
                     status_code=404, detail="No such destination folder."
                 )
-            if row["kind"] == SOURCE_FOLDER_KIND:
+            if row["kind"] in TAKEN_FROM_KINDS:
                 raise HTTPException(
                     status_code=400,
                     detail=(
-                        "A source folder is where runs are taken from, never a "
-                        "place to put a file."
+                        "That folder is taken from, never a place to put a file: "
+                        "an ai-toolkit output root or the Downloads folder."
                     ),
                 )
         if not os.path.isdir(row["path"]):
@@ -979,7 +986,7 @@ def create_router(server) -> APIRouter:
         summary="Add one model file to the shelf",
         description=(
             "Copies a single `.safetensors` file from anywhere on this machine "
-            "into a folder the shelf catalogues - the managed store unless "
+            "into a folder the shelf catalogues - the default folder unless "
             "another is named - and registers it, so it appears without a "
             "rescan. The order is copy, verify by SHA-256, then register and "
             "commit; **the original is never removed**. A file that already sits "

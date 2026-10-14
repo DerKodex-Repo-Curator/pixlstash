@@ -67,6 +67,7 @@ import { useWsStore } from "../stores/useWsStore";
 import { useTasksStore } from "../stores/useTasksStore";
 import { useGridStore } from "../stores/useGridStore";
 import { useWorkflowsStore } from "../stores/useWorkflowsStore";
+import { useModelShelfStore } from "../stores/useModelShelfStore";
 // The real ones: the apiClient mock below spreads `importOriginal`, so a test
 // can drive an actual session transition rather than a stand-in for one.
 import { API_BASE_URL, notifySessionReset } from "../utils/apiClient";
@@ -675,6 +676,15 @@ describe("useUpdatesSocket: a picture was turned (#1419)", () => {
     ).toBe(false);
     // The control: an unknown field still does.
     expect(realtimeDeps.pictureChangeAffectsView(["tags"])).toBe(true);
+  });
+});
+
+describe("useUpdatesSocket: models_arrived", () => {
+  it("hands the arrival to the shelf store", () => {
+    connect();
+    const arrived = vi.spyOn(useModelShelfStore(), "onModelsArrived");
+    receive({ type: "models_arrived", model_ids: [4] });
+    expect(arrived).toHaveBeenCalledTimes(1);
   });
 });
 
