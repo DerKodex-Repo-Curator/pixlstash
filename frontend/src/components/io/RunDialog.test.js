@@ -1288,6 +1288,9 @@ describe("the picture beside the form", () => {
     const wrapper = await mountRun({ kind: "card", workflowId: KEY });
 
     expect(wrapper.vm.coverUrl).toBe("/api/v1/pictures/thumbnails/812.webp?v=3");
+    // Something the workflow once made, not the run's input: beside an empty
+    // Load Image it was read as the chosen picture.
+    expect(wrapper.find(".rund-example").text()).toBe("Example");
   });
 
   it("keeps a caller's own url as given", async () => {
@@ -1299,6 +1302,7 @@ describe("the picture beside the form", () => {
       coverUrl: "/api/v1/pictures/thumbnails/9.webp",
     });
     expect(wrapper.vm.coverUrl).toBe("/api/v1/pictures/thumbnails/9.webp");
+    expect(wrapper.find(".rund-example").exists()).toBe(true);
   });
 
   it("shows the picture a recipe run is made from, not the card's cover", async () => {
@@ -1310,6 +1314,7 @@ describe("the picture beside the form", () => {
     const wrapper = await mountRun({ kind: "picture", pictureIds: [42] });
 
     expect(wrapper.vm.coverUrl).toBe(pictureThumbnailUrl(42));
+    expect(wrapper.find(".rund-example").exists()).toBe(false);
   });
 
   it("shows a saved recipe's own picture, not the card's cover", async () => {
@@ -1323,6 +1328,7 @@ describe("the picture beside the form", () => {
     });
 
     expect(wrapper.vm.coverUrl).toBe(pictureThumbnailUrl(77));
+    expect(wrapper.find(".rund-example").exists()).toBe(false);
     expect(wrapper.vm.sourceKindLine).toBe("Saved recipe");
   });
 });
@@ -2649,6 +2655,8 @@ describe("the pictures a workflow takes", () => {
     const gone = wrapper.findAll(".rund-in")[1];
     expect(gone.text()).toContain("The picture you kept here is gone. Choose another.");
     expect(gone.find(".rund-in-tile--empty").exists()).toBe(true);
+    // The one slot the run cannot go without is the one that glows.
+    expect(gone.find(".rund-in-tile--needed").exists()).toBe(true);
     expect(wrapper.vm.runNotes).toEqual([]);
     expect(wrapper.vm.canRun).toBe(false);
     expect(wrapper.vm.runBlocker).toBe("Choose a picture for Reference first.");
@@ -2663,6 +2671,7 @@ describe("the pictures a workflow takes", () => {
     const row = wrapper.find(".rund-in");
     expect(row.text()).toContain("The picture this one was made from");
     expect(row.find(".rund-in-img").exists()).toBe(true);
+    expect(row.find(".rund-in-tile--needed").exists()).toBe(false);
     // The picture itself is not fed in, so nothing is another take of it.
     expect(wrapper.find(".rund-box").element.checked).toBe(false);
     // One bar button, the pin: nothing was picked, so nothing to clear.
