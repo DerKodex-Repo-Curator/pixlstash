@@ -3186,6 +3186,10 @@ def test_the_huggingface_cache_is_ours_only_while_it_holds_only_our_repos(
             "'2026-08-16T00:00:00Z')",
             (str(cache),),
         )
+    # Holding nothing yet is not evidence that it is ours.
+    assert _folder_tools(shelf_env)[str(cache)] == "HuggingFace"
+
+    with shelf_env.server.hub.transaction() as conn:
         engine = conn.execute(
             "INSERT INTO model (file_kind, filename, provenance, created_at) "
             "VALUES ('engine', 'ours', 'builtin', '2026-08-16T00:00:00Z')"
@@ -3247,6 +3251,12 @@ def test_a_stability_matrix_models_folder_is_labelled_through_its_symlink(
     assert tools[os.path.realpath(comfy_models)] == "StabilityMatrix"
     assert tools[os.path.realpath(tmp_path / "loras")] is None
     assert tools[os.path.realpath(tmp_path / "runs")] == "ai-toolkit"
+
+    # A relative library path would resolve against the server's working
+    # directory, so it labels nothing rather than the wrong folders.
+    (config / "library.json").write_text(json.dumps({"LibraryPath": "StabilityMatrix"}))
+    monkeypatch.chdir(tmp_path)
+    assert _folder_tools(shelf_env)[os.path.realpath(comfy_models)] is None
 
 
 def test_patch_changes_the_bind_path_but_never_the_registered_path(shelf_env):

@@ -6322,8 +6322,8 @@ it.
 
 The chip beside a path is `Managed` for the managed store and otherwise the
 server's **`tool`**, never derived from `kind`: the HuggingFace cache is
-`foreign` like PixlStash's own folders but reads `HuggingFace` once it holds a
-repo PixlStash did not download, and a StabilityMatrix folder is a plain `user`
+`foreign` like PixlStash's own folders but reads `HuggingFace` unless every
+repo in it is one PixlStash downloaded (an empty cache included), and a StabilityMatrix folder is a plain `user`
 row that only the server can recognise, through StabilityMatrix's own
 `library.json`, its `Models` folder included when that is a symlink.
 
