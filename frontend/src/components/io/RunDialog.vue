@@ -569,7 +569,7 @@
             :disabled="submitting"
           />
           <p class="rund-note">
-            {{ fix.value }} is not on this ComfyUI, so this run uses the one
+            {{ fix.value }} is not in this ComfyUI, so this run uses the one
             picked here.
           </p>
         </div>
@@ -1932,7 +1932,7 @@ const checkpointOptions = computed(() => {
     {
       value: fix.file,
       label: fix.missing
-        ? `${shownModel(fix.file)} (not on this ComfyUI)`
+        ? `${shownModel(fix.file)} (not in this ComfyUI)`
         : `${shownModel(fix.file)} (in place of ${shownModel(fix.was)})`,
     },
     ...modelOptionsOf(fix.options),
@@ -1949,8 +1949,8 @@ const checkpointFixNote = computed(() => {
   const fix = checkpointFix.value;
   if (!fix) return "";
   const gone = fix.missing
-    ? `${fix.file} is not on this ComfyUI.`
-    : `${fix.was} is not on this ComfyUI, so this workflow loads ${fix.file} in its place (set in the Workflow tab).`;
+    ? `${fix.file} is not in this ComfyUI.`
+    : `${fix.was} is not in this ComfyUI, so this workflow loads ${fix.file} in its place (set in the Workflow tab).`;
   // Nothing to suggest until the replacements are read.
   if (fix.loading) return gone;
   if (fix.options.length) {
@@ -4018,7 +4018,7 @@ function loraFlag(row) {
   if (row.added || row.skipped) return "";
   const file = loraBase(row.graphValue);
   if (file && bypassedFiles.value.has(file)) {
-    return "Not on this ComfyUI. The run leaves this loader out.";
+    return "Not in this ComfyUI. The run leaves this loader out.";
   }
   if (!row.baseSha && row.graphValue && row.sha256 === row.baseSha) {
     return "Not on your model shelf: PixlStash cannot identify this file.";

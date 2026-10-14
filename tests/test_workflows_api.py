@@ -17589,6 +17589,126 @@ def test_the_same_run_without_a_skip_keeps_the_loader(runnable):
     assert r.json()["groups"][0]["bypassed_loras"] == []
 
 
+def test_every_loader_of_a_lora_the_recipe_names_is_kept(runnable):
+    """One LoRA in two loaders, which the default recipe names once.
+
+    Both run: the recipe leaves a LoRA out, never the second loader of one it
+    keeps, and nothing is reported as missing.
+    """
+    document = json.loads(json.dumps(RUN_DOCUMENT))
+    document["1"]["inputs"]["ckpt_name"] = "realvisxl.safetensors"
+    document["2"]["inputs"]["lora_name"] = "add_detail.safetensors"
+    document["5"] = json.loads(json.dumps(document["2"]))
+    document["5"]["inputs"]["model"] = ["2", 0]
+    document["3"]["inputs"]["model"] = ["5", 0]
+    manual = create_manual_workflow(runnable.server.hub, "Twice", document, "import")
+    try:
+        card = runnable.owner.get(f"{API}/workflows/{manual}").json()["card"]
+        assert [lora["filename"] for lora in card["default_recipe"]["loras"]] == [
+            "add_detail.safetensors"
+        ]
+
+        payload = _preflight(runnable.owner, workflow_id=manual)
+        assert _reasons(payload) == set(), payload
+        assert payload["groups"][0]["bypassed_loras"] == []
+        r = runnable.owner.post(f"{API}/workflows/run", json={"workflow_id": manual})
+        assert r.status_code == 200, r.text
+        assert _lora_loaders(runnable.submitted[0]["graph"]) == [
+            "add_detail.safetensors",
+            "add_detail.safetensors",
+        ]
+    finally:
+        delete_manual_workflow(runnable.server.hub, manual)
+
+
+def test_every_loader_of_a_lora_takes_the_recipes_strength(runnable):
+    """The owner sets the LoRA's strength once; both of its loaders run at it."""
+    digest = _h("add-detail-twice-digest")
+    hub = runnable.server.hub
+    document = json.loads(json.dumps(RUN_DOCUMENT))
+    document["1"]["inputs"]["ckpt_name"] = "realvisxl.safetensors"
+    document["2"]["inputs"].update(
+        {"lora_name": "add_detail.safetensors", "strength_model": 1.0}
+    )
+    document["5"] = json.loads(json.dumps(document["2"]))
+    document["5"]["inputs"]["model"] = ["2", 0]
+    document["3"]["inputs"]["model"] = ["5", 0]
+    manual = create_manual_workflow(hub, "Twice at a strength", document, "import")
+    with hub.transaction() as conn:
+        conn.execute(
+            "INSERT INTO model (file_kind, kind, filename, sha256, provenance) "
+            "VALUES ('adapter', 'unknown', 'add_detail.safetensors', ?, 'scanned')",
+            (digest,),
+        )
+        conn.execute(
+            "INSERT INTO workflow_group_default (workflow_id, address, value) "
+            "VALUES (?, ?, '0.4')",
+            (manual, f"lora:{digest}"),
+        )
+    try:
+        r = runnable.owner.post(f"{API}/workflows/run", json={"workflow_id": manual})
+        assert r.status_code == 200, r.text
+        assert runnable.submitted, [g["reasons"] for g in r.json()["groups"]]
+        graph = runnable.submitted[0]["graph"]
+        assert [graph[n]["inputs"]["strength_model"] for n in ("2", "5")] == [0.4, 0.4]
+    finally:
+        with hub.transaction() as conn:
+            conn.execute("DELETE FROM model WHERE sha256 = ?", (digest,))
+            conn.execute(
+                "DELETE FROM workflow_group_default WHERE workflow_id = ?", (manual,)
+            )
+        delete_manual_workflow(hub, manual)
+
+
+def test_a_loader_of_another_file_of_that_name_is_not_the_recipes():
+    """Two files called the same; the shelf tells them apart by digest."""
+    slots = [
+        {"node_id": "2", "field": "lora_name", "value": "loras/Add_Detail.safetensors"},
+        {"node_id": "5", "field": "lora_name", "value": "add_detail.safetensors"},
+        {"node_id": "6", "field": "lora_name", "value": "add_detail.safetensors"},
+        {"node_id": "7", "field": "lora_name", "value": "other.safetensors"},
+    ]
+    ours, theirs = _h("ours"), _h("theirs")
+    named = run_service.slots_recipe_names(
+        slots,
+        [{"filename": "add_detail.safetensors", "sha256": ours}],
+        # Node 6 is a file the shelf cannot identify: its name is all there is.
+        {("2", "lora_name"): ours, ("5", "lora_name"): theirs},
+    )
+    assert set(named) == {("2", "lora_name"), ("6", "lora_name")}
+
+
+def test_a_loader_the_recipe_leaves_out_is_not_reported_as_a_missing_file(runnable):
+    """The LoRA is turned off in the default recipe, and is on this ComfyUI."""
+    digest = _h("add-detail-off-digest")
+    hub = runnable.server.hub
+    with hub.transaction() as conn:
+        conn.execute(
+            "INSERT INTO model (file_kind, kind, filename, sha256, provenance) "
+            "VALUES ('adapter', 'unknown', 'add_detail.safetensors', ?, 'scanned')",
+            (digest,),
+        )
+        conn.execute(
+            "INSERT INTO workflow_group_default (workflow_id, address, value) "
+            "VALUES (?, ?, 'off')",
+            (RUN_WORKFLOW, f"lora:{digest}"),
+        )
+    try:
+        left_out = _preflight(runnable.owner, workflow_id=RUN_WF)["groups"][0][
+            "bypassed_loras"
+        ]
+    finally:
+        with hub.transaction() as conn:
+            conn.execute("DELETE FROM model WHERE sha256 = ?", (digest,))
+            conn.execute(
+                "DELETE FROM workflow_group_default WHERE address = ?",
+                (f"lora:{digest}",),
+            )
+    assert [(e["node_id"], e["requested"], e["recipe"]) for e in left_out] == [
+        ("2", False, True)
+    ]
+
+
 def test_skipping_a_slot_no_graph_has_is_a_400(runnable):
     r = runnable.owner.post(
         f"{API}/workflows/run/preflight",

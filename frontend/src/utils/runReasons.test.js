@@ -5,8 +5,11 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  LORAS_BYPASSED,
+  LORAS_SKIPPED,
   PICTURE_INPUT_UNFILLED,
   PIXLSTASH_PACK_INSTALL,
+  bypassNotice,
   readReason,
   reasonsBlock,
   unplacedNotice,
@@ -127,7 +130,7 @@ describe("loras_fetched", () => {
       loaders: [{ file: "loras/example-subject.safetensors" }],
     });
     expect(read.text).toBe(
-      "example-subject.safetensors is not on this ComfyUI, so it loads through the ComfyUI-PixlStash LoRA loader, which fetches it by hash.",
+      "example-subject.safetensors is not in this ComfyUI, so it loads through the ComfyUI-PixlStash LoRA loader, which fetches it by hash.",
     );
     expect(read.blocking).toBe(false);
   });
@@ -161,5 +164,21 @@ describe("ui_format", () => {
       "PixlStash could not turn this ComfyUI workflow into one it can run. Open it in ComfyUI from here and PixlStash converts it there.",
     );
     expect(read.blocking).toBe(true);
+  });
+});
+
+describe("bypassNotice", () => {
+  it("does not call a loader the default recipe leaves out a missing file", () => {
+    const notices = bypassNotice({
+      bypassed_loras: [
+        { file: "gone.safetensors", requested: false },
+        { file: "off.safetensors", requested: false, recipe: true },
+        { file: "removed.safetensors", requested: true },
+      ],
+    });
+    expect(notices).toEqual([
+      { code: LORAS_BYPASSED, models: [{ file: "gone.safetensors", requested: false }] },
+      { code: LORAS_SKIPPED, models: [{ file: "removed.safetensors", requested: true }] },
+    ]);
   });
 });

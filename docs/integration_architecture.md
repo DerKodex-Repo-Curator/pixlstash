@@ -814,7 +814,9 @@ Seven rules the client must not re-derive:
    graph or the saved recipe says, on the pre-flight and on the run alike.
    `requested: true` marks a loader the owner skipped with `skip_loras`
    (#1478); `false` is one the server bypassed because this ComfyUI lacks its
-   file. `unplaced_loras` names a saved recipe's LoRA that is not applied: the
+   file, or, with `recipe: true`, because the default recipe leaves its LoRA
+   out: that file is not missing, and a client must not print it as one.
+   `unplaced_loras` names a saved recipe's LoRA that is not applied: the
    workflow has no loader left for it, or the shelf cannot identify it.
    `skip_loras` is refused (400) on a run spanning several cards: a node id
    names one loader on one graph.
@@ -930,7 +932,7 @@ Seven rules the client must not re-derive:
    keeps none, a LoRA addressed to a slot the graph has not, a picture input
    the card has not, a picture that is not kept, or the total runs over
    `MAX_RUNS_PER_REQUEST`. Everything else — including a LoRA that
-   is on the shelf but not on this ComfyUI — is a reason code. A pre-flight
+   is on the shelf but not in this ComfyUI — is a reason code. A pre-flight
    that 400s where the run returns reasons would not be a dry run.
 
 7. **A selection feeding an input is the run's repeat axis.** Such a group runs

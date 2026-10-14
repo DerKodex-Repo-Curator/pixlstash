@@ -6687,21 +6687,35 @@ def create_router(server) -> APIRouter:
                 # skip: a loader that cannot be taken out keeps its LoRA and
                 # the run goes ahead, rather than being refused for a choice
                 # nobody made by hand.
-                placed, kept = run_service.place_recipe_loras(
-                    slots_before_skip,
-                    recipe_loras,
+                digests_before_skip = (
                     _slot_digests(slots_before_skip, shelf_index)
                     if slots_before_skip
-                    else {},
+                    else {}
                 )
-                taken = {
-                    (str(target["node_id"]), str(target["field"]))
-                    for target, _ in placed
-                } | {
-                    (str(target["node_id"]), str(target["field"]))
-                    for target in slots_before_skip
-                    if any(entry["node_id"] == str(target["node_id"]) for entry in kept)
-                }
+                placed, kept = run_service.place_recipe_loras(
+                    slots_before_skip, recipe_loras, digests_before_skip
+                )
+                # Every loader of a LoRA the recipe names, not only the one
+                # each was placed in: a graph loading one LoRA in eight
+                # loaders keeps all eight.
+                taken = (
+                    set(
+                        run_service.slots_recipe_names(
+                            slots_before_skip, recipe_loras, digests_before_skip
+                        )
+                    )
+                    | {
+                        (str(target["node_id"]), str(target["field"]))
+                        for target, _ in placed
+                    }
+                    | {
+                        (str(target["node_id"]), str(target["field"]))
+                        for target in slots_before_skip
+                        if any(
+                            entry["node_id"] == str(target["node_id"]) for entry in kept
+                        )
+                    }
+                )
                 unfilled = [
                     (str(target["node_id"]), str(target["field"]))
                     for target in slots_before_skip
@@ -6720,7 +6734,12 @@ def create_router(server) -> APIRouter:
                         workflow_id,
                         reason.as_dict(),
                     )
-                skipped += [{**entry, "requested": False} for entry in recipe_skipped]
+                # `recipe` says why: the file is not missing, and a client
+                # must not print it as one this ComfyUI lacks.
+                skipped += [
+                    {**entry, "requested": False, "recipe": True}
+                    for entry in recipe_skipped
+                ]
             slots_in_graph = detect_lora_targets(graph)
             # Applied only when it CAN be, and after the two questions that
             # would otherwise be answered as the wrong failure: a graph with no
@@ -6746,13 +6765,32 @@ def create_router(server) -> APIRouter:
                 # order (#1478) - and one with nowhere to go is reported in
                 # `unplaced_loras` rather than dropped. A positional zip put a
                 # recipe stored in the other order onto the wrong loaders.
-                placements, group.unplaced_loras = run_service.place_recipe_loras(
-                    slots_before_skip,
-                    recipe_loras,
+                recipe_digests = (
                     _slot_digests(slots_before_skip, shelf_index)
                     if slots_before_skip
-                    else {},
+                    else {}
                 )
+                placements, group.unplaced_loras = run_service.place_recipe_loras(
+                    slots_before_skip, recipe_loras, recipe_digests
+                )
+                # A LoRA the graph loads in several loaders is the recipe's in
+                # each of them: the others take its strength too, where a
+                # placement is one slot per LoRA.
+                placed_slots = {
+                    (str(target["node_id"]), str(target["field"]))
+                    for target, _ in placements
+                }
+                also = run_service.slots_recipe_names(
+                    slots_before_skip, recipe_loras, recipe_digests
+                )
+                placements += [
+                    (target, also[slot])
+                    for target in slots_before_skip
+                    for slot in [(str(target["node_id"]), str(target["field"]))]
+                    if slot in also
+                    and slot not in placed_slots
+                    and also[slot].get("sha256")
+                ]
                 # A recipe LoRA matched to a skipped slot is not applied: the
                 # owner skipped that loader for this run, and the skip is
                 # already reported in `bypassed_loras`.
@@ -7684,23 +7722,13 @@ def create_router(server) -> APIRouter:
         targets = detect_lora_targets(graph)
         keep: set[tuple[str, str]] = set()
         if recipe.loras_decided and targets:
-            digests = _slot_digests(targets, adapter_digest_index(_hub()))
-            wanted_digests = {
-                lora.sha256.lower() for lora in recipe.loras if lora.sha256
-            }
-            wanted_names = {
-                normalized_filename(lora.filename)
-                for lora in recipe.loras
-                if lora.filename
-            }
-            for target in targets:
-                slot = (str(target["node_id"]), str(target["field"]))
-                if digests.get(slot) in wanted_digests or (
-                    target.get("by") != "digest"
-                    and normalized_filename(str(target.get("value") or ""))
-                    in wanted_names
-                ):
-                    keep.add(slot)
+            keep = set(
+                run_service.slots_recipe_names(
+                    targets,
+                    recipe.recipe_loras(),
+                    _slot_digests(targets, adapter_digest_index(_hub())),
+                )
+            )
         skip = [
             (str(target["node_id"]), str(target["field"]))
             for target in targets
@@ -8571,7 +8599,7 @@ def create_router(server) -> APIRouter:
         if not changes:
             raise HTTPException(
                 status_code=409,
-                detail="Nothing in this workflow needs fixing on this ComfyUI.",
+                detail="Nothing in this workflow needs fixing for this ComfyUI.",
             )
         name, landed = _store_copy(
             hub,
@@ -8871,7 +8899,7 @@ def create_router(server) -> APIRouter:
             409: {
                 "description": (
                     "No graph, nothing changed, an unknown or repeated loader, a "
-                    "LoRA not on the shelf or not on this ComfyUI, a chain "
+                    "LoRA not on the shelf or not in this ComfyUI, a chain "
                     "PixlStash cannot edit honestly, or an overwrite of a "
                     "workflow that got another version meanwhile."
                 )
@@ -10765,7 +10793,7 @@ def create_router(server) -> APIRouter:
                         status_code=409,
                         detail=(
                             f"The LoRA could not be put in loader {item.node_id} "
-                            "on this ComfyUI, so nothing was saved."
+                            "in this ComfyUI, so nothing was saved."
                         ),
                     )
 

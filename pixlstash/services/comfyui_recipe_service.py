@@ -500,7 +500,7 @@ def _match_option(value: str, options: list[str]) -> str | None:
     candidate = lowered.get(normalized.lower())
     if candidate is not None:
         return f"present under a different case: {normalized_options[candidate]}"
-    return "not available on this ComfyUI"
+    return "not available in this ComfyUI"
 
 
 def collect_node_classes(prompt_graph: dict) -> list[str]:
@@ -1414,7 +1414,7 @@ def _shelf_name_in(filenames: list[str], options: list[str]) -> str | None:
         if len(matched) > 1:
             raise LookupError(
                 f"{name.rsplit('/', 1)[-1]} names {len(matched)} different files "
-                "on this ComfyUI, so PixlStash cannot tell which one you mean."
+                "in this ComfyUI, so PixlStash cannot tell which one you mean."
             )
         return next(iter(matched))
     return None
@@ -1481,7 +1481,7 @@ def apply_adapter(
         name = _shelf_name_in(adapter.get("filenames") or [], options)
         if name is None:
             raise LookupError(
-                "That LoRA is on your shelf but not on the ComfyUI this would "
+                "That LoRA is on your shelf but not in the ComfyUI this would "
                 f"run on, under any name node {target['node_id']} lists."
             )
         inputs[target["field"]] = name
@@ -1902,7 +1902,7 @@ def _inserted_loader(
                 logger.info("A LoRA name is ambiguous on this ComfyUI: %s", exc)
                 name, reason = None, str(exc).rstrip(".")
             else:
-                reason = "That LoRA is on your shelf but not on this ComfyUI"
+                reason = "That LoRA is on your shelf but not in this ComfyUI"
             if name is not None:
                 return core, "lora_name", name
     if PIXLSTASH_ADAPTER_LOADER in object_info:
@@ -1974,7 +1974,7 @@ def _checked_loader(
     for kind, wire in (("MODEL", "model"), ("CLIP", "clip"))[: 2 if clip else 1]:
         if kind not in outputs:
             raise LookupError(
-                f"{loader} on this ComfyUI hands on no {kind}, so PixlStash "
+                f"{loader} in this ComfyUI hands on no {kind}, so PixlStash "
                 "cannot wire it in."
             )
         # Its inputs are checked too, not only its outputs: a fork naming them
@@ -1983,7 +1983,7 @@ def _checked_loader(
         # pre-flight exists to happen before.
         if find_input_spec(spec, wire) is None:
             raise LookupError(
-                f"{loader} on this ComfyUI takes no {wire} input, so PixlStash "
+                f"{loader} in this ComfyUI takes no {wire} input, so PixlStash "
                 "cannot wire it in."
             )
     for rewire in splice.get("rewires") or []:
@@ -2076,7 +2076,7 @@ def swap_to_adapter_loader(
     offered = spec.get("output") if isinstance(spec.get("output"), list) else []
     if tuple(offered[: len(outputs)]) != outputs:
         raise LookupError(
-            f"{PIXLSTASH_ADAPTER_LOADER} on this ComfyUI does not hand on "
+            f"{PIXLSTASH_ADAPTER_LOADER} in this ComfyUI does not hand on "
             f"{', '.join(outputs)} first, so it cannot stand in for {class_type}."
         )
     old = node.get("inputs") or {}
@@ -3649,7 +3649,7 @@ def plan_lora_chain(
             ]:
                 if wire is None or kind not in outputs:
                     raise LookupError(
-                        f"{loader_class} on this ComfyUI does not take and hand on "
+                        f"{loader_class} in this ComfyUI does not take and hand on "
                         f"a {kind}, so PixlStash cannot wire it in."
                     )
             inputs = _widget_defaults(spec)
