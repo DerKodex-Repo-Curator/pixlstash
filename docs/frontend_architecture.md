@@ -1922,7 +1922,10 @@ the shelf's workflow sets section) and served as `hand_made` on
   accessible name): ranked by `slotSuggestions` (your sets with the same base
   model, then recipes with this checkpoint, then the same base model, then the
   other base models, which start folded to one line when anything is above
-  them; unranked until a checkpoint is chosen). Empty groups are not drawn, and
+  them; unranked until a checkpoint is chosen), all of it led by *Downloaded
+  around the same time*: models whose file date is within two hours of one the
+  set holds. Each group follows `store.pickOrder`, the Models rail's order, set
+  from the same track beside the filter. Empty groups are not drawn, and
   a group label's count sits in its own column as `.fm-n`. `slotSuggestions`
   sorts and filters by `modelName`, still matching the filename, and under a
   filter returns the set's own matches as a `held` section the popup names
@@ -6429,6 +6432,18 @@ the tab's width on that edge while the rail is closed; the row list does not.
   for them only as they mounted. Until the sets are read nothing says where a model is and *In no
   set yet* is disabled; a failed read says so with Retry rather than calling
   every model loose.
+- **Its order.** An `A–Z | Newest | Oldest` track under the filters
+  (`PICK_ORDERS`, `orderRows`). The dates are file dates (`fileTime`, from
+  `newest_file_mtime`): for a download that is usually when it was downloaded,
+  though a copy that keeps timestamps keeps the original's and a rewrite moves
+  it. `added_at` is when a scan first saw the file, so a first scan gives a
+  whole library one moment. Under a date order
+  the slot headings give way to one heading per download (`downloadBatches`:
+  neighbours more than `DOWNLOAD_GAP_MS`, two hours, apart start a new one), so
+  a checkpoint and the encoder and VAE fetched with it sit together; undated
+  rows close the list. With Fits on the ranked groups stay and the rest follow
+  the order. The choice is `store.pickOrder`, remembered under
+  `pixlstash:modelPickOrder` and shared with every slot's ＋ picker.
 - **Two filters, never applied for you.** *Fits <set>* (`setFits` in
   `utils/workflowSets.js`: not held, a kind some slot takes, the set's base
   model, or used beside its checkpoint, which ranks first with the picture

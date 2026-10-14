@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  downloadBatches,
   evidenceLine,
   fillFromPictures,
   fillFromSets,
@@ -11,6 +12,7 @@ import {
   rowBaseModel,
   kindCounts,
   offerQuestion,
+  orderRows,
   setCard,
   setGroups,
   setName,
@@ -543,6 +545,57 @@ describe("hand-made sets (#1520)", () => {
     expect(heldSection.items.map((r) => r.display_name)).toEqual(["Film Grain"]);
   });
 
+  // Nanoseconds, as the API serves `newest_file_mtime`.
+  const HOUR_NS = 3600 * 1e9;
+  const at = (hours) => ({ newest_file_mtime: 1.8e18 + hours * HOUR_NS });
+
+  it("leads with what was downloaded within two hours of what the set holds", () => {
+    const shelf = [
+      { ...shelfRow(1, "RealVis XL", "checkpoint"), ...at(0) },
+      { ...shelfRow(2, "Film Grain", "adapter"), ...at(1.5) },
+      { ...shelfRow(3, "Soft Light", "adapter"), ...at(-3) },
+      { ...shelfRow(4, "Ink Wash", "adapter"), ...at(-1) },
+      shelfRow(5, "Undated", "adapter"),
+    ];
+    const sections = slotSuggestions({
+      set: mine,
+      slotId: "lora",
+      rows: shelf,
+      sets: [mine],
+      combinations: [],
+      order: "newest",
+    });
+    expect(sections[0].id).toBe("together");
+    expect(sections[0].items.map((r) => r.display_name)).toEqual([
+      "Film Grain",
+      "Ink Wash",
+    ]);
+    // Offered once: not again under the base model.
+    const rest = sections.slice(1).flatMap((s) => s.items);
+    expect(rest.map((r) => r.display_name)).toEqual(["Soft Light", "Undated"]);
+  });
+
+  it("has no download section when nothing was downloaded within two hours of the set's models", () => {
+    const sections = slotSuggestions({
+      set: { id: 3, members: [slotMember(3, "Soft Light", "lora")] },
+      slotId: "lora",
+      rows: [
+        { ...shelfRow(3, "Soft Light", "adapter"), ...at(0) },
+        { ...shelfRow(2, "Film Grain", "adapter"), ...at(3) },
+        { ...shelfRow(4, "Ink Wash", "adapter"), ...at(2.5) },
+      ],
+      sets: [],
+      combinations: [],
+      order: "oldest",
+    });
+    expect(sections.map((s) => s.id)).toEqual(["all"]);
+    expect(sections[0].label).toBe("All LoRAs");
+    expect(sections[0].items.map((r) => r.display_name)).toEqual([
+      "Ink Wash",
+      "Film Grain",
+    ]);
+  });
+
   it("names, sorts and filters by the shelf's name, and still finds the filename (#1574)", () => {
     const file = (id, filename, extra = {}) => ({
       id,
@@ -887,5 +940,29 @@ describe("a card's automatic name", () => {
     expect(setCard(setGroups([combination("9", [named])])[0]).name).toBe(
       "My Mix",
     );
+  });
+});
+
+describe("model list order", () => {
+  const HOUR_NS = 3600 * 1e9;
+  const row = (name, hours) => ({
+    id: name,
+    display_name: name,
+    newest_file_mtime: hours === null ? null : 1.8e18 + hours * HOUR_NS,
+  });
+  const names = (rows) => rows.map((r) => r.display_name);
+  const rows = [row("b", 0), row("a", 5), row("c", null), row("d", 1)];
+
+  it("orders by name, newest or oldest file date, the undated last both ways", () => {
+    expect(names(orderRows(rows, "name"))).toEqual(["a", "b", "c", "d"]);
+    expect(names(orderRows(rows, "newest"))).toEqual(["a", "d", "b", "c"]);
+    expect(names(orderRows(rows, "oldest"))).toEqual(["b", "d", "a", "c"]);
+  });
+
+  it("cuts date-ordered rows into downloads at gaps over two hours", () => {
+    const batches = downloadBatches(orderRows(rows, "newest"));
+    expect(batches.map((b) => names(b.rows))).toEqual([["a"], ["d", "b"], ["c"]]);
+    expect(batches[2].at).toBeNull();
+    expect(batches[1].at).toBe((1.8e18 + HOUR_NS) / 1e6);
   });
 });

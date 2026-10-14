@@ -63,6 +63,7 @@ import {
   headModel,
   hideSetsVerb,
   pictureCount,
+  PICK_ORDERS,
   railListed,
   rowBaseModel,
   setCard,
@@ -85,6 +86,13 @@ const FILTERS_KEY = "pixlstash:modelShelfFilters";
  * exactly the people who have been using the screen longest (#927).
  */
 const FILTERS_SCHEMA_VERSION = 1;
+
+/**
+ * Where the Models rail's and the slot pickers' order is remembered. Its own
+ * key: it is not the shelf's sort, and a reset of the shelf's view does not
+ * reach it.
+ */
+const PICK_ORDER_KEY = "pixlstash:modelPickOrder";
 
 /**
  * Where the view axes are remembered: grouping, sort, and what is collapsed.
@@ -1712,6 +1720,21 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
       : `${dragged.length} models`;
   });
   const railFitsSetId = ref(null);
+
+  /**
+   * The order the Models rail and every slot's ＋ picker list models in: one
+   * choice for both, so the list the rail shows is the list the picker shows.
+   */
+  const pickOrder = ref(
+    PICK_ORDERS.find((o) => o.id === readStored(PICK_ORDER_KEY)?.order)?.id ??
+      "name",
+  );
+
+  function setPickOrder(order) {
+    if (!PICK_ORDERS.some((o) => o.id === order)) return;
+    pickOrder.value = order;
+    writeStored(PICK_ORDER_KEY, { order });
+  }
 
   /**
    * Read which models have run together, once.
@@ -4264,6 +4287,8 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     railOver,
     railDragWhat,
     railFitsSetId,
+    pickOrder,
+    setPickOrder,
     announceAdded,
     removeFromHandMadeSet,
     keepOutOfHandMadeSet,

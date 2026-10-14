@@ -381,16 +381,31 @@ export function dateColumnKey(sortKey) {
  */
 export function modelDate(row, sortKey, own = false) {
   if (dateColumnKey(sortKey) === "file_mtime") {
-    const ns = Number(row?.newest_file_mtime);
-    // `!(ns > 0)` and not `ns <= 0`, so a null or a non-number is caught here
-    // rather than by the range check below.
-    if (!(ns > 0)) return "";
-    const at = new Date(ns / 1e6);
-    // `toISOString` THROWS on a date out of range, and this runs inside render:
-    // one corrupt mtime would take the whole shelf down rather than one cell.
-    return Number.isNaN(at.getTime()) ? "" : at.toISOString();
+    const ms = fileTime(row);
+    return ms === null ? "" : new Date(ms).toISOString();
   }
   return (!own && row?.newest_member_at) || row?.added_at || "";
+}
+
+/**
+ * A row's file date in milliseconds, or null when it has none to trust.
+ *
+ * The file's own date on disk, which for a download is when it was downloaded:
+ * the shelf's `added_at` is when a scan first saw it, and a first scan stamps a
+ * whole library with one moment.
+ *
+ * @param {Object} row - a shelf row.
+ * @returns {number|null}
+ */
+export function fileTime(row) {
+  const ns = Number(row?.newest_file_mtime);
+  // `!(ns > 0)` and not `ns <= 0`, so a null or a non-number is caught here
+  // rather than by the range check below.
+  if (!(ns > 0)) return null;
+  const ms = ns / 1e6;
+  // `toISOString` THROWS on a date out of range, and its callers run inside
+  // render: one corrupt mtime would take a whole list down rather than one row.
+  return Number.isNaN(new Date(ms).getTime()) ? null : ms;
 }
 
 /**

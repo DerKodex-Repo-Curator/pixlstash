@@ -24,7 +24,7 @@
 // names - or names only beside no base model - get no card; the Models rail
 // lists them under `In no set yet`.
 
-import { fileKindLabel, modelName, quantBadge } from "./modelShelf";
+import { fileKindLabel, fileTime, modelName, quantBadge } from "./modelShelf";
 
 /** The kinds a set is named after, as the server's `_SET_BASE_KINDS`. */
 const BASE_KINDS = new Set(["checkpoint", "unknown"]);
@@ -751,6 +751,69 @@ export function rowMatches(row, needle) {
 }
 
 /**
+ * The orders the Models rail and a slot's picker offer. Newest is by file
+ * date, so a checkpoint and the text encoder and VAE downloaded with it come
+ * up together at the top.
+ */
+export const PICK_ORDERS = [
+  { id: "name", label: "A–Z" },
+  { id: "newest", label: "Newest" },
+  { id: "oldest", label: "Oldest" },
+];
+
+/** How far apart two files' dates can be and still read as one download. */
+export const DOWNLOAD_GAP_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * Rows in a `PICK_ORDERS` order. By the name the shelf shows, or by file date
+ * (`fileTime`) with the name breaking ties; a row with no file date goes last
+ * in both directions, as the shelf's own sort puts it.
+ *
+ * @param {Array<Object>} rows - shelf rows; not changed.
+ * @param {string} order - a `PICK_ORDERS` id.
+ * @returns {Array<Object>}
+ */
+export function orderRows(rows, order) {
+  const byName = (a, b) => modelName(a).text.localeCompare(modelName(b).text);
+  if (order !== "newest" && order !== "oldest") return [...rows].sort(byName);
+  const sign = order === "newest" ? -1 : 1;
+  return [...rows].sort((a, b) => {
+    const left = fileTime(a);
+    const right = fileTime(b);
+    if (left === null) return right === null ? byName(a, b) : 1;
+    if (right === null) return -1;
+    return (left - right) * sign || byName(a, b);
+  });
+}
+
+/**
+ * Date-ordered rows cut into downloads: a new batch starts wherever two
+ * neighbours' file dates are more than `DOWNLOAD_GAP_MS` apart. The rows with
+ * no file date are one batch of their own, `at` null.
+ *
+ * @param {Array<Object>} rows - rows as `orderRows` returns them by date.
+ * @returns {Array<{at: number|null, rows: Array<Object>}>} `at` is the
+ *   batch's first row's file date, the one its heading names.
+ */
+export function downloadBatches(rows) {
+  const batches = [];
+  let last;
+  for (const row of rows) {
+    const at = fileTime(row);
+    const batch = batches.at(-1);
+    const joins =
+      batch &&
+      (at === null
+        ? last === null
+        : last !== null && Math.abs(at - last) <= DOWNLOAD_GAP_MS);
+    if (joins) batch.rows.push(row);
+    else batches.push({ at, rows: [row] });
+    last = at;
+  }
+  return batches;
+}
+
+/**
  * The picker's sections for one slot of one set, ranked as the design ranks them.
  *
  * With a checkpoint chosen: your other sets with the same base model, then what
@@ -763,7 +826,11 @@ export function rowMatches(row, needle) {
  * so the picker can say why they are not offered.
  *
  * Sorted by the name the shelf shows (`modelName`), so the list is alphabetical
- * in the names it draws.
+ * in the names it draws, or by file date under a date `order`.
+ *
+ * Ahead of all of it, whatever the order: the models whose file date is within
+ * `DOWNLOAD_GAP_MS` of a model the set already holds, since what was downloaded
+ * with a set's checkpoint is usually what belongs beside it.
  *
  * @param {Object} args
  * @param {Object} args.set - the hand-made set being filled.
@@ -772,6 +839,7 @@ export function rowMatches(row, needle) {
  * @param {Array<Object>} args.sets - every hand-made set.
  * @param {Array<Object>} args.combinations - the evidence payload.
  * @param {string} [args.query] - the type-to-filter text.
+ * @param {string} [args.order] - a `PICK_ORDERS` id.
  * @returns {Array<{id: string, label: string, items: Array<Object>, total: number,
  *   collapsed?: string, held?: boolean}>}
  */
@@ -782,6 +850,7 @@ export function slotSuggestions({
   sets,
   combinations,
   query = "",
+  order = "name",
 }) {
   const slot = SET_SLOTS.find((s) => s.id === slotId);
   if (!slot) return [];
@@ -789,29 +858,22 @@ export function slotSuggestions({
   const needle = query.trim().toLowerCase();
   const byId = new Map();
   const heldMatches = [];
+  // The file dates of what the set holds, read off every row: a held
+  // checkpoint is not a row this slot's picker would list.
+  const heldTimes = [];
   for (const row of rows ?? []) {
+    if (row.sha256 && held.has(row.sha256) && fileTime(row) !== null) {
+      heldTimes.push(fileTime(row));
+    }
     if (!fitsSlot(row, slot) || !rowMatches(row, needle)) continue;
     if (held.has(row.sha256)) heldMatches.push(row);
     else byId.set(row.id, row);
   }
-  const sorted = (items) =>
-    [...items].sort((a, b) =>
-      modelName(a).text.localeCompare(modelName(b).text),
-    );
+  const sorted = (items) => orderRows([...items], order);
   const heldSection =
     needle && heldMatches.length
       ? [{ id: "held", label: "", items: sorted(heldMatches), held: true }]
       : [];
-  const checkpoints = onShelfCheckpoints(set);
-  if (!checkpoints.length) {
-    const all = sorted(byId.values());
-    return [
-      { id: "all", label: `All ${slot.noun}`, items: all, total: all.length },
-      ...heldSection,
-    ];
-  }
-  // The first checkpoint that has a base model: a pair shares one.
-  const base = checkpoints.find((m) => m.base_model)?.base_model ?? null;
   const used = new Set();
   const take = (ids) => {
     const items = [];
@@ -822,6 +884,44 @@ export function slotSuggestions({
     }
     return items;
   };
+  const together = take(
+    sorted(
+      [...byId.values()].filter((row) => {
+        const at = fileTime(row);
+        return (
+          at !== null &&
+          heldTimes.some((t) => Math.abs(at - t) <= DOWNLOAD_GAP_MS)
+        );
+      }),
+    ).map((row) => row.id),
+  );
+  // Only when it has rows: an empty one would be a section nobody sees.
+  const togetherSections = together.length
+    ? [
+        {
+          id: "together",
+          label: "Downloaded around the same time",
+          items: together,
+          total: together.length,
+        },
+      ]
+    : [];
+  const checkpoints = onShelfCheckpoints(set);
+  if (!checkpoints.length) {
+    const all = take(sorted(byId.values()).map((row) => row.id));
+    return [
+      ...togetherSections,
+      {
+        id: "all",
+        label: together.length ? `All other ${slot.noun}` : `All ${slot.noun}`,
+        items: all,
+        total: all.length,
+      },
+      ...heldSection,
+    ];
+  }
+  // The first checkpoint that has a base model: a pair shares one.
+  const base = checkpoints.find((m) => m.base_model)?.base_model ?? null;
   const inSets = take(
     (sets ?? [])
       .filter(
@@ -845,6 +945,7 @@ export function slotSuggestions({
     : [];
   const rest = take(sorted(byId.values()).map((row) => row.id));
   return [
+    ...togetherSections,
     {
       id: "sets",
       label: base ? `In your ${base} sets` : "In your sets",
