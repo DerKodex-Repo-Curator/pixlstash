@@ -69,6 +69,7 @@ from pixlstash.utils.path_utils import LibraryRootsUnavailable
 from pixlstash.tasks.missing_saved_recipe_workflow_finder import (
     MissingSavedRecipeWorkflowFinder,
 )
+from pixlstash.tasks.downloads_intake_finder import DownloadsIntakeFinder
 
 
 logger = get_logger(__name__)
@@ -345,8 +346,6 @@ class Vault:
                 MissingCheckpointHashFinder(hub=registered_hub)
             )
             # The watched Downloads folder, a hub fact for the same reason.
-            from pixlstash.tasks.downloads_intake_finder import DownloadsIntakeFinder
-
             self._planner_work_finders[TaskType.DOWNLOADS_INTAKE] = (
                 DownloadsIntakeFinder(hub=registered_hub, notifier=self.notify)
             )

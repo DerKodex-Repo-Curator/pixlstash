@@ -372,3 +372,11 @@ def test_a_settled_corrupt_file_is_read_once_until_it_changes(
     for _ in range(4):
         assert finder.find_task() is None
     assert len(reads) == 1
+
+
+def test_the_hub_holds_at_most_one_downloads_folder(hub, folders, tmp_path):
+    """The route checks first, but the database is what holds the rule
+    against two registrations racing past that check."""
+    (tmp_path / "second").mkdir()
+    with pytest.raises(sqlite3.IntegrityError):
+        _register(hub, tmp_path / "second", "downloads")

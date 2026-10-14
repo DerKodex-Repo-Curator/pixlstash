@@ -3368,6 +3368,36 @@ def test_one_downloads_folder_is_taken_from_and_never_scanned(shelf_env, tmp_pat
     assert r.status_code == 400, r.text
 
 
+def test_a_downloads_folder_that_loses_a_race_is_a_409(
+    shelf_env, tmp_path, monkeypatch
+):
+    """Another registration landing between the route's check and its insert
+    is refused by the hub's index and reported as the same 409, not a 500."""
+    rival = _new_folder_path(str(tmp_path), "rival")
+    real_conflicts = model_folders_routes._validate_folder_conflicts
+
+    def rival_lands_first(server, path):
+        real_conflicts(server, path)
+        with server.hub.transaction() as conn:
+            conn.execute(
+                "INSERT INTO model_folder (path, kind, movable, created_at) "
+                "VALUES (?, 'downloads', 'external', '2026-10-14T00:00:00Z')",
+                (rival,),
+            )
+
+    monkeypatch.setattr(
+        model_folders_routes, "_validate_folder_conflicts", rival_lands_first
+    )
+    r = shelf_env.owner.post(
+        f"{API}/model-folders",
+        json={"path": _new_folder_path(str(tmp_path), "mine"), "kind": "downloads"},
+    )
+    assert r.status_code == 409, r.text
+    assert "Downloads folder is already set" in r.json()["detail"]
+    rows = shelf_env.owner.get(f"{API}/model-folders").json()["folders"]
+    assert [row["path"] for row in rows if row["kind"] == "downloads"] == [rival]
+
+
 def test_exactly_one_folder_is_the_default_and_it_moves(shelf_env, tmp_path):
     """Marking a folder unmarks the last one; unmarking hands it back."""
     ids = [

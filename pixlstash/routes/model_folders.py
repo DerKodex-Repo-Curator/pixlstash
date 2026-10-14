@@ -75,6 +75,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import threading
 from datetime import datetime, timezone
 from typing import Optional
@@ -651,21 +652,35 @@ def register_model_folder(
             detail="A Downloads folder is already set. Forget it first.",
         )
     _validate_folder_conflicts(server, path)
-    with server.hub.transaction() as conn:
-        cursor = conn.execute(
-            "INSERT INTO model_folder (path, kind, owner, movable, host_path, "
-            "delete_after_import, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                path,
-                kind,
-                owner,
-                movable,
-                host_path,
-                int(delete_after_import),
-                now,
+    try:
+        with server.hub.transaction() as conn:
+            cursor = conn.execute(
+                "INSERT INTO model_folder (path, kind, owner, movable, host_path, "
+                "delete_after_import, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    path,
+                    kind,
+                    owner,
+                    movable,
+                    host_path,
+                    int(delete_after_import),
+                    now,
+                ),
+            )
+            folder_id = int(cursor.lastrowid)
+    except sqlite3.IntegrityError as exc:
+        # A concurrent registration won the race past the checks above: the
+        # same path (`UNIQUE(path)`) or a second Downloads folder
+        # (`ux_model_folder_single_downloads`). Either way it is a 409.
+        logger.info("Model folder %s (kind=%s) not registered: %s", path, kind, exc)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "A Downloads folder is already set. Forget it first."
+                if kind == DOWNLOADS_FOLDER_KIND
+                else "This folder is already registered."
             ),
-        )
-        folder_id = int(cursor.lastrowid)
+        ) from exc
     logger.info("Model folder registered: %s (kind=%s)", path, kind)
     return folder_id
 

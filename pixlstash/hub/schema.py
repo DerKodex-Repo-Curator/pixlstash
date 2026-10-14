@@ -2004,6 +2004,13 @@ def _apply_v2(conn: sqlite3.Connection) -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_model_folder_single_default "
         "ON model_folder(is_default) WHERE is_default = 1"
     )
+    # At most one Downloads folder, held by the database for the same reason:
+    # two registrations racing past the route's own check must not both land.
+    # Safe on an existing hub, because nothing wrote that kind before it.
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_model_folder_single_downloads "
+        "ON model_folder(kind) WHERE kind = 'downloads'"
+    )
 
     # A hand-made set's `cloned` mark, guarded the same way.
     set_columns = {

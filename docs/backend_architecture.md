@@ -10656,8 +10656,10 @@ managed store clears every mark rather than storing one. The API reports the
 *effective* answer (`managed_model_store.find_default_folder`), so exactly one
 row reads `is_default: true` and the client never re-derives the fallback.
 
-**The Downloads folder** is a `model_folder` of `kind = 'downloads'`, at most one
-(a second `POST` answers 409). It joins `source` in
+**The Downloads folder** is a `model_folder` of `kind = 'downloads'`, at most one:
+the route checks first and the partial unique index
+`ux_model_folder_single_downloads` holds it against a race, and a second `POST`
+answers 409 either way. It joins `source` in
 `model_folder_scanner.TAKEN_FROM_KINDS`: never scanned (`rescan` answers
 `skipped`), never a destination for `Add file`, a move or an import. It is also
 the one registered folder `Add file` may copy *from*, because nothing in it is
