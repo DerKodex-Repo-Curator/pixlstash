@@ -42,6 +42,7 @@ from pixlstash.services.model_folder_scanner import (
     DOWNLOADS_FOLDER_KIND,
     HEADER_SUFFIX,
     SHELF_MODEL_SUFFIXES,
+    STATE_PRESENT,
     TAKEN_FROM_KINDS,
     ModelFolderScanner,
 )
@@ -65,10 +66,13 @@ logger = get_logger(__name__)
 # done: Firefox `.part`, Chrome and Edge `.crdownload`, Safari `.download`.
 IN_FLIGHT_SUFFIXES = (".part", ".crdownload", ".download", ".partial")
 
-# What happened to one file. ``busy`` is the one worth retrying soon: another
-# shelf write held the slot, and nothing about the file was wrong.
+# What happened to one file. ``retry`` means nothing about the file was wrong
+# and it goes on a later pass: another shelf write held the slot, the default
+# folder is missing or unplugged, a copy failed, or the hub refused the write.
+# ``left`` means the file itself is the reason - its name is taken in the
+# default folder, or it does not read as a model - so it waits until it changes.
 OUTCOME_MOVED = "moved"
-OUTCOME_BUSY = "busy"
+OUTCOME_RETRY = "retry"
 OUTCOME_LEFT = "left"
 
 
@@ -165,10 +169,9 @@ def take_in(hub: HubDatabase, source_path: str) -> tuple[str, Optional[int]]:
 
     Returns:
         ``(outcome, model_id)``: :data:`OUTCOME_MOVED` with the ``model.id``
-        it landed on, :data:`OUTCOME_BUSY` when another shelf write held the
-        slot, or :data:`OUTCOME_LEFT` when it stays in Downloads for a reason
-        that is logged (no usable default folder, the name is taken there, the
-        copy failed, or the file does not read as a model).
+        it landed on, :data:`OUTCOME_RETRY` when it stays in Downloads for a
+        reason that may pass, or :data:`OUTCOME_LEFT` when the file itself is
+        the reason. Every outcome but a move is logged with why.
     """
     destination = find_default_folder(hub)
     if destination is None or destination["kind"] in TAKEN_FROM_KINDS:
@@ -176,7 +179,7 @@ def take_in(hub: HubDatabase, source_path: str) -> tuple[str, Optional[int]]:
             "No default model folder to move %s into; it stays in Downloads.",
             source_path,
         )
-        return OUTCOME_LEFT, None
+        return OUTCOME_RETRY, None
     folder_path = destination["path"]
     if not os.path.isdir(folder_path):
         logger.warning(
@@ -185,7 +188,7 @@ def take_in(hub: HubDatabase, source_path: str) -> tuple[str, Optional[int]]:
             folder_path,
             source_path,
         )
-        return OUTCOME_LEFT, None
+        return OUTCOME_RETRY, None
     relpath = os.path.basename(source_path)
     try:
         target = resolve_path_within(folder_path, relpath)
@@ -198,29 +201,74 @@ def take_in(hub: HubDatabase, source_path: str) -> tuple[str, Optional[int]]:
             exc,
         )
         return OUTCOME_LEFT, None
-    if os.path.lexists(target) or hub.fetchone(
-        "SELECT 1 FROM model_file WHERE model_folder_id = ? AND relpath = ?",
-        (destination["id"], relpath),
-    ):
-        logger.warning(
-            "%s is already in the default folder %s; the download %s stays in "
-            "Downloads rather than replace it.",
-            relpath,
-            folder_path,
-            source_path,
-        )
-        return OUTCOME_LEFT, None
 
     # The slot a move, an import and Add file take: two writers that each found
-    # this destination name free would otherwise race for it.
+    # this destination name free would otherwise race for it. Taken before the
+    # name checks, so nothing that holds it can take the name in between.
     if not SHELF_IO_LOCK.acquire(blocking=False):
-        return OUTCOME_BUSY, None
+        return OUTCOME_RETRY, None
     try:
+        # `present` only: the scanner keeps a deleted file's row as a
+        # `missing` tombstone, and that must not refuse the same model
+        # downloaded again. `register_file` takes the row back over.
+        if os.path.lexists(target) or hub.fetchone(
+            "SELECT 1 FROM model_file WHERE model_folder_id = ? AND relpath = ? "
+            "AND state = ?",
+            (destination["id"], relpath, STATE_PRESENT),
+        ):
+            logger.warning(
+                "%s is already in the default folder %s; the download %s stays "
+                "in Downloads rather than replace it.",
+                relpath,
+                folder_path,
+                source_path,
+            )
+            return OUTCOME_LEFT, None
         if same_device(source_path, folder_path):
             return _rename_in(hub, destination, source_path, target, relpath)
         return _copy_in(hub, destination, source_path, target, relpath)
     finally:
         SHELF_IO_LOCK.release()
+
+
+def _register(
+    hub: HubDatabase,
+    destination: dict,
+    target: str,
+    relpath: str,
+    sha256: Optional[str] = None,
+) -> tuple[str, Optional[int]]:
+    """Register the file now at *target*; never raises.
+
+    ``None`` from the scanner means the file does not read as a model, which is
+    about the file (``left``); an exception is the hub refusing the write - a
+    locked database - which is about this moment (``retry``).
+    """
+    try:
+        model_id = ModelFolderScanner(hub).register_file(
+            destination["id"], target, relpath, sha256=sha256
+        )
+    except Exception as exc:  # noqa: BLE001 - the caller undoes the move whatever it was
+        logger.error(
+            "Registering %s in folder %s failed: %s. The move is undone and it "
+            "will be tried again.",
+            target,
+            destination["id"],
+            exc,
+            exc_info=True,
+        )
+        return OUTCOME_RETRY, None
+    if model_id is None:
+        return OUTCOME_LEFT, None
+    return OUTCOME_MOVED, model_id
+
+
+def _signature(path: str) -> Optional[tuple[int, int]]:
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    return stat.st_size, stat.st_mtime_ns
 
 
 def _rename_in(
@@ -236,13 +284,12 @@ def _rename_in(
             exc,
             exc_info=True,
         )
-        return OUTCOME_LEFT, None
-    model_id = ModelFolderScanner(hub).register_file(destination["id"], target, relpath)
-    if model_id is not None:
-        return OUTCOME_MOVED, model_id
-    # The scanner has logged why it could not read the file. Put it back where
-    # the owner downloaded it rather than leave a file in the default folder
-    # that no row lists.
+        return OUTCOME_RETRY, None
+    outcome, model_id = _register(hub, destination, target, relpath)
+    if outcome == OUTCOME_MOVED:
+        return outcome, model_id
+    # Put it back where the owner downloaded it rather than leave a file in the
+    # default folder that no row lists.
     try:
         publish_no_clobber(target, source_path)
     except OSError as exc:
@@ -255,13 +302,14 @@ def _rename_in(
             destination["path"],
             exc_info=True,
         )
-    return OUTCOME_LEFT, None
+    return outcome, None
 
 
 def _copy_in(
     hub: HubDatabase, destination: dict, source_path: str, target: str, relpath: str
 ) -> tuple[str, Optional[int]]:
     partial = target + PARTIAL_SUFFIX
+    before = _signature(source_path)
     try:
         require_space(destination["path"], os.path.getsize(source_path))
         written = copy_and_digest(source_path, partial)
@@ -277,14 +325,22 @@ def _copy_in(
             exc,
             exc_info=True,
         )
-        return OUTCOME_LEFT, None
-    model_id = ModelFolderScanner(hub).register_file(
-        destination["id"], target, relpath, sha256=written
-    )
-    if model_id is None:
+        return OUTCOME_RETRY, None
+    outcome, model_id = _register(hub, destination, target, relpath, sha256=written)
+    if outcome != OUTCOME_MOVED:
         # Our own copy, proven free above: it goes, and the download stays.
         discard_partial(target)
-        return OUTCOME_LEFT, None
+        return outcome, None
+    # The copy is of the bytes read; a download that grew while they were read
+    # (a resumed `curl -C`) has more than that, so it is kept, not unlinked.
+    if _signature(source_path) != before:
+        logger.warning(
+            "%s changed while it was being copied to %s. The copy is on the "
+            "shelf and the download is kept; remove whichever you do not want.",
+            source_path,
+            target,
+        )
+        return outcome, model_id
     try:
         unlink_source(source_path)
     except OSError as exc:
@@ -295,4 +351,4 @@ def _copy_in(
             target,
             exc,
         )
-    return OUTCOME_MOVED, model_id
+    return outcome, model_id

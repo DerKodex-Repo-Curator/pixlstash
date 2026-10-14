@@ -11,7 +11,7 @@ from typing import Any, Callable, Optional
 from pixlstash.event_types import EventType
 from pixlstash.hub.db import HubDatabase
 from pixlstash.pixl_logging import get_logger
-from pixlstash.services.downloads_intake import OUTCOME_BUSY, OUTCOME_MOVED, take_in
+from pixlstash.services.downloads_intake import OUTCOME_MOVED, OUTCOME_RETRY, take_in
 from pixlstash.tasks.base_task import BaseTask
 
 logger = get_logger(__name__)
@@ -37,9 +37,10 @@ class DownloadsIntakeTask(BaseTask):
         self._hub = hub
         self._paths = paths
         self._notifier = notifier
-        # The files another shelf write kept us from, read by the finder's
-        # ``on_task_complete`` so they are tried again rather than left.
-        self.busy_paths: list[str] = []
+        # The files that stayed for a reason that may pass (a busy shelf, an
+        # unplugged default folder), read by the finder's ``on_task_complete``
+        # so they are tried again rather than left until they change.
+        self.retry_paths: list[str] = []
         self._total_count = len(paths)
         self._processed_count = 0
 
@@ -49,8 +50,8 @@ class DownloadsIntakeTask(BaseTask):
             outcome, model_id = take_in(self._hub, path)
             if outcome == OUTCOME_MOVED:
                 moved.append(model_id)
-            elif outcome == OUTCOME_BUSY:
-                self.busy_paths.append(path)
+            elif outcome == OUTCOME_RETRY:
+                self.retry_paths.append(path)
             self._processed_count += 1
         if moved:
             logger.info(
@@ -60,4 +61,4 @@ class DownloadsIntakeTask(BaseTask):
             )
             if self._notifier is not None:
                 self._notifier(EventType.MODELS_ARRIVED, {"model_ids": moved})
-        return {"moved": moved, "busy": list(self.busy_paths)}
+        return {"moved": moved, "retry": list(self.retry_paths)}

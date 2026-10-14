@@ -3399,6 +3399,30 @@ def test_exactly_one_folder_is_the_default_and_it_moves(shelf_env, tmp_path):
     assert defaults() == []
 
 
+def test_a_refused_patch_changes_nothing(shelf_env, tmp_path):
+    """A body that is refused in part is refused whole: the default does not
+    move when the host path beside it is rejected, nor onto a folder that
+    cannot be one."""
+    folder_id = shelf_env.owner.post(
+        f"{API}/model-folders", json={"path": _new_folder_path(str(tmp_path), "f")}
+    ).json()["id"]
+    r = shelf_env.owner.patch(
+        f"{API}/model-folders/{folder_id}",
+        json={"is_default": True, "host_path": "relative/path"},
+    )
+    assert r.status_code == 400, r.text
+    source_id = shelf_env.owner.post(
+        f"{API}/model-folders",
+        json={"path": _new_folder_path(str(tmp_path), "src"), "kind": "source"},
+    ).json()["id"]
+    r = shelf_env.owner.patch(
+        f"{API}/model-folders/{source_id}", json={"is_default": True}
+    )
+    assert r.status_code == 400, r.text
+    rows = shelf_env.owner.get(f"{API}/model-folders").json()["folders"]
+    assert [row["id"] for row in rows if row["is_default"]] == []
+
+
 def test_unknown_folder_id_is_404_on_every_mutator(shelf_env):
     assert (
         shelf_env.owner.patch(f"{API}/model-folders/999999", json={}).status_code == 404

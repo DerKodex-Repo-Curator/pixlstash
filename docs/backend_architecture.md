@@ -1070,6 +1070,7 @@ The write path has to tell the two apart. Blanking a description is how a pictur
 | `GHOST_CASCADE` | CPU | `GhostCascadeFinder` | Picture ghosts (B4). Hub-attached vaults only. Every 10 s, drains `pending_ghost_cascade`, which the `picture` delete/re-hash triggers fill, through the covered-ghost cascade (see *Picture ghosts* below) |
 | `WORKFLOW_CARD_BACKFILL` | CPU | `WorkflowCardBackfillFinder` | Workflow cards (v1.12 B2). Hub-attached vaults only, and hub-only in the strongest sense: every input is a stored `workflow_recipe_graph.document`, so it reads no picture and keys the recipes of libraries that are not attached. Hands out variants with no card or with one keyed by a superseded `WORKFLOW_KEY_VERSION` / `CORE_VERSION`, which is the whole of the backfill's once-only-ness; a document that will not reduce is deferred for the life of the process, since it cannot change by itself, while a busy hub (`sqlite3.OperationalError`) leaves its batch eligible — deriving a card is cheap to retry, unlike the 24 GB read the checkpoint hasher this is modelled on defers for. LOW priority, 50 variants per task, and counted over the hub's recipes rather than the library's pictures (`workflows_carded`) so the row does not read as finished from the first second |
 | `CHECKPOINT_HASH` | CPU | `MissingCheckpointHashFinder` | Model shelf (v1.10). The **only finder that works on the hub rather than on the vault**, because a model folder is a fact about the machine: `ModelFolderScanner` (`services/model_folder_scanner.py`) registers a checkpoint the instant it sees it as a `model` row with `file_kind = 'checkpoint'` and `sha256` NULL — it may be 24 GB and the shelf must not stall behind it — and this fills the digest in, which is what `model.hashed_at` was always for. **A changed file at a known path forks onto a new `model` row rather than editing the old one in place.** A `model` row is per *content* and legitimately holds many `model_file` rows, so clearing `sha256` by id stripped the digest off copies in other folders that nobody had touched, and it was rejected outright by `CHECK (file_kind <> 'adapter' OR sha256 IS NOT NULL)` when an adapter had been replaced by a checkpoint at that path, rolling the whole write batch back and aborting the scan before its missing and unreachable sweeps ran. The stored row is reused only when it is that path's sole location and its `file_kind` still matches, which is the case where the entry is the same and only the hash is stale. Adapters are not in this lane; they are hashed on sight by the scan, and `CHECK (file_kind <> 'adapter' OR sha256 IS NOT NULL)` is what makes that a schema fact. The queue is `sha256 IS NULL` joined to a `model_file` row in state `present`, matching the partial index `ix_model_hash_queue`. **A `sha256 UNIQUE` collision is a MERGE inside the task, never a raise**: two rows legitimately reach one digest, because an unhashed checkpoint is identified by the location it was found at, so one file in two registered folders is two rows (as is the duplicate the move invariant's crash window is *designed* to leave). The lower id survives, **every `model_file` row the dropped id held is repointed at it**, and it fills any column only the dropped row had. That location move is what stops a checkpoint present at two paths being re-hashed and re-merged once per scan cycle forever. A row whose file cannot be read is deferred for the life of the process, or one broken path would make the planner submit a doomed task every cycle; a re-scan re-queues it. Registered in `vault.py` only when the vault was opened through a hub registration (`RegisteredVaultPath`), so a Vault built without a hub — CLI tools, most tests — simply does not have this lane. |
+| `DOWNLOADS_INTAKE` | CPU | `DownloadsIntakeFinder` | Model shelf (§25.10). Works on the hub, registered in `vault.py` beside `CHECKPOINT_HASH` for the same reason. Every 2 s lists the top of the `kind = 'downloads'` folder and hands out model files that have settled and are complete; `DownloadsIntakeTask` moves each into the default folder, registers it and announces `models_arrived`. A file that stays for a reason that may pass (busy `SHELF_IO_LOCK`, missing or unplugged default folder, failed copy, refused hub write) is retried about every 15 s; one that stays because of the file itself (name taken, not a model) waits until it changes. |
 
 **Re-processing**: setting a work column to `NULL` (e.g. via an Alembic migration) makes the corresponding finder pick the row up on the next pass — this is how data regenerations are triggered.
 
@@ -10683,12 +10684,29 @@ and announces `models_arrived` with the model ids it registered.
   back. Another drive: `copy_and_digest`, verify, publish, register with the
   verified digest, then unlink. It takes the `SHELF_IO_LOCK` slot without
   blocking.
-- **What stays, and how often it is retried.** A name already taken in the
-  default folder, a file that does not read as a model, or an unusable default
-  folder leaves the download where it is, logged, and the finder remembers its
-  signature so it is not retried every sweep, only once it changes. A file kept
-  out only by a held `SHELF_IO_LOCK` is forgotten when the task ends and goes on
-  a later pass.
+- **What stays, and how often it is retried.** Two kinds, by whose fault it
+  is. **`left`**: the file itself is the reason - a file of that name is really
+  in the default folder (a `present` row or one on disk; a `missing` tombstone
+  of a deleted copy does not count, and `register_file` takes it back over), or
+  it does not read as a model. The finder remembers its signature, so it is
+  retried only once it changes. **`retry`**: nothing about the file was wrong -
+  `SHELF_IO_LOCK` was held, the default folder is missing or unplugged, the copy
+  failed, or the hub refused the row (a locked database). It is forgotten when
+  the task ends, settles again and is retried about every 15 s until it goes, so
+  an unplugged drive delays the move and never strands the file. A refused row
+  undoes the move first: the same-drive file is put back in Downloads, the
+  cross-drive copy is discarded.
+- **A cross-drive original is unlinked only if it did not change during the
+  copy** (size and mtime before against after). A download that a tool resumed
+  under the same name (`curl -C`) grew past the bytes copied, so both copies are
+  kept and the warning says so.
+- **The limit, stated with its consequence:** a `.gguf` has no length to check,
+  so a `curl -O` or `wget` download into the Downloads folder that pauses for
+  more than 15 s with its file open can be moved half-written. On the same drive
+  the writer's open handle follows the file and finishes it in the default
+  folder; across drives the copy is short and the writer finishes an unlinked
+  original, so the tail is lost. Browser downloads are not exposed (they write
+  under a temporary name until done), and neither is any `.safetensors`.
 - **The sidebar's `new` tag.** `models_arrived` (integration §8) sets
   `useModelShelfStore().unseenArrivals`, which puts the `new` tag on the
   sidebar's Models row until the shelf is opened, and re-reads a shelf already

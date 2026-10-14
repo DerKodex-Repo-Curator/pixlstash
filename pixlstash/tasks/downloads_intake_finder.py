@@ -33,10 +33,12 @@ class DownloadsIntakeFinder(BaseTaskFinder):
     pauses is common and a model moved half-written is a model that cannot load.
 
     A file handed out is remembered with the signature it had. One that stays in
-    Downloads - its name is taken in the default folder, or it does not read as
-    a model - is therefore not retried every sweep, only once it changes. One
-    that was only kept out by a concurrent shelf write is forgotten when the task
-    ends (:meth:`on_task_complete`), so it settles and goes on the next pass.
+    Downloads because of the file itself - its name is taken in the default
+    folder, or it does not read as a model - is therefore not retried every
+    sweep, only once it changes. One that stayed for a reason that may pass (a
+    busy shelf, a default folder that is missing or unplugged, a failed copy)
+    is forgotten when the task ends (:meth:`on_task_complete`), so it settles
+    again and is retried, about every ``SETTLE_SECONDS``, until it goes.
 
     Registered in ``vault.py`` with the hub finders, because the shelf is a hub
     fact; only one vault is live at a time.
@@ -105,7 +107,7 @@ class DownloadsIntakeFinder(BaseTaskFinder):
 
     def on_task_complete(self, task, error) -> None:
         """Forget what the task did not get to, so it is offered again."""
-        retry = (task.params or {}).get("paths", []) if error else task.busy_paths
+        retry = (task.params or {}).get("paths", []) if error else task.retry_paths
         with self._lock:
             for path in retry:
                 self._dispatched.pop(path, None)

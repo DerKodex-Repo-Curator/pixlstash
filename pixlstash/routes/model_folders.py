@@ -1024,9 +1024,9 @@ def create_router(server) -> APIRouter:
     ):
         server.auth.ensure_secure_when_required(request)
         folder = _fetch_folder(folder_id)
-        if payload.is_default is not None:
-            _set_default(folder, payload.is_default)
 
+        # Everything that can refuse runs before anything is written, so a
+        # 400 never leaves half the body applied.
         assignments: list[str] = []
         params: list = []
         if "host_path" in payload.model_fields_set:
@@ -1035,6 +1035,8 @@ def create_router(server) -> APIRouter:
         if payload.delete_after_import is not None:
             assignments.append("delete_after_import = ?")
             params.append(int(payload.delete_after_import))
+        if payload.is_default is not None:
+            _set_default(folder, payload.is_default)
         if assignments:
             params.append(folder_id)
             with server.hub.transaction() as conn:

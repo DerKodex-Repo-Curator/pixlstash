@@ -2,6 +2,7 @@
 
 import json
 import os
+import sqlite3
 import struct
 
 import pytest
@@ -10,7 +11,7 @@ from pixlstash.event_types import EventType
 from pixlstash.hub.db import HubDatabase
 from pixlstash.services import downloads_intake
 from pixlstash.services.downloads_intake import (
-    OUTCOME_BUSY,
+    OUTCOME_RETRY,
     OUTCOME_LEFT,
     OUTCOME_MOVED,
     candidates,
@@ -18,6 +19,7 @@ from pixlstash.services.downloads_intake import (
     take_in,
 )
 from pixlstash.services.managed_model_store import find_default_folder
+from pixlstash.services.model_folder_scanner import ModelFolderScanner
 from pixlstash.services.model_mover import SHELF_IO_LOCK
 from pixlstash.tasks import downloads_intake_finder
 from pixlstash.tasks.downloads_intake_finder import DownloadsIntakeFinder
@@ -147,7 +149,7 @@ def test_a_busy_shelf_is_a_retry_not_a_refusal(hub, folders):
     downloads, _, _ = folders
     source = write_adapter(downloads / "Later.safetensors")
     with SHELF_IO_LOCK:
-        assert take_in(hub, source) == (OUTCOME_BUSY, None)
+        assert take_in(hub, source) == (OUTCOME_RETRY, None)
     assert os.path.exists(source)
 
 
@@ -227,7 +229,7 @@ def test_a_file_kept_out_by_a_busy_shelf_is_offered_again(hub, folders, monkeypa
     with SHELF_IO_LOCK:
         task._run_task()
     finder.on_task_complete(task, None)
-    assert task.busy_paths
+    assert task.retry_paths
 
     finder.find_task()
     again = finder.find_task()
@@ -250,3 +252,88 @@ def test_a_file_left_in_downloads_is_not_retried_every_sweep(hub, folders, monke
 
     assert finder.find_task() is None
     assert finder.find_task() is None
+
+
+def test_a_deleted_copy_left_as_a_tombstone_does_not_refuse_a_new_download(
+    hub, folders
+):
+    """The scanner keeps a deleted file's row as `missing`; downloading the
+    same model again must take that row back over, not be refused by it."""
+    downloads, default, default_id = folders
+    first = write_adapter(downloads / "Again.safetensors")
+    assert take_in(hub, first)[0] == OUTCOME_MOVED
+    os.unlink(default / "Again.safetensors")
+    with hub.transaction() as conn:
+        conn.execute("UPDATE model_file SET state = 'missing'")
+
+    again = write_adapter(downloads / "Again.safetensors")
+    assert take_in(hub, again)[0] == OUTCOME_MOVED
+    row = hub.fetchone(
+        "SELECT state FROM model_file WHERE model_folder_id = ? AND relpath = ?",
+        (default_id, "Again.safetensors"),
+    )
+    assert row["state"] == "present"
+
+
+@pytest.mark.parametrize("across_drives", [False, True])
+def test_a_hub_that_refuses_the_row_undoes_the_move(
+    hub, folders, monkeypatch, across_drives
+):
+    downloads, default, default_id = folders
+    source = write_adapter(downloads / "Locked.safetensors")
+    monkeypatch.setattr(downloads_intake, "same_device", lambda *_: not across_drives)
+
+    def locked(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(ModelFolderScanner, "register_file", locked)
+
+    assert take_in(hub, source) == (OUTCOME_RETRY, None)
+    assert os.path.exists(source)
+    assert not (default / "Locked.safetensors").exists()
+
+
+def test_across_drives_a_download_that_grew_during_the_copy_is_kept(
+    hub, folders, monkeypatch
+):
+    downloads, default, default_id = folders
+    source = write_adapter(downloads / "Growing.safetensors")
+    monkeypatch.setattr(downloads_intake, "same_device", lambda *_: False)
+    real_copy = downloads_intake.copy_and_digest
+
+    def copy_then_grow(src, dst):
+        digest = real_copy(src, dst)
+        with open(src, "ab") as handle:
+            handle.write(b"more")
+        return digest
+
+    monkeypatch.setattr(downloads_intake, "copy_and_digest", copy_then_grow)
+
+    assert take_in(hub, source)[0] == OUTCOME_MOVED
+    assert os.path.exists(source), "the longer original was unlinked"
+    assert _located(hub, default_id) == {"Growing.safetensors"}
+
+
+def test_an_unplugged_default_folder_is_retried_once_it_is_back(
+    hub, folders, monkeypatch, tmp_path
+):
+    downloads, default, default_id = folders
+    monkeypatch.setattr(downloads_intake_finder, "_CHECK_INTERVAL_S", 0.0)
+    monkeypatch.setattr(DownloadsIntakeFinder, "SETTLE_SECONDS", 0.0)
+    finder = DownloadsIntakeFinder(hub)
+    write_adapter(downloads / "Wait.safetensors")
+    away = tmp_path / "unplugged"
+    default.rename(away)
+
+    finder.find_task()
+    task = finder.find_task()
+    task._run_task()
+    finder.on_task_complete(task, None)
+    assert task.retry_paths
+
+    away.rename(default)
+    finder.find_task()
+    again = finder.find_task()
+    assert again is not None, "the download was stranded after the outage"
+    again._run_task()
+    assert _located(hub, default_id) == {"Wait.safetensors"}
