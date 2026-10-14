@@ -4811,6 +4811,7 @@ when that is felt.
 | `VRAM_OOM`               | ✓ broadcast |
 | `EXTERNAL_MOVES_PENDING` | ✓ broadcast |
 | `CHANGED_WORKFLOWS`      | ✓ broadcast |
+| `MODELS_ARRIVED`         | ✓ broadcast |
 <!-- AUTOGEN:end name="events" -->
 
 - Events are published from `Vault` whenever a task or domain operation completes; the broadcaster in `server.py` fans the filtered subset out to **owner-level** connected clients (see WebSocket authentication below).
@@ -10674,8 +10675,12 @@ and announces `models_arrived` with the model ids it registered.
   (15 s, for `curl -O` and `wget`, which write the final name directly); and,
   for a `.safetensors`, a length of at least `8 + header + furthest data_offsets
   end` (`safetensors_complete`), so a download that stalled longer than the
-  window is still not moved half-written. A `.gguf` states no total and gets
-  the window only.
+  window is still not moved half-written. A header the file cannot back up (an
+  offset that is not a whole number, or a negative one) counts as incomplete.
+  A settled file that is still short is remembered by its signature and not
+  read again until it changes, so a corrupt download costs one read and one
+  log line, and a stalled one is looked at again when it resumes. A `.gguf`
+  states no total and gets the window only.
 - **A move, unlike `Add file`'s copy**, because registering a folder as the
   Downloads folder is the owner saying "take models out of here". The order is
   still the one that cannot lose a file: the destination exists and is

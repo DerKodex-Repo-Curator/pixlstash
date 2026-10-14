@@ -62,7 +62,9 @@ class DownloadsIntakeFinder(BaseTaskFinder):
         self._notifier = notifier
         # path -> (signature, monotonic time the signature was first seen).
         self._pending: dict[str, tuple[tuple[int, int], float]] = {}
-        # path -> the signature it had when it was handed out.
+        # path -> the signature it had when it was handed out, or when it had
+        # settled and was still not complete. Either way it is not looked at
+        # again until that signature changes.
         self._dispatched: dict[str, tuple[int, int]] = {}
         # ``on_task_complete`` may run on the task runner's thread.
         self._lock = threading.Lock()
@@ -91,12 +93,15 @@ class DownloadsIntakeFinder(BaseTaskFinder):
             seen.add(path)
             if not self._settled(path, signature, now):
                 continue
-            if not safetensors_complete(path):
-                continue
+            complete = safetensors_complete(path)
             with self._lock:
                 self._pending.pop(path, None)
                 self._dispatched[path] = signature
-            ready.append(path)
+            if complete:
+                ready.append(path)
+            # Settled and short: a stalled download, or a corrupt one. It waits
+            # for its signature to change rather than being re-read (and
+            # re-logged) every sweep; a download that resumes changes it.
         with self._lock:
             for table in (self._pending, self._dispatched):
                 for path in [p for p in table if p not in seen]:

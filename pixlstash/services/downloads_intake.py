@@ -150,13 +150,29 @@ def safetensors_complete(path: str) -> bool:
         return False
     if not isinstance(header, dict):
         return False
+    # The header is the file's own claim, so a malformed one - an offset that
+    # is not a whole number, or a negative one that would make any length pass
+    # - is judged incomplete rather than trusted or allowed to raise.
     end = 0
     for key, entry in header.items():
         if key == "__metadata__" or not isinstance(entry, dict):
             continue
         offsets = entry.get("data_offsets")
-        if isinstance(offsets, list) and len(offsets) == 2:
-            end = max(end, int(offsets[1]))
+        if not isinstance(offsets, list) or len(offsets) != 2:
+            continue
+        offset_end = offsets[1]
+        if isinstance(offset_end, bool) or not isinstance(offset_end, int):
+            offset_end = -1
+        if offset_end < 0:
+            logger.info(
+                "%s has a malformed safetensors header (tensor %r ends at %r); "
+                "leaving it in Downloads.",
+                path,
+                key,
+                offsets[1],
+            )
+            return False
+        end = max(end, offset_end)
     return size >= 8 + header_len + end
 
 

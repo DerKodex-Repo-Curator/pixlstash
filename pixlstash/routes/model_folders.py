@@ -1035,26 +1035,31 @@ def create_router(server) -> APIRouter:
         if payload.delete_after_import is not None:
             assignments.append("delete_after_import = ?")
             params.append(int(payload.delete_after_import))
-        if payload.is_default is not None:
-            _set_default(folder, payload.is_default)
-        if assignments:
-            params.append(folder_id)
+        if payload.is_default:
+            _check_default_eligible(folder)
+        # One transaction for the whole body, so a write that fails part-way
+        # (a locked database) leaves none of it applied.
+        if assignments or payload.is_default is not None:
             with server.hub.transaction() as conn:
-                conn.execute(
-                    f"UPDATE model_folder SET {', '.join(assignments)} WHERE id = ?",
-                    tuple(params),
+                if payload.is_default is not None:
+                    _apply_default(conn, folder, payload.is_default)
+                if assignments:
+                    conn.execute(
+                        f"UPDATE model_folder SET {', '.join(assignments)} "
+                        "WHERE id = ?",
+                        (*params, folder_id),
+                    )
+            if payload.is_default is not None:
+                logger.info(
+                    "Default model folder %s: %s (id=%s).",
+                    "set to" if payload.is_default else "no longer",
+                    folder["path"],
+                    folder_id,
                 )
         return _to_response(_fetch_folder(folder_id))
 
-    def _set_default(folder: dict, is_default: bool) -> None:
-        """Make *folder* the default destination, or hand the role back.
-
-        Clearing every flag and setting one happen in one transaction, so the
-        partial unique index never sees two. Marking the managed store and
-        unmarking any folder both leave no flag at all, which is what makes the
-        managed store the default again.
-        """
-        if is_default and folder["kind"] not in DEFAULT_ELIGIBLE_KINDS:
+    def _check_default_eligible(folder: dict) -> None:
+        if folder["kind"] not in DEFAULT_ELIGIBLE_KINDS:
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -1062,22 +1067,22 @@ def create_router(server) -> APIRouter:
                     "default: one you added, or the managed store."
                 ),
             )
-        with server.hub.transaction() as conn:
-            if is_default or folder["is_default"]:
-                conn.execute(
-                    "UPDATE model_folder SET is_default = 0 WHERE is_default = 1"
-                )
-            if is_default and folder["kind"] != MANAGED_KIND:
-                conn.execute(
-                    "UPDATE model_folder SET is_default = 1 WHERE id = ?",
-                    (folder["id"],),
-                )
-        logger.info(
-            "Default model folder %s: %s (id=%s).",
-            "set to" if is_default else "no longer",
-            folder["path"],
-            folder["id"],
-        )
+
+    def _apply_default(conn, folder: dict, is_default: bool) -> None:
+        """Make *folder* the default destination, or hand the role back.
+
+        Run on the caller's transaction: clearing every flag and setting one
+        commit together, so the partial unique index never sees two. Marking
+        the managed store and unmarking any folder both leave no flag at all,
+        which is what makes the managed store the default again.
+        """
+        if is_default or folder["is_default"]:
+            conn.execute("UPDATE model_folder SET is_default = 0 WHERE is_default = 1")
+        if is_default and folder["kind"] != MANAGED_KIND:
+            conn.execute(
+                "UPDATE model_folder SET is_default = 1 WHERE id = ?",
+                (folder["id"],),
+            )
 
     @router.delete(
         "/model-folders/{folder_id}",

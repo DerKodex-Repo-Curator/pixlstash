@@ -337,3 +337,38 @@ def test_an_unplugged_default_folder_is_retried_once_it_is_back(
     assert again is not None, "the download was stranded after the outage"
     again._run_task()
     assert _located(hub, default_id) == {"Wait.safetensors"}
+
+
+@pytest.mark.parametrize("bad_end", ["16", -1, True, 1.5, None])
+def test_a_malformed_header_is_incomplete_not_a_crash(tmp_path, bad_end):
+    """The header is the download's own claim: a non-integer or negative end
+    must neither raise nor make any length pass."""
+    path = _write_safetensors(
+        tmp_path / "bad.safetensors",
+        {"t": {"dtype": "F16", "shape": [1], "data_offsets": [0, bad_end]}},
+        payload=b"\x00" * 16,
+    )
+    assert safetensors_complete(path) is False
+
+
+def test_a_settled_corrupt_file_is_read_once_until_it_changes(
+    hub, folders, monkeypatch
+):
+    downloads, _, _ = folders
+    monkeypatch.setattr(downloads_intake_finder, "_CHECK_INTERVAL_S", 0.0)
+    monkeypatch.setattr(DownloadsIntakeFinder, "SETTLE_SECONDS", 0.0)
+    reads = []
+    monkeypatch.setattr(
+        downloads_intake_finder,
+        "safetensors_complete",
+        lambda path: reads.append(path) or safetensors_complete(path),
+    )
+    finder = DownloadsIntakeFinder(hub)
+    _write_safetensors(
+        downloads / "Corrupt.safetensors",
+        {"t": {"dtype": "F16", "shape": [1], "data_offsets": [0, "x"]}},
+        payload=b"\x00" * 16,
+    )
+    for _ in range(4):
+        assert finder.find_task() is None
+    assert len(reads) == 1

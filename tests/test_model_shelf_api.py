@@ -3399,6 +3399,31 @@ def test_exactly_one_folder_is_the_default_and_it_moves(shelf_env, tmp_path):
     assert defaults() == []
 
 
+def test_a_patch_whose_second_write_fails_moves_no_default(shelf_env, tmp_path):
+    """The default flag and the other fields commit together: a write that
+    fails part-way (simulated by a trigger) leaves the default where it was."""
+    folder_id = shelf_env.owner.post(
+        f"{API}/model-folders", json={"path": _new_folder_path(str(tmp_path), "t")}
+    ).json()["id"]
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute(
+            "CREATE TRIGGER test_refuse_delete_after_import BEFORE UPDATE OF "
+            "delete_after_import ON model_folder BEGIN "
+            "SELECT RAISE(ABORT, 'simulated write failure'); END"
+        )
+    try:
+        with pytest.raises(Exception, match="simulated write failure"):
+            shelf_env.owner.patch(
+                f"{API}/model-folders/{folder_id}",
+                json={"is_default": True, "delete_after_import": True},
+            )
+    finally:
+        with shelf_env.server.hub.transaction() as conn:
+            conn.execute("DROP TRIGGER IF EXISTS test_refuse_delete_after_import")
+    rows = shelf_env.owner.get(f"{API}/model-folders").json()["folders"]
+    assert [row["id"] for row in rows if row["is_default"]] == []
+
+
 def test_a_refused_patch_changes_nothing(shelf_env, tmp_path):
     """A body that is refused in part is refused whole: the default does not
     move when the host path beside it is rejected, nor onto a folder that
