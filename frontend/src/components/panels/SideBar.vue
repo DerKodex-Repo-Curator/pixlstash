@@ -2464,6 +2464,11 @@ function closeSetEditor() {
   setEditorSet.value = null;
 }
 
+// The control focused when Settings opened and its ancestors, nearest first:
+// DOM nodes, held raw. The ancestors are taken now because a node that has
+// since been removed no longer leads back up to the ones still in the page.
+let settingsReturnPath = [];
+
 /**
  * Open the settings dialog, optionally on a specific nav entry.
  * @param {string} [tab] - nav entry id (e.g. "scrapheap"); Appearance if omitted
@@ -2471,8 +2476,31 @@ function closeSetEditor() {
  */
 function openSettingsDialog(tab = "") {
   settingsDialogInitialTab.value = typeof tab === "string" ? tab : "";
+  // Settings opens from a prop, so Vuetify has no activator to hand focus back
+  // to on close; the control that was focused when it opened takes it instead.
+  settingsReturnPath = [];
+  for (let el = document.activeElement; el && el !== document.body; ) {
+    settingsReturnPath.push(el);
+    el = el.parentElement;
+  }
   settingsDialogOpen.value = true;
 }
+
+watch(settingsDialogOpen, (isOpen) => {
+  if (isOpen) return;
+  const path = settingsReturnPath;
+  settingsReturnPath = [];
+  // The opener may be gone (the shelf's empty state unmounts once a folder is
+  // scanned in) or folded away under a narrow toolbar's ⋯; the nearest
+  // ancestor that still takes focus (the shelf root) beats <body>.
+  nextTick(() => {
+    for (const el of path) {
+      if (!el.isConnected) continue;
+      el.focus();
+      if (document.activeElement === el) return;
+    }
+  });
+});
 
 function selectCharacter(id, label = null, event = null) {
   clearCountNew(id);

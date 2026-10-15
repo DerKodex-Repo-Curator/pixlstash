@@ -829,9 +829,9 @@ export const FOLDER_LAYOUT_LABELS = {
 /**
  * What each folder tier is marked with, in ONE icon family.
  *
- * Shared with `ModelFoldersDialog`, which is where these glyphs started: the
- * shelf header and the dialog row are two views of the same registry, and two
- * copies of the map would be two vocabularies for one fact. Nothing here is
+ * These glyphs started in the old model-folders dialog, which shared this map
+ * with the shelf header: two copies of the map would be two vocabularies for
+ * one fact. Settings › Models now draws no glyph, so the header is its reader. Nothing here is
  * hand-drawn - the header used to have no tier mark at all, and the mock that
  * proposed one built a folder out of a div and a `::before` tab, which is a
  * second icon family by construction.

@@ -578,7 +578,7 @@ def _check_uncaptioned(facts: _LibraryFacts) -> dict:
         ),
         action={
             "label": "Choose a captioner",
-            "note": "Settings ▸ Models",
+            "note": "Settings ▸ Tagging",
             "kind": "settings",
             "tab": "behaviour",
         },
@@ -664,7 +664,7 @@ def _check_untagged(facts: _LibraryFacts) -> dict:
         ),
         action={
             "label": "Choose a tagger",
-            "note": "Settings ▸ Models",
+            "note": "Settings ▸ Tagging",
             "kind": "settings",
             "tab": "behaviour",
         },

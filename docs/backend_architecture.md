@@ -10640,11 +10640,11 @@ names, after the only other copy was removed.
   multi-run import is a sequence of separate lock-taking requests, so a forget
   can still land between two of them. What it buys is a clean 4xx before the
   batch starts instead of a file failed halfway through forty.
-- **The UI says so beforehand.** `ModelFoldersDialog`'s `forgetReason` blocks
+- **The UI says so beforehand.** `useModelFolderGates`' `forgetReason` blocks
   Forget while `useModelMovesStore().busy`, the same guard `relocateReason`
-  already carried, and the row's note explains it — an ordinary `user` folder is
-  forgettable without being relocatable, so a guard written only for Move left
-  exactly those rows clickable and failing.
+  already carried, and the control's tooltip explains it — an ordinary `user`
+  folder is forgettable without being relocatable, so a guard written only for
+  Move left exactly those rows clickable and failing.
 
 ### 25.10 The Downloads folder and the default folder
 

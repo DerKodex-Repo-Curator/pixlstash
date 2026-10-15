@@ -583,10 +583,9 @@
           machine. Add the folder where you keep them.
         </p>
         <AppButton
-          ref="emptyFoldersBtnRef"
           variant="primary"
           aria-haspopup="dialog"
-          @click="openFolders(emptyFoldersBtnRef?.$el)"
+          @click="openFolders()"
         >
           Add a model folder
         </AppButton>
@@ -1547,21 +1546,11 @@
       :destination-folder-id="movePreselected"
       @close="closeMove"
     />
-    <!-- Setting the output root from the registry dialog lands on the runs for
-         the same reason doing it from the Add menu does: the owner set it
-         because they have runs to import, so showing them beats leaving a new
-         tab to be discovered. -->
-    <ModelFoldersDialog
-      ref="foldersDialogRef"
-      :open="foldersOpen"
-      @close="closeFolders"
-      @source-added="showTab('runs')"
-    />
 
     <!-- A folder header's own menu (#1270): the two registry verbs that are
          about one folder and need no selection. Anchored to the pointer like
-         the row menu. The gates, their reasons and the Move picker all belong
-         to the folders dialog, so the items ask it rather than keep a copy. -->
+         the row menu. The gates and their reasons are the ones Settings ›
+         Models uses (`useModelFolderGates`), so the two cannot disagree. -->
     <v-menu
       v-model="folderMenuOpen"
       :target="folderMenuAt"
@@ -1577,7 +1566,7 @@
         @keydown="onMenuKeydown"
       >
         <button
-          v-if="foldersDialogRef?.canScan(folderMenuFolder)"
+          v-if="canScanFolder(folderMenuFolder)"
           class="ctx-item"
           :class="{ 'ctx-item--disabled': folderScanReason }"
           type="button"
@@ -1618,6 +1607,17 @@
       pick-model-file
       @select="onFilePicked"
       @close="closeAddFile"
+    />
+
+    <!-- The same picker in its directory mode, emptying a folder into what it
+         returns: the header menu's Move. `registeredPaths` for the same reason
+         as below - moving into a registered folder would swallow it. -->
+    <FolderBrowser
+      :open="Boolean(relocatingFolder)"
+      :registered-paths="foldersStore.registeredPaths"
+      already-registered-label="Already a model folder"
+      @select="onRelocatePicked"
+      @close="closeRelocate"
     />
 
     <!-- The same picker in its directory mode, registering what it returns as
@@ -1674,7 +1674,6 @@ import BaseModelInput from "../widgets/BaseModelInput.vue";
 import ShelfEditDialog from "../panels/ShelfEditDialog.vue";
 import MergeCopiesDialog from "../panels/MergeCopiesDialog.vue";
 import ShelfMoveDialog from "../panels/ShelfMoveDialog.vue";
-import ModelFoldersDialog from "../panels/ModelFoldersDialog.vue";
 import ModelWorksWithDialog from "../panels/ModelWorksWithDialog.vue";
 import ModelSetGrid from "./ModelSetGrid.vue";
 import InspectorEdgeTab from "../widgets/InspectorEdgeTab.vue";
@@ -1715,6 +1714,7 @@ import {
 } from "../../stores/useModelShelfStore";
 import { useModelFoldersStore } from "../../stores/useModelFoldersStore";
 import { useModelMovesStore } from "../../stores/useModelMovesStore";
+import { useModelFolderGates } from "../../composables/useModelFolderGates";
 import { useNoticeStore } from "../../stores/useNoticeStore";
 import { useOperationStore } from "../../stores/useOperationStore";
 import { useReviewSessionsStore } from "../../stores/useReviewSessionsStore";
@@ -1847,8 +1847,6 @@ const userPrefs = useUserPrefsStore();
 const rootEl = ref(null);
 const showMenuOpen = ref(false);
 const sortMenuOpen = ref(false);
-const foldersOpen = ref(false);
-const foldersDialogRef = ref(null);
 const folderMenuOpen = ref(false);
 const folderMenuAt = ref([0, 0]);
 const folderMenuFolder = ref(null);
@@ -1864,7 +1862,7 @@ function closeGroupMenu() {
 }
 /** The model whose companions the Works with dialog is answering for, or null. */
 const worksWithModel = ref(null);
-// Held raw like `folderInvoker`: a DOM node, not reactive state. `VDialog`
+// Held raw: a DOM node, not reactive state. `VDialog`
 // restores focus to its own `activatorEl` and this dialog has none - it opens
 // from a prop - so without this, closing it dropped focus to <body> (WCAG
 // 2.4.3). Both openers are transient: the context-menu item unmounts with the
@@ -1875,10 +1873,6 @@ const worksWithInvoker = shallowRef(null);
 // that place - it unmounts with the menu.
 const addBtnRef = ref(null);
 const foldersBtnRef = ref(null);
-// The empty state's own door. Unlike the two above it is NOT always mounted -
-// the first scan that finds a model replaces the empty state with the list -
-// which is the case `closeFolders`' fallback exists for.
-const emptyFoldersBtnRef = ref(null);
 /**
  * Hand focus to the first candidate that will actually take it, in order.
  * `addBtnRef` and `foldersBtnRef` both carry `shelf-fold-680`: below that
@@ -2511,7 +2505,7 @@ function shelfOwnsTheKey(event) {
   if (
     moveOpen.value ||
     addSourceOpen.value ||
-    foldersOpen.value ||
+    relocatingFolder.value ||
     addFileOpen.value ||
     thumbnailPickerOpen.value ||
     editVerb.value
@@ -3249,7 +3243,7 @@ function onTabKeydown(event) {
 // output root exists there is nothing left here to add.
 
 const addSourceOpen = ref(false);
-// Held raw like `folderInvoker`: a DOM node, not reactive state.
+// Held raw: a DOM node, not reactive state.
 const addSourceInvoker = shallowRef(null);
 
 /** Whether the ai-toolkit output root has been set. */
@@ -3301,7 +3295,7 @@ async function onSourcePicked(path) {
 
 const addFileOpen = ref(false);
 const adding = ref(false);
-// Held raw like `folderInvoker`: a DOM node, not reactive state.
+// Held raw: a DOM node, not reactive state.
 const addFileInvoker = shallowRef(null);
 
 function openAddFile(invoker) {
@@ -3354,37 +3348,42 @@ async function onFilePicked(path) {
   }
 }
 
-// Two controls open the same dialog, so which one gets focus back is a fact
-// about the press rather than about the dialog. Held raw: it is a DOM node, and
-// making it reactive would deep-track an element tree for nothing.
-const folderInvoker = shallowRef(null);
+const {
+  canScan: canScanFolder,
+  scanReason: scanFolderReason,
+  relocateReason: relocateFolderReason,
+  scan: scanFolder,
+} = useModelFolderGates();
+// The folder the header menu's Move is emptying, while its picker is open.
+const relocatingFolder = ref(null);
 // The ⋯ the left group folds into below 690px; its rows open dialogs, so they
 // need its trigger to hand focus back to.
 const overflowRef = ref(null);
 
 /**
- * @param {HTMLElement} invoker Control to hand focus back to on close. Every
- *   door names one, and names the durable control rather than the pressed
- *   element: the `Add folder…` item is gone by the time the dialog closes, so
- *   it names the Add button it hangs off. The earlier version read
- *   `event.currentTarget` and was dead - no call site ever passed an event.
+ * The folder registry lives in Settings › Models; every shelf door opens it
+ * there. Settings gives focus back to whatever held it when it opened, and a
+ * menu item is gone by the time it closes, so a door names the durable control
+ * it hangs off and that takes focus first.
+ *
+ * @param {HTMLElement} [invoker] control to hand focus back to on close.
  */
 function openFolders(invoker) {
-  folderInvoker.value = invoker;
-  foldersOpen.value = true;
+  invoker?.focus?.();
+  emit("open-settings", "models");
 }
 
 /** Why the open folder menu's Rescan is refused, or "" when it is not. */
 const folderScanReason = computed(() =>
   folderMenuFolder.value
-    ? foldersDialogRef.value?.scanReason(folderMenuFolder.value) || ""
+    ? scanFolderReason(folderMenuFolder.value)
     : "",
 );
 
 /** Why the open folder menu's Move is refused, or "" when it is not. */
 const folderMoveReason = computed(() =>
   folderMenuFolder.value
-    ? foldersDialogRef.value?.relocateReason(folderMenuFolder.value) || ""
+    ? relocateFolderReason(folderMenuFolder.value)
     : "",
 );
 
@@ -3398,8 +3397,7 @@ function openFolderMenu(group, event) {
   const folder = foldersStore.folders.find(
     (row) => Number(row.id) === group.folderId,
   );
-  const dialog = foldersDialogRef.value;
-  if (!folder || !dialog || (!dialog.canScan(folder) && !folder.relocatable)) {
+  if (!folder || (!canScanFolder(folder) && !folder.relocatable)) {
     return;
   }
   event.preventDefault();
@@ -3427,33 +3425,28 @@ function onFolderHeaderKeydown(group, event) {
 
 /** Rescan from the header menu. The menu has no activator, so focus goes back by hand. */
 function rescanFromMenu() {
-  foldersDialogRef.value?.scan(folderMenuFolder.value);
+  scanFolder(folderMenuFolder.value);
   folderMenuOpen.value = false;
   folderMenuInvoker.value?.focus?.();
 }
 
-/** Move from the header menu: the dialog's own picker, focus back to the header. */
+/** Move from the header menu: the shared picker, focus back to the header. */
 function relocateFromMenu() {
   folderMenuOpen.value = false;
-  folderInvoker.value = folderMenuInvoker.value;
-  foldersDialogRef.value?.relocate(folderMenuFolder.value);
+  const folder = folderMenuFolder.value;
+  if (folder && !relocateFolderReason(folder)) relocatingFolder.value = folder;
 }
 
-async function closeFolders() {
-  const returnTo = folderInvoker.value;
-  foldersOpen.value = false;
-  folderInvoker.value = null;
-  await nextTick();
-  // The empty-state button unmounts the moment the first folder is scanned
-  // in, and `foldersBtnRef` itself folds away under `overflowRef` below
-  // 656px - `restoreFocus` tries both, then the ⋯ trigger, before giving up
-  // on the shelf root, rather than dropping focus to <body>.
-  restoreFocus(
-    returnTo,
-    foldersBtnRef.value?.el,
-    overflowRef.value?.trigger?.(),
-    rootEl.value,
-  );
+async function onRelocatePicked(path) {
+  const folder = relocatingFolder.value;
+  closeRelocate();
+  if (!folder || relocateFolderReason(folder)) return;
+  await moves.relocate(folder.id, path);
+}
+
+function closeRelocate() {
+  relocatingFolder.value = null;
+  nextTick(() => restoreFocus(folderMenuInvoker.value, rootEl.value));
 }
 
 // `missing` is a fact (the folder was readable, the file was not in it);

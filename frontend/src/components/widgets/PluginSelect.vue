@@ -38,7 +38,7 @@ const props = defineProps({
     validator: (v) => ["tag", "description"].includes(v),
   },
   /**
-   * A plugin whose settings the host renders inline (the Models tab does so
+   * A plugin whose settings the host renders inline (the Tagging tab does so
    * for the built-in PixlStash tagger): the gear greys out while it is chosen.
    */
   inlineSettingsFor: { type: String, default: "" },

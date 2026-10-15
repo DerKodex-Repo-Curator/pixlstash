@@ -9,6 +9,7 @@ import AppearanceSection from "./AppearanceSection.vue";
 import BehaviourSection from "./BehaviourSection.vue";
 import ComfyuiHostSection from "./ComfyuiHostSection.vue";
 import ComputeSection from "./ComputeSection.vue";
+import ModelFoldersSection from "./ModelFoldersSection.vue";
 import PrivacySection from "./PrivacySection.vue";
 import ScrapheapSection from "./ScrapheapSection.vue";
 import SnapshotsSection from "./SnapshotsSection.vue";
@@ -69,9 +70,18 @@ const navItems = computed(() =>
       show: true,
     },
     {
-      id: "behaviour",
-      icon: "tune-variant",
+      // The model folders. The shelf's folder button lands here.
+      id: "models",
+      icon: "folder-multiple-outline",
       label: "Models",
+      show: !isReadOnly.value,
+    },
+    {
+      // Memory, VRAM and the taggers. The id predates the label and is kept:
+      // the server's library insights deep-link to it.
+      id: "behaviour",
+      icon: "tag-outline",
+      label: "Tagging",
       show: !isReadOnly.value,
     },
     {
@@ -223,6 +233,16 @@ watch(
           @update:show-keyboard-hint="emit('update:show-keyboard-hint', $event)"
           @update:thumbnail-mode="emit('update:thumbnail-mode', $event)"
         />
+      </div>
+      <div
+        v-if="!isReadOnly"
+        v-show="settingsTab === 'models'"
+        id="settings-pane-models"
+        class="settings-pane"
+        role="region"
+        aria-labelledby="settings-nav-models"
+      >
+        <ModelFoldersSection :open="dialogOpen && settingsTab === 'models'" />
       </div>
       <div
         v-if="!isReadOnly"
