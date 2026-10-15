@@ -234,7 +234,7 @@ All state consumed by more than one component lives in a Pinia store. The stores
 | `useLockedSetsStore` | `useLockedSetsStore.js` | Which pictures are frozen by a locked picture set. Fed by `GET /picture_sets/locked-members`; refreshed on app start and on the same sidebar-refresh / `pictures_changed` ws triggers the sidebar uses. Single source of the lock-tooltip copy reused by the grid badge, overlay chip, and context-menu gating. |
 | `useModelShelfStore` | `useModelShelfStore.js` | The model shelf's rows and its `Show` selection. `rows` are the raw `/adapters` + `/checkpoints` payload, **every block fetched so far rather than the shown set**: a fetch replaces the blocks it asked for and leaves the rest standing, because the option vocabularies (`adapterKindOptions`, `capabilityOptions`, `baseModelOptions`) are derived from `rows`, so an overwriting narrowed fetch deleted the kind checkboxes that unticking Adapters is documented to *grey*, and dropped base models that stayed selected and persisted with no box left to untick them. `visibleRows` layers the resolved name, the reduced location state and `copies` (how many of the row's registered copies are `present`) on top and applies the kind, capability and base-model narrowing **client-side**, so a multi-select base-model filter is not one request per option. The capability filter matches **has this capability**, not *is this kind*: a model serving two features survives a tick of either, and like the kind boxes it narrows only the block it hangs under (engines), never the whole shelf. `groups` sorts `visibleRows` client-side on the five ruled `SortKey` values and cuts them into one level of groups (`none` / `base_model` / `folder` / `feature`), always returning at least one group so the flat and grouped lists are one piece of markup; the fifth axis, `workflow_set`, is deliberately NOT in that list and is the shelf's DEFAULT (#1438) — its groups overlap, so it swaps the row list for `ModelSetGrid.vue` and is served instead by `workflowSets` / `visibleCombinations` / `setStacks` / `setFoldCounts`, read once from `GET /models/workflow-sets` by `loadWorkflowSets()` and refetched only after a scan (`fetchRows({markNew: true})`), never on a filter tick, because it is a window over every kept picture in the vault and every stored ComfyUI run; `hiddenSets` rides on that same payload and is changed through `PUT /models/workflow-sets/hidden` (**#1869**, the hide is per LIBRARY and server-side, not the per-browser `localStorage` flag it used to be), whose answer is the whole new list so a hide needs no re-read; `worksWithModel(id)` answers off the WHOLE payload rather than the narrowed one, since hiding a companion because its kind is unticked would turn a view setting into a claim about the evidence; sorting never refetches, because every field the keys read is already on the payload and three server-sorted blocks would be destroyed by the merge above. **Two axes fan a row out across several groups** — `folder` (a file copied into two folders occupies both) and `feature` (a multi-capability model is listed under each feature it serves, which is the design rule) — so `rowKey` carries the group on every grouped axis, not just the ones that need it: one key across several draws put `tabindex="0"` on all of them at once. **Under `folder` the key carries the COPY, not the folder**, because the hub is content-addressed and the same bytes can be registered twice *inside one folder* under two names — the exact collision the previous sentence describes, reached on the axis it was written for. `relpath` is half the `model_file` key and so unique within a folder by construction. A row that cannot answer the key sorts last in BOTH directions, and the unset group sorts last whatever the direction; an adapter declares no capability and groups under **its algorithm** (`LoRA`, `LoKr`, …) rather than under one "No feature recorded" bucket that held most of the shelf. One vocabulary spells it and one fold keys it, both in `utils/modelShelf.js`: `adapterKindKey` trims and lower-cases the free-text column, `adapterKindLabel` names the folded value, and the group key, the group header, the row's Kind cell, the nested `Show` checkboxes AND the `adapterKinds` filter behind them all read those two rather than `row.kind`. **The fold has to reach the filter, not just the label.** `LoRA` is reachable from the edit dialog, which trims but does not case-fold, so faceting on the raw column offered two checkboxes drawn with the same label that each ticked half the rows — while the axis folded them into one visible group. **And the fold has to reach the remembered selection too**, which `storedFilters` does on read: a shipped build persisted the raw column, so a blob holding `LoRA` would match nothing and appear in no checkbox — an empty shelf with the Adapters box reading fully on and nothing on screen naming the filter doing it. Folded rather than discarded by a `FILTERS_SCHEMA_VERSION` bump, which throws the whole blob away when the selection is still exactly what the user chose. The key is the folded value and never the label, because the key is what `modelShelfView.collapsed.feature` remembers a collapse by; it is prefixed `kind:` to keep an algorithm out of the capability keyspace. Group headers are uppercased by `.shelf-group-label` like every other header on the axis, so the header reads `LORA` where the cell reads `LoRA`: one vocabulary stops a *second spelling* existing, it does not exempt the axis from the shelf-wide case rule. Everything that is not an adapter with an algorithm still falls through to "No feature recorded", which is the whole of the rest: a checkpoint, an unclassified file, an engine declaring no capability and any `file_kind` this build does not know have no algorithm at all; an adapter whose `kind` folds to the empty string has none either (the hub CHECK makes it NOT NULL, not non-empty, so a whitespace-only one is reachable over the raw API); and an adapter whose `kind` is the literal `unknown` has the classifier's refusal rather than an algorithm (`KIND_UNKNOWN`, `utils/adapter_header.py`) — heading that `UNKNOWN` would stand a second shrug beside the real one and call it a feature. The `Show` facet still offers `Unknown` as a box, because "which of these could we not identify" is a real selection even where it is not a real feature. `view` (`groupBy`, `sortKey`, `sortDirection`) and the per-axis collapsed sets persist under `pixlstash:modelShelfView`, a SECOND key so `resetFilters` cannot take the sort order with it. `filters` (`adapters`, `adapterKinds`, `checkpoints`, `unclassified`, `engines`, `capabilities`, `baseModels`, `duplicatesOnly`) persists to `localStorage` under `pixlstash:modelShelfFilters` — not to `/users/me/config`, which is a fixed `User` model and would need a backend column. **`duplicatesOnly` is the one field `storedFilters` deliberately does not read back**: "only the files written twice" is a question somebody asks once while reclaiming disk, and remembered across a restart it is a shelf that opens showing four rows of an eighteen-hundred-row library with nothing on screen saying why. An empty `adapterKinds` / `capabilities` / `baseModels` array means **unconstrained**, the standard multi-select convention and the only reading under which a fresh install shows anything. `activeCount` counts filter SECTIONS that deviate from their default, not ticked boxes, or a mild narrowing would read as `9`. Only the four top-level type toggles refetch, and they narrow client-side too; the rest only narrow what is already loaded. Each fetch takes the next `epoch` and only the newest may write `rows` or clear `loading`, so a slower earlier flight cannot land last and show adapters only while Checkpoints is ticked; `resetForSession` bumps the same counter, so a read on the wire when the credential changed is discarded. `ModelShelf.vue` watches `loaded` and refetches when a session reset clears it, which the store cannot do itself because session-reset handlers run *before* the new credential is installed. **Session reset drops `rows` but keeps `filters`:** the models are hub-side facts about this machine, but every row carries the characters and sets in the ACTIVE LIBRARY that use it, while the selection and the view axes are the user's own preferences and hold no ids. `offlineMounts` and the `New` badge's `newIds` are both derived here and both documented under §13.1, "The three kinds of absence": `offlineMounts` reads `rows` rather than `visibleRows` on purpose, and `newIds` is a per-fetch id diff that only `fetchRows({ markNew: true })` fills and every other fetch clears. |
 | `useWorkflowsStore` | `useWorkflowsStore.js` | The Workflows grid's cards (v1.12 F1a) — `GET /workflows`, one card per workflow keyed by `id` (#1623); B9 (#1410) moved the grid onto that route when it deleted the shelf's topology list. `sortKey` is one of `rating` / `used` / `pictures` / `name` (the one ascending key, A to Z); *Your ratings* orders by **`rank`**, the Bayesian cover rank, not by the `rating` the card displays, or a 5.0 from one picture would lead a 4.8 from ninety. `selectedKeys` holds workflow ids: `select(id, {additive})` replaces the selection or toggles one id, `selectRange(ids)` takes a drawn run, and `runnableCard` is the one selected card or null. `refetch()` bumps the epoch, clears `loading` and re-reads the grid, so a write's re-read is never refused behind an older read still on the wire, and that older read cannot land over it. `invalidate()` is the one door in from outside the view — a ghost purge in Settings › Privacy — and re-reads the grid **only if it had been read**, so a purge made by somebody who never opened Workflows fires no request. `duplicateCard` re-reads the grid after writing rather than patching it, and returns the server's answer (whose `workflow_id` is the new manual workflow, which the caller selects) or `null` with the reason in `error`. `deleteSelected` deletes manual workflows only (the bar's gate), clears the selection when none was refused and bumps `recipesEpoch`, since their saved recipes become unfiled. `useSetKey` / `requestUseSet(id)` is how the selection menu's *Use a set…* row asks `WorkflowTab` to open its own set menu on that workflow (#1850): the `pictureToOpen` shape, a one-shot the tab clears when it takes it. **Every write the Workflow tab makes to a workflow's waiting changes ends in `refetch()`**, because the updates socket does not echo a write to the window that made it and the card's *Unsaved* badge is drawn off the grid. Session reset drops all of it: every count on a card is read across the active library's pictures. **`filters` (F7) is split across the wire on purpose**: the One-offs and Hidden flags are sent as `include_one_offs` / `include_hidden` and re-read the grid, because they widen the set the server answers with; Ghosts, Type, Checkpoint, Source and Rating only ever remove a card, so `filteredCards` applies them here. `filterChips` is the one answer to "which filters are on" — the panel's *Clear all*, the strip and the toolbar badge all count it — and its WORDS come from `workflowFilterChips` in `utils/filterChips.js`, the module that exists so one filter cannot be spelled two ways; the store owns the state and the refetch decision and nothing else. A filter that removes a card also **prunes `selectedKeys`**, because the selection bar and the rail's bulk verbs act on the selection and would otherwise offer Hide or Delete on cards nobody can see, and `filterOptions` counts each pick-one option over `cards` rather than `filteredCards`, so a count cannot go to zero on the row being read. |
-| `useModelFoldersStore` | `useModelFoldersStore.js` | The registered model folders and the scans running against them. Fetched by the shelf (folder headers, drive bands) and re-read when `ModelFoldersDialog` opens. It is a **store rather than dialog state** because a scan outlives the panel that started it, and because `POST .../rescan` answers 202 as soon as the thread starts, so completion has to be waited for: the store polls `GET /model-folders` every 3s and treats `last_checked` advancing as done, then refreshes `useModelShelfStore` and says what landed. It **gives up after 10 minutes**, because the scanner logs an exception without stamping `last_checked` and a crashed scan is otherwise indistinguishable from a slow one. `forget` captures the row's fields BEFORE the request, which is what makes the notice's `Add it back` possible and therefore what lets removal skip a confirmation prompt. **Session reset drops it whole:** absolute host paths are owner-only, and a session that lost its credential has no standing to keep polling. |
+| `useModelFoldersStore` | `useModelFoldersStore.js` | The registered model folders and the scans running against them. Fetched by the shelf (folder headers, drive bands) and re-read when Settings › Models opens. It is a **store rather than dialog state** because a scan outlives the panel that started it, and because `POST .../rescan` answers 202 as soon as the thread starts, so completion has to be waited for: the store polls `GET /model-folders` every 3s and treats `last_checked` advancing as done, then refreshes `useModelShelfStore` and says what landed. It **gives up after 10 minutes**, because the scanner logs an exception without stamping `last_checked` and a crashed scan is otherwise indistinguishable from a slow one. `forget` captures the row's fields BEFORE the request, which is what makes the notice's `Add it back` possible and therefore what lets removal skip a confirmation prompt. **Session reset drops it whole:** absolute host paths are owner-only, and a session that lost its credential has no standing to keep polling. |
 | `useGenStackPrefsStore` | `useGenStackPrefsStore.js` | Remembered client pref for whether newly filtered images stack with their source: `stackFilterOutputs` (plugin "Filters" runs), default ON and persisted to `localStorage`. Its `stackI2IOutputs` half went in v1.12 F5 with the two surfaces that read it, since `POST /workflows/run` does not stack. |
 | `useEntityListsStore` | `useEntityListsStore.js` | The character / picture-set / project **lists** themselves (`characters`, `pictureSets`, `projects`) plus `fetchedAt` and `pending` per kind. One cache for the three surfaces that need them — the `SideBar` tree, the image context menu's Person/Set/Project flyouts, and the tag-review scope pickers. **Stale-while-revalidate:** a caller renders the cached list immediately and calls `refresh(kind)` *without awaiting it*, so opening a flyout never waits on the network; concurrent callers share one in-flight request (`inFlight`, modelled on `useDedupStore.scopeCounts`). `invalidate(kinds)` is **refetch-only** — a `characters_changed` ws event or a local assignment says "ask again", it never writes the store from a payload (`origin_client_id` is echo-matching, not authority; see §9 and integration_architecture.md §8.1). **These are `SCOPED_LIST` routes, so their content is an authorization decision:** the cache is in-memory only (never `localStorage`/`sessionStorage`), `reset()` drops it on every auth-context transition via the single `onSessionReset` chokepoint in `apiClient` (logout / login / share-token entry / vault switch), and an epoch guard discards any response that was in flight across that transition. Revalidate-on-open is mandatory rather than an optimisation: a share/scoped session receives no ws events (the stream is owner-only), so it is that session's only invalidation path. **The sidebar's row counts ride along on these lists (`include_counts=true`, issue #651):** every character row carries `image_count` and `project_image_count` (scoped to the character's OWN `project_id`, or to "in no project" when it has none) and every project row carries `image_count`, which is what replaced `SideBar.fetchSidebarData`'s one-`/{id}/summary`-per-row fan-out. They live on the shared list rather than in a second counts-bearing cache on purpose (two shapes for one entity would mean two caches, two invalidation paths and two epochs), and the flyout / scope-picker consumers simply ignore the extra fields. Because both scopes are on every row and neither depends on the sidebar's current project selection, one cached response serves both sidebar view modes. Distinct from `useEntityNamesStore`, which holds id→name maps only. |
 | `useEntityNamesStore` | `useEntityNamesStore.js` | `characterNames`, `setNames`, `projectNames`, `refFolderLabels`, `importFolderLabels` (id→name maps). One-directional id→name only (names aren't unique). `SideBar` publishes via `merge*` setters after each fetch; `ImageGrid`'s breadcrumb consumes them to label the route's IDs. |
@@ -895,7 +895,7 @@ nothing in this dialog has to survive one.
 
 **Pane height is fixed** (`.settings-content`, 524px) so the dialog does not
 resize as the rail is clicked. A pane that outgrows it scrolls whole, header and
-all, which is what the Models pane did once a library had six tagger plugins.
+all, which is what the Tagging pane (then called Models) did once a library had six tagger plugins.
 A pane with unbounded content should bound and scroll that content instead:
 Models gives the Auto-tagging section the leftover height and scrolls each
 plugin table inside its column (`BehaviourSection` below).
@@ -1426,7 +1426,7 @@ Schema-driven form renderer for **tagger plugin** parameter schemas. Props: `sch
 Per-plugin settings dialog. Props: `plugin` (plugin schema object), `params` (current param dict), `modelValue` (dialog open). Emits: `update:modelValue`, `saved`. Contains `TaggerParametersUI` and a "Reset to defaults" button. Saves via `PATCH /users/me/config` (`tagger_settings.plugins.<name>.params`). Not opened for the PixlStash tagger, whose settings are inline (below).
 
 #### `TaggerPluginSettingsPanel.vue`
-The same form inline, for a plugin the host shows in the page (the Models tab's PixlStash Tagger Settings section). It draws that `SettingsSection` itself (`title` prop), with the preview (icon-only) and the status in the heading's action slot, the fields in two columns, and Reset to defaults under them, where it lands beneath the first column's help text. **This is how it fits the fixed pane**: #1648's whole-face setting, landing beside the inline panel, made it scroll by ~70px, and a setting a plugin adds now costs half a row. Props: `title`, `plugin`, `settings`. Emits: `update:settings` (the merged settings, PluginSelect's contract). `TaggerParametersUI`, Reset to defaults, no Save: like the rest of the tab (and the VRAM budget's 500 ms debounce) it saves as you go, 500 ms after the last edit, with a "Saving…" / "Saved." status. It skips a number box cleared mid-edit, flushes a pending save on unmount, re-saves an edit whose pause ended while the last save was in flight, and ignores its own save echoing back through `settings` so that echo cannot reseed over a newer edit. A `role="alert"` error line, and the label-thresholds preview dialog for `pixlstash_tagger`. Reseeds the form only when the plugin's name, schema or saved params change by value, never on a new plugin or settings object alone: the pane's `is_loaded` poll replaces the plugin every 5 s. An auto-save that turns `pixlstash_tagger`'s `whole_face_crop` from off to on then offers to re-check the library's faces (#1662): a dry run of `POST /taggers/face-crop-retag` gives the count, a `useConfirm` asks, and the answer never affects the saved setting; the outcome is a notice.
+The same form inline, for a plugin the host shows in the page (the Tagging tab's PixlStash Tagger Settings section). It draws that `SettingsSection` itself (`title` prop), with the preview (icon-only) and the status in the heading's action slot, the fields in two columns, and Reset to defaults under them, where it lands beneath the first column's help text. **This is how it fits the fixed pane**: #1648's whole-face setting, landing beside the inline panel, made it scroll by ~70px, and a setting a plugin adds now costs half a row. Props: `title`, `plugin`, `settings`. Emits: `update:settings` (the merged settings, PluginSelect's contract). `TaggerParametersUI`, Reset to defaults, no Save: like the rest of the tab (and the VRAM budget's 500 ms debounce) it saves as you go, 500 ms after the last edit, with a "Saving…" / "Saved." status. It skips a number box cleared mid-edit, flushes a pending save on unmount, re-saves an edit whose pause ended while the last save was in flight, and ignores its own save echoing back through `settings` so that echo cannot reseed over a newer edit. A `role="alert"` error line, and the label-thresholds preview dialog for `pixlstash_tagger`. Reseeds the form only when the plugin's name, schema or saved params change by value, never on a new plugin or settings object alone: the pane's `is_loaded` poll replaces the plugin every 5 s. An auto-save that turns `pixlstash_tagger`'s `whole_face_crop` from off to on then offers to re-check the library's faces (#1662): a dry run of `POST /taggers/face-crop-retag` gives the count, a `useConfirm` asks, and the answer never affects the saved setting; the outcome is a notice.
 
 #### `PluginSelect.vue`
 Picks the active plugin for one capability (`kind`: `"tag"` or `"description"`, filtering on `supports_tags` / `supports_descriptions`). A field-shaped button (the `AppSelect` box, as a `<button>`) opens a `v-menu` built from the one menu (`.ctx-menu` / `.ctx-item`, `styles/context-menu.css`, keyboard via `utils/menuKeyboard`): an explicit None row, then a `menuitemradio` row per plugin with the trailing olive check on the chosen one. Each plugin row, and the field, leads with a loaded icon in the `--gutter-glyph` box (`mdi-check-circle` in `success`, or a muted `mdi-circle-outline`; deliberately not `.ctx-icon`, which turns olive on the chosen row) and carries a `Tooltip` with the plugin's description and loaded state, so readiness can be compared without choosing, which saves. Not a native `<select>`: its popup takes neither the menu styling nor a tooltip per option. Choosing refocuses the field on the menu's `afterLeave` (sooner, the leaving menu takes focus away again). Beside it a secondary icon-only gear opens `TaggerPluginSettingsDialog` for the chosen plugin (`aria-disabled` plus a guarded handler while None is chosen, or while the chosen plugin is `inlineSettingsFor`, so its tooltip stays reachable and says why). A failed save is a `role="alert"` line. A saved plugin that is no longer installed shows as "(not installed)", and the empty state names it too. Patches `tagger_settings.active_<kind>_plugin` via `PATCH /users/me/config`, writing `null` for None. Props: `plugins`, `settings`, `kind`, `inlineSettingsFor`. Emits: `update:settings`. Replaced the radio tables (issue #1344).
@@ -4813,7 +4813,7 @@ for.
   default destination for a drop or an import. A destination you cannot see is
   not a destination. `withEmptyFolders` merges the registry into the folder
   groups, which is why `ModelShelf.vue` now fetches the folder list on mount
-  rather than leaving `ModelFoldersDialog` as its only reader.
+  rather than leaving Settings › Models as its only reader.
   - It says **which** empty it is: "Not scanned yet" against "No models in this
     folder", discriminated on `last_checked IS NULL` rather than on a zero count,
     because a folder nothing has walked has no count to be zero. Only one of the
@@ -4998,10 +4998,10 @@ groups with `tier`, `icon`, `chip`, `drive`, `offline` and `nested`.
   under it is noise rather than a second signal. The rail still runs down each
   header, which is what holds the grouping together once the band has scrolled
   off.
-- **The tier's glyph is the folders dialog's own.** `FOLDER_TIERS` lives in
-  `utils/modelShelf.js` and `ModelFoldersDialog.vue` reads its `KIND_ICON` out
-  of it: the header and the dialog row are two views of one registry, and two
-  copies of the map would be two vocabularies for one fact. It is also why the
+- **The tier's glyph is one map.** `FOLDER_TIERS` lives in
+  `utils/modelShelf.js`; the folder list in Settings › Models draws no glyph
+  (its tool chip says whose folder it is), so the shelf header is its reader. It
+  is also why the
   glyph is an mdi folder like every other — an earlier mock hand-drew one from a
   `div` plus a `::before` tab, which is a second icon family by construction.
   `managed` takes the home glyph and `foreign` the lock, because `foreign` is
@@ -5064,9 +5064,10 @@ the characters. It is disabled with its reason when nothing selected is hashed.
   name somebody gave is kept, and under the `name` sort the folder's draws are
   re-sorted after the fan-out.
 - **A folder header has a context menu** (#1270): Rescan and Move for the
-  registered folder it stands for. The gates, their refusal sentences and the
-  Move picker stay in `ModelFoldersDialog`, which exposes them; a header with
-  neither verb to offer keeps the browser's own menu.
+  registered folder it stands for. The gates and their refusal sentences are
+  `useModelFolderGates`, shared with Settings › Models; the shelf mounts its own
+  `FolderBrowser` for Move. A header with neither verb to offer keeps the
+  browser's own menu.
 - **Each line says what is at it.** A bare path is a claim that the file is
   there, and three of the four states are the claim that it is not, so
   `COPY_STATE_NOTE` appends "not where it was" / "out of reach" / "not
@@ -5399,7 +5400,7 @@ branches of `groups`, including the ungrouped default, where it was previously
 absent and left the list's `v-for` key `undefined` for every row. That is the same "1,800
 tab stops is a trap" rule as before, now solved by roving rather than by having
 no stop at all. The grid role also lifts the ban that a listbox imposes on
-controls inside a row — the reason `ModelFoldersDialog` refused a listbox, where
+controls inside a row — the reason the model-folders list refused a listbox, where
 a control inside `role="option"` would have been unreachable. Nothing in the row
 is a tab stop even so, because the alternative is 1,800 new stops: renaming is a
 double click on the name, or F2 on the row for the keyboard.
@@ -6296,108 +6297,82 @@ its own overrides (the container-query fold, the icon-trigger accent) and
 
 #### Registering the folders the shelf reads
 
-`ModelFoldersDialog.vue` (`components/panels/`) is the registry surface,
-opened from three doors: the toolbar's `bar-btn--boxed` `Model folders` button,
-the `+ Add ▾` menu's `Add folder…` item, and the empty state's own button. The empty state is the moment the folder list matters, so
-the fix must not be two navigations away in Settings — and the toolbar button is
-what keeps it reachable once the empty state has unmounted, which is exactly
-when rescan, relocate and forget start to matter. Because more than one control
-opens it, `ModelShelf.vue` holds a `folderInvoker` and `openFolders(invoker)`
-takes the control to return focus to. **Every door names one**, and names the
-control that will still be there rather than the element pressed: the
-`Add folder…` item names the **Add button behind it**, because the item itself
-unmounts with the menu. The fallback is the always-mounted toolbar button, and
-it exists for exactly one case — the empty-state button unmounting underneath
-its own dialog when the first scan finds something. That case is asserted, along
-with the two ordinary ones, against a real `document.activeElement`; drop the
-`isConnected` check and the suite goes red. The earlier `event.currentTarget`
-version of all this was dead code: no call site ever passed an event.
+The registry is **Settings › Models** (`settings/ModelFoldersSection.vue`); the
+memory, VRAM and tagger settings that pane used to hold are the **Tagging**
+entry beside it (`BehaviourSection.vue`, nav id still `behaviour` because the
+server's library insights deep-link to it). The shelf's three doors, the
+toolbar's `Model folders` button, the `+ Add ▾` menu's `Add folder…` item and
+the empty state's own button, all `emit("open-settings", "models")`.
 
-This button does not take **`bar-btn--open`**. `App.css` declares that class
-for "the toolbar button while its MENU is open", and this one opens an
-`AppDialog`, which sets `:scrim="true"` — so the highlight is painted under the
-scrim for exactly as long as it applies, and the button has none of the chevron
-the rule rotates. `Group`, `Sort` and `Show` keep it because they really are
-menus. It carries `aria-haspopup="dialog"` and no `aria-expanded`: focus moves
-into the dialog rather than into anything the button owns.
+The pane fills Settings' fixed-height content box as a flex column, and **the
+folder list is the only thing in it that scrolls**: it shrinks to what it holds
+and scrolls once it outgrows the pane, so Settings never grows a scrollbar for
+it. Top to bottom:
 
-`FolderBrowser.vue` is reused whole as the host-path picker, and
-`registeredPaths` is what stops the API's duplicate 409 rather than reporting
-it. One picker serves four verbs (Add folder, Move, Set ai-toolkit folder,
-Monitor download folder), so `addingKind` records which opened it and is
-cleared when it closes.
+- **The header**: `Model folders`, then `Set ai-toolkit folder` (only while no
+  output root is set), the **Downloads pill** or, while none is set, `Monitor
+  download folder`, then `Add folder`. The pill names the Downloads folder by
+  base name with the full path as its tooltip, a dot and `watching`, and its ▾
+  holds `Change…` (forget the old folder, then register the pick: the server
+  holds one at most, so registering first would 409) and `Stop watching`
+  (Forget). A dashed line from the pill points into the card below.
+- **The default folder, pinned**: its own row in a card under the header, with
+  `Change ▾` listing `useModelFoldersStore().defaultCandidates` minus the
+  current one. It says in words what the dashed line means. A folder appears in
+  one place only, so the default and the Downloads folder are not in the list.
+- **The list**: every other folder, one line each, in the server's order: the
+  path, the server's **`tool`** chip (never derived from `kind`: the
+  HuggingFace cache is `foreign` like PixlStash's own folders but reads
+  `HuggingFace` unless every repo in it is PixlStash's, and a StabilityMatrix
+  folder is a plain `user` row only the server can recognise), the file count
+  and size in a right-aligned column (no size at zero rather than `0 B`), and
+  **one action**: Move where the server says `relocatable`, Forget where the
+  owner associated the folder, and an invisible placeholder otherwise so the
+  column holds. No glyph, no scan age, no per-row scan.
+- **The foot**: `N folders · size` and **Rescan all**, which scans every folder
+  `canScan` admits (the managed store and the owner's own) and counts them down
+  while they run.
 
-**The registry renders as two lists** (`sections`): the folders models are
-listed from, then the Downloads folder (backend §25.10), which lists nothing and
-so sits apart under its own `section-label` with the tray glyph
-(`FOLDER_TIERS.downloads`), a `Downloads` chip, Forget and no scan, count or
-scan date. Between them sits the **Default folder** `AppSelect` with a `HelpTip`
-saying what it governs; it offers `useModelFoldersStore().defaultCandidates`
-(`user` folders and the managed store), shows the row whose `is_default` is
-true, and the default row also wears a `Default` chip. The native select hands
-its value back as a string, so the change handler compares by `Number(value)`.
-`Monitor download folder` sits in the header beside `Set ai-toolkit folder` and
-on the same rule: shown while none is set, gone once the row exists.
+Paths go through `FolderPath.vue` (`utils/folderPath.js`): a home directory is
+shown as a `home` token, recognised by its conventional shape
+(`/home/<x>`, `/Users/<x>`, `C:\Users\<x>`), and the rest gives way in the
+middle, the head shrinking to an ellipsis while the last segment keeps its
+width. The full path is the tooltip and the accessible text.
 
-The chip beside a path is `Managed` for the managed store and otherwise the
-server's **`tool`**, never derived from `kind`: the HuggingFace cache is
-`foreign` like PixlStash's own folders but reads `HuggingFace` unless every
-repo in it is one PixlStash downloaded (an empty cache included), and a StabilityMatrix folder is a plain `user`
-row that only the server can recognise, through StabilityMatrix's own
-`library.json`, its `Models` folder included when that is a symlink.
-
+**The gates live in `composables/useModelFolderGates.js`**, read by this pane
+and by the shelf's folder-header menu (#1270), so the two cannot disagree.
 Four states are designed rather than left to fail on click:
 
 - **A remote owner reads the list and may change nothing.** `GET
   /model-folders` is `OWNER_ONLY`, every mutator is `LOCAL_OWNER_ONLY` (§16.3).
-  The signal is `useLibrariesStore().canManage`, already refreshed at startup
-  for every non-read-only session, so there is no second source of truth to
-  drift. Blocked controls take **`aria-disabled`, never the `disabled`
-  attribute**, the shipped `MixedQueueRow` / `ReviewDecisionBar` pattern, so
-  they keep their tab stop and the `aria-describedby` reason they point at
-  stays reachable by keyboard. Docker blocks *adding* for a different reason
-  (`POST` needs a host path this UI cannot ask for from inside a container) and
-  says so in its own sentence.
-- **The managed store has no remove affordance at all.** `DELETE` on it is a
-  **409, not a 403**: the caller is authorized and the target's state refuses,
-  because exactly one such row always exists and it is PixlStash's own storage.
-  A button that could only ever 409 is a worse answer than no button, so the
-  row carries Move in that slot instead, and the reason its Forget is missing is
-  **rendered in the row**, not in a tooltip.
-- **Move is offered on `relocatable`, never on `movable`.** The server says which
-  rows relocate, because the client cannot work it out: PixlStash's own download
-  folder (#905) and the InsightFace packs (#906) both read `kind: foreign`,
-  `owner: pixlstash`, `movable: root_only`, and the HuggingFace cache beside them
-  is `foreign` too — the backend tells all three apart by path and by `movable`,
-  and reports the one boolean that answers this slot's question. Since #906 the
-  first two both carry it and the cache still does not. Move reuses
-  `FolderBrowser` as its picker, the same one Add uses, so the dialog remembers
-  which verb opened it. The job itself belongs to `useModelMovesStore`, not to
-  this dialog: a relocation of 438 GB outlives the panel, the shelf behind it
-  already draws that progress, and there is **one move at a time machine-wide**,
-  so a second is blocked in the row with its reason rather than reported as a 409
-  afterwards. The dialog closes when the job is accepted.
-- **What the picked path means is the server's business, not the dialog's.** For
-  the InsightFace packs it names the InsightFace *root* and the packs land in
-  `<path>/models`; for the other two it is the folder's own new location. The row
-  sends what the owner picked either way, so this asymmetry has no presence in
-  the client at all.
-- **Every action slot is reserved.** Three slots per row plus a trailing help
-  mark, and an action a row does not have is hidden with `visibility`, never
-  `v-if`: §5.1's glyph-gutter rule applied to the right edge, or the managed
-  row's missing Forget would slide every other row's Scan sideways. The help
-  mark (`widgets/HelpTip.vue`, an `AppButton` in a `v-tooltip`) is the
-  pointer-and-focus route to a blocked control's reason; it opens on focus as
-  well as hover and its box is reserved on rows with nothing to explain.
+  The signal is `useLibrariesStore().canManage`. Blocked controls take
+  **`aria-disabled`, never the `disabled` attribute**, so they keep their tab
+  stop, and `aria-describedby` points at the one visible note under the pane.
+  Docker blocks *adding* for its own reason (`POST` needs a host path this UI
+  cannot ask for from inside a container).
+- **The managed store has no Forget.** `DELETE` on it is a **409, not a 403**:
+  exactly one such row always exists and it is PixlStash's own storage. It
+  carries Move in that slot instead.
+- **Move is offered on `relocatable`, never on `movable`.** PixlStash's own
+  download folder, the InsightFace packs and the HuggingFace cache all read
+  `kind: foreign`; the backend tells them apart and reports the one boolean.
+  What the picked path means (the InsightFace *root* for the packs) is the
+  server's business. The job belongs to `useModelMovesStore`: a relocation
+  outlives the pane, the shelf draws its progress, and there is **one move at a
+  time machine-wide**, so a second is blocked beforehand with its reason in the
+  control's tooltip (which opens on keyboard focus) rather than reported as a
+  409. Forget takes the same slot (#1017) and is blocked the same way.
 - **`POST .../rescan` answers 202 the instant the thread starts.** There is no
-  progress channel, because the scanner is a raw daemon thread, so there is no
-  progress bar to draw and a fake one would lie. `useModelFoldersStore` polls
-  the list every 3s and treats `last_checked` advancing as completion, then
-  refreshes the shelf and says what landed. The poll lives in the **store, not
-  the dialog**, because a 57 GB scan outlives the panel that started it; it
-  gives up after 10 minutes, because the scanner logs its exception without
-  stamping `last_checked` and a crash is otherwise indistinguishable from a
-  slow read.
+  progress channel, so `useModelFoldersStore` polls the list every 3s and treats
+  `last_checked` advancing as completion. The poll lives in the **store**,
+  because a scan outlives the pane that started it; it gives up after 10
+  minutes.
+
+`FolderBrowser.vue` is reused whole as the host-path picker, and
+`registeredPaths` stops the duplicate 409 rather than reporting it. One picker
+serves every verb in the pane, so `addingKind` / `relocating` / `replacing`
+record which opened it and are cleared when it closes. The shelf mounts its own
+for the header menu's Move.
 
 Forgetting a folder takes **no confirmation and an undo instead**. The API
 tombstones only the `model_file` rows, so the models keep the names, triggers
@@ -6407,10 +6382,7 @@ the row's fields are captured *before* the request that destroys them.
 
 Rows are a plain `<ul role="list">` of real `<button>`s, deliberately **not**
 `role="listbox"` / `role="option"`: nothing here is selected, and interactive
-controls inside an `option` are unreachable to a screen reader. All **three**
-openers restore focus to the control that was pressed — see the folder-registry
-section above for how, and for the one case (the empty-state button unmounting
-underneath its own dialog) that the fallback exists to catch.
+controls inside an `option` are unreachable to a screen reader.
 
 ---
 

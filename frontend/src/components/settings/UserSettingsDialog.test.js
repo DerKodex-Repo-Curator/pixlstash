@@ -30,6 +30,7 @@ vi.mock("./ComputeSection.vue", () => ({
   default: { template: '<div class="compute-stub" />' },
 }));
 vi.mock("./LibrariesSection.vue", () => ({ default: sectionStub }));
+vi.mock("./ModelFoldersSection.vue", () => ({ default: sectionStub }));
 vi.mock("./PrivacySection.vue", () => ({ default: sectionStub }));
 vi.mock("./ScrapheapSection.vue", () => ({ default: sectionStub }));
 vi.mock("./SnapshotsSection.vue", () => ({ default: sectionStub }));
@@ -88,6 +89,7 @@ describe("UserSettingsDialog library navigation", () => {
       wrapper.findAll(".settings-nav-item").map((n) => n.attributes("id")),
     ).toEqual([
       "settings-nav-appearance",
+      "settings-nav-models",
       "settings-nav-behaviour",
       "settings-nav-smart-score",
       "settings-nav-libraries",
@@ -152,6 +154,7 @@ describe("UserSettingsDialog library navigation", () => {
         wrapper.findAll(".settings-nav-item").map((n) => n.attributes("id")),
       ).toEqual([
         "settings-nav-appearance",
+        "settings-nav-models",
         "settings-nav-behaviour",
         "settings-nav-smart-score",
         "settings-nav-libraries",

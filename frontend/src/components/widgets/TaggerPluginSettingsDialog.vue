@@ -10,7 +10,7 @@
  *   - "Downloaded models" panel (rendered when list_downloaded_artifacts is non-empty)
  *
  * The built-in PixlStash tagger does not open this: its settings, with the
- * label-thresholds preview, are inline in the Models tab
+ * label-thresholds preview, are inline in the Tagging tab
  * (TaggerPluginSettingsPanel).
  */
 import { computed, ref, watch } from "vue";

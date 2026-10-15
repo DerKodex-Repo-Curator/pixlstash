@@ -18,7 +18,7 @@ const props = defineProps({
   /** Current param values (v-model). */
   modelValue: { type: Object, default: () => ({}) },
   /**
-   * Fields per row. A host of fixed height (the Models tab's inline tagger
+   * Fields per row. A host of fixed height (the Tagging tab's inline tagger
    * panel) sets 2, so each setting a plugin adds costs half a row.
    */
   columns: { type: Number, default: 1 },

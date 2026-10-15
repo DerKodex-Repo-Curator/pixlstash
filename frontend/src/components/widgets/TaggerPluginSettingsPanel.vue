@@ -1,11 +1,11 @@
 <script setup>
 /**
  * Inline settings form for one tagger plugin, for a host that shows a plugin's
- * settings in the page rather than behind PluginSelect's gear (the Models tab
+ * settings in the page rather than behind PluginSelect's gear (the Tagging tab
  * does this for the built-in PixlStash tagger).
  *
  * Drawn as a settings section of its own (`title`), with its fields in two
- * columns: the Models pane is a fixed height, and a setting the plugin adds
+ * columns: the Tagging pane is a fixed height, and a setting the plugin adds
  * must not make it scroll.
  *
  * Shows TaggerParametersUI and "Reset to defaults", plus a label-thresholds
