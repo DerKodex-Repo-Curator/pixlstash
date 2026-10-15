@@ -79,6 +79,11 @@ COMFYUI_UNREACHABLE = "comfyui_unreachable"
 UI_FORMAT = "ui_format"
 MISSING_NODES = "missing_nodes"
 MISSING_MODELS = "missing_models"
+# A checkpoint or diffusion model ComfyUI lacks and the shelf holds, which a run
+# would load through `PixlStashCheckpointLoader` but for a ComfyUI still running
+# a pack from before its `shelf` widget (#1923): a restart, not an install, is
+# the fix.
+PACK_OUTDATED = "pack_outdated"
 A1111 = "a1111"
 PICTURE_INPUT_UNFILLED = "picture_input_unfilled"
 NO_LORA_LOADER = "no_lora_loader"
@@ -686,6 +691,34 @@ def apply_choices(graph: dict, choices: list[tuple[str, str, str]]) -> None:
             inputs[field_name],
         )
         inputs[field_name] = value
+
+
+def with_pack_outdated(reasons: list[Reason], files: set[str]) -> list[Reason]:
+    """*reasons* with every missing model in *files* moved to ``pack_outdated``.
+
+    *files* are the checkpoints a current ComfyUI-PixlStash would load off the
+    shelf, so they are not missing: the running ComfyUI's pack is old.
+    """
+    moved: list[dict] = []
+    kept: list[Reason] = []
+    for reason in reasons:
+        if reason.code == MISSING_MODELS and files:
+            models = reason.detail.get("models", [])
+            # A base model's: a VAE of the same name is still missing.
+            stale = [
+                model
+                for model in models
+                if model["file"] in files
+                and model["folder"] in ("checkpoints", "diffusion_models")
+            ]
+            if stale:
+                moved += stale
+                models = [model for model in models if model not in stale]
+                if not models:
+                    continue
+                reason = Reason(MISSING_MODELS, {**reason.detail, "models": models})
+        kept.append(reason)
+    return [*kept, Reason(PACK_OUTDATED, {"models": moved})] if moved else kept
 
 
 def with_pixlstash_refusals(reasons: list[Reason], nodes: list[dict]) -> list[Reason]:
@@ -1759,7 +1792,8 @@ def blocks_batch(reasons: list[Reason], *, allow_unchecked: bool = False) -> boo
     A missing model is the brief's named case and the rule generalises the way
     the owner would expect: installing a file is a trip away from the keyboard,
     so queueing the rest of a mixed batch would leave them re-running the same
-    gesture afterwards to catch the ones that were skipped.
+    gesture afterwards to catch the ones that were skipped. Restarting ComfyUI
+    for an out-of-date pack (``pack_outdated``) is the same trip.
 
     **An uninspectable ComfyUI blocks unless the owner has consented**, which is
     the whole of the ``allow_unchecked`` rule: without it nothing at all is
@@ -1771,7 +1805,7 @@ def blocks_batch(reasons: list[Reason], *, allow_unchecked: bool = False) -> boo
     """
     unchecked = (COMFYUI_UNREACHABLE, COMFYUI_NOT_CONFIGURED)
     return any(
-        reason.code == MISSING_MODELS
+        reason.code in (MISSING_MODELS, PACK_OUTDATED)
         or (reason.code in unchecked and not allow_unchecked)
         for reason in reasons
     )

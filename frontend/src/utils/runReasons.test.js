@@ -5,6 +5,7 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  BLOCKS_BATCH,
   LORAS_BYPASSED,
   LORAS_SKIPPED,
   PICTURE_INPUT_UNFILLED,
@@ -70,6 +71,21 @@ describe("pixlstash_nodes (#1521)", () => {
     expect(readReason({ code: "pixlstash_nodes" }).text).toBe(
       "This graph calls back into PixlStash, so PixlStash will not run it.",
     );
+  });
+});
+
+describe("pack_outdated says restart ComfyUI", () => {
+  it("names the checkpoint and the action, and blocks the batch", () => {
+    const files = [{ file: "sd_xl_base_1.0.safetensors", folder: "checkpoints" }];
+    const read = readReason({ code: "pack_outdated", models: files });
+    expect(read.text).toBe(
+      "ComfyUI-PixlStash is out of date in the running ComfyUI, so it cannot " +
+        "load this model from your model shelf. " +
+        "Restart ComfyUI, or update the pack.",
+    );
+    expect(read.files).toEqual(files);
+    expect(read.blocking).toBe(true);
+    expect(BLOCKS_BATCH).toContain("pack_outdated");
   });
 });
 

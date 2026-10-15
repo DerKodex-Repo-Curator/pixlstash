@@ -20887,6 +20887,108 @@ def test_a_run_loads_a_controlnet_comfyui_lacks_off_the_shelf(controlnets):
     assert env.submitted[-1]["graph"]["9"]["class_type"] == "ControlNetLoader"
 
 
+def test_a_pack_from_before_the_shelf_widget_says_restart_comfyui(id_loaders):
+    """A shelf checkpoint ComfyUI lacks, on a running pack whose loader has no
+    `shelf` widget (#1923): the pre-flight says the pack is out of date, not
+    that the model is missing. Wrong if it stays in `missing_models`, or if a
+    remote ComfyUI, a pack with no loader or a file the shelf does not hold
+    reads as `pack_outdated` too."""
+    env = id_loaders
+    info = json.loads(
+        json.dumps({**CHAIN_OBJECT_INFO, **PACK_OBJECT_INFO, **ID_LOADER_OBJECT_INFO})
+    )
+    info["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"][0] = [
+        "something-else.safetensors"
+    ]
+    del info["PixlStashCheckpointLoader"]["input"]["optional"]["shelf"]
+    env.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url, **_: (info, None)
+    )
+    document = json.loads(json.dumps(CHAIN_DOCUMENT))
+    workflow = workflows_routes.store_manual_workflow(
+        env.server.hub, "Old pack", document, "import"
+    )
+
+    def reasons(workflow_id=workflow):
+        payload = _preflight(env.owner, workflow_id=workflow_id)
+        return {
+            reason["code"]: reason["models"]
+            for group in payload["groups"]
+            for reason in group["reasons"]
+            if reason["code"] in ("missing_models", "pack_outdated")
+        }
+
+    model = {"file": _SHELF_FILENAME, "folder": "checkpoints"}
+    assert reasons() == {"pack_outdated": [model]}
+    r = env.owner.post(f"{API}/workflows/run", json={"workflow_id": workflow})
+    assert not env.submitted, r.text
+
+    # A ComfyUI elsewhere could not load it with any pack.
+    env.monkeypatch.setattr(
+        workflows_routes, "locate", lambda url: ("local_network", url)
+    )
+    assert reasons() == {"missing_models": [model]}
+    env.monkeypatch.setattr(
+        workflows_routes, "locate", lambda url: ("this_computer", url)
+    )
+
+    # A file the shelf does not hold is missing, whatever the pack.
+    document["1"]["inputs"]["ckpt_name"] = "not-on-the-shelf.safetensors"
+    elsewhere = workflows_routes.store_manual_workflow(
+        env.server.hub, "Not on the shelf", document, "import"
+    )
+    assert reasons(elsewhere) == {
+        "missing_models": [
+            {"file": "not-on-the-shelf.safetensors", "folder": "checkpoints"}
+        ]
+    }
+
+    # A diffusion model the shelf holds reads the same; one cast to fp8 does
+    # not, since even a current pack's loader cannot cast it.
+    info["UNETLoader"] = {
+        "input": {"required": {"unet_name": [["something-else.safetensors"], {}]}},
+        "output": ["MODEL"],
+    }
+    unet = json.loads(json.dumps(CHAIN_DOCUMENT))
+    unet["11"] = {
+        "class_type": "UNETLoader",
+        "inputs": {"unet_name": _SHELF_FILENAME, "weight_dtype": "default"},
+    }
+    unet["2"]["inputs"]["model"] = ["11", 0]
+    unet["1"]["inputs"]["ckpt_name"] = "not-on-the-shelf.safetensors"
+    diffusion = {"file": _SHELF_FILENAME, "folder": "diffusion_models"}
+    not_held = {"file": "not-on-the-shelf.safetensors", "folder": "checkpoints"}
+    assert reasons(
+        workflows_routes.store_manual_workflow(
+            env.server.hub, "Old pack, diffusion model", unet, "import"
+        )
+    ) == {"missing_models": [not_held], "pack_outdated": [diffusion]}
+    unet["11"]["inputs"]["weight_dtype"] = "fp8_e4m3fn"
+    assert reasons(
+        workflows_routes.store_manual_workflow(
+            env.server.hub, "Old pack, fp8 diffusion model", unet, "import"
+        )
+    ) == {"missing_models": [not_held, diffusion]}
+
+    # A pack with no loader at all keeps today's wording.
+    del info["PixlStashCheckpointLoader"]
+    assert reasons() == {"missing_models": [model]}
+
+    # Only a checkpoint moves: a VAE of the same name is still missing.
+    vae = {"file": _SHELF_FILENAME, "folder": "vae"}
+    moved = run_service.with_pack_outdated(
+        [run_service.Reason("missing_models", {"models": [model, vae]})],
+        {_SHELF_FILENAME},
+    )
+    assert [r.as_dict() for r in moved] == [
+        {"code": "missing_models", "models": [vae]},
+        {"code": "pack_outdated", "models": [model]},
+    ]
+    # A reason nothing moved out of is kept, even one with no models.
+    bare = run_service.Reason("missing_models", {})
+    assert run_service.with_pack_outdated([bare], {_SHELF_FILENAME}) == [bare]
+
+
 def test_the_picture_loader_goes_in_only_on_a_picture_the_library_holds(id_loaders):
     """A pin (Fixed) or a file a run uploaded says which picture. A file the
     owner put in ComfyUI's input folder is no picture of the library.

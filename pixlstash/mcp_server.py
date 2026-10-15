@@ -483,7 +483,8 @@ WORKFLOW_TOOLS = [
         "name": "preflight_workflow",
         "description": "Whether run_workflow would run this workflow, submitting "
         "nothing: {ok, runs, groups}, each group with the reasons it would "
-        "not run (missing_nodes, missing_models, comfyui_unreachable...). Call "
+        "not run (missing_nodes, missing_models, pack_outdated, "
+        "comfyui_unreachable...). Call "
         "it before run_workflow.",
         "inputSchema": _RUN_SCHEMA,
         "annotations": {"readOnlyHint": True, "openWorldHint": True},

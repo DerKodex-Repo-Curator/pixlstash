@@ -283,7 +283,7 @@
                   ><Tooltip :text="row.missing" activator="parent" />{{
                     modelLabel(fileName(row.missing))
                   }}</span
-                >{{ preflightAnswered ? " is not installed in ComfyUI." : "" }}
+                >{{ missingNote(row.missing) }}
               </p>
               <!-- A pick is saved on the workflow, so an offer that is not of
                    the missing one's base model says so before it. -->
@@ -418,7 +418,11 @@
             <template v-if="checkpointIsMissing">
               <p class="wftab-warn">
                 <v-icon size="16">mdi-alert-outline</v-icon>
-                Checkpoint missing
+                {{
+                  staleFiles.has(missingCheckpointFile)
+                    ? PACK_OUTDATED_TEXT
+                    : "Checkpoint missing"
+                }}
               </p>
               <p
                 v-if="missingCheckpointFile"
@@ -429,7 +433,7 @@
                   ><Tooltip :text="missingCheckpointFile" activator="parent" />{{
                     modelLabel(fileName(missingCheckpointFile))
                   }}</span
-                >{{ preflightAnswered ? " is not installed in ComfyUI." : "" }}
+                >{{ missingNote(missingCheckpointFile) }}
               </p>
               <p v-else class="wftab-note wftab-quiet">
                 No file name was kept for it anywhere.
@@ -1238,7 +1242,12 @@ import {
 } from "../../utils/loraChain";
 import { quantBadge } from "../../utils/modelShelf";
 import { comfyuiLink } from "../../utils/comfyuiLink";
-import { PIXLSTASH_PACK_URL, STAGE_LABELS } from "../../utils/runReasons";
+import {
+  PACK_OUTDATED,
+  PACK_OUTDATED_ACTION,
+  PIXLSTASH_PACK_URL,
+  STAGE_LABELS,
+} from "../../utils/runReasons";
 import { relativeDate } from "../../utils/snapshots";
 import {
   checkpointMissing,
@@ -1660,6 +1669,16 @@ const FORGOTTEN_MODEL = "(forgotten model)";
  * whether it has: an unreachable ComfyUI leaves the card's own answer.
  */
 const missingByKind = ref({});
+/** The missing files a restart of ComfyUI would load off the shelf (#1923). */
+const staleFiles = ref(new Set());
+const PACK_OUTDATED_TEXT = "Restart ComfyUI";
+/** What follows a missing file's name, once ComfyUI has answered. */
+function missingNote(file) {
+  if (!preflightAnswered.value) return "";
+  return staleFiles.value.has(file)
+    ? ` is on your model shelf, but the ComfyUI-PixlStash running in ComfyUI is out of date and cannot load it. ${PACK_OUTDATED_ACTION}`
+    : " is not installed in ComfyUI.";
+}
 const missingBaseFiles = computed(() => missingByKind.value.checkpoint ?? []);
 const preflightAnswered = ref(false);
 let installedCheck = 0;
@@ -1854,7 +1873,9 @@ const modelRows = computed(() => {
       edited: Boolean(pick),
       yours: model.provenance === "edited",
       missing: gone,
-      missingText: spec.missingText,
+      missingText: staleFiles.value.has(gone)
+        ? PACK_OUTDATED_TEXT
+        : spec.missingText,
       unmatched:
         model.kind === "checkpoint" &&
         candidates.length > 0 &&
@@ -4186,6 +4207,7 @@ async function checkInstalled(key, { quiet = false } = {}) {
   // `quiet`: the rows keep what they say until the new answers are in.
   if (!quiet) {
     missingByKind.value = {};
+    staleFiles.value = new Set();
     preflightAnswered.value = false;
     replacementsByFile.value = {};
   }
@@ -4197,10 +4219,17 @@ async function checkInstalled(key, { quiet = false } = {}) {
     );
     if (check !== installedCheck || !stillOn(key)) return;
     preflightAnswered.value = true;
-    const missing = (answer?.groups ?? [])
-      .flatMap((group) => group.reasons ?? [])
-      .filter((reason) => reason.code === "missing_models")
-      .flatMap((reason) => reason.models ?? []);
+    const reasons = (answer?.groups ?? []).flatMap(
+      (group) => group.reasons ?? [],
+    );
+    const modelsOf = (code) =>
+      reasons
+        .filter((reason) => reason.code === code)
+        .flatMap((reason) => reason.models ?? []);
+    // Still a row that needs something done, worded as a restart.
+    const stale = modelsOf(PACK_OUTDATED);
+    staleFiles.value = new Set(stale.map((model) => String(model.file)));
+    const missing = [...modelsOf("missing_models"), ...stale];
     missingByKind.value = Object.fromEntries(
       Object.entries(MODEL_ROWS).map(([kind, spec]) => [
         kind,
