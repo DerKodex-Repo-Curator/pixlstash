@@ -6325,6 +6325,13 @@ into the dialog rather than into anything the button owns.
 `registeredPaths` is what stops the API's duplicate 409 rather than reporting
 it.
 
+The chip beside a path is `Managed` for the managed store and otherwise the
+server's **`tool`**, never derived from `kind`: the HuggingFace cache is
+`foreign` like PixlStash's own folders but reads `HuggingFace` unless every
+repo in it is one PixlStash downloaded (an empty cache included), and a StabilityMatrix folder is a plain `user`
+row that only the server can recognise, through StabilityMatrix's own
+`library.json`, its `Models` folder included when that is a symlink.
+
 Four states are designed rather than left to fail on click:
 
 - **A remote owner reads the list and may change nothing.** `GET

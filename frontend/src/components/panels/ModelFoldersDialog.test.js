@@ -95,6 +95,7 @@ const DOWNLOADS = folder({
   path: "/home/g/.local/share/pixlstash/downloaded_models",
   kind: "foreign",
   owner: "pixlstash",
+  tool: "PixlStash",
   movable: "root_only",
   relocatable: true,
   file_count: 4,
@@ -105,6 +106,7 @@ const INSIGHTFACE = folder({
   path: "/home/g/.insightface/models",
   kind: "foreign",
   owner: "pixlstash",
+  tool: "PixlStash",
   movable: "root_only",
   // Relocatable since #906. It reads identically to DOWNLOADS above, which is
   // the point: the two are told apart by path on the server and by nothing at
@@ -121,6 +123,7 @@ const HF_CACHE = folder({
   path: "/home/g/.cache/huggingface/hub",
   kind: "foreign",
   owner: "pixlstash",
+  tool: "PixlStash",
   movable: "fixed",
   relocatable: false,
   file_count: 26,
@@ -391,6 +394,36 @@ describe("how much disk the folder is using", () => {
     // as one. The managed store on a fresh install is exactly this.
     const wrapper = await open([folder({ file_count: 0, present_bytes: 0 })]);
     expect(wrapper.text()).not.toContain("0 B");
+  });
+});
+
+describe("the label beside the path", () => {
+  it("names the tool the server resolved, and nothing on the owner's own folder", async () => {
+    // Read from `tool`, never from `kind`: the HuggingFace cache and the
+    // download folder are both `foreign`, and a StabilityMatrix folder is a
+    // plain `user` folder that is only recognisable on the server.
+    const wrapper = await open([
+      MANAGED,
+      DOWNLOADS,
+      { ...HF_CACHE, tool: "HuggingFace" },
+      folder({
+        id: 7,
+        path: "/home/me/drive/StabilityMatrix",
+        tool: "StabilityMatrix",
+      }),
+      folder({ id: 8 }),
+    ]);
+    const chips = wrapper
+      .findAll(".mf-row")
+      .map((row) => row.find(".mf-chip"))
+      .map((chip) => (chip.exists() ? chip.text() : null));
+    expect(chips).toEqual([
+      "Managed",
+      "PixlStash",
+      "HuggingFace",
+      "StabilityMatrix",
+      null,
+    ]);
   });
 });
 

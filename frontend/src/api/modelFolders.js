@@ -48,7 +48,8 @@ export const CREATABLE_KINDS = ["user", "source"];
  *
  * @returns {Promise<Array<Object>>} the `folders` array. Each entry carries
  *   `id`, `path`, `kind` (`user`/`managed`/`foreign`/`source`), `owner`,
- *   `movable`, `relocatable` (whether `POST .../relocate` will move it whole -
+ *   `tool` (whose folder it is, the row's label: `PixlStash`, `HuggingFace`,
+ *   `ai-toolkit`, `StabilityMatrix`, or null for the owner's own), `movable`, `relocatable` (whether `POST .../relocate` will move it whole -
  *   offer Move on exactly these, never on `movable === "root_only"`, which the
  *   InsightFace packs also say and cannot be moved yet), `host_path`,
  *   `delete_after_import`, `last_checked`, `created_at`, `file_count` (copies

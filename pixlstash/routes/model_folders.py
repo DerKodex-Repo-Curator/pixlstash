@@ -60,15 +60,18 @@ inline.
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Body, HTTPException, Request
+from platformdirs import user_config_dir
 from pydantic import BaseModel, ConfigDict, Field
 
 from pixlstash.pixl_logging import get_logger
+from pixlstash.services.builtin_caches import huggingface_cache_dir
 from pixlstash.services.builtin_models import BUILTIN_OWNER
 from pixlstash.services import comfyui_link_service
 from pixlstash.services.comfyui_service import comfyui_model_roots
@@ -80,6 +83,7 @@ from pixlstash.services.managed_model_store import (
 from pixlstash.services.model_mover import SHELF_IO_LOCK
 from pixlstash.tasks.base_task import TaskStatus
 from pixlstash.tasks.model_folder_scan_task import ModelFolderScanTask
+from pixlstash.utils.adapter_header import FILE_ENGINE
 from pixlstash.utils.host_path_utils import is_absolute_host_path, normalize_host_path
 from pixlstash.utils.path_utils import path_is_within
 from pixlstash.utils.reference_folder_validator import (
@@ -134,6 +138,79 @@ def _scan_state(folder_id: int) -> tuple[Optional[str], Optional[str]]:
     return task.status.value, task.error
 
 
+def _stability_matrix_roots() -> list[str]:
+    """The resolved folders StabilityMatrix keeps its library and models in.
+
+    StabilityMatrix writes where its library lives to ``library.json`` in its
+    own config folder. ``Models`` is a root of its own as well as the library,
+    because moving it to a bigger drive behind a symlink is common and a
+    registered folder is stored at its resolved path, so the library alone
+    would not contain it. The folder is the one ``platformdirs`` names for
+    StabilityMatrix's app data, checked on Linux only; a portable install
+    keeps its settings beside the app instead, so its folders go unlabelled.
+
+    Returns:
+        Zero, one or two resolved paths.
+    """
+    pointer = os.path.join(
+        user_config_dir("StabilityMatrix", appauthor=False, roaming=True),
+        "library.json",
+    )
+    if not os.path.isfile(pointer):
+        return []
+    try:
+        with open(pointer, encoding="utf-8") as handle:
+            library = json.load(handle).get("LibraryPath")
+    except (OSError, ValueError, AttributeError) as exc:
+        logger.warning(
+            "Could not read StabilityMatrix's library location from %s (%s); "
+            "its model folders will not be labelled as StabilityMatrix's.",
+            pointer,
+            exc,
+        )
+        return []
+    # StabilityMatrix writes an absolute path. Anything else would be resolved
+    # against this server's working directory and label the wrong folders.
+    if not isinstance(library, str) or not os.path.isabs(library.strip()):
+        return []
+    library = os.path.realpath(library.strip())
+    return [library, os.path.realpath(os.path.join(library, "Models"))]
+
+
+def _folder_tool(
+    server, row: dict, stability_matrix_roots: Optional[list[str]] = None
+) -> Optional[str]:
+    """Which tool the folder belongs to, as the folders dialog labels it.
+
+    Args:
+        server: The Server instance, for ``hub``.
+        row: The ``model_folder`` row.
+        stability_matrix_roots: :func:`_stability_matrix_roots`, read once by a
+            caller answering for every folder; read here when omitted.
+    """
+    if row["kind"] == "source":
+        return row["owner"]
+    if row["kind"] == "user":
+        if stability_matrix_roots is None:
+            stability_matrix_roots = _stability_matrix_roots()
+        if any(path_is_within(row["path"], root) for root in stability_matrix_roots):
+            return "StabilityMatrix"
+        return None
+    cache = huggingface_cache_dir()
+    if cache and os.path.realpath(row["path"]) == os.path.realpath(cache):
+        # Shared with every other tool on the machine; it is only ours while it
+        # holds repos and every one is a repo PixlStash downloaded for itself.
+        held = server.hub.fetchone(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(m.file_kind != ?), 0) AS others "
+            "FROM model_file mf JOIN model m ON m.id = mf.model_id "
+            "WHERE mf.model_folder_id = ? AND mf.state = 'present'",
+            (FILE_ENGINE, row["id"]),
+        )
+        if not held["n"] or held["others"]:
+            return "HuggingFace"
+    return "PixlStash"
+
+
 class ModelFolderCreateRequest(BaseModel):
     """Body of ``POST /model-folders``."""
 
@@ -184,6 +261,16 @@ class ModelFolderResponse(BaseModel):
     owner: Optional[str] = Field(
         default=None,
         description="Which subsystem owns the folder; null for a folder the user chose.",
+    )
+    tool: Optional[str] = Field(
+        default=None,
+        description=(
+            "The tool whose folder this is, as the folders dialog labels it: "
+            "`PixlStash`, `HuggingFace` (the cache, unless every repo in it "
+            "is one PixlStash downloaded), `ai-toolkit`, `StabilityMatrix` (a "
+            "folder inside its library or its models folder, symlinked or "
+            "not), or null for a folder that is simply the owner's."
+        ),
     )
     movable: str = Field(
         description=(
@@ -684,6 +771,7 @@ def create_router(server) -> APIRouter:
         file_count: int = 0,
         present_bytes: int = 0,
         scan: Optional[tuple[Optional[str], Optional[str]]] = None,
+        stability_matrix_roots: Optional[list[str]] = None,
     ) -> ModelFolderResponse:
         delete_after_import = row["delete_after_import"]
         scan_status, scan_error = (
@@ -694,6 +782,7 @@ def create_router(server) -> APIRouter:
             path=row["path"],
             kind=row["kind"],
             owner=row["owner"],
+            tool=_folder_tool(server, row, stability_matrix_roots),
             movable=row["movable"],
             relocatable=relocatable_identity(row) is not None,
             deletable=deletes_unclaimed_files(row["kind"], row["path"]),
@@ -734,6 +823,8 @@ def create_router(server) -> APIRouter:
         scans = {int(row["id"]): _scan_state(int(row["id"])) for row in rows}
         counts = _file_counts()
         present_bytes = _present_bytes_by_folder()
+        # Once per list, not per row: the dialog polls this every few seconds.
+        stability_matrix_roots = _stability_matrix_roots()
         return ModelFolderListResponse(
             folders=[
                 _to_response(
@@ -741,6 +832,7 @@ def create_router(server) -> APIRouter:
                     counts.get(int(row["id"]), 0),
                     present_bytes.get(int(row["id"]), 0),
                     scans[int(row["id"])],
+                    stability_matrix_roots,
                 )
                 for row in rows
             ]

@@ -85,12 +85,12 @@
             <span v-if="folder.kind === MANAGED_KIND" class="mf-chip"
               >Managed</span
             >
-            <span v-else-if="folder.kind === SOURCE_KIND" class="mf-chip"
-              >ai-toolkit</span
-            >
-            <span v-else-if="folder.kind === 'foreign'" class="mf-chip"
-              >PixlStash</span
-            >
+            <!-- Whose folder it is, resolved by the server: the HuggingFace
+                 cache is only PixlStash's while it holds nothing else, and a
+                 StabilityMatrix folder is often reached through a symlink. -->
+            <span v-else-if="folder.tool" class="mf-chip">{{
+              folder.tool
+            }}</span>
           </span>
 
           <span class="mf-row__meta">

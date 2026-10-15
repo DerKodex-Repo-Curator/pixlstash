@@ -62,7 +62,7 @@ from pixlstash.routes.model_imports import (
 )
 from pixlstash.routes.model_shelf import MAX_ATTACHMENTS_PER_MODEL
 from pixlstash.server import Server
-from pixlstash.services import builtin_models, comfyui_service
+from pixlstash.services import builtin_caches, builtin_models, comfyui_service
 from pixlstash.services import model_shelf_service, model_workflow_sets
 from pixlstash.services.model_folder_scanner import ModelFolderScanner
 from pixlstash.utils.image_processing.image_utils import ImageUtils
@@ -3163,6 +3163,100 @@ def test_folder_list_counts_copies_and_reports_the_seeded_folder(shelf_env):
     assert r.status_code == 200, r.text
     folders = {row["path"]: row for row in r.json()["folders"]}
     assert folders["/models/loras"]["file_count"] == len(_SEED_MODELS)
+
+
+def _folder_tools(shelf_env) -> dict[str, object]:
+    r = shelf_env.owner.get(f"{API}/model-folders")
+    assert r.status_code == 200, r.text
+    return {row["path"]: row["tool"] for row in r.json()["folders"]}
+
+
+def test_the_huggingface_cache_is_ours_only_while_it_holds_only_our_repos(
+    shelf_env, tmp_path, monkeypatch
+):
+    """The cache is shared with every other tool on the machine, so one repo
+    PixlStash did not download is enough to make it HuggingFace's."""
+    cache = tmp_path / "hf-cache"
+    cache.mkdir()
+    monkeypatch.setenv(builtin_caches.HUGGINGFACE_CACHE_DIR_ENV, str(cache))
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute(
+            "INSERT INTO model_folder (id, path, kind, owner, movable, created_at) "
+            "VALUES (7, ?, 'foreign', 'pixlstash', 'fixed', "
+            "'2026-08-16T00:00:00Z')",
+            (str(cache),),
+        )
+    # Holding nothing yet is not evidence that it is ours.
+    assert _folder_tools(shelf_env)[str(cache)] == "HuggingFace"
+
+    with shelf_env.server.hub.transaction() as conn:
+        engine = conn.execute(
+            "INSERT INTO model (file_kind, filename, provenance, created_at) "
+            "VALUES ('engine', 'ours', 'builtin', '2026-08-16T00:00:00Z')"
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO model_file (model_id, model_folder_id, relpath, state, "
+            "seen_at) VALUES (?, 7, 'models--ours', 'present', "
+            "'2026-08-16T00:00:00Z')",
+            (engine,),
+        )
+    assert _folder_tools(shelf_env)[str(cache)] == "PixlStash"
+
+    with shelf_env.server.hub.transaction() as conn:
+        theirs = conn.execute(
+            "INSERT INTO model (file_kind, filename, provenance, created_at) "
+            "VALUES ('checkpoint', 'theirs', 'builtin', '2026-08-16T00:00:00Z')"
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO model_file (model_id, model_folder_id, relpath, state, "
+            "seen_at) VALUES (?, 7, 'models--theirs', 'present', "
+            "'2026-08-16T00:00:00Z')",
+            (theirs,),
+        )
+    assert _folder_tools(shelf_env)[str(cache)] == "HuggingFace"
+
+
+def test_a_stability_matrix_models_folder_is_labelled_through_its_symlink(
+    shelf_env, tmp_path, monkeypatch
+):
+    """StabilityMatrix's ``Models`` is often a symlink to a bigger drive, and a
+    folder is registered at its resolved path, so the library alone would miss
+    it. Its ComfyUI package's folders sit inside the library itself."""
+    library = tmp_path / "StabilityMatrix"
+    comfy_models = library / "Packages" / "ComfyUI" / "models"
+    comfy_models.mkdir(parents=True)
+    drive = tmp_path / "drive" / "StabilityMatrix"
+    drive.mkdir(parents=True)
+    (library / "Models").symlink_to(drive, target_is_directory=True)
+    config = tmp_path / "config" / "StabilityMatrix"
+    config.mkdir(parents=True)
+    (config / "library.json").write_text(json.dumps({"LibraryPath": str(library)}))
+    monkeypatch.setattr(
+        model_folders_routes, "user_config_dir", lambda *a, **k: str(config)
+    )
+
+    for path, kind in (
+        (str(library / "Models"), "user"),
+        (str(comfy_models), "user"),
+        (_new_folder_path(str(tmp_path), "loras"), "user"),
+        (_new_folder_path(str(tmp_path), "runs"), "source"),
+    ):
+        r = shelf_env.owner.post(
+            f"{API}/model-folders", json={"path": path, "kind": kind}
+        )
+        assert r.status_code == 200, r.text
+
+    tools = _folder_tools(shelf_env)
+    assert tools[os.path.realpath(drive)] == "StabilityMatrix"
+    assert tools[os.path.realpath(comfy_models)] == "StabilityMatrix"
+    assert tools[os.path.realpath(tmp_path / "loras")] is None
+    assert tools[os.path.realpath(tmp_path / "runs")] == "ai-toolkit"
+
+    # A relative library path would resolve against the server's working
+    # directory, so it labels nothing rather than the wrong folders.
+    (config / "library.json").write_text(json.dumps({"LibraryPath": "StabilityMatrix"}))
+    monkeypatch.chdir(tmp_path)
+    assert _folder_tools(shelf_env)[os.path.realpath(comfy_models)] is None
 
 
 def test_patch_changes_the_bind_path_but_never_the_registered_path(shelf_env):
