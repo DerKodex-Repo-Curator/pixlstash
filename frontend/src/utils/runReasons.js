@@ -27,8 +27,18 @@ export const STAGE_LABELS = {
 /** ComfyUI never answered, so nothing at all is known about the graph. */
 export const UNCHECKED_CODES = ["comfyui_unreachable", "comfyui_not_configured"];
 
-/** Installing a file is a trip away from the keyboard, so it stops the batch. */
-export const BLOCKS_BATCH = "missing_models";
+/**
+ * A checkpoint on the shelf that the running ComfyUI's ComfyUI-PixlStash is
+ * too old to load (#1923): restarting ComfyUI is the fix, not installing it.
+ */
+export const PACK_OUTDATED = "pack_outdated";
+export const PACK_OUTDATED_ACTION = "Restart ComfyUI, or update the pack.";
+
+/**
+ * Installing a file, or restarting ComfyUI, is a trip away from the keyboard,
+ * so either stops the batch.
+ */
+export const BLOCKS_BATCH = ["missing_models", PACK_OUTDATED];
 
 /**
  * Not a refusal: a LoRA loader the server took out of the graph (#1463).
@@ -293,6 +303,15 @@ export function readReason(reason) {
       const count = files.length;
       return read(
         `${count} ${count === 1 ? "model is" : "models are"} missing.`,
+        null,
+        files,
+      );
+    }
+    case PACK_OUTDATED: {
+      const files = (reason.models || []).filter(Boolean);
+      const one = files.length === 1;
+      return read(
+        `ComfyUI-PixlStash is out of date in the running ComfyUI, so it cannot load ${one ? "this checkpoint" : "these checkpoints"} from your model shelf. ${PACK_OUTDATED_ACTION}`,
         null,
         files,
       );

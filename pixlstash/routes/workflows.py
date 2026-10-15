@@ -130,6 +130,7 @@ from pixlstash.services.comfyui_recipe_service import (
     apply_seeds,
     detect_lora_targets,
     detect_model_targets,
+    find_input_spec,
     format_prompt_rejection,
     insert_adapter,
     listed_as,
@@ -145,6 +146,7 @@ from pixlstash.services.comfyui_recipe_service import (
     read_lora_chain_untyped,
     retype_text_encoders,
     PICTURE_LOADER_LIBRARY,
+    CHECKPOINT_LOADER_SHELF,
     PIXLSTASH_CHECKPOINT_LOADER,
     PIXLSTASH_CONTROLNET_LOADER,
     SWAPPED_CLASSES,
@@ -6913,6 +6915,7 @@ def create_router(server) -> APIRouter:
             # only rescues a name still missing after them.
             swapped: dict[str, tuple[dict, dict]] = {}
             unloaded: list[dict] = []
+            stale_pack: set[str] = set()
             group.substitutions = _apply_model_fixes(
                 card, graph, object_info, swapped, unloaded
             )
@@ -6941,6 +6944,11 @@ def create_router(server) -> APIRouter:
                     # ControlNet it can (`_with_pack_nodes`); a save keeps the
                     # graph's own.
                     _swap_in_shelf_loaders(request, card_key, graph, object_info)
+                    # Less a fix's original: a restart would load that one, not
+                    # the replacement the row shows.
+                    stale_pack = _shelf_checkpoints_an_old_pack_skips(
+                        request, graph, object_info
+                    ) - {miss["was"] for miss in unloaded}
 
             # After every value, so the replacement for a sampler or scheduler
             # this ComfyUI lacks wins over the default the form also sent.
@@ -6995,6 +7003,8 @@ def create_router(server) -> APIRouter:
                         lora_slots=slots_in_graph,
                         **node_policy,
                     )
+            if stale_pack:
+                judged = run_service.with_pack_outdated(judged, stale_pack)
             found += judged
             if object_info is None and not configured:
                 # The URL is the guessed default and nothing answered on it:
@@ -8279,6 +8289,32 @@ def create_router(server) -> APIRouter:
                 swap["now"],
             )
         return swapped
+
+    def _shelf_checkpoints_an_old_pack_skips(
+        request: Request, graph: dict, object_info: dict
+    ) -> set[str]:
+        """The checkpoints :func:`_swap_in_shelf_loaders` left missing only
+        because the running ComfyUI has a pack from before the loader's
+        ``shelf`` widget (#1923): one restart would load them off the shelf.
+
+        Empty where the pack has no loader at all, or has the widget: the
+        missing file is then reported as it always was.
+        """
+        spec = object_info.get(PIXLSTASH_CHECKPOINT_LOADER)
+        if (
+            not isinstance(spec, dict)
+            or find_input_spec(spec, CHECKPOINT_LOADER_SHELF) is not None
+        ):
+            return set()
+        names = {
+            str(item.get("value"))
+            for item in detect_model_targets(graph, object_info)
+            if item and item.get("class_type") == "CheckpointLoaderSimple"
+        }
+        if not names or not _comfyui_is_here(request):
+            return set()
+        row_of = _shelf_checkpoint(_hub())
+        return {name for name in names if row_of(name)}
 
     # Graphs the Run popup built for ComfyUI to open, by the id that goes into
     # the link: `{opening: (held until, workflow_id, graph)}`. A link cannot

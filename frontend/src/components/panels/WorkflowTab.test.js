@@ -1161,6 +1161,34 @@ describe("a checkpoint that will not load", () => {
     expect(line.tooltip).toBe("SDXL/realvisXL_v5.safetensors");
   });
 
+  it("says restart ComfyUI for a shelf checkpoint its old pack cannot load", async () => {
+    // #1923: the running ComfyUI-PixlStash predates the loader's shelf widget.
+    preflightWorkflowRun.mockResolvedValue({
+      groups: [
+        {
+          reasons: [
+            {
+              code: "pack_outdated",
+              models: [
+                { file: "SDXL/realvisXL_v5.safetensors", folder: "checkpoints" },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    getWorkflowCard.mockResolvedValue(detail({ card: named }));
+    const { wrapper } = await mountWith([KEY], [named]);
+    await settle(wrapper);
+    expect(textOf(wrapper)).toContain("Restart ComfyUI");
+    expect(textOf(wrapper)).not.toContain("Checkpoint missing");
+    expect(missingLine(wrapper).text).toBe(
+      "realvisXL_v5 is on your model shelf, but the ComfyUI-PixlStash " +
+        "running in ComfyUI is out of date and cannot load it. " +
+        "Restart ComfyUI, or update the pack.",
+    );
+  });
+
   it("makes a missing checkpoint a row that needs a pick, asked for by the graph's spelling", async () => {
     // The recipe says `realvisXL_v5`, the graph loads the fp8 build of it:
     // the missing file is still the Checkpoint row's, and it is the graph's

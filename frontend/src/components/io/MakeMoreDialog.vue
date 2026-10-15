@@ -222,7 +222,7 @@ const overRunCap = computed(() => totalRuns.value > MAX_RUNS);
 /** A missing model stops the WHOLE batch, mixed or not — as the server does. */
 const missingModels = computed(() =>
   groups.value.some((group) =>
-    group.reasons.some((reason) => reason.code === BLOCKS_BATCH),
+    group.reasons.some((reason) => BLOCKS_BATCH.includes(reason.code)),
   ),
 );
 const blocker = computed(() => {
