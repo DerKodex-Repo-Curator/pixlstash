@@ -112,4 +112,29 @@ describe("closing Settings", () => {
     wrapper.unmount();
     opener.remove();
   });
+
+  it("falls back to the nearest focusable ancestor when the opener is gone", async () => {
+    // The shelf's empty-state button unmounts once the first folder lands.
+    const region = document.createElement("div");
+    region.tabIndex = -1;
+    const emptyState = document.createElement("div");
+    const opener = document.createElement("button");
+    emptyState.appendChild(opener);
+    region.appendChild(emptyState);
+    document.body.appendChild(region);
+    opener.focus();
+    const wrapper = await mountSidebar();
+
+    wrapper.vm.openSettingsDialog("models");
+    await wrapper.vm.$nextTick();
+    emptyState.remove();
+    wrapper
+      .findComponent({ name: "UserSettingsDialog" })
+      .vm.$emit("update:open", false);
+    await flushPromises();
+
+    expect(document.activeElement).toBe(region);
+    wrapper.unmount();
+    region.remove();
+  });
 });

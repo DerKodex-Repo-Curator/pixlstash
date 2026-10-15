@@ -61,13 +61,13 @@
             >
               <button
                 class="ctx-item"
-                :class="{ 'ctx-item--disabled': addReason }"
+                :class="{ 'ctx-item--disabled': changeDownloadsReason }"
                 type="button"
                 role="menuitem"
-                :aria-disabled="addReason ? 'true' : undefined"
+                :aria-disabled="changeDownloadsReason ? 'true' : undefined"
                 @click="onChangeDownloads"
               >
-                <Tooltip :text="addReason" activator="parent" />
+                <Tooltip :text="changeDownloadsReason" activator="parent" />
                 <v-icon class="ctx-icon">mdi-folder-swap-outline</v-icon>
                 <span class="ctx-label-text">Change…</span>
               </button>
@@ -427,6 +427,13 @@ const changeDefaultReason = computed(
       : "No other folder can be the default yet. Add one first."),
 );
 
+/** A swap is a forget then an add, so either refusal blocks it. */
+const changeDownloadsReason = computed(
+  () =>
+    addReason.value ||
+    (store.downloadsFolder ? forgetReason(store.downloadsFolder) : ""),
+);
+
 const rescanReason = computed(() => {
   if (remoteReason.value) return remoteReason.value;
   return scannable.value.length ? "" : "There is no folder to scan yet.";
@@ -449,7 +456,7 @@ function openPicker(kind) {
 
 function onChangeDownloads() {
   downloadsMenuOpen.value = false;
-  if (addReason.value) return;
+  if (changeDownloadsReason.value) return;
   openPicker(DOWNLOADS_KIND);
   replacing.value = store.downloadsFolder;
 }

@@ -468,6 +468,17 @@ describe("the Downloads folder", () => {
     );
   });
 
+  it("refuses Change… while a move runs, since the swap forgets first", async () => {
+    // The server answers that forget with a 409 (#1017).
+    moveBusy = true;
+    const wrapper = await open([folder(), WATCHED]);
+    const change = byText(wrapper, "Change…");
+    expect(change.attributes("aria-disabled")).toBe("true");
+    await change.trigger("click");
+    expect(browser(wrapper).props("open")).toBe(false);
+    expect(forgetModelFolder).not.toHaveBeenCalled();
+  });
+
   it("offers no menu to a remote session", async () => {
     const wrapper = await open([folder(), WATCHED], { canManage: false });
     expect(byText(wrapper, "Stop watching")).toBeUndefined();
