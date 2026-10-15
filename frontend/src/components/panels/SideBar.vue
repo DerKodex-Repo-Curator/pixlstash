@@ -2464,6 +2464,9 @@ function closeSetEditor() {
   setEditorSet.value = null;
 }
 
+// The control focused when Settings opened: a DOM node, held raw.
+let settingsInvoker = null;
+
 /**
  * Open the settings dialog, optionally on a specific nav entry.
  * @param {string} [tab] - nav entry id (e.g. "scrapheap"); Appearance if omitted
@@ -2471,8 +2474,20 @@ function closeSetEditor() {
  */
 function openSettingsDialog(tab = "") {
   settingsDialogInitialTab.value = typeof tab === "string" ? tab : "";
+  // Settings opens from a prop, so Vuetify has no activator to hand focus back
+  // to on close; the control that was focused when it opened takes it instead.
+  settingsInvoker = document.activeElement;
   settingsDialogOpen.value = true;
 }
+
+watch(settingsDialogOpen, (isOpen) => {
+  if (isOpen) return;
+  const returnTo = settingsInvoker;
+  settingsInvoker = null;
+  nextTick(() => {
+    if (returnTo?.isConnected) returnTo.focus();
+  });
+});
 
 function selectCharacter(id, label = null, event = null) {
   clearCountNew(id);
