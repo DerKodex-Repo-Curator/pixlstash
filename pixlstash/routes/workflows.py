@@ -979,6 +979,8 @@ _WORKFLOW_ID_RE = re.compile(WORKFLOW_ID_PATTERN)
 # resolves as a path.
 _UPLOAD_EXTENSION_RE = re.compile(r"^\.[a-z0-9]{1,8}$")
 _PIXEL_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+# The stock loaders Open in ComfyUI puts the pack's digest loaders in for.
+_PACK_MODEL_LOADERS = {"VAELoader": FILE_VAE, "CLIPLoader": FILE_TEXT_ENCODER}
 # The name `_upload_files` gives a hashed picture, read back for its content:
 # a loader still holding one says what its run loaded (`_made_from`).
 _UPLOAD_NAME_RE = re.compile(
@@ -8181,7 +8183,7 @@ def create_router(server) -> APIRouter:
             and PIXLSTASH_CHECKPOINT_LOADER in object_info
             and _comfyui_is_here(request)
         )
-        return swap_in_pack_nodes(
+        swapped = swap_in_pack_nodes(
             graph,
             object_info,
             _shelf_digest(hub, FILE_ADAPTER),
@@ -8202,9 +8204,24 @@ def create_router(server) -> APIRouter:
             checkpoint_id=_shelf_checkpoint(hub) if by_row else None,
             shelf_uuid=shelf_uuid(hub) if by_row else None,
             controlnet_digest=_shelf_digest(hub, FILE_CONTROLNET),
-            vae_digest=_shelf_digest(hub, FILE_VAE),
-            clip_digest=_shelf_digest(hub, FILE_TEXT_ENCODER),
         )
+        # The VAE and CLIP loaders by digest, as a model fix puts them in: on
+        # the same terms (one file the shelf holds, no setting the pack's
+        # loader would lose, no GGUF).
+        for node_id, node in list(graph.items()):
+            was = node.get("class_type") if isinstance(node, dict) else None
+            kind = _PACK_MODEL_LOADERS.get(was)
+            if kind is None:
+                continue
+            plan, _refusal = run_service.plan_pixlstash_swap(
+                graph, node_id, kind, {}, object_info, _shelf_digest(hub, kind)
+            )
+            if plan is not None:
+                run_service.apply_pixlstash_swap(graph, node_id, plan)
+                swapped.append(
+                    {"node_id": str(node_id), "was": was, "now": plan["class_type"]}
+                )
+        return swapped
 
     def _swap_in_shelf_loaders(
         request: Request, card_key: str, graph: dict, object_info: dict

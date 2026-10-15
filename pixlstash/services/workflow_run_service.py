@@ -1180,9 +1180,9 @@ def repair(
 
 # The ComfyUI-PixlStash loader a model fix swaps in where the workflow's own
 # loader cannot load the replacement (#1605), per slot kind, with the digest
-# widgets it takes in order. Checkpoints keep the rename only:
-# `PixlStashCheckpointLoader` names a per-hub shelf id and cannot fetch the
-# file, and there is no PixlStash UNET loader.
+# widgets it takes in order. Checkpoints and diffusion models keep the rename
+# only: `PixlStashCheckpointLoader`, which loads either, names a per-hub shelf
+# id and cannot fetch the file.
 PIXLSTASH_SWAP_LOADERS: dict[str, tuple[str, tuple[str, ...]]] = {
     FILE_VAE: ("PixlStashVAELoader", ("vae_sha256",)),
     FILE_TEXT_ENCODER: ("PixlStashCLIPLoader", ("clip_sha256", "clip_sha256_2")),

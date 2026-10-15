@@ -2119,30 +2119,22 @@ _PACK_ID_LOADERS = {
 # The field each stock loader names its checkpoint by.
 _CHECKPOINT_FIELDS = {"CheckpointLoaderSimple": "ckpt_name", "UNETLoader": "unet_name"}
 
-# The stock loaders a graph opened in ComfyUI gets one of the pack's digest
-# loaders for: the field naming the file, the pack's class, the field it takes
-# the digest in, and the output its consumers read. These fetch their file, so
-# they go in wherever the shelf holds a copy, as an adapter loader does.
-PIXLSTASH_VAE_LOADER = "PixlStashVAELoader"
-PIXLSTASH_CLIP_LOADER = "PixlStashCLIPLoader"
-_PACK_DIGEST_LOADERS = {
-    "VAELoader": ("vae_name", PIXLSTASH_VAE_LOADER, "vae_sha256", ("VAE",)),
-    "CLIPLoader": ("clip_name", PIXLSTASH_CLIP_LOADER, "clip_sha256", ("CLIP",)),
-}
-
 
 # Every class `swap_in_pack_nodes` puts in or takes the place of, as the stock
 # node it stands for. What a layout is matched on (`graph_structure`): which
 # of a pair a graph holds follows what the shelf and the library hold on the
 # day, and the layout is of either. A model-only LoRA loader reads as the full
 # one, since the pack's loader stands in for both; their wiring tells them
-# apart.
+# apart. So does a diffusion model's, since the pack's checkpoint loader
+# stands in for it too. The VAE and CLIP loaders are put in by Open in
+# ComfyUI's caller (`run_service.plan_pixlstash_swap`).
 SWAPPED_CLASSES = {
     **{pack: stock for stock, (pack, _carried) in PACK_SAVERS.items()},
     PIXLSTASH_PICTURE_LOADER: "LoadImage",
     PIXLSTASH_CHECKPOINT_LOADER: "CheckpointLoaderSimple",
     "UNETLoader": "CheckpointLoaderSimple",
-    **{pack: stock for stock, (_f, pack, _d, _o) in _PACK_DIGEST_LOADERS.items()},
+    "PixlStashVAELoader": "VAELoader",
+    "PixlStashCLIPLoader": "CLIPLoader",
     PIXLSTASH_ADAPTER_LOADER: "LoraLoader",
     "LoraLoaderModelOnly": "LoraLoader",
     PIXLSTASH_CONTROLNET_LOADER: "ControlNetLoader",
@@ -2172,8 +2164,6 @@ def swap_in_pack_nodes(
     checkpoint_id: Callable[[str], str | None] | None = None,
     shelf_uuid: str | None = None,
     controlnet_digest: Callable[[str], str | None] | None = None,
-    vae_digest: Callable[[str], str | None] | None = None,
-    clip_digest: Callable[[str], str | None] | None = None,
 ) -> list[dict]:
     """Put ComfyUI-PixlStash nodes where a graph has the stock ones, in place.
 
@@ -2183,10 +2173,8 @@ def swap_in_pack_nodes(
     pack's savers on the same inputs, and a core single-slot LoRA loader whose
     file *lora_digest* can name becomes ``PixlStashAdapterLoader``
     (:func:`swap_to_adapter_loader`), and a ``ControlNetLoader`` whose file
-    *controlnet_digest* can name becomes ``PixlStashControlNetLoader``.
-    ``VAELoader`` and ``CLIPLoader`` become the pack's VAE and CLIP loaders on
-    the digest *vae_digest* and *clip_digest* name for their file. Every node
-    keeps its id and its wiring.
+    *controlnet_digest* can name becomes ``PixlStashControlNetLoader``. Every
+    node keeps its id and its wiring.
 
     The two loaders that name a row by its id are swapped in only with the
     widget that says whose the id is, since an id without it is not trusted
@@ -2203,10 +2191,9 @@ def swap_in_pack_nodes(
     A saver's setting the pack's saver has no place for (Save Video's
     ``codec``) is left to the pack's own default. A node is left as it is
     where this ComfyUI lacks the pack's class or has one that cannot stand in
-    (:func:`_stands_in`), where a loader holds a setting the pack's cannot
-    keep (a diffusion model's ``weight_dtype``, a CLIP's ``device`` or a
-    ``type`` the pack's does not list), where the stock node has a wire the
-    pack's has no place for, and where nothing is wired into a saver.
+    (:func:`_stands_in`), where a diffusion model's loader casts its weights
+    (``weight_dtype``), which the pack's cannot, where the stock node has a
+    wire the pack's has no place for, and where nothing is wired into a saver.
 
     Args:
         lora_digest: A ``lora_name`` -> the SHA-256 the pack's loader can
@@ -2220,9 +2207,6 @@ def swap_in_pack_nodes(
         shelf_uuid: The shelf those rows are on.
         controlnet_digest: A ``control_net_name`` -> the SHA-256 the pack's
             loader can load it by, or ``None``.
-        vae_digest: A ``vae_name`` -> the SHA-256 the pack's VAE loader can
-            load it by, or ``None``.
-        clip_digest: A ``clip_name`` -> the same, for the CLIP loader.
 
     Returns:
         ``[{node_id, was, now}]`` for every node swapped.
@@ -2236,7 +2220,9 @@ def swap_in_pack_nodes(
         if was in PACK_SAVERS:
             now, carried = PACK_SAVERS[was]
             spec = object_info.get(now)
-            declared = (spec.get("input") if isinstance(spec, dict) else None) or {}
+            if not isinstance(spec, dict):
+                continue
+            declared = spec.get("input") or {}
             takes = {
                 name
                 for group in ("required", "optional")
@@ -2321,25 +2307,6 @@ def swap_in_pack_nodes(
                 continue
             node["class_type"] = now
             node["inputs"] = {**_widget_defaults(spec), **digest}
-        elif was in _PACK_DIGEST_LOADERS:
-            field, now, digest_field, outputs = _PACK_DIGEST_LOADERS[was]
-            lookup = vae_digest if was == "VAELoader" else clip_digest
-            name = old.get(field)
-            sha256 = lookup(name) if lookup and isinstance(name, str) else None
-            if not sha256:
-                continue
-            spec = object_info.get(now)
-            owned = {digest_field: sha256}
-            if was == "CLIPLoader":
-                if old.get("device", "default") != "default" or old.get("type") not in (
-                    _combo_options(spec, "type") or ()
-                ):
-                    continue
-                owned["type"] = old["type"]
-            if not _stands_in(spec, outputs, owned):
-                continue
-            node["class_type"] = now
-            node["inputs"] = {**_widget_defaults(spec), **owned}
         else:
             continue
         # A title that was only the stock node's name would call the new node
