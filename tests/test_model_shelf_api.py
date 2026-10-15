@@ -3347,6 +3347,9 @@ def test_one_downloads_folder_is_taken_from_and_never_scanned(shelf_env, tmp_pat
         "external",
         False,
     )
+    # The owner's own folder, labelled by its kind: no tool chip, and above all
+    # not "PixlStash", which a downloads row would get by falling through.
+    assert body["tool"] is None, body
     folder_id = body["id"]
 
     r = shelf_env.owner.post(
