@@ -20458,6 +20458,195 @@ def test_the_checkpoint_loader_goes_in_only_where_it_can_read_the_file(id_loader
     assert opened() == ["CheckpointLoaderSimple", "PixlStashPictureLoader"]
 
 
+def test_a_picture_in_comfyuis_input_folder_opens_as_the_library_picture(
+    id_loaders,
+):
+    """A Load Image naming a file in ComfyUI's input folder whose content the
+    library holds opens as the pack's Picture Loader on that picture. Wrong if
+    it stays a Load Image, or if a file the library does not hold, or one
+    ComfyUI cannot hand over, becomes a loader on some other picture."""
+    env = id_loaders
+    held = b"\x89PNG test-picture-in-the-input-folder"
+    picture = _add_picture(
+        env.server,
+        env.tmp_path,
+        "in-input.png",
+        pixel_sha=ImageUtils.calculate_hash_from_bytes(held),
+    )
+    files = {("", "in-input.png"): held, ("sub", "other.png"): b"\x89PNG test-other"}
+    fetched = []
+
+    def download(base_url, entry):
+        fetched.append(entry)
+        key = (entry["subfolder"], entry["filename"])
+        if entry["type"] != "input" or key not in files:
+            raise HTTPException(status_code=404, detail="test-not-there")
+        return files[key], ".png"
+
+    env.monkeypatch.setattr(workflows_routes, "_download_comfyui_image", download)
+
+    def opened(image):
+        manual = workflows_routes.store_manual_workflow(
+            env.server.hub, f"Input {image}", _picture_document(image), "import"
+        )
+        return _opened(env, manual, pixlstash_nodes="true")["workflow"]["7"]
+
+    assert opened("in-input.png [input]") == {
+        "class_type": "PixlStashPictureLoader",
+        "inputs": {
+            "picture_ids": str(picture),
+            "library": env.server.vault.library_uuid,
+        },
+    }
+    assert {"filename": "in-input.png", "subfolder": "", "type": "input"} in fetched
+    for image in ("sub/other.png", "gone.png"):
+        assert opened(image) == {
+            "class_type": "LoadImage",
+            "inputs": {"image": image},
+        }
+    assert {"filename": "other.png", "subfolder": "sub", "type": "input"} in fetched
+
+
+def test_a_diffusion_model_a_vae_and_a_clip_open_as_the_shelfs_loaders(id_loaders):
+    """Load Diffusion Model goes in as the pack's checkpoint loader on the
+    shelf's row, Load VAE and Load CLIP as the pack's loaders on the shelf's
+    digest. Wrong if one stays stock while the shelf holds its file, or a
+    loader goes in on a file the shelf does not hold."""
+    env = id_loaders
+    info = json.loads(
+        json.dumps({**CHAIN_OBJECT_INFO, **PACK_OBJECT_INFO, **ID_LOADER_OBJECT_INFO})
+    )
+    info.update(
+        {
+            "UNETLoader": {
+                "input": {"required": {"unet_name": [[_SHELF_FILENAME], {}]}},
+                "output": ["MODEL"],
+            },
+            "VAELoader": {
+                "input": {"required": {"vae_name": [["test-vae.safetensors"], {}]}},
+                "output": ["VAE"],
+            },
+            "CLIPLoader": {
+                "input": {"required": {"clip_name": [["test-te.safetensors"], {}]}},
+                "output": ["CLIP"],
+            },
+            "PixlStashVAELoader": {
+                "input": {"required": {"vae_sha256": ["STRING", {"default": ""}]}},
+                "output": ["VAE"],
+            },
+            "PixlStashCLIPLoader": {
+                "input": {
+                    "required": {
+                        "clip_sha256": ["STRING", {"default": ""}],
+                        "type": [["stable_diffusion"], {}],
+                    }
+                },
+                "output": ["CLIP"],
+            },
+        }
+    )
+    env.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url, **_: (info, None)
+    )
+    graph = {
+        "1": {
+            "class_type": "UNETLoader",
+            "inputs": {"unet_name": _SHELF_FILENAME, "weight_dtype": "default"},
+        },
+        "2": {
+            "class_type": "VAELoader",
+            "inputs": {"vae_name": "test-vae.safetensors"},
+        },
+        "3": {
+            "class_type": "CLIPLoader",
+            "inputs": {"clip_name": "test-te.safetensors", "type": "stable_diffusion"},
+        },
+        "6": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": "a", "clip": ["3", 0]},
+        },
+        "4": {
+            "class_type": "KSampler",
+            "inputs": {"seed": 1, "model": ["1", 0], "positive": ["6", 0]},
+        },
+        "8": {
+            "class_type": "VAEDecode",
+            "inputs": {"samples": ["4", 0], "vae": ["2", 0]},
+        },
+        "9": {
+            "class_type": "SaveImage",
+            "inputs": {"filename_prefix": "m", "images": ["8", 0]},
+        },
+    }
+    manual = workflows_routes.store_manual_workflow(
+        env.server.hub, "Model loaders", graph, "import"
+    )
+    hub = env.server.hub
+    held = {
+        "test-vae.safetensors": ("vae", _h("vae")),
+        "test-te.safetensors": ("text_encoder", _h("te")),
+    }
+    with hub.transaction() as conn:
+        folder_id = conn.execute(
+            "SELECT id FROM model_folder WHERE path = '/models/test-swap'"
+        ).fetchone()[0]
+        ids = []
+        for filename, (kind, digest) in held.items():
+            model_id = conn.execute(
+                "INSERT INTO model (file_kind, kind, filename, sha256, provenance) "
+                "VALUES (?, 'unknown', ?, ?, 'scanned') RETURNING id",
+                (kind, filename, digest),
+            ).fetchone()[0]
+            ids.append(model_id)
+            conn.execute(
+                "INSERT INTO model_file (model_id, model_folder_id, relpath, state) "
+                "VALUES (?, ?, ?, 'present')",
+                (model_id, folder_id, filename),
+            )
+    try:
+        opened = _opened(env, manual, pixlstash_nodes="true")["workflow"]
+        assert {n: opened[n] for n in "123"} == {
+            "1": {
+                "class_type": "PixlStashCheckpointLoader",
+                "inputs": {
+                    "checkpoint_id": str(env.checkpoint),
+                    "shelf": shelf_uuid(hub),
+                },
+            },
+            "2": {
+                "class_type": "PixlStashVAELoader",
+                "inputs": {"vae_sha256": _h("vae")},
+            },
+            "3": {
+                "class_type": "PixlStashCLIPLoader",
+                "inputs": {"clip_sha256": _h("te"), "type": "stable_diffusion"},
+            },
+        }
+        # The copies gone: nothing for the pack's loaders to load.
+        touched = [*ids, env.checkpoint]
+        marks = ", ".join("?" * len(touched))
+        with hub.transaction() as conn:
+            conn.execute(
+                f"UPDATE model_file SET state = 'missing' WHERE model_id IN ({marks})",
+                touched,
+            )
+        opened = _opened(env, manual, pixlstash_nodes="true")["workflow"]
+        assert [opened[n]["class_type"] for n in "123"] == [
+            "UNETLoader",
+            "VAELoader",
+            "CLIPLoader",
+        ]
+    finally:
+        with hub.transaction() as conn:
+            conn.execute(
+                "UPDATE model_file SET state = 'present' WHERE model_id = ?",
+                (env.checkpoint,),
+            )
+            for model_id in ids:
+                conn.execute("DELETE FROM model_file WHERE model_id = ?", (model_id,))
+                conn.execute("DELETE FROM model WHERE id = ?", (model_id,))
+
+
 def test_a_run_loads_a_checkpoint_comfyui_lacks_off_the_shelf(id_loaders):
     """ComfyUI does not list the graph's checkpoint and the shelf holds it: a
     run loads it through the pack's loader, so the Workflow tab's pre-flight

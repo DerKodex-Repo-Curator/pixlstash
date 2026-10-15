@@ -2109,10 +2109,25 @@ PACK_SAVERS = {
 
 
 # The stock loaders a graph opened in ComfyUI gets one of the pack's id
-# loaders for, each with the outputs its consumers read, in order.
+# loaders for, each with the outputs its consumers read, in order. The pack's
+# checkpoint loader loads a bare diffusion model too, as MODEL alone.
 _PACK_ID_LOADERS = {
     "LoadImage": (PIXLSTASH_PICTURE_LOADER, ("IMAGE", "MASK")),
     "CheckpointLoaderSimple": (PIXLSTASH_CHECKPOINT_LOADER, ("MODEL", "CLIP", "VAE")),
+    "UNETLoader": (PIXLSTASH_CHECKPOINT_LOADER, ("MODEL",)),
+}
+# The field each stock loader names its checkpoint by.
+_CHECKPOINT_FIELDS = {"CheckpointLoaderSimple": "ckpt_name", "UNETLoader": "unet_name"}
+
+# The stock loaders a graph opened in ComfyUI gets one of the pack's digest
+# loaders for: the field naming the file, the pack's class, the field it takes
+# the digest in, and the output its consumers read. These fetch their file, so
+# they go in wherever the shelf holds a copy, as an adapter loader does.
+PIXLSTASH_VAE_LOADER = "PixlStashVAELoader"
+PIXLSTASH_CLIP_LOADER = "PixlStashCLIPLoader"
+_PACK_DIGEST_LOADERS = {
+    "VAELoader": ("vae_name", PIXLSTASH_VAE_LOADER, "vae_sha256", ("VAE",)),
+    "CLIPLoader": ("clip_name", PIXLSTASH_CLIP_LOADER, "clip_sha256", ("CLIP",)),
 }
 
 
@@ -2124,7 +2139,10 @@ _PACK_ID_LOADERS = {
 # apart.
 SWAPPED_CLASSES = {
     **{pack: stock for stock, (pack, _carried) in PACK_SAVERS.items()},
-    **{pack: stock for stock, (pack, _outputs) in _PACK_ID_LOADERS.items()},
+    PIXLSTASH_PICTURE_LOADER: "LoadImage",
+    PIXLSTASH_CHECKPOINT_LOADER: "CheckpointLoaderSimple",
+    "UNETLoader": "CheckpointLoaderSimple",
+    **{pack: stock for stock, (_f, pack, _d, _o) in _PACK_DIGEST_LOADERS.items()},
     PIXLSTASH_ADAPTER_LOADER: "LoraLoader",
     "LoraLoaderModelOnly": "LoraLoader",
     PIXLSTASH_CONTROLNET_LOADER: "ControlNetLoader",
@@ -2154,6 +2172,8 @@ def swap_in_pack_nodes(
     checkpoint_id: Callable[[str], str | None] | None = None,
     shelf_uuid: str | None = None,
     controlnet_digest: Callable[[str], str | None] | None = None,
+    vae_digest: Callable[[str], str | None] | None = None,
+    clip_digest: Callable[[str], str | None] | None = None,
 ) -> list[dict]:
     """Put ComfyUI-PixlStash nodes where a graph has the stock ones, in place.
 
@@ -2163,8 +2183,10 @@ def swap_in_pack_nodes(
     pack's savers on the same inputs, and a core single-slot LoRA loader whose
     file *lora_digest* can name becomes ``PixlStashAdapterLoader``
     (:func:`swap_to_adapter_loader`), and a ``ControlNetLoader`` whose file
-    *controlnet_digest* can name becomes ``PixlStashControlNetLoader``. Every
-    node keeps its id and its wiring.
+    *controlnet_digest* can name becomes ``PixlStashControlNetLoader``.
+    ``VAELoader`` and ``CLIPLoader`` become the pack's VAE and CLIP loaders on
+    the digest *vae_digest* and *clip_digest* name for their file. Every node
+    keeps its id and its wiring.
 
     The two loaders that name a row by its id are swapped in only with the
     widget that says whose the id is, since an id without it is not trusted
@@ -2174,13 +2196,17 @@ def swap_in_pack_nodes(
     * ``LoadImage`` becomes ``PixlStashPictureLoader`` on the picture
       *pictures* names for the node, of library *library_uuid*. Never with no
       picture: empty, that loader picks pictures by its own sort.
-    * ``CheckpointLoaderSimple`` becomes ``PixlStashCheckpointLoader`` on the
-      row *checkpoint_id* names for its file, of shelf *shelf_uuid*.
+    * ``CheckpointLoaderSimple`` and ``UNETLoader`` become
+      ``PixlStashCheckpointLoader`` on the row *checkpoint_id* names for their
+      file, of shelf *shelf_uuid*.
 
-    A node is left as it is where this ComfyUI lacks the pack's class or has
-    one that cannot stand in (:func:`_stands_in`), where the stock node holds
-    an input the pack's has no place for (a Save Video from before the pack's
-    saver was written against it), and where nothing is wired into a saver.
+    A saver's setting the pack's saver has no place for (Save Video's
+    ``codec``) is left to the pack's own default. A node is left as it is
+    where this ComfyUI lacks the pack's class or has one that cannot stand in
+    (:func:`_stands_in`), where a loader holds a setting the pack's cannot
+    keep (a diffusion model's ``weight_dtype``, a CLIP's ``device`` or a
+    ``type`` the pack's does not list), where the stock node has a wire the
+    pack's has no place for, and where nothing is wired into a saver.
 
     Args:
         lora_digest: A ``lora_name`` -> the SHA-256 the pack's loader can
@@ -2194,6 +2220,9 @@ def swap_in_pack_nodes(
         shelf_uuid: The shelf those rows are on.
         controlnet_digest: A ``control_net_name`` -> the SHA-256 the pack's
             loader can load it by, or ``None``.
+        vae_digest: A ``vae_name`` -> the SHA-256 the pack's VAE loader can
+            load it by, or ``None``.
+        clip_digest: A ``clip_name`` -> the same, for the CLIP loader.
 
     Returns:
         ``[{node_id, was, now}]`` for every node swapped.
@@ -2213,13 +2242,25 @@ def swap_in_pack_nodes(
                 for group in ("required", "optional")
                 for name in (declared.get(group) or {})
             }
-            # A nested input ("format.codec") is its root's to declare.
-            if not is_link(old.get(carried)) or not all(
-                str(name).split(".")[0] in takes for name in old
+            # A nested input ("format.codec") is its root's to declare. A
+            # setting it does not declare takes the pack saver's default; a
+            # wire it has no place for keeps the stock saver.
+            undeclared = {
+                name: value
+                for name, value in old.items()
+                if str(name).split(".")[0] not in takes
+            }
+            if not is_link(old.get(carried)) or any(
+                is_link(value) for value in undeclared.values()
             ):
                 continue
             node["class_type"] = now
-            node["inputs"] = {**_widget_defaults(spec), **old}
+            node["inputs"] = {
+                **_widget_defaults(spec),
+                **{
+                    name: value for name, value in old.items() if name not in undeclared
+                },
+            }
         elif was in _SWAPPABLE_LORA_LOADERS:
             name = old.get("lora_name")
             sha256 = lora_digest(name) if isinstance(name, str) else None
@@ -2250,10 +2291,14 @@ def swap_in_pack_nodes(
                         PICTURE_LOADER_LIBRARY: library_uuid,
                     }
             else:
-                name = old.get("ckpt_name")
+                name = old.get(_CHECKPOINT_FIELDS[was])
                 row = (
                     checkpoint_id(name)
-                    if checkpoint_id and shelf_uuid and isinstance(name, str)
+                    if checkpoint_id
+                    and shelf_uuid
+                    and isinstance(name, str)
+                    # The pack's loader has no cast: an fp8 choice would go.
+                    and old.get("weight_dtype", "default") == "default"
                     else None
                 )
                 if row:
@@ -2276,6 +2321,25 @@ def swap_in_pack_nodes(
                 continue
             node["class_type"] = now
             node["inputs"] = {**_widget_defaults(spec), **digest}
+        elif was in _PACK_DIGEST_LOADERS:
+            field, now, digest_field, outputs = _PACK_DIGEST_LOADERS[was]
+            lookup = vae_digest if was == "VAELoader" else clip_digest
+            name = old.get(field)
+            sha256 = lookup(name) if lookup and isinstance(name, str) else None
+            if not sha256:
+                continue
+            spec = object_info.get(now)
+            owned = {digest_field: sha256}
+            if was == "CLIPLoader":
+                if old.get("device", "default") != "default" or old.get("type") not in (
+                    _combo_options(spec, "type") or ()
+                ):
+                    continue
+                owned["type"] = old["type"]
+            if not _stands_in(spec, outputs, owned):
+                continue
+            node["class_type"] = now
+            node["inputs"] = {**_widget_defaults(spec), **owned}
         else:
             continue
         # A title that was only the stock node's name would call the new node

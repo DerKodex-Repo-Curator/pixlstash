@@ -20,6 +20,7 @@ from pathlib import Path
 import pixlstash
 import pytest
 from _pytest.config.exceptions import UsageError
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pixlstash.server import Server
 from pixlstash.tasks.face_extraction_task import FaceExtractionTask
@@ -562,9 +563,17 @@ def no_test_opens_a_comfyui_socket(monkeypatch):
     it. Left alone the thread would outlive the session (and on a development
     box would reach a real ComfyUI). The listener's own test calls it directly.
     """
+    from pixlstash.routes import workflows as workflows_routes
     from pixlstash.services import comfyui_service
 
     monkeypatch.setattr(comfyui_service, "_listen_for_progress", lambda base_url: None)
+
+    # Nor does opening a graph with PixlStash nodes ask it for a Load Image's
+    # file (`_input_file_sha`): it answers as a ComfyUI without the file.
+    def no_input_file(base_url, entry):
+        raise HTTPException(status_code=404, detail="test-no-comfyui")
+
+    monkeypatch.setattr(workflows_routes, "_download_comfyui_image", no_input_file)
     yield
     # Nor does a run a test queued stay in flight for the next one to list.
     with comfyui_service._run_outcomes_lock:

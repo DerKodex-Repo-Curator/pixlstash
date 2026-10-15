@@ -310,10 +310,30 @@ class TestOpeningWithPackNodes:
         assert graph["9"] == _node("SaveVideo", **inputs)
         assert _why(graph, **STRICT) == {}
 
+    def test_a_setting_the_video_saver_lacks_takes_its_default(self):
+        # A current ComfyUI's Save Video has a `codec` the pack's saver does
+        # not: the saver encodes with its own default rather than staying out.
+        graph = {
+            "9": _node(
+                "SaveVideo",
+                video=["7", 0],
+                format="auto",
+                **{"format.codec": "auto", "codec": "auto", "codec.crf": 23},
+            )
+        }
+        assert [s["now"] for s in self._swap(graph)] == ["PixlStashVideoSaver"]
+        assert graph["9"]["inputs"] == {
+            "video": ["7", 0],
+            "filename_prefix": "video/comfyui",
+            "format": "auto",
+            "format.codec": "auto",
+            "save_workflow": True,
+        }
+
     def test_a_saver_is_left_where_the_pack_cannot_stand_in_for_it(self):
-        # An input the pack's saver has no place for (an older Save Video),
-        # nothing wired in to save, and a ComfyUI without the pack.
-        old = _node("SaveVideo", video=["7", 0], codec="h264")
+        # A wire the pack's saver has no place for, nothing wired in to save,
+        # and a ComfyUI without the pack.
+        old = _node("SaveVideo", video=["7", 0], codec=["6", 0])
         unwired = _node("SaveImage", filename_prefix="v")
         graph = {"8": dict(old), "9": dict(unwired)}
         assert self._swap(graph) == []
@@ -364,7 +384,86 @@ class TestOpeningWithPackNodes:
             },
             "output": ["MODEL", "CLIP", "VAE"],
         },
+        "PixlStashVAELoader": {
+            "input": {"required": {"vae_sha256": ["STRING", {"default": ""}]}},
+            "output": ["VAE"],
+        },
+        "PixlStashCLIPLoader": {
+            "input": {
+                "required": {
+                    "clip_sha256": ["STRING", {"default": ""}],
+                    "type": [["stable_diffusion", "minimax"], {}],
+                },
+                "optional": {"clip_sha256_2": ["STRING", {"default": ""}]},
+            },
+            "output": ["CLIP"],
+        },
     }
+
+    @staticmethod
+    def _models():
+        """A diffusion model, a VAE and a CLIP, each by its own loader."""
+        return {
+            "1": _node("UNETLoader", unet_name="u.safetensors", weight_dtype="default"),
+            "2": _node("VAELoader", vae_name="v.safetensors"),
+            "3": _node(
+                "CLIPLoader",
+                clip_name="c.safetensors",
+                type="minimax",
+                device="default",
+            ),
+            "4": _node("CLIPTextEncode", clip=["3", 0], text="a"),
+            "5": _node("KSampler", model=["1", 0], positive=["4", 0]),
+            "6": _node("VAEDecode", samples=["5", 0], vae=["2", 0]),
+        }
+
+    def _swap_models(self, graph, **known):
+        known = {
+            "checkpoint_id": {"u.safetensors": "8"}.get,
+            "shelf_uuid": "shelf-here",
+            "vae_digest": {"v.safetensors": "a" * 64}.get,
+            "clip_digest": {"c.safetensors": "b" * 64}.get,
+            **known,
+        }
+        return comfyui_recipe_service.swap_in_pack_nodes(
+            graph, {**self.INFO, **self.ID_LOADERS}, {}.get, **known
+        )
+
+    def test_a_diffusion_model_a_vae_and_a_clip_load_off_the_shelf(self):
+        graph = self._models()
+        assert [(s["node_id"], s["now"]) for s in self._swap_models(graph)] == [
+            ("1", CKPT),
+            ("2", "PixlStashVAELoader"),
+            ("3", "PixlStashCLIPLoader"),
+        ]
+        assert graph["1"] == _node(CKPT, checkpoint_id="8", shelf="shelf-here")
+        assert graph["2"] == _node("PixlStashVAELoader", vae_sha256="a" * 64)
+        assert graph["3"] == _node(
+            "PixlStashCLIPLoader",
+            clip_sha256="b" * 64,
+            type="minimax",
+            clip_sha256_2="",
+        )
+        # What read them reads them where it did.
+        assert {key: graph[key] for key in "456"} == {
+            key: self._models()[key] for key in "456"
+        }
+
+    def test_a_model_loader_keeps_a_setting_the_pack_cannot(self):
+        stock = self._models()
+        # Not on the shelf: nothing to load it by.
+        graph = self._models()
+        nothing = {"checkpoint_id": {}.get, "vae_digest": {}.get, "clip_digest": {}.get}
+        assert self._swap_models(graph, **nothing) == []
+        assert graph == stock
+        # An fp8 cast, a CLIP on the CPU, a CLIP type the pack does not list.
+        graph = self._models()
+        graph["1"]["inputs"]["weight_dtype"] = "fp8_e4m3fn"
+        graph["3"]["inputs"]["device"] = "cpu"
+        assert [s["node_id"] for s in self._swap_models(graph)] == ["2"]
+        graph = self._models()
+        graph["3"]["inputs"]["type"] = "flux"
+        assert [s["node_id"] for s in self._swap_models(graph)] == ["1", "2"]
 
     @staticmethod
     def _stock():
@@ -449,6 +548,8 @@ class TestOpeningWithPackNodes:
             **self._stock(),
             "4": _node("LoraLoader", lora_name="x.safetensors", model=["1", 0]),
             "9": _node("SaveImage", images=["3", 0], filename_prefix="v"),
+            # The model loaders alone: what reads them is wired by their ids.
+            **{f"m{key}": self._models()[key] for key in "123"},
         }
         swapped = json.loads(json.dumps(stock))
         info = {**self.INFO, **self.ID_LOADERS}
@@ -458,10 +559,12 @@ class TestOpeningWithPackNodes:
             {"x.safetensors": "d" * 64}.get,
             pictures={"2": 41},
             library_uuid="lib-here",
-            checkpoint_id={"a.safetensors": "7"}.get,
+            checkpoint_id={"a.safetensors": "7", "u.safetensors": "8"}.get,
             shelf_uuid="shelf-here",
+            vae_digest={"v.safetensors": "a" * 64}.get,
+            clip_digest={"c.safetensors": "b" * 64}.get,
         )
-        assert {s["node_id"] for s in done} == {"1", "2", "4", "9"}
+        assert {s["node_id"] for s in done} == {"1", "2", "4", "9", "m1", "m2", "m3"}
         classes = comfyui_recipe_service.SWAPPED_CLASSES
         structure = workflow_run_service.graph_structure
         assert structure(swapped) != structure(stock)
