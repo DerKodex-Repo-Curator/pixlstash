@@ -6,7 +6,7 @@
 // server's own `~` in `GET /model-folders` if that ever matters.
 // `Shared`, `Public` and `Default` sit under a Users folder without being anybody's.
 const HOME_RE =
-  /^(\/home\/[^/]+|\/Users\/(?!Shared\/)[^/]+|\/root|[A-Za-z]:[\\/]Users[\\/](?!(?:Public|Default)[\\/])[^\\/]+)(?=[\\/])/;
+  /^(\/home\/[^/]+|\/Users\/(?!(?:Shared|Public|Default)\/)[^/]+|\/root|[A-Za-z]:[\\/]Users[\\/](?!(?:Shared|Public|Default)[\\/])[^\\/]+)(?=[\\/])/;
 
 /**
  * Split a path for display.

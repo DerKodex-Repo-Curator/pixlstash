@@ -455,6 +455,19 @@ describe("the Downloads folder", () => {
     ]);
   });
 
+  it("keeps a refused Change… reachable so its reason can be read", async () => {
+    // Natively disabled, the item takes no hover, so its tooltip never opens.
+    const wrapper = await open([folder(), WATCHED], { inDocker: true });
+    const change = byText(wrapper, "Change…");
+    expect(change.attributes("aria-disabled")).toBe("true");
+    expect(change.attributes("disabled")).toBeUndefined();
+    await change.trigger("click");
+    expect(browser(wrapper).props("open")).toBe(false);
+    expect(byText(wrapper, "Stop watching").attributes("aria-disabled")).toBe(
+      undefined,
+    );
+  });
+
   it("offers no menu to a remote session", async () => {
     const wrapper = await open([folder(), WATCHED], { canManage: false });
     expect(byText(wrapper, "Stop watching")).toBeUndefined();

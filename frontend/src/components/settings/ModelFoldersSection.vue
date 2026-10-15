@@ -64,7 +64,7 @@
                 :class="{ 'ctx-item--disabled': addReason }"
                 type="button"
                 role="menuitem"
-                :disabled="Boolean(addReason)"
+                :aria-disabled="addReason ? 'true' : undefined"
                 @click="onChangeDownloads"
               >
                 <Tooltip :text="addReason" activator="parent" />
@@ -78,7 +78,9 @@
                 }"
                 type="button"
                 role="menuitem"
-                :disabled="Boolean(forgetReason(store.downloadsFolder))"
+                :aria-disabled="
+                  forgetReason(store.downloadsFolder) ? 'true' : undefined
+                "
                 @click="onStopWatching"
               >
                 <Tooltip
