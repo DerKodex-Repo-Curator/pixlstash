@@ -20708,6 +20708,43 @@ def test_a_run_loads_a_checkpoint_comfyui_lacks_off_the_shelf(id_loaders):
     assert env.submitted[-1]["graph"]["1"] == CHAIN_DOCUMENT["1"]
 
 
+def test_a_run_loads_a_diffusion_model_comfyui_lacks_off_the_shelf(id_loaders):
+    """The same for Load Diffusion Model, alone in missing its file. Wrong if
+    `missing_models` names it, or the run submits the stock loader."""
+    env = id_loaders
+    info = json.loads(
+        json.dumps({**CHAIN_OBJECT_INFO, **PACK_OBJECT_INFO, **ID_LOADER_OBJECT_INFO})
+    )
+    info["UNETLoader"] = {
+        "input": {"required": {"unet_name": [["something-else.safetensors"], {}]}},
+        "output": ["MODEL"],
+    }
+    env.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url, **_: (info, None)
+    )
+    graph = json.loads(json.dumps(CHAIN_DOCUMENT))
+    graph["11"] = {
+        "class_type": "UNETLoader",
+        "inputs": {"unet_name": _SHELF_FILENAME, "weight_dtype": "default"},
+    }
+    graph["2"]["inputs"]["model"] = ["11", 0]
+    workflow = workflows_routes.store_manual_workflow(
+        env.server.hub, "Shelf diffusion model", graph, "import"
+    )
+    payload = _preflight(env.owner, workflow_id=workflow)
+    assert [
+        reason
+        for group in payload["groups"]
+        for reason in group["reasons"]
+        if reason["code"] == "missing_models"
+    ] == []
+    r = env.owner.post(f"{API}/workflows/run", json={"workflow_id": workflow})
+    assert r.status_code == 200, r.text
+    submitted = env.submitted[-1]["graph"]
+    assert submitted["11"]["class_type"] == "PixlStashCheckpointLoader"
+    assert submitted["1"] == CHAIN_DOCUMENT["1"]
+
+
 _CONTROLNET_FILENAME = "sd3.5_large_controlnet_canny.safetensors"
 _CONTROLNET_DIGEST = _h("controlnet-canny")
 
