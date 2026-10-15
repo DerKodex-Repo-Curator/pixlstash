@@ -293,7 +293,9 @@
       :placeholder="chooserPlaceholder"
       :empty-text="chooserEmpty"
       :status="chooserStatus"
+      :order="store.pickOrder"
       @update:query="(value) => (chooserQuery = value)"
+      @update:order="store.setPickOrder"
       @add="addChosen"
       @undo="undoLastPick"
       @close="closeChooser"
@@ -1183,6 +1185,7 @@ const chooserSections = computed(() => {
     sets: store.shownHandMadeSets,
     combinations: store.workflowSets.combinations,
     query: chooserQuery.value,
+    order: store.pickOrder,
   }).map((section) => ({
     ...section,
     items: section.held

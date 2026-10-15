@@ -60,6 +60,8 @@ import { useModelShelfStore } from "../../stores/useModelShelfStore";
 import { useNoticeStore } from "../../stores/useNoticeStore";
 import { useOperationStore } from "../../stores/useOperationStore";
 import { useSidebarStore } from "../../stores/useSidebarStore";
+import { useUserPrefsStore } from "../../stores/useUserPrefsStore";
+import { formatUserDate } from "../../utils/utils";
 
 const stubs = {
   "v-icon": true,
@@ -261,6 +263,38 @@ describe("what the rail lists", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(setModelsHidden).toHaveBeenCalledWith([23, 22, 21], true);
     expect(stacked()).toHaveLength(0);
+  });
+
+  it("orders newest first by file date, one heading per download, and remembers it", async () => {
+    const HOUR_NS = 3600 * 1e9;
+    const at = (hours) => ({ newest_file_mtime: 1.8e18 + hours * HOUR_NS });
+    const { wrapper, store } = await mountRail({
+      rows: [
+        row(1, "RealVisXL_v5", "checkpoint", at(0)),
+        row(3, "FilmGrain_XL", "adapter", at(-5)),
+        row(5, "Soft_Light", "adapter", at(1)),
+      ],
+    });
+    const order = wrapper.find('[data-testid="mrail-order"]');
+    await order.findAll('[role="radio"]')[1].trigger("click");
+    const ids = () =>
+      wrapper.findAll('[role="option"]').map((o) => o.attributes("data-model-id"));
+    // The checkpoint and the LoRA an hour after it are one download.
+    expect(ids()).toEqual(["5", "1", "3"]);
+    const headings = wrapper.findAll(".mrail-group");
+    expect(headings).toHaveLength(2);
+    // Named by the batch's first row's date and time, with its count.
+    const first = new Date((1.8e18 + HOUR_NS) / 1e6).toISOString();
+    expect(headings[0].text()).toBe(
+      `${formatUserDate(first, useUserPrefsStore().dateFormat)} 2`,
+    );
+    expect(store.pickOrder).toBe("newest");
+    expect(JSON.parse(window.localStorage.getItem("pixlstash:modelPickOrder"))).toEqual({
+      order: "newest",
+    });
+
+    await order.findAll('[role="radio"]')[0].trigger("click");
+    expect(ids()).toEqual(["1", "3", "5"]);
   });
 
   it("says where each model already is", async () => {

@@ -46,6 +46,17 @@
             @keydown="onKeydown"
           />
         </div>
+        <!-- A slot's picker only: a checklist is pre-ticked evidence, read
+             whole. A click leaves focus in the field, as a row's does. -->
+        <Segmented
+          v-if="pick"
+          @mousedown.prevent
+          :model-value="order"
+          :options="PICK_ORDERS"
+          aria-label="Order"
+          data-testid="wsc-order"
+          @update:model-value="setOrder"
+        />
       </div>
       <p v-if="note" class="wsc__note">{{ note }}</p>
       <div
@@ -203,8 +214,10 @@ import { computed, nextTick, ref, useId, watch } from "vue";
 import { VIcon } from "vuetify/components";
 
 import { modelName, quantBadge } from "../../utils/modelShelf";
+import { PICK_ORDERS } from "../../utils/workflowSets";
 import AppButton from "../widgets/AppButton.vue";
 import ModelMark from "../widgets/ModelMark.vue";
+import Segmented from "../widgets/Segmented.vue";
 
 /** How many rows a section draws before "Show more" is asked for. */
 const SECTION_DEPTH = 8;
@@ -233,9 +246,11 @@ const props = defineProps({
   emptyText: { type: String, default: "Nothing to add." },
   /** Pick mode's status line: `{text, undo}`, or null before the first add. */
   status: { type: Object, default: null },
+  /** Pick mode's order, a `PICK_ORDERS` id; the caller sorts `sections`. */
+  order: { type: String, default: "name" },
 });
 
-const emit = defineEmits(["close", "add", "update:query", "undo"]);
+const emit = defineEmits(["close", "add", "update:query", "update:order", "undo"]);
 
 const listId = `wsc-${useId()}`;
 const fieldRef = ref(null);
@@ -393,6 +408,12 @@ watch(items, (list, before) => {
     : null;
 });
 
+/** A new order starts over from the top match. */
+function setOrder(order) {
+  activeKey.value = null;
+  emit("update:order", order);
+}
+
 function onInput(event) {
   // Typing starts over from the top match.
   activeKey.value = null;
@@ -503,7 +524,15 @@ function onKeydown(event) {
 }
 
 .wsc__fs {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
   padding: var(--space-4) var(--space-4) var(--space-3);
+}
+
+.wsc__fs > .tbm-input-wrap {
+  flex: 1;
+  min-width: 0;
 }
 
 .wsc__note {

@@ -49,6 +49,16 @@
             >
           </button>
         </div>
+        <!-- By file date the rows fall into downloads, so a checkpoint and the
+             encoder and VAE that came with it sit under one heading. -->
+        <Segmented
+          :model-value="store.pickOrder"
+          :options="PICK_ORDERS"
+          full
+          aria-label="Order"
+          data-testid="mrail-order"
+          @update:model-value="store.setPickOrder"
+        />
       </div>
 
       <p
@@ -401,16 +411,21 @@ import { GRID_GROUP_BY, useModelShelfStore } from "../../stores/useModelShelfSto
 import { useSidebarStore } from "../../stores/useSidebarStore";
 import { useTasksStore } from "../../stores/useTasksStore";
 import { onMenuKeydown } from "../../utils/menuKeyboard.js";
+import { useUserPrefsStore } from "../../stores/useUserPrefsStore";
 import {
   formatModelSize,
   hideModelsVerb,
   modelName,
 } from "../../utils/modelShelf";
+import { formatUserDate } from "../../utils/utils";
 import {
   defaultSlot,
+  downloadBatches,
   handMadeBase,
   handMadeName,
+  orderRows,
   pictureCount,
+  PICK_ORDERS,
   rowMatches,
   SET_SLOTS,
   setCheckpoint,
@@ -422,6 +437,7 @@ import AppButton from "../widgets/AppButton.vue";
 import AppInput from "../widgets/AppInput.vue";
 import AppInspector from "../widgets/AppInspector.vue";
 import ModelMark from "../widgets/ModelMark.vue";
+import Segmented from "../widgets/Segmented.vue";
 import ShelfSelectionBar from "./ShelfSelectionBar.vue";
 import TasksPanel, { tasksTabFor } from "./TasksPanel.vue";
 import Tooltip from "../widgets/Tooltip.vue";
@@ -432,6 +448,7 @@ const RUN_PAUSE_MS = 1500;
 const store = useModelShelfStore();
 const sidebarStore = useSidebarStore();
 const tasksStore = useTasksStore();
+const userPrefs = useUserPrefsStore();
 const route = useRoute();
 
 // The sets say where each model already is. The store's guard makes a repeat
@@ -630,18 +647,33 @@ function nameOf(row) {
 const byName = (a, b) => nameOf(a).localeCompare(nameOf(b));
 
 /**
- * The list under the set panel's own slot headings. With Fits on, the models
- * pictures ran with the set's checkpoint come first, strongest evidence first,
- * then the rest under the ＋ chooser's "<base> <kind>" headings.
+ * The list under the set panel's own slot headings, or by file date one
+ * heading per download (`downloadBatches`), whatever its kinds. With Fits on,
+ * the models pictures ran with the set's checkpoint come first, strongest
+ * evidence first, then the rest under the ＋ chooser's "<base> <kind>"
+ * headings, each in the chosen order.
  */
 const groups = computed(() => {
+  const order = store.pickOrder;
   const bySlot = (rows) =>
     SET_SLOTS.map((slot) => ({
       slot,
       rows: rows.filter((row) => defaultSlot(row.file_kind) === slot.id),
     })).filter((entry) => entry.rows.length);
+  if (!fits.value && order !== "name") {
+    return downloadBatches(orderRows(shown.value, order)).map(
+      ({ at, rows }, index) => ({
+        id: `dl-${index}`,
+        label:
+          at === null
+            ? "No file date"
+            : formatUserDate(new Date(at).toISOString(), userPrefs.dateFormat),
+        rows,
+      }),
+    );
+  }
   if (!fits.value) {
-    return bySlot([...shown.value].sort(byName)).map(({ slot, rows }) => ({
+    return bySlot(orderRows(shown.value, order)).map(({ slot, rows }) => ({
       id: slot.id,
       label: slot.label,
       rows,
@@ -656,7 +688,10 @@ const groups = computed(() => {
         (evidence.get(b.id).pictures || 0) -
           (evidence.get(a.id).pictures || 0) || byName(a, b),
     );
-  const rest = shown.value.filter((row) => !evidence.has(row.id)).sort(byName);
+  const rest = orderRows(
+    shown.value.filter((row) => !evidence.has(row.id)),
+    order,
+  );
   return [
     ...bySlot(ranked).map(({ slot, rows }) => ({
       id: `ran-${slot.id}`,
