@@ -79,9 +79,10 @@ COMFYUI_UNREACHABLE = "comfyui_unreachable"
 UI_FORMAT = "ui_format"
 MISSING_NODES = "missing_nodes"
 MISSING_MODELS = "missing_models"
-# A checkpoint ComfyUI lacks and the shelf holds, which a run would load through
-# `PixlStashCheckpointLoader` but for a ComfyUI still running a pack from
-# before its `shelf` widget (#1923): a restart, not an install, is the fix.
+# A checkpoint or diffusion model ComfyUI lacks and the shelf holds, which a run
+# would load through `PixlStashCheckpointLoader` but for a ComfyUI still running
+# a pack from before its `shelf` widget (#1923): a restart, not an install, is
+# the fix.
 PACK_OUTDATED = "pack_outdated"
 A1111 = "a1111"
 PICTURE_INPUT_UNFILLED = "picture_input_unfilled"
@@ -703,11 +704,12 @@ def with_pack_outdated(reasons: list[Reason], files: set[str]) -> list[Reason]:
     for reason in reasons:
         if reason.code == MISSING_MODELS and files:
             models = reason.detail.get("models", [])
-            # A checkpoint's: a VAE or UNET of the same name is still missing.
+            # A base model's: a VAE of the same name is still missing.
             stale = [
                 model
                 for model in models
-                if model["file"] in files and model["folder"] == "checkpoints"
+                if model["file"] in files
+                and model["folder"] in ("checkpoints", "diffusion_models")
             ]
             if stale:
                 moved += stale

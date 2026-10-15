@@ -787,9 +787,10 @@ Seven rules the client must not re-derive:
    `missing_models: {models: [{file, folder}]}` (read off the graph with
    the owner's model fixes applied; where a fix's replacement is missing too,
    `file` is the replacement and never the original it stands in for),
-   `pack_outdated: {models: [{file, folder}]}` (a checkpoint ComfyUI lacks and
-   the shelf holds, which the run would load through `PixlStashCheckpointLoader`
-   but for a running pack from before its `shelf` widget; moved out of
+   `pack_outdated: {models: [{file, folder}]}` (a checkpoint or diffusion
+   model ComfyUI lacks and the shelf holds, which the run would load through
+   `PixlStashCheckpointLoader` but for a running pack from before its `shelf`
+   widget; moved out of
    `missing_models`, it blocks the batch the same way, and the Workflow tab and
    the Run popup word it as "restart ComfyUI"), `a1111`,
    `picture_input_unfilled: {inputs: [{slot_label, input_name, title}]}`,

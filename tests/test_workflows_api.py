@@ -20943,6 +20943,33 @@ def test_a_pack_from_before_the_shelf_widget_says_restart_comfyui(id_loaders):
         ]
     }
 
+    # A diffusion model the shelf holds reads the same; one cast to fp8 does
+    # not, since even a current pack's loader cannot cast it.
+    info["UNETLoader"] = {
+        "input": {"required": {"unet_name": [["something-else.safetensors"], {}]}},
+        "output": ["MODEL"],
+    }
+    unet = json.loads(json.dumps(CHAIN_DOCUMENT))
+    unet["11"] = {
+        "class_type": "UNETLoader",
+        "inputs": {"unet_name": _SHELF_FILENAME, "weight_dtype": "default"},
+    }
+    unet["2"]["inputs"]["model"] = ["11", 0]
+    unet["1"]["inputs"]["ckpt_name"] = "not-on-the-shelf.safetensors"
+    diffusion = {"file": _SHELF_FILENAME, "folder": "diffusion_models"}
+    not_held = {"file": "not-on-the-shelf.safetensors", "folder": "checkpoints"}
+    assert reasons(
+        workflows_routes.store_manual_workflow(
+            env.server.hub, "Old pack, diffusion model", unet, "import"
+        )
+    ) == {"missing_models": [not_held], "pack_outdated": [diffusion]}
+    unet["11"]["inputs"]["weight_dtype"] = "fp8_e4m3fn"
+    assert reasons(
+        workflows_routes.store_manual_workflow(
+            env.server.hub, "Old pack, fp8 diffusion model", unet, "import"
+        )
+    ) == {"missing_models": [not_held, diffusion]}
+
     # A pack with no loader at all keeps today's wording.
     del info["PixlStashCheckpointLoader"]
     assert reasons() == {"missing_models": [model]}

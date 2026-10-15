@@ -80,7 +80,7 @@ describe("pack_outdated says restart ComfyUI", () => {
     const read = readReason({ code: "pack_outdated", models: files });
     expect(read.text).toBe(
       "ComfyUI-PixlStash is out of date in the running ComfyUI, so it cannot " +
-        "load this checkpoint from your model shelf. " +
+        "load this model from your model shelf. " +
         "Restart ComfyUI, or update the pack.",
     );
     expect(read.files).toEqual(files);

@@ -8294,9 +8294,10 @@ def create_router(server) -> APIRouter:
     def _shelf_checkpoints_an_old_pack_skips(
         request: Request, graph: dict, object_info: dict
     ) -> set[str]:
-        """The checkpoints :func:`_swap_in_shelf_loaders` left missing only
-        because the running ComfyUI has a pack from before the loader's
-        ``shelf`` widget (#1923): one restart would load them off the shelf.
+        """The checkpoints and diffusion models :func:`_swap_in_shelf_loaders`
+        left missing only because the running ComfyUI has a pack from before
+        the loader's ``shelf`` widget (#1923): one restart would load them off
+        the shelf.
 
         Empty where the pack has no loader at all, or has the widget: the
         missing file is then reported as it always was.
@@ -8310,7 +8311,14 @@ def create_router(server) -> APIRouter:
         names = {
             str(item.get("value"))
             for item in detect_model_targets(graph, object_info)
-            if item and item.get("class_type") == "CheckpointLoaderSimple"
+            if item
+            and item.get("class_type") in ("CheckpointLoaderSimple", "UNETLoader")
+            # The pack's loader has no cast, so even a current one leaves an
+            # fp8 diffusion model's loader as it is (`swap_in_pack_nodes`).
+            and (graph.get(str(item.get("node_id"))) or {})
+            .get("inputs", {})
+            .get("weight_dtype", "default")
+            == "default"
         }
         if not names or not _comfyui_is_here(request):
             return set()

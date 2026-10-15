@@ -28,8 +28,9 @@ export const STAGE_LABELS = {
 export const UNCHECKED_CODES = ["comfyui_unreachable", "comfyui_not_configured"];
 
 /**
- * A checkpoint on the shelf that the running ComfyUI's ComfyUI-PixlStash is
- * too old to load (#1923): restarting ComfyUI is the fix, not installing it.
+ * A checkpoint or diffusion model on the shelf that the running ComfyUI's
+ * ComfyUI-PixlStash is too old to load (#1923): restarting ComfyUI is the
+ * fix, not installing it.
  */
 export const PACK_OUTDATED = "pack_outdated";
 export const PACK_OUTDATED_ACTION = "Restart ComfyUI, or update the pack.";
@@ -311,7 +312,7 @@ export function readReason(reason) {
       const files = (reason.models || []).filter(Boolean);
       const one = files.length === 1;
       return read(
-        `ComfyUI-PixlStash is out of date in the running ComfyUI, so it cannot load ${one ? "this checkpoint" : "these checkpoints"} from your model shelf. ${PACK_OUTDATED_ACTION}`,
+        `ComfyUI-PixlStash is out of date in the running ComfyUI, so it cannot load ${one ? "this model" : "these models"} from your model shelf. ${PACK_OUTDATED_ACTION}`,
         null,
         files,
       );
