@@ -20458,6 +20458,67 @@ def test_the_checkpoint_loader_goes_in_only_where_it_can_read_the_file(id_loader
     assert opened() == ["CheckpointLoaderSimple", "PixlStashPictureLoader"]
 
 
+def test_a_run_loads_a_checkpoint_comfyui_lacks_off_the_shelf(id_loaders):
+    """ComfyUI does not list the graph's checkpoint and the shelf holds it: a
+    run loads it through the pack's loader, so the Workflow tab's pre-flight
+    does not call it missing. Wrong if `missing_models` names it there, or the
+    run submits the stock loader."""
+    env = id_loaders
+    info = json.loads(
+        json.dumps({**CHAIN_OBJECT_INFO, **PACK_OBJECT_INFO, **ID_LOADER_OBJECT_INFO})
+    )
+    listed = info["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"]
+    listed[0] = ["something-else.safetensors"]
+    env.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url, **_: (info, None)
+    )
+    workflow = workflows_routes.store_manual_workflow(
+        env.server.hub,
+        "Shelf checkpoint",
+        json.loads(json.dumps(CHAIN_DOCUMENT)),
+        "import",
+    )
+
+    def missing():
+        payload = _preflight(env.owner, workflow_id=workflow)
+        return [
+            model
+            for group in payload["groups"]
+            for reason in group["reasons"]
+            if reason["code"] == "missing_models"
+            for model in reason["models"]
+        ]
+
+    assert missing() == []
+    r = env.owner.post(f"{API}/workflows/run", json={"workflow_id": workflow})
+    assert r.status_code == 200, r.text
+    graph = env.submitted[-1]["graph"]
+    assert graph["1"]["class_type"] == "PixlStashCheckpointLoader"
+    assert graph["1"]["inputs"] == {
+        "checkpoint_id": str(env.checkpoint),
+        "shelf": shelf_uuid(env.server.hub),
+    }
+    assert graph["2"]["inputs"]["model"] == ["1", 0]
+    # Open's plan, which a save stores, keeps the graph's own loader: a shelf
+    # row id saved into a version would name this hub's shelf for good.
+    assert _opened(env, workflow)["workflow"]["1"] == CHAIN_DOCUMENT["1"]
+
+    # The loader cannot fetch the file: away from this computer it is missing.
+    env.monkeypatch.setattr(
+        workflows_routes, "locate", lambda url: ("local_network", url)
+    )
+    assert missing() == [{"file": _SHELF_FILENAME, "folder": "checkpoints"}]
+
+    # A ComfyUI that has the file loads it with its own loader.
+    env.monkeypatch.setattr(
+        workflows_routes, "locate", lambda url: ("this_computer", url)
+    )
+    listed[0] = [_SHELF_FILENAME]
+    r = env.owner.post(f"{API}/workflows/run", json={"workflow_id": workflow})
+    assert r.status_code == 200, r.text
+    assert env.submitted[-1]["graph"]["1"] == CHAIN_DOCUMENT["1"]
+
+
 def test_the_picture_loader_goes_in_only_on_a_picture_the_library_holds(id_loaders):
     """A pin (Fixed) or a file a run uploaded says which picture. A file the
     owner put in ComfyUI's input folder is no picture of the library.
