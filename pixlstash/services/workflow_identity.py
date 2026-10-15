@@ -249,6 +249,7 @@ _CANONICAL_LOADERS = {
     "PixlStashCheckpointLoader": "CheckpointLoaderSimple",
     "PixlStashCLIPLoader": "CLIPLoader",
     "PixlStashVAELoader": "VAELoader",
+    "PixlStashControlNetLoader": "ControlNetLoader",
 }
 
 # What a removed node's output stands for when an edge is re-wired through it:

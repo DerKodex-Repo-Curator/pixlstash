@@ -921,6 +921,36 @@ class TestComponentRoleBackfill:
         )
         assert hub.execute("PRAGMA user_version").fetchone()[0] == CURRENT_DATA_VERSION
 
+    def test_a_data_v15_hub_refiles_what_sits_in_controlnet(self, hub):
+        # `controlnet/` came to name `controlnet` (data version 16). An SDXL
+        # ControlNet cleared the checkpoint threshold and an SD 1.5 one did
+        # not; both are ControlNets. A Control-LoRA there carries adapter
+        # markers and stays an adapter; a `vae/` the earlier pass left alone
+        # stays left alone.
+        apply_migrations(hub)
+        hub.execute("PRAGMA user_version = 15")
+        folder_id = add_folder(hub, "/models")
+        big = add_model(hub, file_kind="checkpoint", sha256="c", kind=None)
+        add_file(hub, big, folder_id, "ControlNet/sdxl_canny.safetensors")
+        small = add_model(hub, file_kind="unknown", sha256="s", kind=None)
+        add_file(hub, small, folder_id, "controlnet/sd15_depth.safetensors")
+        control_lora = add_model(hub, file_kind="adapter", sha256="a")
+        add_file(hub, control_lora, folder_id, "controlnet/control-lora.safetensors")
+        owner_unknown = add_model(hub, file_kind="unknown", sha256="u", kind=None)
+        add_file(hub, owner_unknown, folder_id, "vae/not_a_vae.safetensors")
+        hub.commit()
+
+        apply_migrations(hub)
+
+        kinds = dict(hub.execute("SELECT id, file_kind FROM model").fetchall())
+        assert [kinds[i] for i in (big, small, control_lora, owner_unknown)] == [
+            "controlnet",
+            "controlnet",
+            "adapter",
+            "unknown",
+        ]
+        assert hub.execute("PRAGMA user_version").fetchone()[0] == CURRENT_DATA_VERSION
+
     def test_a_fresh_hub_records_the_backfill_as_done(self, hub):
         apply_migrations(hub)
 

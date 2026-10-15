@@ -39,7 +39,7 @@ vi.mock("../../api/modelShelf", () => ({
   listAdapters: (...args) => {
     if (args[0]?.fileKind === "engine") return listEngines(...args);
     if (args[0]?.fileKind === "unknown") return listUnclassified(...args);
-    if (args[0]?.fileKind === "vae" || args[0]?.fileKind === "text_encoder") {
+    if (["vae", "text_encoder", "controlnet"].includes(args[0]?.fileKind)) {
       return listSupport(...args);
     }
     return listAdapters(...args);

@@ -100,6 +100,11 @@ FILE_ENGINE = "engine"
 # machine, and it is why "what can I delete" had no answer.
 FILE_VAE = "vae"
 FILE_TEXT_ENCODER = "text_encoder"
+# A ControlNet is loaded beside a model too, by its own loader, which the
+# ComfyUI-PixlStash ControlNet Loader stands in for. Big ones (SDXL, SD3.5)
+# clear `_CHECKPOINT_MIN_PARAMS` and read as `checkpoint`, which the shelf's
+# hash routes refuse, so it needs a name of its own to be fetched by digest.
+FILE_CONTROLNET = "controlnet"
 
 # What a directory NAMES the files inside it, normalised by `_normalise_folder`.
 #
@@ -138,6 +143,8 @@ _ROLE_FOLDERS: dict[str, str] = {
     "unet": FILE_CHECKPOINT,
     "unets": FILE_CHECKPOINT,
     "diffusionmodels": FILE_CHECKPOINT,
+    "controlnet": FILE_CONTROLNET,
+    "controlnets": FILE_CONTROLNET,
 }
 
 # Parameter count above which a marker-free file is a base checkpoint rather
@@ -191,7 +198,8 @@ class AdapterInfo:
             unrecognised LyCORIS variant reads as "an adapter whose kind we do
             not know" rather than being mistaken for a checkpoint.
         file_kind: What the file is: ``"adapter"``, ``"vae"``,
-            ``"text_encoder"``, ``"checkpoint"`` or ``"unknown"``. Never
+            ``"text_encoder"``, ``"controlnet"``, ``"checkpoint"`` or
+            ``"unknown"``. Never
             guesses checkpoint from the absence of markers alone; see
             :func:`classify_model_file`.
         param_count: Total parameters, summed from the tensor shapes already in
@@ -533,8 +541,8 @@ def role_from_folder(path: str) -> Optional[str]:
         path: Path to the model file. May be relative or absolute.
 
     Returns:
-        ``"vae"``, ``"text_encoder"``, ``"checkpoint"``, or ``None`` when the
-        directory names no role we recognise - which is the answer for a flat folder of mixed
+        ``"vae"``, ``"text_encoder"``, ``"controlnet"``, ``"checkpoint"``, or
+        ``None`` when the directory names no role we recognise - which is the answer for a flat folder of mixed
         downloads and must never be read as "not a VAE".
     """
     folder = os.path.basename(os.path.dirname(path))
@@ -578,8 +586,8 @@ def classify_model_file(tensor_names, param_count: int, path: str = "") -> str:
             only a header should get.
 
     Returns:
-        ``"adapter"``, ``"vae"``, ``"text_encoder"``, ``"checkpoint"`` or
-        ``"unknown"``.
+        ``"adapter"``, ``"vae"``, ``"text_encoder"``, ``"controlnet"``,
+        ``"checkpoint"`` or ``"unknown"``.
     """
     if has_adapter_markers(tensor_names):
         return FILE_ADAPTER

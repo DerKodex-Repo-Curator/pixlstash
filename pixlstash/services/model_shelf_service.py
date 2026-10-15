@@ -71,6 +71,7 @@ from pixlstash.services.workflow_library_service import (
 from pixlstash.utils.adapter_header import (
     FILE_ADAPTER,
     FILE_CHECKPOINT,
+    FILE_CONTROLNET,
     FILE_ENGINE,
     FILE_TEXT_ENCODER,
     FILE_UNKNOWN,
@@ -840,10 +841,11 @@ SUPPORT_FILE_KINDS = (FILE_VAE, FILE_TEXT_ENCODER)
 
 # Kinds that never make a support file needed. An adapter runs on a base model
 # and needs whatever that base needs, so counting it would keep a VAE "in use"
-# by a LoRA whose checkpoint is the thing being deleted. `unknown` is NOT here:
-# it may be a base model we failed to recognise, and keeping a file is the safe
-# answer to not knowing.
-_NOT_CONSUMERS = (*SUPPORT_FILE_KINDS, FILE_ADAPTER, FILE_ENGINE)
+# by a LoRA whose checkpoint is the thing being deleted. A ControlNet is the
+# same: it conditions a base model and loads no VAE of its own. `unknown` is NOT
+# here: it may be a base model we failed to recognise, and keeping a file is the
+# safe answer to not knowing.
+_NOT_CONSUMERS = (*SUPPORT_FILE_KINDS, FILE_ADAPTER, FILE_CONTROLNET, FILE_ENGINE)
 
 
 def resolve_recipe_models(
@@ -1869,8 +1871,9 @@ _SET_KIND_RANK = {
     FILE_UNKNOWN: 1,
     FILE_VAE: 2,
     FILE_TEXT_ENCODER: 3,
-    FILE_ADAPTER: 4,
-    FILE_ENGINE: 5,
+    FILE_CONTROLNET: 4,
+    FILE_ADAPTER: 5,
+    FILE_ENGINE: 6,
 }
 
 
@@ -2162,6 +2165,7 @@ FILE_KINDS = (
     FILE_CHECKPOINT,
     FILE_VAE,
     FILE_TEXT_ENCODER,
+    FILE_CONTROLNET,
     FILE_UNKNOWN,
 )
 

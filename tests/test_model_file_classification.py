@@ -19,6 +19,7 @@ import pytest
 from pixlstash.utils.adapter_header import (
     FILE_ADAPTER,
     FILE_CHECKPOINT,
+    FILE_CONTROLNET,
     FILE_TEXT_ENCODER,
     FILE_UNKNOWN,
     FILE_VAE,
@@ -184,6 +185,21 @@ class TestTheFolderNamesTheRole:
         assert (
             classify_model_file((), 0, path=f"/models/{folder}/Flux1-Dev-Q4_K_M.gguf")
             == FILE_CHECKPOINT
+        )
+
+    @pytest.mark.parametrize("params", [361_000_000, 2_500_000_000])
+    @pytest.mark.parametrize("folder", ["controlnet", "ControlNet", "controlnets"])
+    def test_a_controlnet_folder_names_a_controlnet_of_any_size(self, folder, params):
+        # An SD 1.5 ControlNet sits below the checkpoint threshold and an SDXL
+        # one above it; filed as `checkpoint`, the shelf's hash routes refuse
+        # it and the PixlStash ControlNet Loader cannot fetch it.
+        assert (
+            classify_model_file(
+                ["control_model.input_blocks.0.0.weight"],
+                param_count=params,
+                path=f"/models/{folder}/canny.safetensors",
+            )
+            == FILE_CONTROLNET
         )
 
     def test_markers_still_win_over_the_folder(self):

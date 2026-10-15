@@ -522,6 +522,7 @@ const FILE_KIND_LABELS = {
   checkpoint: "Checkpoint",
   vae: "VAE",
   text_encoder: "Text encoder",
+  controlnet: "ControlNet",
   unknown: "Unclassified",
 };
 
