@@ -20957,6 +20957,9 @@ def test_a_pack_from_before_the_shelf_widget_says_restart_comfyui(id_loaders):
         {"code": "missing_models", "models": [vae]},
         {"code": "pack_outdated", "models": [model]},
     ]
+    # A reason nothing moved out of is kept, even one with no models.
+    bare = run_service.Reason("missing_models", {})
+    assert run_service.with_pack_outdated([bare], {_SHELF_FILENAME}) == [bare]
 
 
 def test_the_picture_loader_goes_in_only_on_a_picture_the_library_holds(id_loaders):
