@@ -52,9 +52,12 @@ const globalOpts = {
     stubs: {
       "v-icon": true,
       Tooltip: true,
-      // Activator and content both rendered, so the menu items are reachable.
+      // Activator and content both rendered, so the menu items are reachable,
+      // except when the menu is disabled, which is what a blocked menu is.
       "v-menu": {
-        template: "<div><slot name='activator' :props='{}' /><slot /></div>",
+        props: ["disabled"],
+        template:
+          "<div><slot name='activator' :props='{}' /><slot v-if='!disabled' /></div>",
       },
       FolderBrowser: true,
     },
@@ -319,6 +322,24 @@ describe("Rescan all", () => {
     expect(ids).toEqual([1, 2]);
   });
 
+  it("counts the scans down and takes no second click while they start", async () => {
+    let answer;
+    rescanModelFolder.mockReturnValue(
+      new Promise((r) => {
+        answer = r;
+      }),
+    );
+    const wrapper = await open([folder(), { ...MANAGED, is_default: true }]);
+    await byText(wrapper, "Rescan all").trigger("click");
+    expect(byText(wrapper, "Scanning").text()).toContain("Scanning 1 of 2…");
+    await byText(wrapper, "Scanning").trigger("click");
+    expect(rescanModelFolder).toHaveBeenCalledTimes(2);
+    answer({ status: "started" });
+    await new Promise((r) => setTimeout(r, 0));
+    // Both still running on the server: the first of two.
+    expect(byText(wrapper, "Scanning").text()).toContain("Scanning 1 of 2…");
+  });
+
   it("is blocked, described and silent from a remote session", async () => {
     const wrapper = await open([folder()], { canManage: false });
     const rescan = byText(wrapper, "Rescan all");
@@ -418,6 +439,29 @@ describe("the Downloads folder", () => {
       createModelFolder.mock.invocationCallOrder[0],
     );
   });
+
+  it("puts the old folder back when the new one is refused", async () => {
+    // Otherwise a refused pick leaves nothing watched at all.
+    createModelFolder
+      .mockRejectedValueOnce(new Error("refused"))
+      .mockResolvedValueOnce(WATCHED);
+    const wrapper = await open([folder(), WATCHED]);
+    await byText(wrapper, "Change…").trigger("click");
+    await browser(wrapper).vm.$emit("select", "/home/me/Desktop");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(createModelFolder.mock.calls.map((c) => c[0])).toEqual([
+      { path: "/home/me/Desktop", kind: "downloads" },
+      { path: "/home/me/Downloads", kind: "downloads" },
+    ]);
+  });
+
+  it("offers no menu to a remote session", async () => {
+    const wrapper = await open([folder(), WATCHED], { canManage: false });
+    expect(byText(wrapper, "Stop watching")).toBeUndefined();
+    expect(wrapper.find(".mf-dl").attributes("aria-describedby")).toBe(
+      "mf-remote-note",
+    );
+  });
 });
 
 describe("the default folder", () => {
@@ -445,9 +489,17 @@ describe("the default folder", () => {
     expect(setDefaultModelFolder).toHaveBeenCalledWith(2, true);
   });
 
-  it("sends nothing from a remote session", async () => {
+  it("offers no menu at all to a remote session", async () => {
     const wrapper = await open([CHOSEN, STORE], { canManage: false });
-    await wrapper.find(".mf-default .ctx-item").trigger("click");
-    expect(setDefaultModelFolder).not.toHaveBeenCalled();
+    expect(wrapper.find(".mf-default .ctx-item").exists()).toBe(false);
+    const change = byText(wrapper, "Change");
+    expect(change.attributes("aria-disabled")).toBe("true");
+    expect(change.attributes("aria-describedby")).toBe("mf-remote-note");
+  });
+
+  it("says why it cannot change while no other folder could be the default", async () => {
+    const wrapper = await open([CHOSEN, HF_CACHE]);
+    expect(wrapper.find(".mf-default .ctx-item").exists()).toBe(false);
+    expect(byText(wrapper, "Change").attributes("aria-disabled")).toBe("true");
   });
 });

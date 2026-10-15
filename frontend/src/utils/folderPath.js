@@ -4,8 +4,9 @@
 // ponytail: home is recognised by its conventional shape, not asked of the
 // server, so a home directory anywhere else is shown as a plain path. Send the
 // server's own `~` in `GET /model-folders` if that ever matters.
+// `Shared`, `Public` and `Default` sit under a Users folder without being anybody's.
 const HOME_RE =
-  /^(\/home\/[^/]+|\/Users\/[^/]+|\/root|[A-Za-z]:\\Users\\[^\\]+)(?=[\\/]|$)/;
+  /^(\/home\/[^/]+|\/Users\/(?!Shared\/)[^/]+|\/root|[A-Za-z]:[\\/]Users[\\/](?!(?:Public|Default)[\\/])[^\\/]+)(?=[\\/])/;
 
 /**
  * Split a path for display.

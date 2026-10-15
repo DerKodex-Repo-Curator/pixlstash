@@ -23,15 +23,18 @@
            and what it does is send new models into the default folder below,
            which the dashed link under the pill points at. -->
         <span v-if="store.downloadsFolder" class="mf-dl-wrap">
+          <!-- Both verbs are on the host tier, so a remote session gets no menu
+               rather than one whose every item fails; the note says why. -->
           <v-menu
             v-model="downloadsMenuOpen"
+            :disabled="Boolean(remoteReason)"
             location="bottom end"
             origin="top end"
             :offset="6"
           >
             <template #activator="{ props: menuProps }">
               <button
-                v-bind="menuProps"
+                v-bind="{ ...menuProps, ...blockedAttrs(remoteReason) }"
                 type="button"
                 class="mf-dl"
                 aria-haspopup="menu"
@@ -64,6 +67,7 @@
                 :disabled="Boolean(addReason)"
                 @click="onChangeDownloads"
               >
+                <Tooltip :text="addReason" activator="parent" />
                 <v-icon class="ctx-icon">mdi-folder-swap-outline</v-icon>
                 <span class="ctx-label-text">Change…</span>
               </button>
@@ -77,6 +81,10 @@
                 :disabled="Boolean(forgetReason(store.downloadsFolder))"
                 @click="onStopWatching"
               >
+                <Tooltip
+                  :text="forgetReason(store.downloadsFolder)"
+                  activator="parent"
+                />
                 <v-icon class="ctx-icon">mdi-eye-off-outline</v-icon>
                 <span class="ctx-label-text">Stop watching</span>
               </button>
@@ -150,18 +158,18 @@
           }}</span>
           <v-menu
             v-model="defaultMenuOpen"
+            :disabled="Boolean(changeDefaultReason)"
             location="bottom end"
             origin="top end"
             :offset="6"
           >
             <template #activator="{ props: menuProps }">
               <AppButton
-                v-bind="{ ...menuProps, ...blockedAttrs(remoteReason) }"
+                v-bind="{ ...menuProps, ...blockedAttrs(changeDefaultReason) }"
                 size="sm"
                 variant="secondary"
                 aria-haspopup="menu"
-                :disabled="!defaultChoices.length"
-                @click.capture="onChangeDefaultClick"
+                :tooltip="changeDefaultReason"
               >
                 Change<v-icon size="16" class="mf-chevron"
                   >mdi-chevron-down</v-icon
@@ -393,13 +401,29 @@ const rescanRemaining = computed(
   () => rescanBatch.value.filter((id) => store.scanningIds.has(id)).length,
 );
 
-const rescanning = computed(() => rescanRemaining.value > 0);
+// True from the click until every scan request has answered, which is before
+// any of them shows up in `scanningIds`.
+const rescanStarting = ref(false);
+
+const rescanning = computed(
+  () => rescanStarting.value || rescanRemaining.value > 0,
+);
 
 const rescanLabel = computed(() => {
   if (!rescanning.value) return "Rescan all";
   const total = rescanBatch.value.length;
-  return `Scanning ${total - rescanRemaining.value + 1} of ${total}…`;
+  const done = rescanStarting.value ? 0 : total - rescanRemaining.value;
+  return `Scanning ${Math.min(done + 1, total)} of ${total}…`;
 });
+
+/** Why the default cannot be changed here, or "" when it can. */
+const changeDefaultReason = computed(
+  () =>
+    remoteReason.value ||
+    (defaultChoices.value.length
+      ? ""
+      : "No other folder can be the default yet. Add one first."),
+);
 
 const rescanReason = computed(() => {
   if (remoteReason.value) return remoteReason.value;
@@ -433,13 +457,6 @@ function onStopWatching() {
   onForget(store.downloadsFolder);
 }
 
-/** A blocked Change must not open its menu: `aria-disabled` stops nothing. */
-function onChangeDefaultClick(event) {
-  if (!remoteReason.value) return;
-  event.stopPropagation();
-  event.preventDefault();
-}
-
 function onDefaultChange(folder) {
   defaultMenuOpen.value = false;
   if (remoteReason.value || folder.is_default) return;
@@ -454,7 +471,9 @@ function onRelocate(folder) {
 
 /**
  * Swap the Downloads folder for another. The server holds one at most, so the
- * old one is forgotten first; it was never scanned, so nothing leaves the shelf.
+ * old one is forgotten first; it was never scanned, so nothing leaves the
+ * shelf. If the new one is then refused, the old one is put back rather than
+ * leaving nothing watched.
  */
 async function replaceDownloads(previous, path) {
   try {
@@ -466,7 +485,8 @@ async function replaceDownloads(previous, path) {
     });
     return;
   }
-  await store.add({ path, kind: DOWNLOADS_KIND });
+  if (await store.add({ path, kind: DOWNLOADS_KIND })) return;
+  await store.add({ path: previous.path, kind: DOWNLOADS_KIND });
 }
 
 async function onPicked(path) {
@@ -500,11 +520,16 @@ function onForget(folder) {
 }
 
 /** Scan every catalogued folder. Locked, source and Downloads folders are skipped. */
-function onRescanAll() {
+async function onRescanAll() {
   if (rescanReason.value || rescanning.value) return;
   const batch = scannable.value.filter((folder) => !isScanning(folder));
   rescanBatch.value = batch.map((folder) => folder.id);
-  batch.forEach(scan);
+  rescanStarting.value = true;
+  try {
+    await Promise.all(batch.map(scan));
+  } finally {
+    rescanStarting.value = false;
+  }
 }
 
 // The registry is host data, re-read when Settings opens so its rows are

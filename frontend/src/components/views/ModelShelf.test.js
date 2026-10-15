@@ -169,7 +169,7 @@ vi.mock("../../api/pictures", async (importOriginal) => ({
   getPictureThumbnailBlob: (...args) => getPictureThumbnailBlob(...args),
 }));
 // The folder-header menu's gates (#1270). They are Settings' gates and their
-// own reasons are pinned in `useModelFolderGates.test.js`; here a stub keeps
+// reasons are pinned through `ModelFoldersSection.test.js`; here a stub keeps
 // this suite about the menu.
 const folderGates = vi.hoisted(() => ({
   moveReason: "",
@@ -4119,6 +4119,23 @@ describe("the model-folders door", () => {
       .find((b) => b.text().includes("Add a model folder"))
       .trigger("click");
     expect(wrapper.emitted("open-settings")).toEqual([["models"], ["models"]]);
+  });
+
+  it("puts focus on the Add button before Settings records its opener", async () => {
+    // Settings hands focus back to whatever held it when it opened, and the
+    // `Add folder…` item is gone by then, so the Add button it hangs off has
+    // to be the one holding it.
+    const wrapper = await mountShelf([adapter({ id: 1 })]);
+    document.body.appendChild(wrapper.element);
+    const add = wrapper
+      .find('.shelf-toolbar .tip[data-text="Add models to the shelf"]')
+      .element.closest("button");
+    await wrapper
+      .findAll(".ctx-item")
+      .find((b) => b.text().includes("Add folder"))
+      .trigger("click");
+    expect(document.activeElement).toBe(add);
+    wrapper.unmount();
   });
 });
 

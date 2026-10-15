@@ -5439,7 +5439,7 @@ surfaces teleport out of `.shelf` and their text is selectable. Five checks, in
 this order, each for its own reason:
 
 - **The shelf's own dialogs, by REF** (`moveOpen`, `importOpen`, `stacksOpen`,
-  `foldersOpen`, `addFileOpen`, `editVerb`) — they are `AppDialog`s inside this
+  `relocatingFolder`, `addFileOpen`, `editVerb`) — they are `AppDialog`s inside this
   subtree, and a press with nothing focused targets `<body>`, which no ancestor
   test can see. Same body-target hole the create-person dialog documents above.
 - **Any active Vuetify overlay that is not a tooltip**, plus `.image-overlay` —

@@ -108,9 +108,9 @@ export function useModelFolderGates() {
   }
 
   /** Start a scan, unless the folder cannot be scanned or the server would refuse. */
-  function scan(folder) {
+  async function scan(folder) {
     if (!canScan(folder) || scanReason(folder)) return;
-    store.scan(folder.id);
+    await store.scan(folder.id);
   }
 
   return {

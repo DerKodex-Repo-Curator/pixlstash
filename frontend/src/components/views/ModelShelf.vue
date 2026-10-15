@@ -133,7 +133,7 @@
             class="ctx-item"
             type="button"
             role="menuitem"
-            @click="openFolders()"
+            @click="openFolders(addBtnRef?.el)"
           >
             <v-icon class="ctx-icon">mdi-folder-plus-outline</v-icon>
             <span class="ctx-label-text">Add folder…</span>
@@ -194,7 +194,7 @@
         tooltip="Model folders - add, rescan, move or forget a folder"
         aria-label="Model folders"
         aria-haspopup="dialog"
-        @click="openFolders()"
+        @click="openFolders(foldersBtnRef?.el)"
       />
 
       <!-- Where those two land when the bar runs out of width. Only the
@@ -214,7 +214,7 @@
             role="menuitem"
             @click="
               close();
-              openFolders();
+              openFolders(overflowRef?.trigger?.());
             "
           >
             <v-icon class="ctx-icon">mdi-folder-plus-outline</v-icon>
@@ -253,7 +253,7 @@
             role="menuitem"
             @click="
               close();
-              openFolders();
+              openFolders(overflowRef?.trigger?.());
             "
           >
             <v-icon class="ctx-icon">mdi-folder-multiple-outline</v-icon>
@@ -3360,8 +3360,16 @@ const relocatingFolder = ref(null);
 // need its trigger to hand focus back to.
 const overflowRef = ref(null);
 
-/** The folder registry lives in Settings › Models; every shelf door opens it there. */
-function openFolders() {
+/**
+ * The folder registry lives in Settings › Models; every shelf door opens it
+ * there. Settings gives focus back to whatever held it when it opened, and a
+ * menu item is gone by the time it closes, so a door names the durable control
+ * it hangs off and that takes focus first.
+ *
+ * @param {HTMLElement} [invoker] control to hand focus back to on close.
+ */
+function openFolders(invoker) {
+  invoker?.focus?.();
   emit("open-settings", "models");
 }
 
