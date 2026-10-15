@@ -20947,6 +20947,17 @@ def test_a_pack_from_before_the_shelf_widget_says_restart_comfyui(id_loaders):
     del info["PixlStashCheckpointLoader"]
     assert reasons() == {"missing_models": [model]}
 
+    # Only a checkpoint moves: a VAE of the same name is still missing.
+    vae = {"file": _SHELF_FILENAME, "folder": "vae"}
+    moved = run_service.with_pack_outdated(
+        [run_service.Reason("missing_models", {"models": [model, vae]})],
+        {_SHELF_FILENAME},
+    )
+    assert [r.as_dict() for r in moved] == [
+        {"code": "missing_models", "models": [vae]},
+        {"code": "pack_outdated", "models": [model]},
+    ]
+
 
 def test_the_picture_loader_goes_in_only_on_a_picture_the_library_holds(id_loaders):
     """A pin (Fixed) or a file a run uploaded says which picture. A file the

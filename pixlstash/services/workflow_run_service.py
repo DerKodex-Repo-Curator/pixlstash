@@ -703,8 +703,14 @@ def with_pack_outdated(reasons: list[Reason], files: set[str]) -> list[Reason]:
     for reason in reasons:
         if reason.code == MISSING_MODELS and files:
             models = reason.detail.get("models", [])
-            moved += [model for model in models if model["file"] in files]
-            models = [model for model in models if model["file"] not in files]
+            # A checkpoint's: a VAE or UNET of the same name is still missing.
+            stale = [
+                model
+                for model in models
+                if model["file"] in files and model["folder"] == "checkpoints"
+            ]
+            moved += stale
+            models = [model for model in models if model not in stale]
             if not models:
                 continue
             reason = Reason(MISSING_MODELS, {**reason.detail, "models": models})

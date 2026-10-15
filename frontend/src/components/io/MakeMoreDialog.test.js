@@ -330,6 +330,25 @@ describe("a selection every picture of which can run", () => {
     expect(makeButton(wrapper).text()).toBe("Make");
   });
 
+  it("holds the whole batch for a pack that needs a restart (#1923)", async () => {
+    preflightWorkflowRun.mockResolvedValue({
+      ok: false,
+      runs: 1,
+      groups: [
+        { workflow_id: GOOD, picture_ids: [1, 2], runs: 1, reasons: [] },
+        {
+          workflow_id: BAD,
+          picture_ids: [3],
+          runs: 0,
+          reasons: [{ code: "pack_outdated", models: [{ file: "x", folder: "checkpoints" }] }],
+        },
+      ],
+    });
+    const wrapper = await mountMakeMore();
+    // The runnable card is held back too, as for a missing model.
+    expect(makeButton(wrapper).attributes("aria-disabled")).toBe("true");
+  });
+
   it("still makes every run when a LoRA is only bypassed (#1463)", async () => {
     // The reported symptom: one absent LoRA on one card refused a selection
     // that was otherwise entirely runnable. It is not a reason, so it neither
