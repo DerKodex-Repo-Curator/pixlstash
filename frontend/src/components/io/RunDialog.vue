@@ -35,12 +35,23 @@
            measurement and nothing else in the app uses: a component-local
            value rather than a token nobody else would read. -->
       <div class="rund-src">
-        <img
-          v-if="coverUrl"
-          class="rund-pic"
-          :src="coverUrl"
-          :alt="`The picture this run is made from: ${sourceName}`"
-        />
+        <!-- The workflow's own cover is something it once made, not what this
+             run starts from: beside an empty Load Image it was read as the
+             chosen picture, so it says so. -->
+        <div v-if="coverUrl" class="rund-cover">
+          <img
+            class="rund-pic"
+            :src="coverUrl"
+            :alt="
+              coverIsExample
+                ? `An example of what ${sourceName} makes`
+                : `The picture this run is made from: ${sourceName}`
+            "
+          />
+          <span v-if="coverIsExample" class="rund-example" aria-hidden="true">
+            Example
+          </span>
+        </div>
         <span v-else class="rund-pic rund-pic--empty">
           <v-icon size="28">mdi-sitemap-outline</v-icon>
         </span>
@@ -165,6 +176,7 @@
               class="rund-in-tile"
               :class="{
                 'rund-in-tile--empty': !input.picture_id,
+                'rund-in-tile--needed': input.fill === null,
                 'rund-in-tile--off': !setupReady,
               }"
               :data-input="address(input)"
@@ -1757,6 +1769,16 @@ const coverUrl = computed(() => {
   const cover = card.value?.covers?.[0];
   return cover ? workflowCoverUrl(cover) : "";
 });
+/**
+ * Whether that picture is the workflow's own cover (a caller's `coverUrl` is
+ * one too), rather than a picture this run is made from.
+ */
+const coverIsExample = computed(
+  () =>
+    Boolean(coverUrl.value) &&
+    pictureIds.value[0] == null &&
+    savedRecipe.value?.source_picture_id == null,
+);
 const seedText = computed(() => recipe.value?.seed_text || "");
 /**
  * Whether this run would make the picture it is run from again: its own
@@ -4928,6 +4950,26 @@ void load();
   display: block;
 }
 
+.rund-cover {
+  position: relative;
+}
+
+/* A neutral photo chip (design system Badge, `subtle`): it labels, it is not
+   an action or a selection, so it takes no amber and no olive. */
+.rund-example {
+  position: absolute;
+  top: var(--space-2);
+  left: var(--space-2);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--scrim-photo);
+  color: rgb(var(--v-theme-on-dark-surface));
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+}
+
 .rund-pic--empty {
   display: flex;
   align-items: center;
@@ -5117,6 +5159,16 @@ button.rund-in-tile.rund-in-tile--off {
 /* An empty slot is drawn as a place to put something, not as a broken image. */
 .rund-in-tile--empty {
   border-style: dashed;
+}
+
+/* A slot the run cannot go without: the glow of the landing pulse
+   (`gridNewPulse`), held, so it outweighs the cover beside it. */
+.rund-in-tile--needed:not(.rund-in-tile--off) {
+  border-color: rgb(var(--v-theme-accent));
+  color: rgb(var(--v-theme-on-surface));
+  box-shadow:
+    0 0 10px rgba(var(--v-theme-accent), 0.5),
+    0 0 18px rgba(var(--v-theme-accent), 0.25);
 }
 
 .rund-in-img,
