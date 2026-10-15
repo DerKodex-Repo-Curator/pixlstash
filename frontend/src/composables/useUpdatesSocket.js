@@ -19,6 +19,7 @@ import { useMovesStore } from "../stores/useMovesStore";
 import { useNoticeStore } from "../stores/useNoticeStore";
 import { useTasksStore } from "../stores/useTasksStore";
 import { useWorkflowsStore } from "../stores/useWorkflowsStore";
+import { useModelShelfStore } from "../stores/useModelShelfStore";
 import {
   isFullRestoreRequestInFlight,
   prepareForFullRestoreTransition,
@@ -147,6 +148,7 @@ export function useUpdatesSocket({
   const movesStore = useMovesStore();
   const noticeStore = useNoticeStore();
   const workflowsStore = useWorkflowsStore();
+  const modelShelfStore = useModelShelfStore();
 
   let updatesSocket = null;
   let updatesReconnectTimer = null;
@@ -513,6 +515,11 @@ export function useUpdatesSocket({
             workflowsStore.onWorkflowsChanged(change);
           }, WORKFLOWS_CHANGED_DEBOUNCE_MS);
         }
+      } else if (payload?.type === "models_arrived" && !isReadOnly.value) {
+        // Models moved onto the shelf from the Downloads folder. Owner-only,
+        // like every /models route; the store re-reads its rows and raises the
+        // sidebar's `new` tag.
+        modelShelfStore.onModelsArrived();
       } else if (payload?.type === "snapshot_created" && !isReadOnly.value) {
         snapshotsStore.onSnapshotCreated();
       } else if (payload?.type === "snapshot_deleted" && !isReadOnly.value) {

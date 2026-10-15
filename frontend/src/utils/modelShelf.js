@@ -858,6 +858,13 @@ export const FOLDER_TIERS = {
     chip: "ai-toolkit",
     note: "Training output. Models are imported from here, not catalogued in place.",
   },
+  // A tray, not a folder: nothing is listed from it. Models saved here are
+  // moved to the default folder, so it never heads a group of rows itself.
+  downloads: {
+    icon: "mdi-tray-arrow-down",
+    chip: "Downloads",
+    note: "New models saved here move to the default folder.",
+  },
   user: { icon: "mdi-folder-outline", chip: "", note: "" },
 };
 

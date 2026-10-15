@@ -159,6 +159,30 @@ beforeEach(() => {
   });
 });
 
+describe("models arriving from the Downloads folder", () => {
+  it("raises the sidebar tag and badges the arrival on a shelf already read", async () => {
+    const store = useModelShelfStore();
+    listAdapters.mockResolvedValue([adapter({ id: 1 })]);
+    await store.fetchRows();
+    listAdapters.mockResolvedValue([adapter({ id: 1 }), adapter({ id: 2 })]);
+
+    store.onModelsArrived();
+    await vi.waitFor(() => expect(store.loading).toBe(false));
+
+    expect(store.unseenArrivals).toBe(true);
+    expect(listAdapters).toHaveBeenCalledTimes(2);
+    expect(store.visibleRows.find((r) => r.id === 2)?.isNew).toBe(true);
+    expect(store.visibleRows.find((r) => r.id === 1)?.isNew).toBe(false);
+  });
+
+  it("reads nothing for a shelf never opened, where every row would be new", () => {
+    const store = useModelShelfStore();
+    store.onModelsArrived();
+    expect(store.unseenArrivals).toBe(true);
+    expect(listAdapters).not.toHaveBeenCalled();
+  });
+});
+
 describe("defaults", () => {
   it("shows adapters, checkpoints and unclassified files", async () => {
     // `unknown` is first-class and never folded into either other list - and it

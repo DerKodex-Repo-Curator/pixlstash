@@ -175,6 +175,8 @@ class WsBroadcasterMixin:
                 # about it: a client filtering to one character still has the
                 # Workflows view open.
                 EventType.CHANGED_WORKFLOWS,
+                # A model is not a picture either: the shelf is machine-wide.
+                EventType.MODELS_ARRIVED,
             )
             or event_type in _WS_SNAPSHOT_EVENT_TYPES
         )
@@ -330,6 +332,15 @@ class WsBroadcasterMixin:
                         else {}
                     ).items()
                 },
+            }
+        elif event_type == EventType.MODELS_ARRIVED:
+            # Another "look again": the shelf re-reads its rows. The ids only
+            # say how many arrived.
+            info = data if isinstance(data, dict) else {}
+            payload = {
+                "type": "models_arrived",
+                "event": event_type.name,
+                "model_ids": [int(i) for i in (info.get("model_ids") or [])],
             }
         elif event_type in _WS_SNAPSHOT_EVENT_TYPES:
             info = data if isinstance(data, dict) else {}

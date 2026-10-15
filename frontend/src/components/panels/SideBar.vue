@@ -99,6 +99,7 @@ import { useSidebarExpansion } from "../../composables/useSidebarExpansion";
 import { useRoute } from "vue-router";
 import { useDedupStore, scopeKey } from "../../stores/useDedupStore";
 import { useMovesStore } from "../../stores/useMovesStore";
+import { useModelShelfStore } from "../../stores/useModelShelfStore";
 import { useSelectionStore } from "../../stores/useSelectionStore";
 import { useSortStore } from "../../stores/useSortStore";
 import { useProjectStore } from "../../stores/useProjectStore";
@@ -141,6 +142,7 @@ const isDesktop = typeof window !== "undefined" && !!window.pixlstashDesktop;
 
 const dedupStore = useDedupStore();
 const movesStore = useMovesStore();
+const modelShelfStore = useModelShelfStore();
 
 // Store-direct (Phase 3): the sidebar reads the selection, sort, project and
 // preference state it displays straight from the stores and writes changes
@@ -182,6 +184,15 @@ const isDuplicatesView = computed(() => route.name === "duplicates");
 // out of this the way it did when the two predicates were separate literals.
 const isModelsView = computed(() => MODEL_SHELF_ROUTES.includes(route.name));
 const isWorkflowsView = computed(() => WORKFLOW_ROUTES.includes(route.name));
+// The Models row's `new` tag means "arrived while you were not looking", so the
+// shelf being open answers it, including for an arrival while it is open.
+watch(
+  () => isModelsView.value && modelShelfStore.unseenArrivals,
+  (seen) => {
+    if (seen) modelShelfStore.unseenArrivals = false;
+  },
+  { immediate: true },
+);
 
 // A shared library keeps the duplicate affordances VISIBLE and inert rather
 // than hiding them: a read-only visitor should still see that the feature
@@ -6689,6 +6700,13 @@ defineExpose({
                   ><v-icon size="18">mdi-layers-outline</v-icon></span
                 >
                 <span class="sidebar-list-label">Models</span>
+                <!-- Models arrived from the Downloads folder while the shelf
+                     was not open. Cleared by opening it. -->
+                <span
+                  v-if="modelShelfStore.unseenArrivals && !isReadOnly"
+                  class="sidebar-list-count"
+                  ><span class="sidebar-new-tag">new</span></span
+                >
               </button>
             </div>
 

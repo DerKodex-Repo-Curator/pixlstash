@@ -35,7 +35,7 @@
 22. [Tiered Duplicate Detection](#22-tiered-duplicate-detection)
 23. [Opt-in telemetry](#23-opt-in-telemetry-the-install-id-and-the-consent-flags)
 24. [Folder structure: read, commit, layout and moves](#24-folder-structure-read-commit-layout-and-moves) — incl. [24.1 The folder-structure read](#241-the-folder-structure-read), [24.2 The folder-structure commit](#242-the-folder-structure-commit), [24.3 The library layout](#243-the-library-layout), [24.4 The layout and the move engine](#244-the-layout-and-the-move-engine), [24.5 Reconciling moves made outside PixlStash](#245-reconciling-moves-made-outside-pixlstash)
-25. [Model Shelf](#25-model-shelf) — incl. [25.1 The shelf's five verbs (shelf plan F3)](#251-the-shelfs-five-verbs-shelf-plan-f3), [25.2 The built-in model folder: declared, never scanned](#252-the-built-in-model-folder-declared-never-scanned), [25.3 The other two roots: InsightFace packs and the HuggingFace cache](#253-the-other-two-roots-insightface-packs-and-the-huggingface-cache), [25.4 What a cached model is FOR: the feature classifier and `model_capability`](#254-what-a-cached-model-is-for-the-feature-classifier-and-model_capability), [25.5 The managed model store (shelf plan B7)](#255-the-managed-model-store-shelf-plan-b7), [25.6 `Add file`: one loose model onto the shelf (shelf plan F6)](#256-add-file-one-loose-model-onto-the-shelf-shelf-plan-f6), [25.7 A trained model's previews: `<stem>_samples/`](#257-a-trained-models-previews-stem_samples), [25.8 `Delete`: models off the shelf and off the disk (#933)](#258-delete-models-off-the-shelf-and-off-the-disk-933), [25.9 `Keep one copy`: merging duplicate models (#1439)](#259-keep-one-copy-merging-duplicate-models-1439)
+25. [Model Shelf](#25-model-shelf) — incl. [25.1 The shelf's five verbs (shelf plan F3)](#251-the-shelfs-five-verbs-shelf-plan-f3), [25.2 The built-in model folder: declared, never scanned](#252-the-built-in-model-folder-declared-never-scanned), [25.3 The other two roots: InsightFace packs and the HuggingFace cache](#253-the-other-two-roots-insightface-packs-and-the-huggingface-cache), [25.4 What a cached model is FOR: the feature classifier and `model_capability`](#254-what-a-cached-model-is-for-the-feature-classifier-and-model_capability), [25.5 The managed model store (shelf plan B7)](#255-the-managed-model-store-shelf-plan-b7), [25.6 `Add file`: one loose model onto the shelf (shelf plan F6)](#256-add-file-one-loose-model-onto-the-shelf-shelf-plan-f6), [25.7 A trained model's previews: `<stem>_samples/`](#257-a-trained-models-previews-stem_samples), [25.8 `Delete`: models off the shelf and off the disk (#933)](#258-delete-models-off-the-shelf-and-off-the-disk-933), [25.9 `Keep one copy`: merging duplicate models (#1439)](#259-keep-one-copy-merging-duplicate-models-1439), [25.10 The Downloads folder and the default folder](#2510-the-downloads-folder-and-the-default-folder)
 26. [Prompt match](#26-prompt-match)
 
 ---
@@ -1070,6 +1070,7 @@ The write path has to tell the two apart. Blanking a description is how a pictur
 | `GHOST_CASCADE` | CPU | `GhostCascadeFinder` | Picture ghosts (B4). Hub-attached vaults only. Every 10 s, drains `pending_ghost_cascade`, which the `picture` delete/re-hash triggers fill, through the covered-ghost cascade (see *Picture ghosts* below) |
 | `WORKFLOW_CARD_BACKFILL` | CPU | `WorkflowCardBackfillFinder` | Workflow cards (v1.12 B2). Hub-attached vaults only, and hub-only in the strongest sense: every input is a stored `workflow_recipe_graph.document`, so it reads no picture and keys the recipes of libraries that are not attached. Hands out variants with no card or with one keyed by a superseded `WORKFLOW_KEY_VERSION` / `CORE_VERSION`, which is the whole of the backfill's once-only-ness; a document that will not reduce is deferred for the life of the process, since it cannot change by itself, while a busy hub (`sqlite3.OperationalError`) leaves its batch eligible — deriving a card is cheap to retry, unlike the 24 GB read the checkpoint hasher this is modelled on defers for. LOW priority, 50 variants per task, and counted over the hub's recipes rather than the library's pictures (`workflows_carded`) so the row does not read as finished from the first second |
 | `CHECKPOINT_HASH` | CPU | `MissingCheckpointHashFinder` | Model shelf (v1.10). The **only finder that works on the hub rather than on the vault**, because a model folder is a fact about the machine: `ModelFolderScanner` (`services/model_folder_scanner.py`) registers a checkpoint the instant it sees it as a `model` row with `file_kind = 'checkpoint'` and `sha256` NULL — it may be 24 GB and the shelf must not stall behind it — and this fills the digest in, which is what `model.hashed_at` was always for. **A changed file at a known path forks onto a new `model` row rather than editing the old one in place.** A `model` row is per *content* and legitimately holds many `model_file` rows, so clearing `sha256` by id stripped the digest off copies in other folders that nobody had touched, and it was rejected outright by `CHECK (file_kind <> 'adapter' OR sha256 IS NOT NULL)` when an adapter had been replaced by a checkpoint at that path, rolling the whole write batch back and aborting the scan before its missing and unreachable sweeps ran. The stored row is reused only when it is that path's sole location and its `file_kind` still matches, which is the case where the entry is the same and only the hash is stale. Adapters are not in this lane; they are hashed on sight by the scan, and `CHECK (file_kind <> 'adapter' OR sha256 IS NOT NULL)` is what makes that a schema fact. The queue is `sha256 IS NULL` joined to a `model_file` row in state `present`, matching the partial index `ix_model_hash_queue`. **A `sha256 UNIQUE` collision is a MERGE inside the task, never a raise**: two rows legitimately reach one digest, because an unhashed checkpoint is identified by the location it was found at, so one file in two registered folders is two rows (as is the duplicate the move invariant's crash window is *designed* to leave). The lower id survives, **every `model_file` row the dropped id held is repointed at it**, and it fills any column only the dropped row had. That location move is what stops a checkpoint present at two paths being re-hashed and re-merged once per scan cycle forever. A row whose file cannot be read is deferred for the life of the process, or one broken path would make the planner submit a doomed task every cycle; a re-scan re-queues it. Registered in `vault.py` only when the vault was opened through a hub registration (`RegisteredVaultPath`), so a Vault built without a hub — CLI tools, most tests — simply does not have this lane. |
+| `DOWNLOADS_INTAKE` | CPU | `DownloadsIntakeFinder` | Model shelf (§25.10). Works on the hub, registered in `vault.py` beside `CHECKPOINT_HASH` for the same reason. Every 2 s lists the top of the `kind = 'downloads'` folder and hands out model files that have settled and are complete; `DownloadsIntakeTask` moves each into the default folder, registers it and announces `models_arrived`. A file that stays for a reason that may pass (busy `SHELF_IO_LOCK`, missing or unplugged default folder, failed copy, refused hub write) is retried about every 15 s; one that stays because of the file itself (name taken, not a model) waits until it changes. |
 
 **Re-processing**: setting a work column to `NULL` (e.g. via an Alembic migration) makes the corresponding finder pick the row up on the next pass — this is how data regenerations are triggered.
 
@@ -4810,6 +4811,7 @@ when that is felt.
 | `VRAM_OOM`               | ✓ broadcast |
 | `EXTERNAL_MOVES_PENDING` | ✓ broadcast |
 | `CHANGED_WORKFLOWS`      | ✓ broadcast |
+| `MODELS_ARRIVED`         | ✓ broadcast |
 <!-- AUTOGEN:end name="events" -->
 
 - Events are published from `Vault` whenever a task or domain operation completes; the broadcaster in `server.py` fans the filtered subset out to **owner-level** connected clients (see WebSocket authentication below).
@@ -9180,7 +9182,8 @@ PixlStash's own model storage, the way the vault owns picture files, and it is
 created on first run by
 [`services/managed_model_store.py`](../pixlstash/services/managed_model_store.py)
 (`ensure_managed_folder`, called from `Server.__init__` right after the hub is
-bootstrapped). It is the default destination for a drop or an ai-toolkit import.
+bootstrapped). It is the default destination for a drop or an ai-toolkit import
+until the owner marks another folder default (§25.10).
 
 - **Why `managed` rather than a seeded `user` folder.** With zero registered
   folders there is nowhere to drop or import a model, so drag-in is impossible
@@ -9227,8 +9230,9 @@ bootstrapped). It is the default destination for a drop or an ai-toolkit import.
 ([`routes/model_files.py`](../pixlstash/routes/model_files.py)) is the path for a
 single adapter or checkpoint that is **not** part of a training run and does not
 deserve a registered folder of its own — the file downloaded into `~/Downloads`
-an hour ago. It copies that file into a folder the shelf catalogues (the managed
-store above, unless another is named) and registers it there, so the row is on
+an hour ago. It copies that file into a folder the shelf catalogues (the default
+folder of §25.10 — the managed store above unless the owner marked another —
+unless another is named) and registers it there, so the row is on
 the shelf when the call returns and the owner never has to rescan.
 
 - **A copy, never a move.** The source is the owner's own file in a directory
@@ -10637,6 +10641,84 @@ names, after the only other copy was removed.
   already carried, and the row's note explains it — an ordinary `user` folder is
   forgettable without being relocatable, so a guard written only for Move left
   exactly those rows clickable and failing.
+
+### 25.10 The Downloads folder and the default folder
+
+**The default folder** is where a new model goes when nothing names a
+destination: `Add file`, a model taken in from the Downloads folder, and the
+preselected destination of a training-run import. `model_folder.is_default`
+marks it, at most one row by the partial unique index
+`ux_model_folder_single_default`, and set through `PATCH /model-folders/{id}`
+`{"is_default": true}`, which clears the old mark in the same transaction. Only
+a `user` folder or the managed store can be it. **No mark means the managed
+store**, so a hub from before the column keeps its destination, and marking the
+managed store clears every mark rather than storing one. The API reports the
+*effective* answer (`managed_model_store.find_default_folder`), so exactly one
+row reads `is_default: true` and the client never re-derives the fallback.
+
+**The Downloads folder** is a `model_folder` of `kind = 'downloads'`, at most one:
+the route checks first and the partial unique index
+`ux_model_folder_single_downloads` holds it against a race, and a second `POST`
+answers 409 either way. It joins `source` in
+`model_folder_scanner.TAKEN_FROM_KINDS`: never scanned (`rescan` answers
+`skipped`), never a destination for `Add file`, a move or an import. It is also
+the one registered folder `Add file` may copy *from*, because nothing in it is
+catalogued and the "rescan instead" refusal would send the owner nowhere.
+
+`DownloadsIntakeFinder` (a hub finder registered in `vault.py` beside the
+checkpoint hasher) lists its top level every two seconds and hands out what is
+finished; `DownloadsIntakeTask` calls `downloads_intake.take_in` for each file
+and announces `models_arrived` with the model ids it registered.
+
+- **Finished means three checks.** A `.safetensors`/`.gguf` regular file (never
+  a symlink) with bytes in it and no `.part`/`.crdownload`/`.download`/`.partial`
+  sibling (browsers write under a temporary name; Firefox also leaves an empty
+  file at the final name); a `(size, mtime)` unchanged for `SETTLE_SECONDS`
+  (15 s, for `curl -O` and `wget`, which write the final name directly); and,
+  for a `.safetensors`, a length of at least `8 + header + furthest data_offsets
+  end` (`safetensors_complete`), so a download that stalled longer than the
+  window is still not moved half-written. A header the file cannot back up (an
+  offset that is not a whole number, or a negative one) counts as incomplete.
+  A settled file that is still short is remembered by its signature and not
+  read again until it changes, so a corrupt download costs one read and one
+  log line, and a stalled one is looked at again when it resumes. A `.gguf`
+  states no total and gets the window only.
+- **A move, unlike `Add file`'s copy**, because registering a folder as the
+  Downloads folder is the owner saying "take models out of here". The order is
+  still the one that cannot lose a file: the destination exists and is
+  registered before the source goes. Same drive: `publish_no_clobber` to the
+  destination name, `register_file`, and a file the scanner cannot read is put
+  back. Another drive: `copy_and_digest`, verify, publish, register with the
+  verified digest, then unlink. It takes the `SHELF_IO_LOCK` slot without
+  blocking.
+- **What stays, and how often it is retried.** Two kinds, by whose fault it
+  is. **`left`**: the file itself is the reason - a file of that name is really
+  in the default folder (a `present` row or one on disk; a `missing` tombstone
+  of a deleted copy does not count, and `register_file` takes it back over), or
+  it does not read as a model. The finder remembers its signature, so it is
+  retried only once it changes. **`retry`**: nothing about the file was wrong -
+  `SHELF_IO_LOCK` was held, the default folder is missing or unplugged, the copy
+  failed, or the hub refused the row (a locked database). It is forgotten when
+  the task ends, settles again and is retried about every 15 s until it goes, so
+  an unplugged drive delays the move and never strands the file. A refused row
+  undoes the move first: the same-drive file is put back in Downloads, the
+  cross-drive copy is discarded.
+- **A cross-drive original is unlinked only if it did not change during the
+  copy** (size and mtime before against after). A download that a tool resumed
+  under the same name (`curl -C`) grew past the bytes copied, so both copies are
+  kept and the warning says so.
+- **The limit, stated with its consequence:** a `.gguf` has no length to check,
+  so a `curl -O` or `wget` download into the Downloads folder that pauses for
+  more than 15 s with its file open can be moved half-written. On the same drive
+  the writer's open handle follows the file and finishes it in the default
+  folder; across drives the copy is short and the writer finishes an unlinked
+  original, so the tail is lost. Browser downloads are not exposed (they write
+  under a temporary name until done), and neither is any `.safetensors`.
+- **The sidebar's `new` tag.** `models_arrived` (integration §8) sets
+  `useModelShelfStore().unseenArrivals`, which puts the `new` tag on the
+  sidebar's Models row until the shelf is opened, and re-reads a shelf already
+  read with `markNew`, so the arrivals wear the row `New` badge. An unread shelf
+  is not fetched: against no previous fetch every row would be new.
 
 
 ---

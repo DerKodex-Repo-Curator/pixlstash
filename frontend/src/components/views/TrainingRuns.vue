@@ -686,8 +686,11 @@ watch(
   (list) => {
     const stillThere = list.some((f) => f.id === destinationId.value);
     if (destinationId.value != null && stillThere) return;
-    const managed = list.find((f) => f.kind === "managed");
-    destinationId.value = managed?.id ?? list[0]?.id ?? null;
+    // The default folder from the Model folders dialog, which is the managed
+    // store until the owner picks another.
+    const preferred =
+      list.find((f) => f.is_default) ?? list.find((f) => f.kind === "managed");
+    destinationId.value = preferred?.id ?? list[0]?.id ?? null;
   },
   { immediate: true },
 );

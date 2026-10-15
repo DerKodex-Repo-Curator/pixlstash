@@ -180,6 +180,21 @@ def find_managed_folder(hub: HubDatabase) -> Optional[dict]:
     return dict(rows[0])
 
 
+def find_default_folder(hub: HubDatabase) -> Optional[dict]:
+    """Return the folder a new model goes into when the caller names none.
+
+    The one the owner marked (``is_default = 1``, at most one by the partial
+    unique index ``ux_model_folder_single_default``), else the managed store.
+    Marking is a preference, never a requirement, so an unmarked hub - every hub
+    before this column existed - keeps the managed store as its destination.
+    """
+    row = hub.fetchone(
+        "SELECT id, path, kind, owner, movable, created_at FROM model_folder "
+        "WHERE is_default = 1"
+    )
+    return dict(row) if row is not None else find_managed_folder(hub)
+
+
 def ensure_managed_folder(hub: HubDatabase, config_dir: str) -> Optional[dict]:
     """Create the managed store if it is not there yet, and return its row.
 

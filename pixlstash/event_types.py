@@ -36,3 +36,7 @@ class EventType(Enum):
     # and the client re-fetches GET /workflows rather than trusting a card
     # carried on the wire.
     CHANGED_WORKFLOWS = auto()
+    # Models were moved onto the shelf from the watched Downloads folder. A
+    # "look again" nudge for the shelf and the sidebar's `new` tag on Models;
+    # it names the model ids and carries no row.
+    MODELS_ARRIVED = auto()

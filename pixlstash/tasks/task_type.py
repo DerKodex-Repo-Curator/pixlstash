@@ -37,6 +37,7 @@ class TaskType(str, Enum):
     SNAPSHOT_IDENTITY_SCRUB = "SnapshotIdentityScrubTask"
     CHECKPOINT_HASH = "CheckpointHashTask"
     MODEL_FOLDER_SCAN = "ModelFolderScanTask"
+    DOWNLOADS_INTAKE = "DownloadsIntakeTask"
     LAYOUT_MOVE = "LayoutMoveTask"
     GHOST_CASCADE = "GhostCascadeTask"
     WORKFLOW_CARD_BACKFILL = "WorkflowCardBackfillTask"

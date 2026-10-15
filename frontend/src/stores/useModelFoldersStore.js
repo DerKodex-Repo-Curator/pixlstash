@@ -3,11 +3,13 @@ import { defineStore } from "pinia";
 
 import {
   createModelFolder,
+  DOWNLOADS_KIND,
   forgetModelFolder,
   listModelFolderDevices,
   listModelFolders,
   MANAGED_KIND,
   rescanModelFolder,
+  setDefaultModelFolder,
   SOURCE_KIND,
 } from "../api/modelFolders";
 import { onSessionReset } from "../utils/apiClient";
@@ -92,6 +94,26 @@ export const useModelFoldersStore = defineStore("modelFolders", () => {
    */
   const sourceFolder = computed(() =>
     folders.value.find((folder) => folder.kind === SOURCE_KIND),
+  );
+
+  /** The watched Downloads folder, or `undefined` while none is set. */
+  const downloadsFolder = computed(() =>
+    folders.value.find((folder) => folder.kind === DOWNLOADS_KIND),
+  );
+
+  /** Where a new model goes when nothing else is named. */
+  const defaultFolder = computed(() =>
+    folders.value.find((folder) => folder.is_default),
+  );
+
+  /**
+   * The folders that can be the default: the ones the shelf catalogues and
+   * writes into. Never a taken-from folder, never PixlStash's own `foreign`.
+   */
+  const defaultCandidates = computed(() =>
+    folders.value.filter(
+      (folder) => folder.kind === "user" || folder.kind === MANAGED_KIND,
+    ),
   );
 
   /** Paths already registered, for the picker to disable rather than 409 on. */
@@ -227,17 +249,19 @@ export const useModelFoldersStore = defineStore("modelFolders", () => {
    */
   async function add(options) {
     const notices = useNoticeStore();
-    const takenFrom = options?.kind === SOURCE_KIND;
+    const takenFrom =
+      options?.kind === SOURCE_KIND || options?.kind === DOWNLOADS_KIND;
     try {
       const created = await createModelFolder(options);
       await refresh();
       const name = basename(created?.path || options.path);
-      notices.push({
-        level: "success",
-        text: takenFrom
-          ? `Added ${name}. Its training runs are ready to import.`
-          : `Added ${name}. Looking for models in it now.`,
-      });
+      const text =
+        options?.kind === DOWNLOADS_KIND
+          ? `Watching ${name}. New models saved there move to your default folder.`
+          : takenFrom
+            ? `Added ${name}. Its training runs are ready to import.`
+            : `Added ${name}. Looking for models in it now.`;
+      notices.push({ level: "success", text });
       if (!takenFrom && created?.id != null)
         await scan(created.id, { silent: true });
       return true;
@@ -286,6 +310,35 @@ export const useModelFoldersStore = defineStore("modelFolders", () => {
       notices.push({
         level: "error",
         text: errorDetail(err) || "Could not forget that folder.",
+      });
+      return false;
+    }
+  }
+
+  /**
+   * Make a folder the default destination for a new model.
+   *
+   * Choosing the managed store clears the owner's mark rather than setting
+   * one: with nothing marked the managed store is the default, so the two say
+   * the same thing and only one of them is stored.
+   *
+   * @param {Object} folder - a row from `defaultCandidates`.
+   * @returns {Promise<boolean>} true when the default changed.
+   */
+  async function setDefault(folder) {
+    const notices = useNoticeStore();
+    try {
+      await setDefaultModelFolder(folder.id, true);
+      await refresh({ quiet: true });
+      notices.push({
+        level: "success",
+        text: `New models now go to ${basename(folder.path)}.`,
+      });
+      return true;
+    } catch (err) {
+      notices.push({
+        level: "error",
+        text: errorDetail(err) || "Could not change the default folder.",
       });
       return false;
     }
@@ -361,12 +414,16 @@ export const useModelFoldersStore = defineStore("modelFolders", () => {
     scanningIds,
     managedFolder,
     sourceFolder,
+    downloadsFolder,
+    defaultFolder,
+    defaultCandidates,
     registeredPaths,
     refresh,
     refreshDevices,
     add,
     forget,
     scan,
+    setDefault,
     resetForSession,
   };
 });

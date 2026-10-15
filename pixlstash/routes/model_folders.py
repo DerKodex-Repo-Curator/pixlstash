@@ -35,6 +35,19 @@ answers 409. ``user`` and ``foreign`` folders may legitimately number zero; that
 is a normal state, not an error. See
 :mod:`pixlstash.services.managed_model_store`.
 
+**One folder may be the Downloads folder** (``kind = 'downloads'``). It is
+taken from like a ``source`` folder - never scanned, never a destination - and
+:mod:`pixlstash.services.downloads_intake` moves the models that land in it into
+the default folder. There is one, because "where my browser saves" is one place;
+a second registration answers 409.
+
+**One folder may be the default** (``is_default``, set through ``PATCH``): where
+``Add file`` and the Downloads folder put a model when nothing else is named.
+Only a folder the shelf catalogues and writes into can be it (``user`` or the
+managed store), at most one is by a partial unique index, and with none marked
+the managed store is the default, so ``is_default`` is reported as the effective
+answer rather than the stored flag.
+
 **Two of the four columns are derived, not asked for.** ``movable`` and ``owner``
 follow from ``kind``, and offering them as inputs would let a caller register a
 combination that means nothing (an ``external``-movable ``user`` folder). Only
@@ -62,6 +75,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import threading
 from datetime import datetime, timezone
 from typing import Optional
@@ -78,7 +92,12 @@ from pixlstash.services.comfyui_service import comfyui_model_roots
 from pixlstash.services.managed_model_store import (
     MANAGED_KIND,
     deletes_unclaimed_files,
+    find_default_folder,
     relocatable_identity,
+)
+from pixlstash.services.model_folder_scanner import (
+    DOWNLOADS_FOLDER_KIND,
+    TAKEN_FROM_KINDS,
 )
 from pixlstash.services.model_mover import SHELF_IO_LOCK
 from pixlstash.tasks.base_task import TaskStatus
@@ -97,15 +116,21 @@ logger = get_logger(__name__)
 # The folder kinds a caller may register. ``managed`` and ``foreign`` are
 # PixlStash's own (tagger artifacts, InsightFace, the HuggingFace cache) and are
 # registered by the code that owns them.
-CREATABLE_KINDS = ("user", "source")
+CREATABLE_KINDS = ("user", "source", DOWNLOADS_FOLDER_KIND)
 
 # ``movable`` and ``owner`` follow from ``kind``: a user folder holds files that
-# can each be moved individually; a source folder is an ai-toolkit output root,
-# taken FROM and never catalogued in place.
+# can each be moved individually; a source folder is an ai-toolkit output root
+# and the downloads folder is where the browser saves, both taken FROM and never
+# catalogued in place.
 _DERIVED_BY_KIND = {
     "user": ("per_item", None),
     "source": ("external", "ai-toolkit"),
+    DOWNLOADS_FOLDER_KIND: ("external", None),
 }
+
+# The kinds a model can be put into by default: catalogued, and the owner's to
+# write into. Never a taken-from kind, and never PixlStash's own `foreign` roots.
+DEFAULT_ELIGIBLE_KINDS = ("user", MANAGED_KIND)
 
 # The most recent scan submitted for each folder, whatever state it ended in.
 # One entry per registered folder, dropped when the folder is forgotten, so it
@@ -190,6 +215,9 @@ def _folder_tool(
     """
     if row["kind"] == "source":
         return row["owner"]
+    if row["kind"] == DOWNLOADS_FOLDER_KIND:
+        # The owner's own Downloads folder; the dialog labels it by its kind.
+        return None
     if row["kind"] == "user":
         if stability_matrix_roots is None:
             stability_matrix_roots = _stability_matrix_roots()
@@ -223,7 +251,9 @@ class ModelFolderCreateRequest(BaseModel):
         default="user",
         description=(
             "`user` for a folder to catalogue in place, `source` for an "
-            "ai-toolkit output root that is scanned for importable runs instead."
+            "ai-toolkit output root that is scanned for importable runs instead, "
+            "`downloads` for the one folder whose new models are moved into the "
+            "default folder."
         ),
     )
     host_path: Optional[str] = Field(
@@ -248,6 +278,14 @@ class ModelFolderUpdateRequest(BaseModel):
 
     host_path: Optional[str] = None
     delete_after_import: Optional[bool] = None
+    is_default: Optional[bool] = Field(
+        default=None,
+        description=(
+            "`true` makes this the default folder (the previous one stops being "
+            "it); `false` hands the role back to the managed store. A `user` "
+            "folder or the managed store only."
+        ),
+    )
 
 
 class ModelFolderResponse(BaseModel):
@@ -257,7 +295,9 @@ class ModelFolderResponse(BaseModel):
 
     id: int
     path: str
-    kind: str = Field(description="`user`, `managed`, `foreign` or `source`.")
+    kind: str = Field(
+        description="`user`, `managed`, `foreign`, `source` or `downloads`."
+    )
     owner: Optional[str] = Field(
         default=None,
         description="Which subsystem owns the folder; null for a folder the user chose.",
@@ -306,6 +346,15 @@ class ModelFolderResponse(BaseModel):
     )
     host_path: Optional[str] = None
     delete_after_import: Optional[bool] = None
+    is_default: bool = Field(
+        default=False,
+        description=(
+            "Whether a new model goes here when nothing else is named: `Add "
+            "file`, and a model moved in from the Downloads folder. Exactly one "
+            "row says true while the managed store is registered: the one the "
+            "owner marked, else the managed store."
+        ),
+    )
     last_checked: Optional[str] = Field(
         default=None,
         description="When the scanner last completed a pass. Null if never.",
@@ -595,22 +644,43 @@ def register_model_folder(
         raise HTTPException(
             status_code=409, detail="This folder is already registered."
         )
-    _validate_folder_conflicts(server, path)
-    with server.hub.transaction() as conn:
-        cursor = conn.execute(
-            "INSERT INTO model_folder (path, kind, owner, movable, host_path, "
-            "delete_after_import, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                path,
-                kind,
-                owner,
-                movable,
-                host_path,
-                int(delete_after_import),
-                now,
-            ),
+    if kind == DOWNLOADS_FOLDER_KIND and server.hub.fetchone(
+        "SELECT 1 FROM model_folder WHERE kind = ?", (DOWNLOADS_FOLDER_KIND,)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="A Downloads folder is already set. Forget it first.",
         )
-        folder_id = int(cursor.lastrowid)
+    _validate_folder_conflicts(server, path)
+    try:
+        with server.hub.transaction() as conn:
+            cursor = conn.execute(
+                "INSERT INTO model_folder (path, kind, owner, movable, host_path, "
+                "delete_after_import, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    path,
+                    kind,
+                    owner,
+                    movable,
+                    host_path,
+                    int(delete_after_import),
+                    now,
+                ),
+            )
+            folder_id = int(cursor.lastrowid)
+    except sqlite3.IntegrityError as exc:
+        # A concurrent registration won the race past the checks above: the
+        # same path (`UNIQUE(path)`) or a second Downloads folder
+        # (`ux_model_folder_single_downloads`). Either way it is a 409.
+        logger.info("Model folder %s (kind=%s) not registered: %s", path, kind, exc)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "A Downloads folder is already set. Forget it first."
+                if kind == DOWNLOADS_FOLDER_KIND
+                else "This folder is already registered."
+            ),
+        ) from exc
     logger.info("Model folder registered: %s (kind=%s)", path, kind)
     return folder_id
 
@@ -751,7 +821,7 @@ def create_router(server) -> APIRouter:
     def _fetch_folder(folder_id: int) -> dict:
         row = server.hub.fetchone(
             "SELECT id, path, kind, owner, movable, host_path, delete_after_import, "
-            "last_checked, created_at FROM model_folder WHERE id = ?",
+            "is_default, last_checked, created_at FROM model_folder WHERE id = ?",
             (folder_id,),
         )
         if row is None:
@@ -766,13 +836,20 @@ def create_router(server) -> APIRouter:
         )
         return {int(row["model_folder_id"]): int(row["n"]) for row in rows}
 
+    def _default_folder_id() -> Optional[int]:
+        row = find_default_folder(server.hub)
+        return int(row["id"]) if row is not None else None
+
     def _to_response(
         row: dict,
         file_count: int = 0,
         present_bytes: int = 0,
         scan: Optional[tuple[Optional[str], Optional[str]]] = None,
         stability_matrix_roots: Optional[list[str]] = None,
+        default_id: Optional[int] = None,
     ) -> ModelFolderResponse:
+        if default_id is None:
+            default_id = _default_folder_id()
         delete_after_import = row["delete_after_import"]
         scan_status, scan_error = (
             scan if scan is not None else _scan_state(int(row["id"]))
@@ -790,6 +867,7 @@ def create_router(server) -> APIRouter:
             delete_after_import=(
                 None if delete_after_import is None else bool(delete_after_import)
             ),
+            is_default=int(row["id"]) == default_id,
             last_checked=row["last_checked"],
             created_at=row["created_at"],
             file_count=file_count,
@@ -812,7 +890,7 @@ def create_router(server) -> APIRouter:
         server.auth.ensure_secure_when_required(request)
         rows = server.hub.fetchall(
             "SELECT id, path, kind, owner, movable, host_path, delete_after_import, "
-            "last_checked, created_at FROM model_folder ORDER BY id"
+            "is_default, last_checked, created_at FROM model_folder ORDER BY id"
         )
         # Scan state before the aggregates, never after. A scan's task flips to
         # completed only once it has written its rows, so reading the counts
@@ -825,6 +903,7 @@ def create_router(server) -> APIRouter:
         present_bytes = _present_bytes_by_folder()
         # Once per list, not per row: the dialog polls this every few seconds.
         stability_matrix_roots = _stability_matrix_roots()
+        default_id = _default_folder_id()
         return ModelFolderListResponse(
             folders=[
                 _to_response(
@@ -833,6 +912,7 @@ def create_router(server) -> APIRouter:
                     present_bytes.get(int(row["id"]), 0),
                     scans[int(row["id"])],
                     stability_matrix_roots,
+                    default_id,
                 )
                 for row in rows
             ]
@@ -917,9 +997,11 @@ def create_router(server) -> APIRouter:
         "/model-folders",
         summary="Register a model folder",
         description=(
-            "Adds a folder for the shelf to catalogue (`kind=user`) or to take "
-            "ai-toolkit runs from (`kind=source`). Registering does not scan; "
-            "call the rescan route, which queues the walk as a background task."
+            "Adds a folder for the shelf to catalogue (`kind=user`), to take "
+            "ai-toolkit runs from (`kind=source`), or to watch for downloaded "
+            "models (`kind=downloads`, one at most), which are moved into the "
+            "default folder. Registering does not scan; call the rescan route, "
+            "which queues the walk as a background task."
         ),
         tags=["model_shelf"],
         response_model=ModelFolderResponse,
@@ -942,8 +1024,9 @@ def create_router(server) -> APIRouter:
         "/model-folders/{folder_id}",
         summary="Update a registered model folder",
         description=(
-            "Changes the Docker bind source or the source-folder import "
-            "behaviour. The path itself is not editable: moving a folder's "
+            "Changes the Docker bind source, the source-folder import "
+            "behaviour, or which folder is the default destination for a new "
+            "model. The path itself is not editable: moving a folder's "
             "contents is a copy-verify-repoint operation, not a field edit."
         ),
         tags=["model_shelf"],
@@ -955,8 +1038,10 @@ def create_router(server) -> APIRouter:
         payload: ModelFolderUpdateRequest = Body(...),
     ):
         server.auth.ensure_secure_when_required(request)
-        _fetch_folder(folder_id)
+        folder = _fetch_folder(folder_id)
 
+        # Everything that can refuse runs before anything is written, so a
+        # 400 never leaves half the body applied.
         assignments: list[str] = []
         params: list = []
         if "host_path" in payload.model_fields_set:
@@ -965,14 +1050,54 @@ def create_router(server) -> APIRouter:
         if payload.delete_after_import is not None:
             assignments.append("delete_after_import = ?")
             params.append(int(payload.delete_after_import))
-        if assignments:
-            params.append(folder_id)
+        if payload.is_default:
+            _check_default_eligible(folder)
+        # One transaction for the whole body, so a write that fails part-way
+        # (a locked database) leaves none of it applied.
+        if assignments or payload.is_default is not None:
             with server.hub.transaction() as conn:
-                conn.execute(
-                    f"UPDATE model_folder SET {', '.join(assignments)} WHERE id = ?",
-                    tuple(params),
+                if payload.is_default is not None:
+                    _apply_default(conn, folder, payload.is_default)
+                if assignments:
+                    conn.execute(
+                        f"UPDATE model_folder SET {', '.join(assignments)} "
+                        "WHERE id = ?",
+                        (*params, folder_id),
+                    )
+            if payload.is_default is not None:
+                logger.info(
+                    "Default model folder %s: %s (id=%s).",
+                    "set to" if payload.is_default else "no longer",
+                    folder["path"],
+                    folder_id,
                 )
         return _to_response(_fetch_folder(folder_id))
+
+    def _check_default_eligible(folder: dict) -> None:
+        if folder["kind"] not in DEFAULT_ELIGIBLE_KINDS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Only a folder the shelf lists and writes into can be the "
+                    "default: one you added, or the managed store."
+                ),
+            )
+
+    def _apply_default(conn, folder: dict, is_default: bool) -> None:
+        """Make *folder* the default destination, or hand the role back.
+
+        Run on the caller's transaction: clearing every flag and setting one
+        commit together, so the partial unique index never sees two. Marking
+        the managed store and unmarking any folder both leave no flag at all,
+        which is what makes the managed store the default again.
+        """
+        if is_default or folder["is_default"]:
+            conn.execute("UPDATE model_folder SET is_default = 0 WHERE is_default = 1")
+        if is_default and folder["kind"] != MANAGED_KIND:
+            conn.execute(
+                "UPDATE model_folder SET is_default = 1 WHERE id = ?",
+                (folder["id"],),
+            )
 
     @router.delete(
         "/model-folders/{folder_id}",
@@ -1083,7 +1208,7 @@ def create_router(server) -> APIRouter:
     def rescan_model_folder(folder_id: int, request: Request):
         server.auth.ensure_secure_when_required(request)
         folder = _fetch_folder(folder_id)
-        if folder["kind"] == "source" or folder["owner"] == BUILTIN_OWNER:
+        if folder["kind"] in TAKEN_FROM_KINDS or folder["owner"] == BUILTIN_OWNER:
             # A source folder holds runs to import, not models to catalogue. A
             # built-in folder is DECLARED, and pointing the scanner at it would
             # be actively wrong: it yields only `.safetensors` and sweeps what it

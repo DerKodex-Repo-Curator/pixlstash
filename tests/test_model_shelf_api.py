@@ -3333,6 +3333,154 @@ def test_rescan_skips_a_source_folder(shelf_env, tmp_path):
     assert r.json()["status"] == "skipped"
 
 
+def test_one_downloads_folder_is_taken_from_and_never_scanned(shelf_env, tmp_path):
+    """The Downloads folder is watched, not catalogued: its models are moved
+    into the default folder, so a scan or a destination there means nothing."""
+    r = shelf_env.owner.post(
+        f"{API}/model-folders",
+        json={"path": _new_folder_path(str(tmp_path), "dl"), "kind": "downloads"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert (body["kind"], body["movable"], body["is_default"]) == (
+        "downloads",
+        "external",
+        False,
+    )
+    # The owner's own folder, labelled by its kind: no tool chip, and above all
+    # not "PixlStash", which a downloads row would get by falling through.
+    assert body["tool"] is None, body
+    folder_id = body["id"]
+
+    r = shelf_env.owner.post(
+        f"{API}/model-folders",
+        json={"path": _new_folder_path(str(tmp_path), "dl2"), "kind": "downloads"},
+    )
+    assert r.status_code == 409, r.text
+    # The positive control: the refusal is about the kind, not the path.
+    r = shelf_env.owner.post(
+        f"{API}/model-folders", json={"path": _new_folder_path(str(tmp_path), "dl2")}
+    )
+    assert r.status_code == 200, r.text
+
+    r = shelf_env.owner.post(f"{API}/model-folders/{folder_id}/rescan")
+    assert r.json()["status"] == "skipped", r.text
+    r = shelf_env.owner.patch(
+        f"{API}/model-folders/{folder_id}", json={"is_default": True}
+    )
+    assert r.status_code == 400, r.text
+
+
+def test_a_downloads_folder_that_loses_a_race_is_a_409(
+    shelf_env, tmp_path, monkeypatch
+):
+    """Another registration landing between the route's check and its insert
+    is refused by the hub's index and reported as the same 409, not a 500."""
+    rival = _new_folder_path(str(tmp_path), "rival")
+    real_conflicts = model_folders_routes._validate_folder_conflicts
+
+    def rival_lands_first(server, path):
+        real_conflicts(server, path)
+        with server.hub.transaction() as conn:
+            conn.execute(
+                "INSERT INTO model_folder (path, kind, movable, created_at) "
+                "VALUES (?, 'downloads', 'external', '2026-10-14T00:00:00Z')",
+                (rival,),
+            )
+
+    monkeypatch.setattr(
+        model_folders_routes, "_validate_folder_conflicts", rival_lands_first
+    )
+    r = shelf_env.owner.post(
+        f"{API}/model-folders",
+        json={"path": _new_folder_path(str(tmp_path), "mine"), "kind": "downloads"},
+    )
+    assert r.status_code == 409, r.text
+    assert "Downloads folder is already set" in r.json()["detail"]
+    rows = shelf_env.owner.get(f"{API}/model-folders").json()["folders"]
+    assert [row["path"] for row in rows if row["kind"] == "downloads"] == [rival]
+
+
+def test_exactly_one_folder_is_the_default_and_it_moves(shelf_env, tmp_path):
+    """Marking a folder unmarks the last one; unmarking hands it back."""
+    ids = [
+        shelf_env.owner.post(
+            f"{API}/model-folders",
+            json={"path": _new_folder_path(str(tmp_path), name)},
+        ).json()["id"]
+        for name in ("first", "second")
+    ]
+
+    def defaults():
+        rows = shelf_env.owner.get(f"{API}/model-folders").json()["folders"]
+        return [row["id"] for row in rows if row["is_default"]]
+
+    # The seeded hub has no managed store, so nothing is the default yet.
+    assert defaults() == []
+    for folder_id in (ids[0], ids[1]):
+        r = shelf_env.owner.patch(
+            f"{API}/model-folders/{folder_id}", json={"is_default": True}
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["is_default"] is True
+        assert defaults() == [folder_id]
+
+    r = shelf_env.owner.patch(
+        f"{API}/model-folders/{ids[1]}", json={"is_default": False}
+    )
+    assert r.status_code == 200, r.text
+    assert defaults() == []
+
+
+def test_a_patch_whose_second_write_fails_moves_no_default(shelf_env, tmp_path):
+    """The default flag and the other fields commit together: a write that
+    fails part-way (simulated by a trigger) leaves the default where it was."""
+    folder_id = shelf_env.owner.post(
+        f"{API}/model-folders", json={"path": _new_folder_path(str(tmp_path), "t")}
+    ).json()["id"]
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute(
+            "CREATE TRIGGER test_refuse_delete_after_import BEFORE UPDATE OF "
+            "delete_after_import ON model_folder BEGIN "
+            "SELECT RAISE(ABORT, 'simulated write failure'); END"
+        )
+    try:
+        with pytest.raises(Exception, match="simulated write failure"):
+            shelf_env.owner.patch(
+                f"{API}/model-folders/{folder_id}",
+                json={"is_default": True, "delete_after_import": True},
+            )
+    finally:
+        with shelf_env.server.hub.transaction() as conn:
+            conn.execute("DROP TRIGGER IF EXISTS test_refuse_delete_after_import")
+    rows = shelf_env.owner.get(f"{API}/model-folders").json()["folders"]
+    assert [row["id"] for row in rows if row["is_default"]] == []
+
+
+def test_a_refused_patch_changes_nothing(shelf_env, tmp_path):
+    """A body that is refused in part is refused whole: the default does not
+    move when the host path beside it is rejected, nor onto a folder that
+    cannot be one."""
+    folder_id = shelf_env.owner.post(
+        f"{API}/model-folders", json={"path": _new_folder_path(str(tmp_path), "f")}
+    ).json()["id"]
+    r = shelf_env.owner.patch(
+        f"{API}/model-folders/{folder_id}",
+        json={"is_default": True, "host_path": "relative/path"},
+    )
+    assert r.status_code == 400, r.text
+    source_id = shelf_env.owner.post(
+        f"{API}/model-folders",
+        json={"path": _new_folder_path(str(tmp_path), "src"), "kind": "source"},
+    ).json()["id"]
+    r = shelf_env.owner.patch(
+        f"{API}/model-folders/{source_id}", json={"is_default": True}
+    )
+    assert r.status_code == 400, r.text
+    rows = shelf_env.owner.get(f"{API}/model-folders").json()["folders"]
+    assert [row["id"] for row in rows if row["is_default"]] == []
+
+
 def test_unknown_folder_id_is_404_on_every_mutator(shelf_env):
     assert (
         shelf_env.owner.patch(f"{API}/model-folders/999999", json={}).status_code == 404
@@ -7381,6 +7529,57 @@ def test_a_file_already_inside_a_registered_folder_is_refused_not_duplicated(
     assert sorted(p.name for p in loose_file.store.iterdir()) == [
         "already-there.safetensors"
     ]
+
+
+def test_add_file_lands_in_the_folder_marked_default(shelf_env, loose_file, tmp_path):
+    """With a folder marked default it is the destination; unmarked, the
+    managed store is again, and the list says so on exactly one row."""
+    chosen = tmp_path / "chosen"
+    chosen.mkdir()
+    chosen_id = shelf_env.owner.post(
+        f"{API}/model-folders", json={"path": str(chosen)}
+    ).json()["id"]
+    r = shelf_env.owner.patch(
+        f"{API}/model-folders/{chosen_id}", json={"is_default": True}
+    )
+    assert r.status_code == 200, r.text
+
+    r = shelf_env.owner.post(
+        f"{API}/model-files", json={"path": str(loose_file.source)}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["folder_id"] == chosen_id
+    assert (chosen / "loose.safetensors").exists()
+
+    shelf_env.owner.patch(
+        f"{API}/model-folders/{loose_file.store_id}", json={"is_default": True}
+    )
+    rows = shelf_env.owner.get(f"{API}/model-folders").json()["folders"]
+    assert [row["id"] for row in rows if row["is_default"]] == [loose_file.store_id]
+
+
+def test_a_file_in_the_downloads_folder_can_still_be_added(shelf_env, loose_file):
+    """The Downloads folder is registered but catalogues nothing, so `Add file`
+    from it is not the duplicate the registered-folder refusal guards against."""
+    r = shelf_env.owner.post(
+        f"{API}/model-folders",
+        json={"path": str(loose_file.source.parent), "kind": "downloads"},
+    )
+    assert r.status_code == 200, r.text
+    downloads_id = r.json()["id"]
+
+    r = shelf_env.owner.post(
+        f"{API}/model-files", json={"path": str(loose_file.source)}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["folder_id"] == loose_file.store_id
+
+    # And it is never a destination.
+    r = shelf_env.owner.post(
+        f"{API}/model-files",
+        json={"path": str(loose_file.source), "destination_folder_id": downloads_id},
+    )
+    assert r.status_code == 400, r.text
 
 
 def test_a_file_that_is_not_a_model_is_refused_before_anything_is_copied(

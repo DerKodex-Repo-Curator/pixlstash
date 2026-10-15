@@ -327,7 +327,8 @@ CREATE TABLE IF NOT EXISTS model_folder (
     host_path            TEXT,
     delete_after_import  INTEGER,
     last_checked         TEXT,
-    created_at           TEXT
+    created_at           TEXT,
+    is_default           INTEGER NOT NULL DEFAULT 0
 )
 """
 
@@ -1986,6 +1987,30 @@ def _apply_v2(conn: sqlite3.Connection) -> None:
     for column in ("base_model_canonical", "base_model_source"):
         if column not in model_columns:
             conn.execute(f"ALTER TABLE model ADD COLUMN {column} TEXT")
+
+    # The owner's chosen default destination for a new model, guarded the same
+    # way. 0 everywhere means "the managed store", so an existing hub keeps the
+    # destination it had. The partial unique index is created here rather than
+    # in `_V2_MODEL_SHELF_INDEXES` because that tuple runs before this ALTER, and
+    # on an existing hub the column would not exist yet.
+    folder_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(model_folder)").fetchall()
+    }
+    if "is_default" not in folder_columns:
+        conn.execute(
+            "ALTER TABLE model_folder ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0"
+        )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_model_folder_single_default "
+        "ON model_folder(is_default) WHERE is_default = 1"
+    )
+    # At most one Downloads folder, held by the database for the same reason:
+    # two registrations racing past the route's own check must not both land.
+    # Safe on an existing hub, because nothing wrote that kind before it.
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_model_folder_single_downloads "
+        "ON model_folder(kind) WHERE kind = 'downloads'"
+    )
 
     # A hand-made set's `cloned` mark, guarded the same way.
     set_columns = {

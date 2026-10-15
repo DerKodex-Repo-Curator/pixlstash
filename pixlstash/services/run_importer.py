@@ -56,7 +56,7 @@ from typing import Callable, Optional
 
 from pixlstash.hub.db import HubDatabase
 from pixlstash.pixl_logging import get_logger
-from pixlstash.services.model_folder_scanner import STATE_PRESENT
+from pixlstash.services.model_folder_scanner import STATE_PRESENT, TAKEN_FROM_KINDS
 from pixlstash.services.model_mover import (
     PARTIAL_SUFFIX,
     STATUS_CANCELLED,
@@ -310,10 +310,10 @@ class RunImporter:
         )
         if row is None:
             raise MoveRefused("No such destination folder.", status_code=404)
-        if row["kind"] == "source":
+        if row["kind"] in TAKEN_FROM_KINDS:
             raise MoveRefused(
-                "A source folder is where runs are taken from, never a place to "
-                "import them into."
+                "That folder is taken from, never a place to import runs into: "
+                "an ai-toolkit output root or the Downloads folder."
             )
         if not os.path.isdir(row["path"]):
             raise MoveRefused(

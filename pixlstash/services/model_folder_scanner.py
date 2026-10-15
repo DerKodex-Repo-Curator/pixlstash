@@ -39,7 +39,9 @@ must not read as a deletion the moment it drops.
 ``kind = 'source'`` folders are skipped entirely. They are ai-toolkit output
 roots, scanned for importable *runs* by :mod:`pixlstash.utils.aitoolkit_run` and
 never catalogued in place - the same distinction the product already makes
-between a reference folder and an import folder.
+between a reference folder and an import folder. ``kind = 'downloads'`` is
+skipped for the same reason: its models are moved out by
+:mod:`pixlstash.services.downloads_intake`, not listed where they landed.
 """
 
 from __future__ import annotations
@@ -103,6 +105,14 @@ HEADER_SUFFIX = ".safetensors"
 
 # ai-toolkit output roots are taken FROM, never catalogued in place.
 SOURCE_FOLDER_KIND = "source"
+
+# The Downloads folder the shelf watches. Taken from as well: a model that lands
+# there is moved into the default folder (`services/downloads_intake.py`), so
+# cataloguing it in place would register a copy that is about to leave.
+DOWNLOADS_FOLDER_KIND = "downloads"
+
+# Every kind that is taken from: never scanned, never a destination.
+TAKEN_FROM_KINDS = (SOURCE_FOLDER_KIND, DOWNLOADS_FOLDER_KIND)
 
 # Anything the scanner finds on disk was put there by something other than a
 # PixlStash-orchestrated training run; ``trained`` is reserved for the latter,
@@ -415,7 +425,7 @@ class ModelFolderScanner:
         kind: str,
         progress: Optional[Callable[[int, int], None]] = None,
     ) -> FolderScanResult:
-        if kind == SOURCE_FOLDER_KIND:
+        if kind in TAKEN_FROM_KINDS:
             return FolderScanResult(
                 folder_id=folder_id, path=path, state=STATE_PRESENT, skipped=True
             )

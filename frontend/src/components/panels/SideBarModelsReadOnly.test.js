@@ -75,6 +75,8 @@ vi.mock("vue-router", async () => {
 
 import { isReadOnly, sessionContext } from "../../utils/apiClient";
 import { useSidebarStore } from "../../stores/useSidebarStore";
+import { useModelShelfStore } from "../../stores/useModelShelfStore";
+import { useRoute } from "vue-router";
 import SideBar from "./SideBar.vue";
 
 /**
@@ -301,5 +303,37 @@ describe("the Workflows entry", () => {
     await dockedRow.trigger("click");
     expect(docked.emitted("select-workflows")).toHaveLength(1);
     docked.unmount();
+  });
+});
+
+describe("the expanded rail's Models entry, after a download arrived", () => {
+  afterEach(() => {
+    useRoute().name = "all-pictures";
+  });
+
+  it("wears `new` until the shelf is opened", async () => {
+    const wrapper = await mountSidebar();
+    const shelf = useModelShelfStore();
+    expect(expandedModels(wrapper).find(".sidebar-new-tag").exists()).toBe(false);
+
+    shelf.unseenArrivals = true;
+    await flushPromises();
+    expect(expandedModels(wrapper).find(".sidebar-new-tag").exists()).toBe(true);
+
+    useRoute().name = "models";
+    await flushPromises();
+    expect(shelf.unseenArrivals).toBe(false);
+    expect(expandedModels(wrapper).find(".sidebar-new-tag").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("is never raised by an arrival while the shelf is open", async () => {
+    useRoute().name = "models";
+    const wrapper = await mountSidebar();
+    const shelf = useModelShelfStore();
+    shelf.unseenArrivals = true;
+    await flushPromises();
+    expect(shelf.unseenArrivals).toBe(false);
+    wrapper.unmount();
   });
 });

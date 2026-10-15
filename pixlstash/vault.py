@@ -69,6 +69,7 @@ from pixlstash.utils.path_utils import LibraryRootsUnavailable
 from pixlstash.tasks.missing_saved_recipe_workflow_finder import (
     MissingSavedRecipeWorkflowFinder,
 )
+from pixlstash.tasks.downloads_intake_finder import DownloadsIntakeFinder
 
 
 logger = get_logger(__name__)
@@ -343,6 +344,10 @@ class Vault:
 
             self._planner_work_finders[TaskType.CHECKPOINT_HASH] = (
                 MissingCheckpointHashFinder(hub=registered_hub)
+            )
+            # The watched Downloads folder, a hub fact for the same reason.
+            self._planner_work_finders[TaskType.DOWNLOADS_INTAKE] = (
+                DownloadsIntakeFinder(hub=registered_hub, notifier=self.notify)
             )
             # The workflow-card backfill (§B2). Hub-only in the strongest sense:
             # it reads stored documents and never a picture, so it keys the

@@ -13,15 +13,18 @@ const listModelFolders = vi.fn();
 const createModelFolder = vi.fn();
 const forgetModelFolder = vi.fn();
 const rescanModelFolder = vi.fn();
+const setDefaultModelFolder = vi.fn();
 
 vi.mock("../../api/modelFolders", () => ({
   MANAGED_KIND: "managed",
   SOURCE_KIND: "source",
-  CREATABLE_KINDS: ["user", "source"],
+  DOWNLOADS_KIND: "downloads",
+  CREATABLE_KINDS: ["user", "source", "downloads"],
   listModelFolders: (...a) => listModelFolders(...a),
   createModelFolder: (...a) => createModelFolder(...a),
   forgetModelFolder: (...a) => forgetModelFolder(...a),
   rescanModelFolder: (...a) => rescanModelFolder(...a),
+  setDefaultModelFolder: (...a) => setDefaultModelFolder(...a),
 }));
 
 vi.mock("../../stores/useModelShelfStore", () => ({
@@ -151,6 +154,7 @@ beforeEach(() => {
   moveBusy = false;
   forgetModelFolder.mockReset().mockResolvedValue({ tombstoned_files: 0 });
   rescanModelFolder.mockReset().mockResolvedValue({ status: "started" });
+  setDefaultModelFolder.mockReset().mockResolvedValue({});
 });
 
 describe("the managed store", () => {
@@ -486,6 +490,76 @@ describe("setting the ai-toolkit output folder", () => {
       path: "/home/g/loras2",
       kind: "user",
     });
+  });
+});
+
+describe("the Downloads folder", () => {
+  const WATCHED = folder({
+    id: 7,
+    path: "/home/me/Downloads",
+    kind: "downloads",
+    movable: "external",
+    file_count: 0,
+  });
+
+  it("offers to monitor one while none is set, and stops once one is", async () => {
+    expect((await open([folder()])).text()).toContain("Monitor download folder");
+    expect((await open([folder(), WATCHED])).text()).not.toContain(
+      "Monitor download folder",
+    );
+  });
+
+  it("registers what the picker returns as the Downloads folder", async () => {
+    const wrapper = await open([folder()]);
+    await wrapper
+      .findAll("button")
+      .find((b) => b.text().includes("Monitor download folder"))
+      .trigger("click");
+    await wrapper
+      .findComponent({ name: "FolderBrowser" })
+      .vm.$emit("select", "/home/me/Downloads");
+    await wrapper.vm.$nextTick();
+
+    expect(createModelFolder).toHaveBeenCalledWith({
+      path: "/home/me/Downloads",
+      kind: "downloads",
+    });
+  });
+
+  it("sits in its own list under its own label, apart from the others", async () => {
+    const wrapper = await open([folder(), MANAGED, WATCHED]);
+    const lists = wrapper.findAll("ul.mf-list");
+    expect(lists).toHaveLength(2);
+    expect(lists[0].text()).not.toContain("/home/me/Downloads");
+    expect(lists[1].text()).toContain("/home/me/Downloads");
+    expect(wrapper.text()).toContain("Downloads");
+    // Forgettable, never scannable: nothing is listed from it.
+    expect(lists[1].find(".mf-hidden").exists()).toBe(true);
+  });
+});
+
+describe("the default folder", () => {
+  const CHOSEN = folder({ id: 1, is_default: true });
+  const STORE = { ...MANAGED, is_default: false };
+
+  it("shows the default and offers only folders that can be it", async () => {
+    const wrapper = await open([CHOSEN, STORE, HF_CACHE]);
+    const select = wrapper.find(".mf-default select");
+    expect(select.element.value).toBe("1");
+    const offered = select.findAll("option").map((o) => o.element.value);
+    expect(offered).toEqual(["1", "2"]);
+  });
+
+  it("asks the server to make the picked folder the default", async () => {
+    const wrapper = await open([CHOSEN, STORE]);
+    await wrapper.find(".mf-default select").setValue("2");
+    expect(setDefaultModelFolder).toHaveBeenCalledWith(2, true);
+  });
+
+  it("sends nothing from a remote session", async () => {
+    const wrapper = await open([CHOSEN, STORE], { canManage: false });
+    await wrapper.find(".mf-default select").setValue("2");
+    expect(setDefaultModelFolder).not.toHaveBeenCalled();
   });
 });
 
