@@ -159,6 +159,7 @@ from pixlstash.services.comfyui_service import (
     RUN_CLIENT_ID,
     _process_comfyui_outputs,
     _submit_comfyui_prompt,
+    _download_comfyui_image,
     _upload_image_to_comfyui,
     library_ids_named,
     own_picture_ids,
@@ -978,6 +979,8 @@ _WORKFLOW_ID_RE = re.compile(WORKFLOW_ID_PATTERN)
 # resolves as a path.
 _UPLOAD_EXTENSION_RE = re.compile(r"^\.[a-z0-9]{1,8}$")
 _PIXEL_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+# The stock loaders Open in ComfyUI puts the pack's digest loaders in for.
+_PACK_MODEL_LOADERS = {"VAELoader": FILE_VAE, "CLIPLoader": FILE_TEXT_ENCODER}
 # The name `_upload_files` gives a hashed picture, read back for its content:
 # a loader still holding one says what its run loaded (`_made_from`).
 _UPLOAD_NAME_RE = re.compile(
@@ -8057,17 +8060,21 @@ def create_router(server) -> APIRouter:
         )
 
     def _known_pictures(
-        workflow_id: str, graph: dict, bindings: list | None, object_info: dict
+        workflow_id: str,
+        graph: dict,
+        bindings: list | None,
+        object_info: dict,
+        comfyui_url: str,
     ) -> dict[str, int]:
         """``{node_id: picture id}`` for each ``LoadImage`` of *graph* whose
         picture this library is known to hold.
 
-        Two ways it is known. The owner pinned one to the input (Fixed), which
-        is the picture a run loads there whatever the graph names. Otherwise
-        the graph names a file a run of PixlStash uploaded, which carries the
-        picture's content (`_upload_files`). Either way the oldest kept
-        picture with that content, as a pin resolves. A file the owner put in
-        ComfyUI's input folder is no picture of the library, and stays.
+        Three ways it is known. The owner pinned one to the input (Fixed),
+        which is the picture a run loads there whatever the graph names.
+        Otherwise the graph names a file a run of PixlStash uploaded, which
+        carries the picture's content (`_upload_files`), or a file in
+        ComfyUI's input folder whose content the library holds. Each way the
+        oldest kept picture with that content, as a pin resolves.
         """
         wanted: dict[str, str] = {}
         for node_id, node in graph.items():
@@ -8081,6 +8088,10 @@ def create_router(server) -> APIRouter:
             )
             if named:
                 wanted[str(node_id)] = named.group(1)
+            elif isinstance(inputs.get("image"), str):
+                content = _input_file_sha(comfyui_url, inputs["image"])
+                if content:
+                    wanted[str(node_id)] = content
         for item in _card_inputs(
             _hub(), workflow_id, graph, False, bindings, object_info
         ):
@@ -8096,6 +8107,27 @@ def create_router(server) -> APIRouter:
             for node_id, pixel_sha in wanted.items()
             if pixel_sha in kept
         }
+
+    def _input_file_sha(comfyui_url: str, name: str) -> str | None:
+        """The content hash of *name* in ComfyUI's input folder, as a
+        picture's ``pixel_sha`` is taken, or ``None`` where it cannot be read.
+        """
+        # ponytail: fetched on every open and save; cache by name if it shows.
+        subfolder, _, filename = name.removesuffix(" [input]").rpartition("/")
+        try:
+            data, _ext = _download_comfyui_image(
+                comfyui_url,
+                {"filename": filename, "subfolder": subfolder, "type": "input"},
+            )
+        except HTTPException as exc:
+            logger.info(
+                "[workflows] Load Image's %s stays a Load Image: ComfyUI did "
+                "not hand over the file (%s).",
+                name,
+                exc.detail,
+            )
+            return None
+        return ImageUtils.calculate_hash_from_bytes(data) if data else None
 
     def _comfyui_is_here(request: Request) -> bool:
         """Whether the owner's ComfyUI runs on this computer, where it reads
@@ -8121,15 +8153,16 @@ def create_router(server) -> APIRouter:
         """Swap ComfyUI-PixlStash nodes into *graph* for opening in ComfyUI.
 
         :func:`swap_in_pack_nodes`, each swap only where what it needs is
-        here: a LoRA or a ControlNet by digest where the shelf holds a copy of
-        the file for the pack's loader to fetch; a picture by id where the library is
-        known to hold it (:func:`_known_pictures`); a checkpoint by shelf row
-        where the shelf holds one copy of it and ComfyUI is on this computer,
-        since that loader cannot fetch its file. Nothing is swapped when
-        ComfyUI did not say which nodes it has.
+        here: a LoRA, a VAE, a CLIP or a ControlNet by digest where the shelf
+        holds a copy of the file for the pack's loader to fetch; a picture by
+        id where the library is known to hold it (:func:`_known_pictures`); a
+        checkpoint or a diffusion model by shelf row where the shelf holds one
+        copy of it and ComfyUI is on this computer, since that loader cannot
+        fetch its file. Nothing is swapped when ComfyUI did not say which
+        nodes it has.
 
         Asked of the same graph, it answers the same until the shelf, the
-        library or a pin changes: ``PUT …/graph`` runs it again to know a
+        library, a pin or a file in ComfyUI's input folder changes: ``PUT …/graph`` runs it again to know a
         graph saved untouched.
 
         *filled* is ``{node_id: picture id}`` for the picture inputs a run
@@ -8143,16 +8176,25 @@ def create_router(server) -> APIRouter:
         # Asked for only where a swap would use it: the shelf's id is made
         # the first time it is read.
         by_row = (
-            _holds_class(graph, "CheckpointLoaderSimple")
+            (
+                _holds_class(graph, "CheckpointLoaderSimple")
+                or _holds_class(graph, "UNETLoader")
+            )
             and PIXLSTASH_CHECKPOINT_LOADER in object_info
             and _comfyui_is_here(request)
         )
-        return swap_in_pack_nodes(
+        swapped = swap_in_pack_nodes(
             graph,
             object_info,
             _shelf_digest(hub, FILE_ADAPTER),
             pictures={
-                **_known_pictures(workflow_id, graph, bindings, object_info),
+                **_known_pictures(
+                    workflow_id,
+                    graph,
+                    bindings,
+                    object_info,
+                    _comfyui_url(_user(request)),
+                ),
                 **(filled or {}),
             }
             if PIXLSTASH_PICTURE_LOADER in object_info
@@ -8163,30 +8205,48 @@ def create_router(server) -> APIRouter:
             shelf_uuid=shelf_uuid(hub) if by_row else None,
             controlnet_digest=_shelf_digest(hub, FILE_CONTROLNET),
         )
+        # The VAE and CLIP loaders by digest, as a model fix puts them in: on
+        # the same terms (one file the shelf holds, no setting the pack's
+        # loader would lose, no GGUF).
+        for node_id, node in list(graph.items()):
+            was = node.get("class_type") if isinstance(node, dict) else None
+            kind = _PACK_MODEL_LOADERS.get(was)
+            if kind is None:
+                continue
+            plan, _refusal = run_service.plan_pixlstash_swap(
+                graph, node_id, kind, {}, object_info, _shelf_digest(hub, kind)
+            )
+            if plan is not None:
+                run_service.apply_pixlstash_swap(graph, node_id, plan)
+                swapped.append(
+                    {"node_id": str(node_id), "was": was, "now": plan["class_type"]}
+                )
+        return swapped
 
     def _swap_in_shelf_loaders(
         request: Request, card_key: str, graph: dict, object_info: dict
     ) -> list[dict]:
         """Load each checkpoint and ControlNet this ComfyUI lacks off the shelf.
 
-        For a run: a ``CheckpointLoaderSimple`` or ``ControlNetLoader`` naming
-        a file ComfyUI does not list becomes the pack's loader on the shelf's
-        copy of that file, the swap *Open in ComfyUI* makes
-        (:func:`swap_in_pack_nodes`), on the same terms. A checkpoint by the
-        shelf's row, only where the shelf holds one copy and ComfyUI is on this
-        computer to read it, since that loader cannot fetch its file; a
-        ControlNet by digest, which its loader fetches when it has to.
-        Anywhere else the loader is left as it is, and the pre-flight reports
-        the file missing as before.
+        For a run: a ``CheckpointLoaderSimple``, ``UNETLoader`` or
+        ``ControlNetLoader`` naming a file ComfyUI does not list becomes the
+        pack's loader on the shelf's copy of that file, the swap *Open in
+        ComfyUI* makes (:func:`swap_in_pack_nodes`), on the same terms. A
+        checkpoint or diffusion model by the shelf's row, only where the shelf
+        holds one copy and ComfyUI is on this computer to read it, since that
+        loader cannot fetch its file; a ControlNet by digest, which its loader
+        fetches when it has to. Anywhere else the loader is left as it is, and
+        the pre-flight reports the file missing as before.
         """
         missing = {
             str(item.get("node_id")): item.get("class_type")
             for item in detect_model_targets(graph, object_info)
             if item
-            and item.get("class_type") in ("CheckpointLoaderSimple", "ControlNetLoader")
+            and item.get("class_type")
+            in ("CheckpointLoaderSimple", "UNETLoader", "ControlNetLoader")
         }
         by_row = (
-            "CheckpointLoaderSimple" in missing.values()
+            not {"CheckpointLoaderSimple", "UNETLoader"}.isdisjoint(missing.values())
             and PIXLSTASH_CHECKPOINT_LOADER in object_info
             and _comfyui_is_here(request)
         )

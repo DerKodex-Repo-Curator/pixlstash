@@ -310,10 +310,30 @@ class TestOpeningWithPackNodes:
         assert graph["9"] == _node("SaveVideo", **inputs)
         assert _why(graph, **STRICT) == {}
 
+    def test_a_setting_the_video_saver_lacks_takes_its_default(self):
+        # A current ComfyUI's Save Video has a `codec` the pack's saver does
+        # not: the saver encodes with its own default rather than staying out.
+        graph = {
+            "9": _node(
+                "SaveVideo",
+                video=["7", 0],
+                format="auto",
+                **{"format.codec": "auto", "codec": "auto", "codec.crf": 23},
+            )
+        }
+        assert [s["now"] for s in self._swap(graph)] == ["PixlStashVideoSaver"]
+        assert graph["9"]["inputs"] == {
+            "video": ["7", 0],
+            "filename_prefix": "video/comfyui",
+            "format": "auto",
+            "format.codec": "auto",
+            "save_workflow": True,
+        }
+
     def test_a_saver_is_left_where_the_pack_cannot_stand_in_for_it(self):
-        # An input the pack's saver has no place for (an older Save Video),
-        # nothing wired in to save, and a ComfyUI without the pack.
-        old = _node("SaveVideo", video=["7", 0], codec="h264")
+        # A wire the pack's saver has no place for, nothing wired in to save,
+        # and a ComfyUI without the pack.
+        old = _node("SaveVideo", video=["7", 0], codec=["6", 0])
         unwired = _node("SaveImage", filename_prefix="v")
         graph = {"8": dict(old), "9": dict(unwired)}
         assert self._swap(graph) == []
@@ -365,6 +385,25 @@ class TestOpeningWithPackNodes:
             "output": ["MODEL", "CLIP", "VAE"],
         },
     }
+
+    def test_a_diffusion_model_loads_off_the_shelf_as_a_checkpoint(self):
+        """The pack's checkpoint loader hands on MODEL first, so it stands in
+        for Load Diffusion Model on the shelf's row, but never where the
+        stock loader casts the weights: the pack's has no cast."""
+        info = {**self.INFO, **self.ID_LOADERS}
+        known = {"checkpoint_id": {"u.safetensors": "8"}.get, "shelf_uuid": "s"}
+        unet = _node("UNETLoader", unet_name="u.safetensors", weight_dtype="default")
+        graph = {"1": dict(unet), "5": _node("KSampler", model=["1", 0])}
+        swapped = comfyui_recipe_service.swap_in_pack_nodes(
+            graph, info, {}.get, **known
+        )
+        assert [(s["was"], s["now"]) for s in swapped] == [("UNETLoader", CKPT)]
+        assert graph["1"] == _node(CKPT, checkpoint_id="8", shelf="s")
+        assert graph["5"]["inputs"] == {"model": ["1", 0]}
+        cast = {"1": _node("UNETLoader", unet_name="u.safetensors", weight_dtype="fp8")}
+        assert (
+            comfyui_recipe_service.swap_in_pack_nodes(cast, info, {}.get, **known) == []
+        )
 
     @staticmethod
     def _stock():
@@ -449,6 +488,7 @@ class TestOpeningWithPackNodes:
             **self._stock(),
             "4": _node("LoraLoader", lora_name="x.safetensors", model=["1", 0]),
             "9": _node("SaveImage", images=["3", 0], filename_prefix="v"),
+            "m1": _node("UNETLoader", unet_name="u.safetensors"),
         }
         swapped = json.loads(json.dumps(stock))
         info = {**self.INFO, **self.ID_LOADERS}
@@ -458,10 +498,10 @@ class TestOpeningWithPackNodes:
             {"x.safetensors": "d" * 64}.get,
             pictures={"2": 41},
             library_uuid="lib-here",
-            checkpoint_id={"a.safetensors": "7"}.get,
+            checkpoint_id={"a.safetensors": "7", "u.safetensors": "8"}.get,
             shelf_uuid="shelf-here",
         )
-        assert {s["node_id"] for s in done} == {"1", "2", "4", "9"}
+        assert {s["node_id"] for s in done} == {"1", "2", "4", "9", "m1"}
         classes = comfyui_recipe_service.SWAPPED_CLASSES
         structure = workflow_run_service.graph_structure
         assert structure(swapped) != structure(stock)

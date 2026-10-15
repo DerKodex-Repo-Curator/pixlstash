@@ -2109,11 +2109,15 @@ PACK_SAVERS = {
 
 
 # The stock loaders a graph opened in ComfyUI gets one of the pack's id
-# loaders for, each with the outputs its consumers read, in order.
+# loaders for, each with the outputs its consumers read, in order. The pack's
+# checkpoint loader loads a bare diffusion model too, as MODEL alone.
 _PACK_ID_LOADERS = {
     "LoadImage": (PIXLSTASH_PICTURE_LOADER, ("IMAGE", "MASK")),
     "CheckpointLoaderSimple": (PIXLSTASH_CHECKPOINT_LOADER, ("MODEL", "CLIP", "VAE")),
+    "UNETLoader": (PIXLSTASH_CHECKPOINT_LOADER, ("MODEL",)),
 }
+# The field each stock loader names its checkpoint by.
+_CHECKPOINT_FIELDS = {"CheckpointLoaderSimple": "ckpt_name", "UNETLoader": "unet_name"}
 
 
 # Every class `swap_in_pack_nodes` puts in or takes the place of, as the stock
@@ -2121,10 +2125,16 @@ _PACK_ID_LOADERS = {
 # of a pair a graph holds follows what the shelf and the library hold on the
 # day, and the layout is of either. A model-only LoRA loader reads as the full
 # one, since the pack's loader stands in for both; their wiring tells them
-# apart.
+# apart. So does a diffusion model's, since the pack's checkpoint loader
+# stands in for it too. The VAE and CLIP loaders are put in by Open in
+# ComfyUI's caller (`run_service.plan_pixlstash_swap`).
 SWAPPED_CLASSES = {
     **{pack: stock for stock, (pack, _carried) in PACK_SAVERS.items()},
-    **{pack: stock for stock, (pack, _outputs) in _PACK_ID_LOADERS.items()},
+    PIXLSTASH_PICTURE_LOADER: "LoadImage",
+    PIXLSTASH_CHECKPOINT_LOADER: "CheckpointLoaderSimple",
+    "UNETLoader": "CheckpointLoaderSimple",
+    "PixlStashVAELoader": "VAELoader",
+    "PixlStashCLIPLoader": "CLIPLoader",
     PIXLSTASH_ADAPTER_LOADER: "LoraLoader",
     "LoraLoaderModelOnly": "LoraLoader",
     PIXLSTASH_CONTROLNET_LOADER: "ControlNetLoader",
@@ -2174,13 +2184,16 @@ def swap_in_pack_nodes(
     * ``LoadImage`` becomes ``PixlStashPictureLoader`` on the picture
       *pictures* names for the node, of library *library_uuid*. Never with no
       picture: empty, that loader picks pictures by its own sort.
-    * ``CheckpointLoaderSimple`` becomes ``PixlStashCheckpointLoader`` on the
-      row *checkpoint_id* names for its file, of shelf *shelf_uuid*.
+    * ``CheckpointLoaderSimple`` and ``UNETLoader`` become
+      ``PixlStashCheckpointLoader`` on the row *checkpoint_id* names for their
+      file, of shelf *shelf_uuid*.
 
-    A node is left as it is where this ComfyUI lacks the pack's class or has
-    one that cannot stand in (:func:`_stands_in`), where the stock node holds
-    an input the pack's has no place for (a Save Video from before the pack's
-    saver was written against it), and where nothing is wired into a saver.
+    A saver's setting the pack's saver has no place for (Save Video's
+    ``codec``) is left to the pack's own default. A node is left as it is
+    where this ComfyUI lacks the pack's class or has one that cannot stand in
+    (:func:`_stands_in`), where a diffusion model's loader casts its weights
+    (``weight_dtype``), which the pack's cannot, where the stock node has a
+    wire the pack's has no place for, and where nothing is wired into a saver.
 
     Args:
         lora_digest: A ``lora_name`` -> the SHA-256 the pack's loader can
@@ -2207,19 +2220,33 @@ def swap_in_pack_nodes(
         if was in PACK_SAVERS:
             now, carried = PACK_SAVERS[was]
             spec = object_info.get(now)
-            declared = (spec.get("input") if isinstance(spec, dict) else None) or {}
+            if not isinstance(spec, dict):
+                continue
+            declared = spec.get("input") or {}
             takes = {
                 name
                 for group in ("required", "optional")
                 for name in (declared.get(group) or {})
             }
-            # A nested input ("format.codec") is its root's to declare.
-            if not is_link(old.get(carried)) or not all(
-                str(name).split(".")[0] in takes for name in old
+            # A nested input ("format.codec") is its root's to declare. A
+            # setting it does not declare takes the pack saver's default; a
+            # wire it has no place for keeps the stock saver.
+            undeclared = {
+                name: value
+                for name, value in old.items()
+                if str(name).split(".")[0] not in takes
+            }
+            if not is_link(old.get(carried)) or any(
+                is_link(value) for value in undeclared.values()
             ):
                 continue
             node["class_type"] = now
-            node["inputs"] = {**_widget_defaults(spec), **old}
+            node["inputs"] = {
+                **_widget_defaults(spec),
+                **{
+                    name: value for name, value in old.items() if name not in undeclared
+                },
+            }
         elif was in _SWAPPABLE_LORA_LOADERS:
             name = old.get("lora_name")
             sha256 = lora_digest(name) if isinstance(name, str) else None
@@ -2250,10 +2277,14 @@ def swap_in_pack_nodes(
                         PICTURE_LOADER_LIBRARY: library_uuid,
                     }
             else:
-                name = old.get("ckpt_name")
+                name = old.get(_CHECKPOINT_FIELDS[was])
                 row = (
                     checkpoint_id(name)
-                    if checkpoint_id and shelf_uuid and isinstance(name, str)
+                    if checkpoint_id
+                    and shelf_uuid
+                    and isinstance(name, str)
+                    # The pack's loader has no cast: an fp8 choice would go.
+                    and old.get("weight_dtype", "default") == "default"
                     else None
                 )
                 if row:
