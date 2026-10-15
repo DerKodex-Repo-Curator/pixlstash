@@ -199,9 +199,8 @@ class AdapterInfo:
             not know" rather than being mistaken for a checkpoint.
         file_kind: What the file is: ``"adapter"``, ``"vae"``,
             ``"text_encoder"``, ``"controlnet"``, ``"checkpoint"`` or
-            ``"unknown"``. Never
-            guesses checkpoint from the absence of markers alone; see
-            :func:`classify_model_file`.
+            ``"unknown"``. Never guesses checkpoint from the absence of markers
+            alone; see :func:`classify_model_file`.
         param_count: Total parameters, summed from the tensor shapes already in
             the header. Exact and free, unlike file size which quantisation and
             rank both confound.
