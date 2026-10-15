@@ -146,6 +146,7 @@ from pixlstash.services.comfyui_recipe_service import (
     retype_text_encoders,
     PICTURE_LOADER_LIBRARY,
     PIXLSTASH_CHECKPOINT_LOADER,
+    PIXLSTASH_CONTROLNET_LOADER,
     SWAPPED_CLASSES,
     swap_in_pack_nodes,
     swap_target,
@@ -292,6 +293,7 @@ from pixlstash.stacking import (
 from pixlstash.utils.adapter_header import (
     FILE_ADAPTER,
     FILE_CHECKPOINT,
+    FILE_CONTROLNET,
     FILE_ENGINE,
     FILE_TEXT_ENCODER,
     FILE_UNKNOWN,
@@ -6932,9 +6934,10 @@ def create_router(server) -> APIRouter:
                         swap["field"],
                     )
                 if not opening:
-                    # Open puts the shelf's loader in on every checkpoint it
-                    # can (`_with_pack_nodes`); a save keeps the graph's own.
-                    _swap_in_shelf_checkpoints(request, card_key, graph, object_info)
+                    # Open puts the shelf's loader in on every checkpoint and
+                    # ControlNet it can (`_with_pack_nodes`); a save keeps the
+                    # graph's own.
+                    _swap_in_shelf_loaders(request, card_key, graph, object_info)
 
             # After every value, so the replacement for a sampler or scheduler
             # this ComfyUI lacks wins over the default the form also sent.
@@ -8118,8 +8121,8 @@ def create_router(server) -> APIRouter:
         """Swap ComfyUI-PixlStash nodes into *graph* for opening in ComfyUI.
 
         :func:`swap_in_pack_nodes`, each swap only where what it needs is
-        here: a LoRA by digest where the shelf holds a copy of the file for
-        the pack's loader to fetch; a picture by id where the library is
+        here: a LoRA or a ControlNet by digest where the shelf holds a copy of
+        the file for the pack's loader to fetch; a picture by id where the library is
         known to hold it (:func:`_known_pictures`); a checkpoint by shelf row
         where the shelf holds one copy of it and ComfyUI is on this computer,
         since that loader cannot fetch its file. Nothing is swapped when
@@ -8158,29 +8161,40 @@ def create_router(server) -> APIRouter:
             library_uuid=_library_uuid(),
             checkpoint_id=_shelf_checkpoint(hub) if by_row else None,
             shelf_uuid=shelf_uuid(hub) if by_row else None,
+            controlnet_digest=_shelf_digest(hub, FILE_CONTROLNET),
         )
 
-    def _swap_in_shelf_checkpoints(
+    def _swap_in_shelf_loaders(
         request: Request, card_key: str, graph: dict, object_info: dict
     ) -> list[dict]:
-        """Load each checkpoint this ComfyUI lacks off the shelf, for a run.
+        """Load each checkpoint and ControlNet this ComfyUI lacks off the shelf.
 
-        A ``CheckpointLoaderSimple`` naming a file ComfyUI does not list
-        becomes ``PixlStashCheckpointLoader`` on the shelf's row for that file:
-        the swap *Open in ComfyUI* makes (:func:`swap_in_pack_nodes`), on the
-        same terms. The shelf holds one copy of the file, ComfyUI is on this
-        computer to read it, and its pack has the loader with the widget that
-        says whose the id is. Anywhere else the loader is left as it is, and
-        the pre-flight reports the file missing as before.
+        For a run: a ``CheckpointLoaderSimple`` or ``ControlNetLoader`` naming
+        a file ComfyUI does not list becomes the pack's loader on the shelf's
+        copy of that file, the swap *Open in ComfyUI* makes
+        (:func:`swap_in_pack_nodes`), on the same terms. A checkpoint by the
+        shelf's row, only where the shelf holds one copy and ComfyUI is on this
+        computer to read it, since that loader cannot fetch its file; a
+        ControlNet by digest, which its loader fetches when it has to.
+        Anywhere else the loader is left as it is, and the pre-flight reports
+        the file missing as before.
         """
-        if PIXLSTASH_CHECKPOINT_LOADER not in object_info:
-            return []
         missing = {
-            str(item.get("node_id"))
+            str(item.get("node_id")): item.get("class_type")
             for item in detect_model_targets(graph, object_info)
-            if item and item.get("class_type") == "CheckpointLoaderSimple"
+            if item
+            and item.get("class_type") in ("CheckpointLoaderSimple", "ControlNetLoader")
         }
-        if not missing or not _comfyui_is_here(request):
+        by_row = (
+            "CheckpointLoaderSimple" in missing.values()
+            and PIXLSTASH_CHECKPOINT_LOADER in object_info
+            and _comfyui_is_here(request)
+        )
+        by_digest = (
+            "ControlNetLoader" in missing.values()
+            and PIXLSTASH_CONTROLNET_LOADER in object_info
+        )
+        if not by_row and not by_digest:
             return []
         hub = _hub()
         # Only the loaders whose file ComfyUI lacks: the swap changes each
@@ -8189,15 +8203,19 @@ def create_router(server) -> APIRouter:
             {node_id: node for node_id, node in graph.items() if node_id in missing},
             object_info,
             lambda _name: None,
-            checkpoint_id=_shelf_checkpoint(hub),
-            shelf_uuid=shelf_uuid(hub),
+            checkpoint_id=_shelf_checkpoint(hub) if by_row else None,
+            shelf_uuid=shelf_uuid(hub) if by_row else None,
+            controlnet_digest=_shelf_digest(hub, FILE_CONTROLNET)
+            if by_digest
+            else None,
         )
         for swap in swapped:
             logger.info(
-                "[workflows] Card %s loads node %s's checkpoint off the shelf "
-                "through %s: this ComfyUI does not have the file.",
+                "[workflows] Card %s loads node %s's %s off the shelf through "
+                "%s: this ComfyUI does not have the file.",
                 card_key,
                 swap["node_id"],
+                swap["was"],
                 swap["now"],
             )
         return swapped

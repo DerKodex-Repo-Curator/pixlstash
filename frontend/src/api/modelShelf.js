@@ -23,7 +23,7 @@ export const BASE_MODEL_UNASSIGNED = "UNASSIGNED";
  *
  * @param {Object} [options]
  * @param {string} [options.fileKind="adapter"] - `adapter`, `unknown`, `vae`,
- *   `text_encoder` or `engine`. Checkpoints have their own route; anything
+ *   `text_encoder`, `controlnet` or `engine`. Checkpoints have their own route; anything
  *   else is a 400.
  * @param {string} [options.baseModel] - exact match, or `UNASSIGNED` for the
  *   rows that record none. Omit for all.

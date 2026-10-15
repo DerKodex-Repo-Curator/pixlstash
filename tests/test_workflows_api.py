@@ -20519,6 +20519,148 @@ def test_a_run_loads_a_checkpoint_comfyui_lacks_off_the_shelf(id_loaders):
     assert env.submitted[-1]["graph"]["1"] == CHAIN_DOCUMENT["1"]
 
 
+_CONTROLNET_FILENAME = "sd3.5_large_controlnet_canny.safetensors"
+_CONTROLNET_DIGEST = _h("controlnet-canny")
+
+# A ComfyUI with the pack's ControlNet loader, listing some other ControlNet
+# than the one the graph names.
+CONTROLNET_OBJECT_INFO = {
+    "ControlNetLoader": {
+        "input": {"required": {"control_net_name": [["depth.safetensors"], {}]}},
+        "output": ["CONTROL_NET"],
+    },
+    "ControlNetApply": {
+        "input": {
+            "required": {
+                "conditioning": ["CONDITIONING", {}],
+                "control_net": ["CONTROL_NET", {}],
+                "strength": ["FLOAT", {"default": 1.0}],
+            }
+        },
+        "output": ["CONDITIONING"],
+    },
+    "PixlStashControlNetLoader": {
+        "input": {"required": {"control_net_sha256": ["STRING", {"default": ""}]}},
+        "output": ["CONTROL_NET"],
+    },
+}
+
+
+@pytest.fixture
+def controlnets(with_pack):
+    """``with_pack``, a workflow loading a ControlNet the shelf holds a copy of
+    (``workflow``), and the ComfyUI it runs on (``info``)."""
+    env = with_pack
+    info = json.loads(
+        json.dumps({**CHAIN_OBJECT_INFO, **PACK_OBJECT_INFO, **CONTROLNET_OBJECT_INFO})
+    )
+    env.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url, **_: (info, None)
+    )
+    hub = env.server.hub
+    with hub.transaction() as conn:
+        model_id = conn.execute(
+            "INSERT INTO model (file_kind, filename, sha256, provenance) "
+            "VALUES ('controlnet', ?, ?, 'scanned')",
+            (_CONTROLNET_FILENAME, _CONTROLNET_DIGEST),
+        ).lastrowid
+        folder_id = conn.execute(
+            "SELECT id FROM model_folder WHERE path = '/models/test-swap'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO model_file (model_id, model_folder_id, relpath, state) "
+            "VALUES (?, ?, ?, 'present')",
+            (model_id, folder_id, _CONTROLNET_FILENAME),
+        )
+    graph = json.loads(json.dumps(CHAIN_DOCUMENT))
+    graph["9"] = {
+        "class_type": "ControlNetLoader",
+        "inputs": {"control_net_name": _CONTROLNET_FILENAME},
+    }
+    graph["10"] = {
+        "class_type": "ControlNetApply",
+        "inputs": {"conditioning": ["6", 0], "control_net": ["9", 0], "strength": 0.6},
+    }
+    graph["3"]["inputs"]["positive"] = ["10", 0]
+    workflow = workflows_routes.store_manual_workflow(
+        hub, "ControlNet", graph, "import"
+    )
+    try:
+        yield SimpleNamespace(
+            **{**vars(env), "workflow": workflow, "info": info, "model": model_id}
+        )
+    finally:
+        with hub.transaction() as conn:
+            conn.execute("DELETE FROM model_file WHERE model_id = ?", (model_id,))
+            conn.execute("DELETE FROM model WHERE id = ?", (model_id,))
+
+
+def test_a_controlnet_on_the_shelf_opens_in_the_pack_loader(controlnets):
+    """Open in ComfyUI loads the ControlNet by its digest, as it does a LoRA.
+
+    Wrong if node 9 stays a Load ControlNet Model, or the Apply node stops
+    reading it; wrong too if it goes in on a file the shelf has no copy of,
+    since the pack's loader would then fail in ComfyUI's queue.
+    """
+    env = controlnets
+    graph = _opened(env, env.workflow, pixlstash_nodes="true")["workflow"]
+    assert graph["9"] == {
+        "class_type": "PixlStashControlNetLoader",
+        "inputs": {"control_net_sha256": _CONTROLNET_DIGEST},
+    }
+    assert graph["10"]["inputs"]["control_net"] == ["9", 0]
+    assert _opened(env, env.workflow)["workflow"]["9"]["class_type"] == (
+        "ControlNetLoader"
+    )
+
+    with env.server.hub.transaction() as conn:
+        conn.execute(
+            "UPDATE model_file SET state = 'missing' WHERE model_id = ?", (env.model,)
+        )
+    graph = _opened(env, env.workflow, pixlstash_nodes="true")["workflow"]
+    assert graph["9"]["class_type"] == "ControlNetLoader"
+
+
+def test_a_run_loads_a_controlnet_comfyui_lacks_off_the_shelf(controlnets):
+    """ComfyUI does not list the graph's ControlNet and the shelf holds it: a
+    run loads it through the pack's loader, so the Workflow tab's pre-flight
+    does not call it missing. Wrong if `missing_models` names it there, or the
+    run submits the stock loader."""
+    env = controlnets
+
+    def missing():
+        payload = _preflight(env.owner, workflow_id=env.workflow)
+        return [
+            model
+            for group in payload["groups"]
+            for reason in group["reasons"]
+            if reason["code"] == "missing_models"
+            for model in reason["models"]
+        ]
+
+    assert missing() == []
+    r = env.owner.post(f"{API}/workflows/run", json={"workflow_id": env.workflow})
+    assert r.status_code == 200, r.text
+    graph = env.submitted[-1]["graph"]
+    assert graph["9"] == {
+        "class_type": "PixlStashControlNetLoader",
+        "inputs": {"control_net_sha256": _CONTROLNET_DIGEST},
+    }
+    assert graph["10"]["inputs"]["control_net"] == ["9", 0]
+
+    # A ComfyUI without the pack's loader has nothing to load it with.
+    pack_loader = env.info.pop("PixlStashControlNetLoader")
+    assert missing() == [{"file": _CONTROLNET_FILENAME, "folder": "controlnet"}]
+    env.info["PixlStashControlNetLoader"] = pack_loader
+
+    # A ComfyUI that has the file loads it with its own loader.
+    listed = env.info["ControlNetLoader"]["input"]["required"]["control_net_name"]
+    listed[0] = [_CONTROLNET_FILENAME]
+    r = env.owner.post(f"{API}/workflows/run", json={"workflow_id": env.workflow})
+    assert r.status_code == 200, r.text
+    assert env.submitted[-1]["graph"]["9"]["class_type"] == "ControlNetLoader"
+
+
 def test_the_picture_loader_goes_in_only_on_a_picture_the_library_holds(id_loaders):
     """A pin (Fixed) or a file a run uploaded says which picture. A file the
     owner put in ComfyUI's input folder is no picture of the library.

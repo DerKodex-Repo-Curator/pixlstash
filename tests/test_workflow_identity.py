@@ -1373,6 +1373,32 @@ def test_the_shelf_checkpoint_is_the_graph_s_one_model_slot():
     assert found[0].asset.startswith("asset:")
 
 
+def test_a_controlnet_off_the_shelf_is_the_same_workflow_as_the_stock_loader():
+    """Open in ComfyUI and a run swap ``ControlNetLoader`` for the pack's
+    loader on the same file, so a picture made either way is one workflow."""
+
+    def graph(loader: dict) -> dict:
+        return _graph(
+            extra={
+                "60": loader,
+                **_positive_through(
+                    "61",
+                    _node(
+                        "ControlNetApply",
+                        conditioning=["2", 0],
+                        control_net=["60", 0],
+                        strength=0.6,
+                    ),
+                ),
+            }
+        )
+
+    stock = graph(_node("ControlNetLoader", control_net_name="canny.safetensors"))
+    shelf = graph(_node("PixlStashControlNetLoader", control_net_sha256="cc" * 32))
+    assert topology_hash(stock) != topology_hash(shelf)
+    assert core_hash(_doc(stock)) == core_hash(_doc(shelf))
+
+
 def test_the_second_text_encoder_of_a_pair_is_a_model_not_a_parameter():
     """``clip_sha256_2`` is the T5 or Llama beside a clip-l, on one node."""
 

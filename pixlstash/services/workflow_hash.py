@@ -151,10 +151,10 @@ TEXT_FIELD_SUFFIX_RE = re.compile(r"_(text|prompt|caption|query|search)$", re.I)
 MAX_FILENAME_LENGTH = 255
 
 # The ComfyUI-PixlStash loaders name their asset by digest rather than by
-# filename (`lora_sha256`, `adapter_sha256`, `vae_sha256`, `clip_sha256`), so
-# the extension rules below cannot see them. Without this a LoRA swap on a
-# PixlStash node would leave the recipe unchanged, which is the one error the
-# spec calls unrecoverable.
+# filename (`lora_sha256`, `adapter_sha256`, `vae_sha256`, `clip_sha256`,
+# `control_net_sha256`), so the extension rules below cannot see them. Without
+# this a LoRA swap on a PixlStash node would leave the recipe unchanged, which
+# is the one error the spec calls unrecoverable.
 #
 # A numbered suffix is ComfyUI's convention for a second slot on one node, and
 # it names a model exactly as the first does: the PixlStash CLIP loader's

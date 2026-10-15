@@ -189,6 +189,7 @@ const FILE_KINDS = [
   { value: "checkpoint", label: "Checkpoint (a base model)" },
   { value: "vae", label: "VAE" },
   { value: "text_encoder", label: "Text encoder" },
+  { value: "controlnet", label: "ControlNet" },
   { value: "unknown", label: "Unclassified" },
 ];
 

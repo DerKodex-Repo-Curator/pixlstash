@@ -157,6 +157,11 @@ CHECKPOINT_LOADER_ID = "checkpoint_id"
 # every walker that finds models by their extension.
 CHECKPOINT_LOADER_SHELF = "shelf"
 
+# The ComfyUI-PixlStash ControlNet loader: core `ControlNetLoader`'s one
+# output with the file named by digest, so it can fetch one ComfyUI lacks.
+PIXLSTASH_CONTROLNET_LOADER = "PixlStashControlNetLoader"
+CONTROLNET_LOADER_DIGEST = "control_net_sha256"
+
 # How to get the ComfyUI-PixlStash node pack, ending every sentence that
 # refuses for want of it. The frontend's copy is PIXLSTASH_PACK_INSTALL in
 # frontend/src/utils/runReasons.js.
@@ -2122,6 +2127,7 @@ SWAPPED_CLASSES = {
     **{pack: stock for stock, (pack, _outputs) in _PACK_ID_LOADERS.items()},
     PIXLSTASH_ADAPTER_LOADER: "LoraLoader",
     "LoraLoaderModelOnly": "LoraLoader",
+    PIXLSTASH_CONTROLNET_LOADER: "ControlNetLoader",
 }
 
 
@@ -2147,6 +2153,7 @@ def swap_in_pack_nodes(
     library_uuid: str | None = None,
     checkpoint_id: Callable[[str], str | None] | None = None,
     shelf_uuid: str | None = None,
+    controlnet_digest: Callable[[str], str | None] | None = None,
 ) -> list[dict]:
     """Put ComfyUI-PixlStash nodes where a graph has the stock ones, in place.
 
@@ -2155,7 +2162,9 @@ def swap_in_pack_nodes(
     the picture or video back. ``SaveImage`` and ``SaveVideo`` become the
     pack's savers on the same inputs, and a core single-slot LoRA loader whose
     file *lora_digest* can name becomes ``PixlStashAdapterLoader``
-    (:func:`swap_to_adapter_loader`). Every node keeps its id and its wiring.
+    (:func:`swap_to_adapter_loader`), and a ``ControlNetLoader`` whose file
+    *controlnet_digest* can name becomes ``PixlStashControlNetLoader``. Every
+    node keeps its id and its wiring.
 
     The two loaders that name a row by its id are swapped in only with the
     widget that says whose the id is, since an id without it is not trusted
@@ -2183,6 +2192,8 @@ def swap_in_pack_nodes(
             load it by, or ``None``. The caller answers only where that
             loader can read the file: it cannot fetch one.
         shelf_uuid: The shelf those rows are on.
+        controlnet_digest: A ``control_net_name`` -> the SHA-256 the pack's
+            loader can load it by, or ``None``.
 
     Returns:
         ``[{node_id, was, now}]`` for every node swapped.
@@ -2255,6 +2266,16 @@ def swap_in_pack_nodes(
                 continue
             node["class_type"] = now
             node["inputs"] = {**_widget_defaults(spec), **owned}
+        elif was == "ControlNetLoader" and controlnet_digest:
+            name = old.get("control_net_name")
+            sha256 = controlnet_digest(name) if isinstance(name, str) else None
+            now = PIXLSTASH_CONTROLNET_LOADER
+            spec = object_info.get(now)
+            digest = {CONTROLNET_LOADER_DIGEST: sha256}
+            if not sha256 or not _stands_in(spec, ("CONTROL_NET",), digest):
+                continue
+            node["class_type"] = now
+            node["inputs"] = {**_widget_defaults(spec), **digest}
         else:
             continue
         # A title that was only the stock node's name would call the new node

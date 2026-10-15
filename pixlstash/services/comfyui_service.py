@@ -740,6 +740,7 @@ PIXLSTASH_ALLOWED_NODES = frozenset(
         "PixlStashMultiAdapterLoader",
         "PixlStashVAELoader",
         "PixlStashCLIPLoader",
+        "PixlStashControlNetLoader",
         "PixlStashLikenessSearch",
         "PixlStashSemanticSearch",
         "PixlStashFaceLikenessGate",
