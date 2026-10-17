@@ -72,7 +72,7 @@ RUN pip install --no-cache-dir \
     tqdm \
     sentence_transformers \
     pillow-heif \
-    "sqlmodel<0.0.45" \
+    "sqlmodel>=0.0.45" \
     alembic \
     cryptography \
     passlib \
