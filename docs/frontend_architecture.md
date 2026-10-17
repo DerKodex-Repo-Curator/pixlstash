@@ -5887,11 +5887,14 @@ WO). **The two rules must not be unified**, however similar the palettes look.
 
 **Two letters and a version tab.** The letters come only from words that start
 with a letter, and the first number in the name rides on a pill at the tile's
-corner: an `x.y` version keeps its dot, anything else is cut to two digits.
+corner: an `x.y` version keeps its dot and its whole minor (`1.10` stays
+`1.10`, never `1.1`; a longer minor is a date or a counter and leaves the major
+alone), anything else is cut to two digits.
 `Stable Diffusion 3.5 Large` is SD with a 3.5 tab, and the ControlNet
 `sd3.5 large controlnet canny` beside it is SL with 3.5, where two letters alone
 drew SD and S5. The tab is the tile's own pair inverted (ink fill, tile-coloured
-digits and edge), a fixed 15px with `--text-2xs` digits, hanging 6px past the
+digits and edge), 15px high and at least 15px wide (a longer version widens it
+leftward over the tile) with `--text-2xs` digits, hanging 6px past the
 corner; a picture or a set's icon in the square hides it. A tab sized as a share
 of the tile was 11px high at 24px, too small to read. **A surface that clips
 must leave the tab its 6px**: the workflow card's strip pads and gives it back
