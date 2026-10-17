@@ -2295,10 +2295,17 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     const named = new Set(
       rows.value.filter((row) => rowMatches(row, needle)).map((row) => row.id),
     );
+    // A loaded row also matches by filename, but a row is only here when its
+    // block was fetched, so the name the member's card shows (and its label)
+    // count too: a set must not drop out because its kind was never fetched.
+    const hit = (text) => (text ?? "").toLowerCase().includes(needle);
     return allHandMadeGroups.value.filter(
       (group) =>
-        setLabel(group.set).toLowerCase().includes(needle) ||
-        group.models.some((model) => named.has(model.id)),
+        hit(setLabel(group.set)) ||
+        (group.set.members ?? []).some(
+          (member) =>
+            named.has(member.id) || hit(member.name) || hit(member.label),
+        ),
     );
   });
 

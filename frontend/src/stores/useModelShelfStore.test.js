@@ -3347,6 +3347,14 @@ describe("sets from pictures are hidden, never deleted", () => {
         declined: [],
         members: [member(lora, "b".repeat(64))],
       },
+      {
+        id: 9,
+        name: "nine",
+        declined: [],
+        members: [
+          member({ id: 99, name: "Lonely_Ink.safetensors" }, "c".repeat(64)),
+        ],
+      },
     ]);
     store.setView({ groupBy: "workflow_set" });
     await store.fetchRows();
@@ -3360,9 +3368,13 @@ describe("sets from pictures are hidden, never deleted", () => {
     store.setFilters({ name: "seven" });
     expect(drawn()).toEqual([7]);
     // The rail and the set chooser still offer every set.
-    expect(store.shownHandMadeSets.map((set) => set.id)).toEqual([7, 8]);
+    expect(store.shownHandMadeSets.map((set) => set.id)).toEqual([7, 8, 9]);
+    // By the name a member's card shows when the shelf has no row for it (its
+    // block not fetched): set 9's member is not among the rows.
+    store.setFilters({ name: "LONELY ink" });
+    expect(drawn()).toEqual([9]);
     store.setFilters({ name: "" });
-    expect(drawn()).toEqual([7, 8]);
+    expect(drawn()).toEqual([7, 8, 9]);
   });
 
   it("hides a set, remembers it, and draws it again on request", async () => {
