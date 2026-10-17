@@ -86,14 +86,16 @@ function splitQuant(tokens) {
   const popped = [];
   while (kept.length) {
     const last = kept[kept.length - 1].toLowerCase();
-    if (!(last in QUANT_TOKENS) && !QUANT_MODIFIERS.has(last)) break;
+    if (!Object.hasOwn(QUANT_TOKENS, last) && !QUANT_MODIFIERS.has(last)) break;
     popped.push(kept.pop());
   }
   // The guard the whole safety of this rests on: `scaled` and `fast` are
   // ordinary tokens in real model names and may only be eaten when a genuine
   // quant token was eaten with them, or `some_model_scaled` silently becomes
   // `some model`.
-  const real = popped.find((t) => t.toLowerCase() in QUANT_TOKENS);
+  const real = popped.find((t) =>
+    Object.hasOwn(QUANT_TOKENS, t.toLowerCase()),
+  );
   if (!real) return { tokens: [...tokens], quant: null };
   return { tokens: kept, quant: QUANT_TOKENS[real.toLowerCase()] };
 }

@@ -155,6 +155,8 @@ const QUANT_NON_VOCABULARY = [
   ["portrait_mix_v2.safetensors", "portrait mix v2"],
   ["juggernaut_xl_v9.safetensors", "juggernaut xl v9"],
   ["Anything-XL.safetensors", "Anything XL"],
+  // `constructor` is on every Object, so a bare `in` lookup ate it as a quant.
+  ["clementine_constructor.safetensors", "clementine constructor"],
 ];
 
 describe("the quant postfix", () => {

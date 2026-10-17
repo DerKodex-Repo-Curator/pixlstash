@@ -58,6 +58,7 @@ ROWS += [
     for tail in (
         "fp32 f32 fp16 f16 bf16 fp8 f8 e4m3 e4m3fn e5m2 nvfp4 mxfp4 fp4 nf4 "
         "int8 i8 int4 i4 int2 fp8_scaled int8_fast awq gptq_int4 scaled fast "
+        "constructor toString valueOf __proto__ hasOwnProperty "
         "Q4_K_M Q8_0 IQ3_XXS IQ4_XL IQ4_NL TQ1_0 Q5_K Q4_X q4 K_M"
     ).split()
 ]
