@@ -200,7 +200,9 @@ import { computed, h, nextTick, ref, watch } from "vue";
 import { VIcon, VMenu } from "vuetify/components";
 
 import AppBarButton from "../widgets/AppBarButton.vue";
+import ComfyuiIcon from "../widgets/ComfyuiIcon.vue";
 import Tooltip from "../widgets/Tooltip.vue";
+import { useComfyuiOpen } from "../../composables/useComfyuiOpen";
 import { useWorkflowsStore } from "../../stores/useWorkflowsStore";
 import { formatKeyHint, selectAllKeyHint } from "../../utils/shortcutHints";
 import { onMenuKeydown } from "../../utils/menuKeyboard.js";
@@ -212,6 +214,7 @@ const emit = defineEmits([
   "open-cover",
   "show-pictures",
   "run",
+  "open-comfyui",
   "rename",
   "hide",
   "export",
@@ -293,6 +296,7 @@ function closeContextMenu() {
 watch(contextOpen, (open, wasOpen) => {
   if (open) return;
   contextPicture.value = null;
+  comfyuiSubOpen.value = false;
   if (wasOpen) emit("menu-closed");
 });
 
@@ -347,6 +351,53 @@ const runnable = computed(() => Boolean(store.runnableCard));
 const runTitle = computed(() =>
   runnable.value ? "Run this workflow" : "Select one workflow to run it",
 );
+
+// *Open in ComfyUI*, the Workflow tab's two open verbs under one row. Absent
+// with no ComfyUI to open, as the tab's button is; refused for several cards,
+// or a ComfyUI without the node that loads the link.
+const { canOpenComfyui, comfyuiLacksNode, comfyuiOpensACopy } =
+  useComfyuiOpen();
+const comfyuiOpenable = computed(
+  () => runnable.value && !comfyuiLacksNode.value,
+);
+const comfyuiTitle = computed(() => {
+  if (!runnable.value) return "Select one workflow to open it in ComfyUI";
+  if (comfyuiLacksNode.value) {
+    return (
+      "Opening a workflow needs the ComfyUI-PixlStash node in ComfyUI. " +
+      "Install or update it, then restart ComfyUI"
+    );
+  }
+  return "";
+});
+const adaptedTitle = computed(() =>
+  comfyuiOpensACopy.value
+    ? "Your ComfyUI-PixlStash node is older, so saving there does not save " +
+      "back here. Update it to save back"
+    : "With PixlStash's savers and loaders, so what you queue there comes back here",
+);
+const comfyuiSubOpen = ref(false);
+// Opened leftward when the menu sits too near the window's right edge for it.
+const comfyuiSubFlip = ref(false);
+watch(moreMenuOpen, (open) => {
+  if (!open) comfyuiSubOpen.value = false;
+});
+
+/** Open the submenu beside `wrap`, its first row focused when `focus`. */
+async function openComfyuiSub(wrap, focus = false) {
+  comfyuiSubFlip.value =
+    wrap.getBoundingClientRect().right + 200 > window.innerWidth;
+  comfyuiSubOpen.value = true;
+  if (!focus) return;
+  await nextTick();
+  wrap.querySelector(".ctx-submenu .ctx-item")?.focus();
+}
+
+/** Back out of the submenu to its row. */
+function closeComfyuiSub(wrap) {
+  comfyuiSubOpen.value = false;
+  wrap.querySelector(":scope > .ctx-item")?.focus();
+}
 
 /** The refusal of a verb that acts on exactly one workflow. */
 function oneOnly(verb) {
@@ -517,7 +568,10 @@ function onVerb(verb) {
   countMenuOpen.value = false;
   contextOpen.value = false;
   moreMenuOpen.value = false;
+  comfyuiSubOpen.value = false;
   if (verb === "hide") emit("hide", allHidden.value);
+  else if (verb === "open-comfyui") emit("open-comfyui", false);
+  else if (verb === "open-comfyui-original") emit("open-comfyui", true);
   else emit(verb);
 }
 
@@ -584,6 +638,109 @@ const VerbMenu = () => {
     );
   const sep = () => h("div", { class: "ctx-sep" });
 
+  /**
+   * *Open in ComfyUI* and its submenu: Adapted for PixlStash, Original.
+   *
+   * The row stops its own click: a `v-menu` closes on any click in its
+   * content, and this one opens something rather than doing it. Right arrow,
+   * Enter and Space open the submenu on its first row; Left goes back.
+   */
+  const comfyuiRow = () => {
+    if (!canOpenComfyui.value) return null;
+    const disabled = !comfyuiOpenable.value;
+    const open = comfyuiSubOpen.value && !disabled;
+    const subKeydown = (event) => {
+      const wrap = event.currentTarget.parentElement;
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        closeComfyuiSub(wrap);
+      } else {
+        onMenuKeydown(event);
+      }
+      // The parent menu's own roving cursor must not move as well.
+      if (["ArrowLeft", "ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+        event.stopPropagation();
+      }
+    };
+    return h(
+      "div",
+      {
+        class: ["ctx-submenu-wrap", comfyuiSubFlip.value && "ctx-flip-sub"],
+        onMouseenter: (event) => {
+          if (!disabled) openComfyuiSub(event.currentTarget);
+        },
+        onMouseleave: () => (comfyuiSubOpen.value = false),
+        onFocusout: (event) => {
+          if (!event.currentTarget.contains(event.relatedTarget)) {
+            comfyuiSubOpen.value = false;
+          }
+        },
+      },
+      [
+        h(
+          "button",
+          {
+            class: ["ctx-item", disabled && "ctx-item--disabled"],
+            type: "button",
+            role: "menuitem",
+            "data-verb": "open-comfyui",
+            "aria-haspopup": "menu",
+            "aria-expanded": String(open),
+            "aria-disabled": disabled ? "true" : undefined,
+            onClick: (event) => {
+              event.preventDefault();
+              if (disabled) return;
+              // Opens, never toggles: the pointer that clicks has already
+              // opened it on the way in.
+              event.stopPropagation();
+              openComfyuiSub(event.currentTarget.parentElement);
+            },
+            onKeydown: (event) => {
+              if (disabled || !["ArrowRight", "Enter", " "].includes(event.key)) {
+                return;
+              }
+              event.preventDefault();
+              event.stopPropagation();
+              openComfyuiSub(event.currentTarget.parentElement, true);
+            },
+          },
+          [
+            comfyuiTitle.value
+              ? h(Tooltip, { text: comfyuiTitle.value, activator: "parent" })
+              : null,
+            h(ComfyuiIcon, { size: 16, class: "ctx-icon" }),
+            h("span", { class: "ctx-label-text" }, "Open in ComfyUI"),
+            h("i", {
+              class: "v-icon mdi mdi-chevron-right ctx-arrow",
+              "aria-hidden": "true",
+            }),
+          ],
+        ),
+        open
+          ? h(
+              "div",
+              {
+                class: "ctx-submenu",
+                role: "menu",
+                "aria-label": "Open in ComfyUI",
+                onKeydown: subKeydown,
+              },
+              [
+                item("", "Adapted for PixlStash", {
+                  verb: "open-comfyui",
+                  title: adaptedTitle.value,
+                }),
+                item("", "Original", {
+                  verb: "open-comfyui-original",
+                  title: "With its own savers and loaders instead of PixlStash's",
+                }),
+              ],
+            )
+          : null,
+      ],
+    );
+  };
+
   // `data-testid`, not a second class: the count menu shares `.wf-menu` for
   // its sizing, and a selector that cannot tell the two apart makes the parity
   // assertion compare a count menu with a verb menu.
@@ -618,6 +775,7 @@ const VerbMenu = () => {
         disabled: !runnable.value,
         title: runTitle.value,
       }),
+      comfyuiRow(),
       item("mdi-image-multiple-outline", showPicturesLabel.value, {
         verb: "show-pictures",
         disabled: !hasPictures.value,
@@ -682,6 +840,7 @@ defineExpose({
   openTarget,
   coverOpenable,
   runnable,
+  comfyuiOpenable,
   allHidden,
   deletable,
 });

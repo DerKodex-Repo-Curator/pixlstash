@@ -301,6 +301,7 @@
         @open-cover="openCoverPicture"
         @show-pictures="showSelectedPictures"
         @run="runSelected"
+        @open-comfyui="openSelectedInComfyui"
         @rename="startRename"
         @hide="hideSelected"
         @export="exportSelected"
@@ -370,6 +371,7 @@ import { VIcon, VMenu } from "vuetify/components";
 import { importWorkflow } from "../../api/comfyui";
 import { listImportFolders } from "../../api/folders";
 import { exportWorkflow, workflowCoverUrl } from "../../api/workflows";
+import { openWorkflowInComfyui } from "../../composables/useComfyuiOpen";
 import { useConfirm } from "../../composables/useConfirm";
 import { useWorkflowPictures } from "../../composables/useWorkflowPictures";
 import { useFilterStore } from "../../stores/useFilterStore";
@@ -1075,6 +1077,11 @@ function runCard(card) {
 
 function runSelected() {
   runCard(store.runnableCard);
+}
+
+/** The menus' *Open in ComfyUI*, which the bar gates. */
+function openSelectedInComfyui(original) {
+  openWorkflowInComfyui(store.runnableCard?.id, original);
 }
 
 /**
