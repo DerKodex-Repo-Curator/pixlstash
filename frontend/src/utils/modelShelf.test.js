@@ -1598,6 +1598,16 @@ describe("the generated mark's version tab", () => {
   it("is empty when the name carries no number, so no tab is drawn", () => {
     expect(version("World of Wordcraft")).toBe("");
   });
+
+  it("skips a zero-padded counter, which is not a version", () => {
+    // A file whose whole name is a training index reads as its raw filename,
+    // which would otherwise put "00" on the tab.
+    expect(generatedMark({ filename: "000002750.safetensors" }).version).toBe(
+      "",
+    );
+    expect(version("lora 0042 v2")).toBe("2");
+    expect(version("SDXL 0.9")).toBe("0.9");
+  });
 });
 
 describe("stackReceipt", () => {

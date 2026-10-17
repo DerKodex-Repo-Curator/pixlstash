@@ -2083,10 +2083,12 @@ function initialsOf(text) {
  * What a mark's version tab shows: the first number in the name. An `x.y`
  * version keeps its dot (`3.5`, `2.2`, `1.0`); anything else is cut to two
  * digits (`2511` is 25, and so is `25.1`, whose major already fills the tab).
- * Empty when the name carries no number, and then the mark has no tab.
+ * A zero-padded number (`000002750`) is a counter, not a version, and is
+ * skipped; `0.9` is still one. Empty when the name carries no number, and then
+ * the mark has no tab.
  */
 function versionOf(text) {
-  const match = /(\d+)(?:\.(\d))?/.exec(String(text || ""));
+  const match = /(?<!\d)(?!0\d)(\d+)(?:\.(\d))?/.exec(String(text || ""));
   if (!match) return "";
   const [, major, minor] = match;
   return major.length === 1 && minor ? `${major}.${minor}` : major.slice(0, 2);
