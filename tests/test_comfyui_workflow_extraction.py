@@ -264,6 +264,35 @@ def test_loaded_model_widgets_reads_the_pack_loaders_digests() -> None:
     # Only a digest names a model there, as the structural hash reads it.
     api["1"]["inputs"]["control_net_sha256"] = "canny.safetensors"
     assert loaded_model_widgets(api) == expected[1:]
+    # An editor file that declares no inputs: the digest is the loader's only
+    # widget, so it is slot 0.
+    for node in ui["nodes"]:
+        del node["inputs"]
+    assert loaded_model_widgets(ui) == expected
+
+
+def test_a_one_widget_loader_is_read_from_a_bare_array() -> None:
+    """Core ControlNet, upscale and style loaders have one widget, the model
+    (#1939), so an editor file that declares no inputs still names it."""
+    nodes = [
+        ("ControlNetLoader", ["canny.safetensors"]),
+        ("DiffControlNetLoader", ["depth.safetensors"]),
+        ("UpscaleModelLoader", ["4x.pth"]),
+        ("StyleModelLoader", ["redux.safetensors"]),
+    ]
+    ui = {
+        "nodes": [
+            {"id": i, "type": cls, "widgets_values": values}
+            for i, (cls, values) in enumerate(nodes, start=1)
+        ],
+        "links": [],
+    }
+    assert loaded_model_widgets(ui) == [
+        ("control_net_name", "canny.safetensors"),
+        ("control_net_name", "depth.safetensors"),
+        ("model_name", "4x.pth"),
+        ("style_model_name", "redux.safetensors"),
+    ]
 
 
 def test_a_subgraph_loader_reads_the_file_its_instance_names() -> None:

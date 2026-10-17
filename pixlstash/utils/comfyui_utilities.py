@@ -665,10 +665,22 @@ def extract_generation_info(workflow: dict) -> dict:
 
 # The loaders whose model name is the FIRST widget value, for the UI-format
 # node that declares no inputs at all and is therefore a bare positional array.
-# Only these three: every other loader in the map below either interleaves its
-# widgets or carries several, and a positional guess there would name the wrong
-# file rather than none.
-_NAME_FIRST_CLASSES = _CHECKPOINT_CLASSES | _UNET_CLASSES | _LORA_CLASSES
+# The three families, and the loaders whose model name is their ONLY widget
+# (ComfyUI's `/object_info`; DiffControlNetLoader's other input is a MODEL
+# link). Every other loader in the map below either interleaves its widgets or
+# carries several, and a positional guess there would name the wrong file
+# rather than none.
+_ONE_WIDGET_LOADERS = frozenset(
+    {
+        "ControlNetLoader",
+        "DiffControlNetLoader",
+        "UpscaleModelLoader",
+        "StyleModelLoader",
+    }
+)
+_NAME_FIRST_CLASSES = (
+    _CHECKPOINT_CLASSES | _UNET_CLASSES | _LORA_CLASSES | _ONE_WIDGET_LOADERS
+)
 
 # `config_name` is a YAML beside the checkpoint, not a model: it reaches no
 # shelf row and would draw a mark for a file nobody loads.
@@ -721,8 +733,8 @@ def loaded_model_widgets(workflow: dict) -> list[tuple[str, str]]:
     Both serialisations, like :func:`extract_generation_info`, and the same
     best effort: a **UI-format** file names its widget values by position, so a
     name is read off ``widgets_values`` through the node's declared inputs, and
-    falls back to slot 0 only for the three loader families whose model name is
-    the first widget (:data:`_NAME_FIRST_CLASSES`).
+    falls back to slot 0 only for the loaders whose model name is the first
+    widget (:data:`_NAME_FIRST_CLASSES`).
 
     **Which widget each loader reads is ``MODEL_FILENAME_FIELDS``'** (through
     ``model_filename_fields``, so a ComfyUI-MultiGPU wrapper reads as the
@@ -790,7 +802,7 @@ def _loaded_model_widgets_ui(workflow: dict) -> list[tuple[str, str]]:
                 and class_type in _NAME_FIRST_CLASSES
             ):
                 # No input declared the widget, so the array is bare and the
-                # model name is slot 0 - true of these three families only.
+                # model name is slot 0 - true of these loaders only.
                 values = node.get("widgets_values") or []
                 named = [(widgets[0], values[0] if values else None)]
             named.extend(
@@ -800,7 +812,12 @@ def _loaded_model_widgets_ui(workflow: dict) -> list[tuple[str, str]]:
             )
             digest = _PACK_DIGEST_WIDGETS.get(class_type)
             if digest:
-                named.append((digest, _pack_digest(_get_widget_value_ui(node, digest))))
+                # The digest is the pack loader's only widget, so a bare
+                # array holds it at slot 0.
+                value = _get_widget_value_ui(node, digest)
+                if value is None:
+                    value = (node.get("widgets_values") or [None])[0]
+                named.append((digest, _pack_digest(value)))
             for widget, value in named:
                 value = _shelf_id_text(widget, value)
                 if isinstance(value, str) and value:

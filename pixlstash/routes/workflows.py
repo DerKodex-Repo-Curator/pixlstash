@@ -3436,7 +3436,8 @@ def _manual_model_widgets(hub, workflow_id: str) -> tuple:
     document itself is read only when its version is not cached.
     """
     row = hub.fetchone(
-        "SELECT v.version, COALESCE(v.created_at, d.created_at) AS version_at "
+        "SELECT v.version, COALESCE(v.created_at, d.created_at) AS version_at, "
+        "d.api_document IS NOT NULL AS converted "
         "FROM workflow_document d LEFT JOIN workflow_version v "
         "ON v.workflow_id = d.workflow_id AND v.version = (SELECT MAX(version) "
         "FROM workflow_version WHERE workflow_id = d.workflow_id) "
@@ -3445,25 +3446,39 @@ def _manual_model_widgets(hub, workflow_id: str) -> tuple:
     )
     if row is None:
         return ()
-    return _model_widgets_at(hub, workflow_id, row["version"], row["version_at"])
+    return _model_widgets_at(
+        hub, workflow_id, row["version"], row["version_at"], bool(row["converted"])
+    )
 
 
 # Bounded, so a deleted workflow's entry ages out. Keyed on when the version
 # was stored as well as its number: a workflow made from a file reuses its id
 # (`hub/workflow_group_convert.py`), so a deleted one's version 1 and its
-# successor's must not share an entry.
+# successor's must not share an entry. And on whether a conversion is stored,
+# which lands on a version after it was first read.
 @functools.lru_cache(maxsize=512)
 def _model_widgets_at(
-    hub, workflow_id: str, version: int | None, version_at: str | None
+    hub,
+    workflow_id: str,
+    version: int | None,
+    version_at: str | None,
+    converted: bool = False,
 ) -> tuple:
-    """:func:`_manual_model_widgets` of the version *version* stored at *version_at*."""
+    """:func:`_manual_model_widgets` of the version *version* stored at *version_at*.
+
+    Off the stored API conversion where there is one: it names every widget,
+    where an editor file's bare ``widgets_values`` name only the loaders whose
+    model is the first (#1939). It is also exactly the graph a run submits.
+    """
     document = hub.fetchone(
-        "SELECT document FROM workflow_document WHERE workflow_id = ?",
+        "SELECT document, api_document FROM workflow_document WHERE workflow_id = ?",
         (workflow_id,),
     )
     if document is None:
         return ()
-    return _model_widgets_of(workflow_id, document["document"])
+    return _model_widgets_of(
+        workflow_id, document["api_document"] or document["document"]
+    )
 
 
 def _model_widgets_of(workflow_id: str, document: str) -> tuple:
