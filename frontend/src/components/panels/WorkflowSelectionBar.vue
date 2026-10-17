@@ -641,8 +641,9 @@ const VerbMenu = () => {
   /**
    * *Open in ComfyUI* and its submenu: Adapted for PixlStash, Original.
    *
-   * The row stops its own click: a `v-menu` closes on any click in its
-   * content, and this one opens something rather than doing it. Right arrow,
+   * An enabled row stops its own click: a `v-menu` closes on any click in its
+   * content, and this one opens something rather than doing it. A refused
+   * row's click closes the menu, as every other refused row's does. Right arrow,
    * Enter and Space open the submenu on its first row; Left goes back.
    */
   const comfyuiRow = () => {
@@ -708,7 +709,7 @@ const VerbMenu = () => {
             comfyuiTitle.value
               ? h(Tooltip, { text: comfyuiTitle.value, activator: "parent" })
               : null,
-            h(ComfyuiIcon, { size: 16, class: "ctx-icon" }),
+            h(ComfyuiIcon, { class: "ctx-icon" }),
             h("span", { class: "ctx-label-text" }, "Open in ComfyUI"),
             h("i", {
               class: "v-icon mdi mdi-chevron-right ctx-arrow",

@@ -1401,8 +1401,14 @@ test.describe("Open in ComfyUI on the card menu", () => {
     await page.keyboard.press("ArrowLeft");
     await expect(opener(page)).toBeFocused();
     await expect(sub(page)).toHaveCount(0);
+    // Space opens it on its first row and opens nothing in ComfyUI yet.
+    await page.keyboard.press(" ");
+    await expect(adapted).toBeFocused();
+    expect(await opened()).toHaveLength(1);
+    await page.keyboard.press("ArrowLeft");
     await page.keyboard.press("Enter");
     await expect(adapted).toBeFocused();
+    expect(await opened()).toHaveLength(1);
     await page.keyboard.press("Enter");
     await expect(cardMenu(page)).toHaveCount(0);
     url = (await opened())[1];
