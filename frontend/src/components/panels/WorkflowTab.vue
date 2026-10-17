@@ -1190,9 +1190,11 @@ import {
   setWorkflowPins,
   workflowCoverUrl,
 } from "../../api/workflows";
-import { getPixlstashNode } from "../../api/comfyui";
+import {
+  openWorkflowInComfyui,
+  useComfyuiOpen,
+} from "../../composables/useComfyuiOpen";
 import { useWorkflowPictures } from "../../composables/useWorkflowPictures";
-import { useFilterStore } from "../../stores/useFilterStore";
 import { useNoticeStore } from "../../stores/useNoticeStore";
 import { useSidebarStore } from "../../stores/useSidebarStore";
 import { useRunDialogStore } from "../../stores/useRunDialogStore";
@@ -1207,7 +1209,6 @@ import {
   loraStem,
 } from "../../utils/loraChain";
 import { quantBadge } from "../../utils/modelShelf";
-import { comfyuiLink } from "../../utils/comfyuiLink";
 import {
   PACK_OUTDATED,
   PACK_OUTDATED_ACTION,
@@ -1272,51 +1273,8 @@ const { showPictures, showLoraPictures, showValuePictures } =
   useWorkflowPictures();
 const sidebarStore = useSidebarStore();
 const notices = useNoticeStore();
-const filterStore = useFilterStore();
-/**
- * The desktop shell's bridge, when there is one. Its window opens only `https:`
- * outside the app and ComfyUI is plain `http:`, so on the desktop the link goes
- * through `desktop:openComfyui` instead of `window.open`.
- */
-const desktop = typeof window !== "undefined" ? window.pixlstashDesktop : null;
-
-/** Whether there is a ComfyUI to open, and a way to open it from here. */
-const canOpenComfyui = computed(
-  () => Boolean(filterStore.comfyuiUrl) && (!desktop || !!desktop.openComfyui),
-);
-
-/**
- * ComfyUI answered that it lacks the ComfyUI-PixlStash node's
- * `open_workflow.js`, so a link would open on whatever it had last. Only a
- * definite no refuses: an unreachable ComfyUI, or a failed ask, leaves the
- * button to try.
- */
-const comfyuiLacksNode = ref(false);
-/**
- * The nodes ComfyUI has are from before a workflow opened there saved back
- * (#1852): what opens is a copy, and the button says so. Only a definite no.
- */
-const comfyuiOpensACopy = ref(false);
-let nodeCheck = 0;
-watch(
-  () => canOpenComfyui.value && filterStore.comfyuiUrl,
-  async (url) => {
-    const check = ++nodeCheck;
-    comfyuiLacksNode.value = false;
-    comfyuiOpensACopy.value = false;
-    if (!url) return;
-    try {
-      const { can_open_workflows: canOpen, saves_back: savesBack } =
-        await getPixlstashNode();
-      if (check !== nodeCheck) return;
-      comfyuiLacksNode.value = canOpen === false;
-      comfyuiOpensACopy.value = canOpen === true && savesBack === false;
-    } catch (err) {
-      console.warn("[workflows] could not ask ComfyUI for the PixlStash node", err);
-    }
-  },
-  { immediate: true },
-);
+const { canOpenComfyui, comfyuiLacksNode, comfyuiOpensACopy } =
+  useComfyuiOpen();
 const runDialog = useRunDialogStore();
 const tasksStore = useTasksStore();
 
@@ -4016,47 +3974,15 @@ function run() {
 }
 
 /**
- * Open ComfyUI on what Run… runs (`runTarget`), in a new tab.
- *
- * ComfyUI takes no workflow from a URL, so the id rides along as
- * `?pixlstash_workflow=` and the ComfyUI-PixlStash node fetches the graph
- * (`GET /workflows/{id}/graph`) and loads it. Synchronous on purpose: a
- * `window.open` after an await is what popup blockers refuse.
- *
- * The node asks for the graph with its own savers and Adapter Loader in place
- * of the stock nodes, so a picture queued in ComfyUI comes back here.
- * `original` adds `pixlstash_original=1`, which tells it to ask for the
- * workflow's own nodes instead.
+ * Open ComfyUI on what Run… runs (`runTarget`), in a new tab. `original`
+ * opens it with its own nodes rather than PixlStash's (`useComfyuiOpen`).
  *
  * @param {boolean} [original]
  */
 function openInComfyui(original = false) {
   const target = runTarget.value;
-  if (!target || !filterStore.comfyuiUrl || comfyuiLacksNode.value) return;
-  const url = comfyuiLink(filterStore.comfyuiUrl, {
-    pixlstash_workflow: target.id,
-    ...(original ? { pixlstash_original: "1" } : {}),
-  });
-  if (!url) {
-    notices.push({
-      level: "error",
-      text: "The ComfyUI address in Settings is not a web address.",
-    });
-    return;
-  }
-  if (desktop?.openComfyui) {
-    desktop
-      .openComfyui(url)
-      .then((opened) => {
-        if (!opened) throw new Error("the shell refused the link");
-      })
-      .catch((err) => {
-        console.warn("[workflows] the desktop shell would not open ComfyUI", err);
-        notices.push({ level: "error", text: "Could not open ComfyUI." });
-      });
-    return;
-  }
-  window.open(url, "_blank", "noopener,noreferrer");
+  if (!target || comfyuiLacksNode.value) return;
+  openWorkflowInComfyui(target.id, original);
 }
 
 /** The More menu's *Open original in ComfyUI*. */

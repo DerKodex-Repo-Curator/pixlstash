@@ -83,8 +83,10 @@ vi.mock("../../api/recipes", () => ({
   exportSavedRecipe: vi.fn(),
 }));
 const importWorkflow = vi.fn();
+const getPixlstashNode = vi.fn();
 vi.mock("../../api/comfyui", () => ({
   importWorkflow: (...args) => importWorkflow(...args),
+  getPixlstashNode: (...args) => getPixlstashNode(...args),
 }));
 
 import WorkflowsView from "./WorkflowsView.vue";
@@ -1255,6 +1257,27 @@ describe("the verbs the bar fires", () => {
       workflowId: "b",
     });
     expect(useRunDialogStore().source.workflowKey).toBeUndefined();
+  });
+
+  it("Open in ComfyUI opens the selected workflow, adapted or original", async () => {
+    getPixlstashNode.mockResolvedValue({ can_open_workflows: true });
+    useFilterStore().comfyuiUrl = "http://127.0.0.1:8188/";
+    const wrapper = await grid();
+    useWorkflowsStore().select("b");
+    const opened = vi.spyOn(window, "open").mockReturnValue(null);
+    try {
+      await bar(wrapper).vm.$emit("open-comfyui", false);
+      await bar(wrapper).vm.$emit("open-comfyui", true);
+      const [adapted, original] = opened.mock.calls.map(
+        ([url]) => new URL(url).searchParams,
+      );
+      expect(adapted.get("pixlstash_workflow")).toBe("b");
+      expect(adapted.has("pixlstash_original")).toBe(false);
+      expect(original.get("pixlstash_workflow")).toBe("b");
+      expect(original.get("pixlstash_original")).toBe("1");
+    } finally {
+      opened.mockRestore();
+    }
   });
 
   it("Delete asks first, and deletes nothing when the answer is no", async () => {

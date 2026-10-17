@@ -14,11 +14,17 @@
 // for the `⋯` menu turns this red, which is the whole point of asserting
 // something that is currently true by construction.
 
-import { beforeEach, describe, expect, it } from "vitest";
-import { mount } from "@vue/test-utils";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 
+const getPixlstashNode = vi.fn();
+vi.mock("../../api/comfyui", () => ({
+  getPixlstashNode: (...args) => getPixlstashNode(...args),
+}));
+
 import WorkflowSelectionBar from "./WorkflowSelectionBar.vue";
+import { useFilterStore } from "../../stores/useFilterStore";
 import { useWorkflowsStore } from "../../stores/useWorkflowsStore";
 
 // `v-menu` is stubbed because Vuetify is not installed in these mounts, and an
@@ -480,5 +486,112 @@ describe("Use a set…", () => {
       expect(said).not.toMatch(/\b(cop(y|ies|ied)|clon(e|ed|ing)|fixed|edited|original)\b/i);
       wrapper.unmount();
     }
+  });
+});
+
+// The Workflow tab's two open verbs, under one row with a submenu.
+describe("Open in ComfyUI", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    getPixlstashNode.mockReset();
+    getPixlstashNode.mockResolvedValue({ can_open_workflows: true });
+  });
+
+  /** Mounted with a ComfyUI configured, after the node check answered. */
+  async function withComfyui(keys, opts = {}) {
+    useFilterStore().comfyuiUrl = "http://127.0.0.1:8188/";
+    const store = useWorkflowsStore();
+    store.cards = CARDS;
+    store.selectRange(keys);
+    const wrapper = mount(WorkflowSelectionBar, { ...globalOpts, ...opts });
+    await flushPromises();
+    return wrapper;
+  }
+
+  const trigger = (wrapper) =>
+    verbMenus(wrapper)[0].find('[data-verb="open-comfyui"][aria-haspopup]');
+
+  it("is absent with no ComfyUI to open", () => {
+    const { wrapper } = bar(["a"]);
+    expect(wrapper.find('[data-verb="open-comfyui"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("opens a submenu of Adapted and Original, each firing its verb", async () => {
+    const wrapper = await withComfyui(["a"]);
+    // In both menus, so their parity still holds.
+    expect(rowVerbs(verbMenus(wrapper)[1])).toEqual(rowVerbs(verbMenus(wrapper)[0]));
+    expect(trigger(wrapper).attributes("aria-disabled")).toBeUndefined();
+    expect(wrapper.find(".ctx-submenu").exists()).toBe(false);
+
+    await trigger(wrapper).trigger("click");
+    const sub = verbMenus(wrapper)[0].find(".ctx-submenu");
+    expect(rowLabels(sub)).toEqual(["Adapted for PixlStash", "Original"]);
+    // Each row wears the mark of whose nodes it opens with.
+    const [adaptedRow, originalRow] = sub.findAll(".ctx-item");
+    expect(adaptedRow.find("img.ctx-icon").attributes("src")).toBe("/Logo.png");
+    expect(adaptedRow.find("svg").exists()).toBe(false);
+    expect(originalRow.find("svg.ctx-icon").exists()).toBe(true);
+    expect(originalRow.find("img").exists()).toBe(false);
+
+    await sub.findAll(".ctx-item")[0].trigger("click");
+    expect(wrapper.emitted("open-comfyui")).toEqual([[false]]);
+    // The verb shut the submenu; open it again for the other row.
+    expect(wrapper.find(".ctx-submenu").exists()).toBe(false);
+    await trigger(wrapper).trigger("click");
+    await verbMenus(wrapper)[0].findAll(".ctx-submenu .ctx-item")[1].trigger("click");
+    expect(wrapper.emitted("open-comfyui")).toEqual([[false], [true]]);
+    wrapper.unmount();
+  });
+
+  it("is refused for several workflows, with why", async () => {
+    const wrapper = await withComfyui(["a", "b"]);
+    const row = trigger(wrapper);
+    expect(row.attributes("aria-disabled")).toBe("true");
+    expect(row.find(".tip").attributes("data-text")).toBe(
+      "Select one workflow to open it in ComfyUI",
+    );
+    await row.trigger("click");
+    expect(wrapper.find(".ctx-submenu").exists()).toBe(false);
+    expect(wrapper.emitted("open-comfyui")).toBeUndefined();
+    wrapper.unmount();
+  });
+
+  it("is refused when ComfyUI lacks the node, naming it", async () => {
+    getPixlstashNode.mockResolvedValue({ can_open_workflows: false });
+    const wrapper = await withComfyui(["a"]);
+    const row = trigger(wrapper);
+    expect(row.attributes("aria-disabled")).toBe("true");
+    expect(row.find(".tip").attributes("data-text")).toContain(
+      "ComfyUI-PixlStash node",
+    );
+    await row.trigger("click");
+    expect(wrapper.find(".ctx-submenu").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("Right arrow opens it on its first row, Left goes back", async () => {
+    const wrapper = await withComfyui(["a"], { attachTo: document.body });
+    const row = trigger(wrapper);
+    row.element.focus();
+    await row.trigger("keydown", { key: "ArrowRight" });
+    await flushPromises();
+    const rows = verbMenus(wrapper)[0].findAll(".ctx-submenu .ctx-item");
+    expect(document.activeElement).toBe(rows[0].element);
+
+    // Down moves inside the submenu, not along the menu behind it.
+    await rows[0].trigger("keydown", { key: "ArrowDown" });
+    expect(document.activeElement).toBe(rows[1].element);
+
+    // A pointer passing over and off the row leaves a focused submenu open.
+    await row.element.parentElement.dispatchEvent(new MouseEvent("mouseleave"));
+    await flushPromises();
+    expect(document.activeElement).toBe(rows[1].element);
+    expect(wrapper.find(".ctx-submenu").exists()).toBe(true);
+
+    await rows[1].trigger("keydown", { key: "ArrowLeft" });
+    expect(document.activeElement).toBe(row.element);
+    expect(wrapper.find(".ctx-submenu").exists()).toBe(false);
+    wrapper.unmount();
   });
 });

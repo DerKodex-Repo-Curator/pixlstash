@@ -2176,7 +2176,7 @@ filtered by.
   and when the list shrinks past it, no card at all — which takes the grid's
   only tab stop with it and strands a keyboard user outside a screen they
   cannot re-enter.
-- **The card menu has no clone verb** (#1850; `panels/WorkflowSelectionBar.vue`, one list for the bar's ⋯ and the context menu). Its rows are Rename, Hide, *Use a set…*, Export, Duplicate and Delete. *Use a set…* is offered for exactly one workflow and changes that workflow, so it sits with the rows that do; the bar emits `use-set` and the view opens the rail and calls `store.requestUseSet(id)`, which `WorkflowTab` answers by opening its own set menu. Duplicate says *Duplicated as <name>.*
+- **The card menu has no clone verb** (#1850; `panels/WorkflowSelectionBar.vue`, one list for the bar's ⋯ and the context menu). Its rows are Rename, Hide, *Use a set…*, Export, Duplicate and Delete, with *Open in ComfyUI* under Run… (below). *Use a set…* is offered for exactly one workflow and changes that workflow, so it sits with the rows that do; the bar emits `use-set` and the view opens the rail and calls `store.requestUseSet(id)`, which `WorkflowTab` answers by opening its own set menu. Duplicate says *Duplicated as <name>.*
 - **Nothing rearranges workflows.** They are automatic (`auto:<core and families digest>`);
   there is no Merge or Split verb, and a wrong grouping is fixed in the core
   rule (`services/workflow_identity.py`). Run is single-selection only. Every
@@ -2250,8 +2250,14 @@ can no longer see.
   a picture queued in ComfyUI comes back. **Open original in ComfyUI**, in the ⋯ menu
   above Hide, opens the same link with `pixlstash_original=1`, which tells the
   node to ask for the workflow's own nodes; it is offered only where the
-  button would open (an address, one workflow, a node that can). An
-  older shell without the bridge gets no button. An address of `0.0.0.0` is
+  button would open (an address, one workflow, a node that can). The grid's
+  card menu (`WorkflowSelectionBar.vue`, ⋯ and right-click) offers both as
+  an *Open in ComfyUI* row with a submenu, *Adapted for PixlStash* (the
+  PixlStash logo) and *Original* (the ComfyUI mark), gated the same way and refused with a reason rather than hidden
+  except where there is no ComfyUI; the row opens the submenu on click, hover,
+  Right arrow, Enter or Space, and Left goes back. The gates, the node check
+  and the open itself are `composables/useComfyuiOpen.js`, shared by both
+  surfaces. An older shell without the bridge gets no button. An address of `0.0.0.0` is
   sent to the page's own host. The address is the one the *server* reaches
   ComfyUI on, so a browser on another machine resolves it against itself.
   **What ComfyUI saves from there comes back as this workflow's next version**

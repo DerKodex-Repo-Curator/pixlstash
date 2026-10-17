@@ -1352,3 +1352,67 @@ test.describe("going back a version with changes waiting", () => {
     );
   });
 });
+
+test.describe("Open in ComfyUI on the card menu", () => {
+  const cardMenu = (page) => page.getByTestId("wf-verbs").filter({ visible: true });
+  const opener = (page) => cardMenu(page).getByRole("menuitem", { name: "Open in ComfyUI" });
+  const sub = (page) => page.getByRole("menu", { name: "Open in ComfyUI" });
+
+  test("opens a submenu that keeps the menu open, by pointer and by keyboard", async ({ page }) => {
+    net = await stubWorkflows(page, { comfyui: true });
+    await selectWorkflow(page);
+    // What would open, without opening a tab on a ComfyUI that is not there.
+    await page.evaluate(() => {
+      window.__opened = [];
+      window.open = (url) => {
+        window.__opened.push(url);
+        return null;
+      };
+    });
+    const opened = () => page.evaluate(() => window.__opened);
+
+    await cardRow(page).click({ button: "right" });
+    await expect(opener(page)).toBeVisible();
+    // A click on the row opens the submenu; a v-menu closes on any other click.
+    await opener(page).click();
+    await expect(sub(page)).toBeVisible();
+    await expect(opener(page)).toHaveAttribute("aria-expanded", "true");
+    await sub(page).getByRole("menuitem", { name: "Original" }).click();
+    await expect(cardMenu(page)).toHaveCount(0);
+    let [url] = await opened();
+    expect(new URL(url).searchParams.get("pixlstash_workflow")).toBe(WF);
+    expect(new URL(url).searchParams.get("pixlstash_original")).toBe("1");
+
+    // Hover opens it too; and it sits inside the window.
+    await cardRow(page).click({ button: "right" });
+    await opener(page).hover();
+    await expect(sub(page)).toBeVisible();
+    const box = await sub(page).boundingBox();
+    expect(box.x + box.width).toBeLessThanOrEqual(page.viewportSize().width);
+    await shotAround(page, [cardMenu(page), sub(page)], "card-menu-comfyui");
+    await page.keyboard.press("Escape");
+    await expect(cardMenu(page)).toHaveCount(0);
+
+    await cardRow(page).click({ button: "right" });
+    await opener(page).focus();
+    await page.keyboard.press("ArrowRight");
+    const adapted = sub(page).getByRole("menuitem", { name: "Adapted for PixlStash" });
+    await expect(adapted).toBeFocused();
+    await page.keyboard.press("ArrowLeft");
+    await expect(opener(page)).toBeFocused();
+    await expect(sub(page)).toHaveCount(0);
+    // Space opens it on its first row and opens nothing in ComfyUI yet.
+    await page.keyboard.press(" ");
+    await expect(adapted).toBeFocused();
+    expect(await opened()).toHaveLength(1);
+    await page.keyboard.press("ArrowLeft");
+    await page.keyboard.press("Enter");
+    await expect(adapted).toBeFocused();
+    expect(await opened()).toHaveLength(1);
+    await page.keyboard.press("Enter");
+    await expect(cardMenu(page)).toHaveCount(0);
+    url = (await opened())[1];
+    expect(new URL(url).searchParams.get("pixlstash_workflow")).toBe(WF);
+    expect(new URL(url).searchParams.has("pixlstash_original")).toBe(false);
+  });
+});
