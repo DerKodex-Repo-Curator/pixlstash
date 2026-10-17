@@ -5859,6 +5859,17 @@ come from the same name chain the row's label uses, skipping a short English
 list of joining words after the first word ("World of Wordcraft" is WW, not
 WO). **The two rules must not be unified**, however similar the palettes look.
 
+**Two letters and a version tab.** The letters come only from words that start
+with a letter, and the first number in the name rides on a pill at the tile's
+corner, dots dropped and at most two digits: `Stable Diffusion 3.5 Large` is SD
+with a 35 tab, and the ControlNet `sd3.5 large controlnet canny` beside it is SL
+with 35, where two letters alone drew SD and S5. The tab is the tile's own pair
+inverted (ink fill, tile-coloured digits and edge), a fixed 15px with
+`--text-2xs` digits, hanging 6px past the corner; a picture or a set's icon in
+the square hides it. A tab sized as a share of the tile was 11px high at 24px,
+too small to read. The member rows of a model set draw through `ModelMark` too,
+so no surface copies the mark into a square of its own.
+
 Keyed on the **folded** base model, so every spelling of FLUX.2 lands on one
 colour instead of scattering across the palette — which is what the folding
 table is for. A row recording no base model hashes on the empty string and

@@ -228,22 +228,11 @@
              all of it, exactly as the card does in Grid. -->
         <span class="msp__ident" role="gridcell">
           <ModelMark
-            v-if="marks.get(member.id)"
             aria-hidden="true"
-            :row="marks.get(member.id).row"
-            :ring="marks.get(member.id).ring"
-            :style="marks.get(member.id).style"
+            :row="markOf(member).row"
+            :ring="markOf(member).ring"
+            :style="markOf(member).style"
           />
-          <span
-            v-else
-            class="msp__mark"
-            aria-hidden="true"
-            :style="{
-              backgroundColor: markOf(member).color,
-              color: markOf(member).ink,
-            }"
-            >{{ markOf(member).initials }}</span
-          >
           <span class="msp__rowname" aria-hidden="true"
             ><Tooltip
               :text="modelFileTitle(marks.get(member.id)?.row ?? member)"
@@ -336,7 +325,6 @@ import { VIcon } from "vuetify/components";
 
 import {
   formatModelSize,
-  generatedMark,
   modelFileTitle,
 } from "../../utils/modelShelf";
 import { useWorkflowNames } from "../../composables/useWorkflowNames";
@@ -484,12 +472,22 @@ const countLabel = computed(() =>
   props.members.length === 1 ? "1 model" : `${props.members.length} models`,
 );
 
+/**
+ * What a row's mark draws: the shelf's own for a model on the shelf, and for one
+ * that has none a generated mark from its kept name, with no ring.
+ */
 function markOf(member) {
-  return generatedMark({
-    display_name: member.name,
-    filename: member.filename,
-    base_model: member.base_model ?? null,
-  });
+  return (
+    props.marks.get(member.id) ?? {
+      row: {
+        display_name: member.name,
+        filename: member.filename,
+        base_model: member.base_model ?? null,
+      },
+      ring: null,
+      style: {},
+    }
+  );
 }
 
 /** A List row's whole accessible name; everything inside it is `aria-hidden`. */
@@ -679,18 +677,6 @@ const notchStyle = computed(() => {
   align-items: center;
   gap: var(--space-3);
   min-width: 0;
-}
-
-.msp__mark {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  width: var(--tag-h-xs);
-  height: var(--tag-h-xs);
-  border-radius: var(--radius-sm);
-  font-size: 9px;
-  font-weight: var(--weight-semibold);
 }
 
 .msp__rowname {

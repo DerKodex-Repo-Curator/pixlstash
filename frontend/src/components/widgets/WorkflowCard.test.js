@@ -426,8 +426,10 @@ describe("WorkflowCard", () => {
       ...BARE,
       loras: [{ name: "detail" }],
     }).find(".wf-card__rule");
+    // The mark's text is its initials and the version tab's digits.
+    const mark = generatedMark({ filename: "flux1-fill-dev" });
     expect(rule.element.previousElementSibling.textContent).toBe(
-      generatedMark({ filename: "flux1-fill-dev" }).initials,
+      mark.initials + mark.version,
     );
   });
 

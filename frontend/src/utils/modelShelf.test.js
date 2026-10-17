@@ -1562,6 +1562,34 @@ describe("the generated mark's initials", () => {
   it("matches whole words only", () => {
     expect(initials("Forest Inpaint")).toBe("FI");
   });
+
+  it("takes letters from words that start with one", () => {
+    // A number is the version, never an initial: the old rule drew the first
+    // of these as S5.
+    expect(initials("sd3.5 large controlnet canny")).toBe("SL");
+    expect(initials("Stable Diffusion 3.5-Large")).toBe("SD");
+    expect(initials("Wan 2.2 high noise")).toBe("WH");
+    // One lettered word gives its first two letters, never a digit.
+    expect(initials("SDXL 1.0")).toBe("SD");
+    expect(initials("flux1")).toBe("FL");
+    expect(initials("4x-UltraSharp")).toBe("UL");
+  });
+});
+
+describe("the generated mark's version tab", () => {
+  const version = (display_name) => generatedMark({ display_name }).version;
+
+  it("carries the first number, dots dropped, at most two digits", () => {
+    expect(version("Stable Diffusion 3.5-Large")).toBe("35");
+    expect(version("sd3.5 large controlnet canny")).toBe("35");
+    expect(version("flux1 dev")).toBe("1");
+    expect(version("Qwen Image Edit 2511")).toBe("25");
+    expect(version("Juggernaut XL v9 and 10")).toBe("9");
+  });
+
+  it("is empty when the name carries no number, so no tab is drawn", () => {
+    expect(version("World of Wordcraft")).toBe("");
+  });
 });
 
 describe("stackReceipt", () => {

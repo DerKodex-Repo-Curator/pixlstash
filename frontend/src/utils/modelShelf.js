@@ -2049,7 +2049,12 @@ const MARK_FILLER_WORDS = new Set([
   "and",
 ]);
 
-/** Up to two initials for a mark, from whatever the row is actually called. */
+/**
+ * Up to two letters for a mark, from whatever the row is actually called: the
+ * first letters of the first two words that start with a letter, so the
+ * version number goes to {@link versionOf} instead of taking a letter's place
+ * (`Stable Diffusion 3.5` is SD, not S3).
+ */
 function initialsOf(text) {
   const all = String(text || "")
     .split(/[\s_\-.]+/)
@@ -2061,9 +2066,27 @@ function initialsOf(text) {
   );
   // Skipping must still leave two words to take a letter from each.
   const words = significant.length > 1 ? significant : all;
-  if (!words.length) return "?";
-  if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
-  return (words[0][0] + words[1][0]).toUpperCase();
+  const lettered = words.filter((word) => /^\p{L}/u.test(word));
+  if (lettered.length > 1) {
+    return (lettered[0][0] + lettered[1][0]).toUpperCase();
+  }
+  if (lettered.length === 1) {
+    return lettered[0]
+      .replace(/\P{L}/gu, "")
+      .slice(0, 2)
+      .toUpperCase();
+  }
+  return words.length ? words[0].slice(0, 2).toUpperCase() : "?";
+}
+
+/**
+ * The digits a mark's version tab shows: the first number in the name, its
+ * dots dropped, at most two digits (`3.5` is 35, `2511` is 25). Empty when
+ * the name carries no number, and then the mark has no tab.
+ */
+function versionOf(text) {
+  const match = /\d+(?:\.\d+)*/.exec(String(text || ""));
+  return match ? match[0].replace(/\./g, "").slice(0, 2) : "";
 }
 
 // The mark's tile keeps its palette entry's HUE and pins saturation and
@@ -2145,10 +2168,16 @@ export function markForeground() {
  * draws the same mark; `tests/test_comfyui_pack_model_mark.py` fails when the
  * two disagree, so change them together.
  *
+ * **Two letters and a version.** Two letters cannot tell `Stable Diffusion
+ * 3.5 Large` from `sd3.5 large controlnet`, and neither could the old rule's
+ * S5, so the letters say which model and a tab on the corner carries the
+ * version (the mark design round's option D2).
+ *
  * @param {Object} row - a shelf row.
- * @returns {{color: string, ink: string, initials: string}} `color` is an
- *   `hsl()` string, not a hex, because it is renormalised rather than taken
- *   from the palette. `ink` travels with it so the pair cannot be separated.
+ * @returns {{color: string, ink: string, initials: string, version: string}}
+ *   `color` is an `hsl()` string, not a hex, because it is renormalised rather
+ *   than taken from the palette. `ink` travels with it so the pair cannot be
+ *   separated. `version` is the tab's digits, `""` for no tab.
  */
 export function generatedMark(row) {
   const key = baseModelKey(row);
@@ -2158,6 +2187,7 @@ export function generatedMark(row) {
     color: markBackground(entry),
     ink: markForeground(),
     initials: initialsOf(name.text),
+    version: versionOf(name.text),
   };
 }
 
