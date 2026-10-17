@@ -86,7 +86,7 @@
                 activator="parent"
                 :describe="false"
               />
-              <ModelMark :row="mark.row" :detail="mark.detail" />
+              <ModelMark :row="mark.row" :detail="mark.detail" named />
               <span v-if="mark.count > 1" class="wf-card__mark-count"
                 >×{{ mark.count }}</span
               >
@@ -332,6 +332,10 @@ function markRow(model) {
     base_model: model.base_model,
     base_model_folded: model.base_model_folded,
     icon_sha256: model.icon,
+    mark: model.mark,
+    mark_tab: model.mark_tab,
+    mark_colors: model.mark_colors,
+    mark_icon: model.mark_icon,
   };
 }
 /**

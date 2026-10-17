@@ -1,0 +1,71 @@
+// Every name a workflow card's tile can print fits it (#1951).
+//
+// A known model's tile carries the short name people write for it, sized to
+// fill the tile's 24px line and shrunk for a long one, but never below 8.25px
+// (`NAME_FLOOR` in `src/utils/modelTile.js`). A name that would need less
+// overflows the tile, so each one in `KNOWN_BASE_MODELS` and
+// `KNOWN_FINE_TUNES` is rendered here, in the app's own face in Chromium,
+// where jsdom cannot measure text at all. A tab's role word is held to the
+// 28px tile the same way.
+
+import { execFileSync } from 'node:child_process'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { test, expect } from '../fixtures/test.js'
+
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
+
+const READ_NAMES = `
+import json
+from pixlstash.utils.known_base_models import KNOWN_BASE_MODELS, KNOWN_FINE_TUNES
+tiles = [*KNOWN_BASE_MODELS.values(), *KNOWN_FINE_TUNES.values()]
+print(json.dumps({
+    "lines": sorted({line for t in tiles for line in t.get("mark", [])}),
+    "roles": sorted({t["role"] for t in tiles if t.get("role")}),
+}))
+`
+
+function knownNames() {
+  const python = process.env.PIXLSTASH_PYTHON || 'python'
+  const stdout = execFileSync(python, ['-c', READ_NAMES], {
+    encoding: 'utf8',
+    env: { ...process.env, PYTHONPATH: REPO_ROOT },
+  })
+  return JSON.parse(stdout)
+}
+
+test('every known name fits the tile at the smallest size it may take', async ({ page }) => {
+  const { lines, roles } = knownNames()
+  expect(lines.length).toBeGreaterThan(30)
+
+  await page.goto('/')
+  const widths = await page.evaluate(
+    ({ lines, roles }) => {
+      const measure = (text, style) => {
+        const span = document.createElement('span')
+        Object.assign(span.style, { position: 'absolute', whiteSpace: 'nowrap', ...style })
+        span.textContent = text
+        document.body.appendChild(span)
+        const width = span.getBoundingClientRect().width
+        span.remove()
+        return [text, width]
+      }
+      return {
+        // `.mmark-name`: semibold, tracked -0.02em, at the floor.
+        lines: lines.map((line) =>
+          measure(line, { fontSize: '8.25px', fontWeight: '600', letterSpacing: '-0.02em' }),
+        ),
+        // `.mmark-version`: the type ramp's 2xs, bold.
+        roles: roles.map((role) =>
+          measure(role, { fontSize: 'var(--text-2xs)', fontWeight: '700' }),
+        ),
+      }
+    },
+    { lines, roles },
+  )
+
+  const tooWide = (measured, budget) =>
+    measured.filter(([, width]) => width > budget).map(([text, width]) => `${text} ${width}px`)
+  expect(tooWide(widths.lines, 24), 'names wider than the 24px line at 8.25px').toEqual([])
+  expect(tooWide(widths.roles, 28), 'tab words wider than the 28px tile').toEqual([])
+})

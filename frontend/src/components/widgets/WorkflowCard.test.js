@@ -570,6 +570,50 @@ describe("WorkflowCard", () => {
     ]);
   });
 
+  it("draws the server's name for a known model, and letters only the rest", () => {
+    // #1951: the SDXL base and refiner are SDXL over 1.0 with a BASE and a
+    // REFI tab, sent with the slot. Two look-alikes the server named nothing
+    // for still take a second line between themselves.
+    const strip = mountCard({
+      ...BARE,
+      models: [
+        {
+          name: "sd xl base 1.0",
+          kind: "checkpoint",
+          base_model_folded: "SDXL 1.0",
+          mark: ["SDXL", "1.0"],
+          mark_tab: "BASE",
+          mark_colors: ["#9d39ff", "#e80000"],
+        },
+        {
+          name: "sd xl refiner 1.0",
+          kind: "checkpoint",
+          base_model_folded: "SDXL 1.0",
+          mark: ["SDXL", "1.0"],
+          mark_tab: "REFI",
+          mark_colors: ["#9d39ff", "#e80000"],
+        },
+      ],
+      loras: [{ name: "add detail one" }, { name: "add detail two" }],
+    }).findAll(".wf-card__strip .wf-card__mark .mmark");
+    const lines = (mark, part) =>
+      mark.findAll(`${part} > span`).map((line) => line.text());
+    expect(strip.map((mark) => lines(mark, ".mmark-name"))).toEqual([
+      ["SDXL", "1.0"],
+      ["SDXL", "1.0"],
+      [],
+      [],
+    ]);
+    expect(strip.slice(0, 2).map((mark) => mark.find(".mmark-version").text())).toEqual([
+      "BASE",
+      "REFI",
+    ]);
+    expect(strip.slice(2).map((mark) => lines(mark, ".mmark-initials"))).toEqual([
+      ["AD", "ON"],
+      ["AD", "TW"],
+    ]);
+  });
+
   it("counts every loader of a model the strip left off in its +N", () => {
     const wrapper = mountCard({
       ...BARE,
