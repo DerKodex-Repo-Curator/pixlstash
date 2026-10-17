@@ -50,6 +50,7 @@ from pixlstash.hub.workflow_card_reads import (
     manual_document_and_version,
     variant_documents,
     workflow_group_defaults,
+    workflow_group_parameter_names,
     workflow_index,
 )
 from pixlstash.hub.workflow_cards import STRIP_LORAS_FOR_STACKS, loader_swaps_of
@@ -1274,7 +1275,8 @@ class Default:
     ``input_name`` are the address ``workflow_group_default`` is keyed on
     (``<slot_label>/<input_name>``) and are what ``PUT …/defaults`` edits.
     ``exposed`` is a parameter that is here only because the owner set it: no
-    picture votes on it, so clearing the edit takes the row away.
+    picture votes on it, so clearing the edit takes the row away. ``name`` is
+    what the owner called it, if anything; ``label`` stays the key.
     """
 
     label: str
@@ -1283,6 +1285,7 @@ class Default:
     value: bool | int | float | str
     provenance: str
     exposed: bool = False
+    name: Optional[str] = None
 
 
 def _address_order(address: tuple[str, str]) -> tuple:
@@ -1710,6 +1713,7 @@ def workflow_defaults(
     # the size above the sampler in one workflow and below it in the next.
     addresses = sorted(set(values) | set(value_overrides), key=_address_order)
     labels = _labels(addresses)
+    parameter_names = workflow_group_parameter_names(hub, workflow_id)
     for address in addresses:
         if address in value_overrides:
             recipe.values.append(
@@ -1719,6 +1723,7 @@ def workflow_defaults(
                     value_overrides[address],
                     EDITED,
                     address not in values,
+                    parameter_names.get("/".join(address)),
                 )
             )
         else:

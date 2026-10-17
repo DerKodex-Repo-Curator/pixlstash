@@ -147,12 +147,19 @@ def _write_hidden(
 
 
 def replace_parameter_defaults(
-    hub: HubDatabase, workflow_id: str, defaults: list[tuple[str, str]]
+    hub: HubDatabase,
+    workflow_id: str,
+    defaults: list[tuple[str, str]],
+    names: Optional[dict[str, str]] = None,
 ) -> None:
     """Replace a workflow's PARAMETER edits whole: ``[(address, value)]``.
 
     Rows naming a model or a LoRA (:func:`is_parameter_address`) are left
     alone, so clearing the parameter form never takes out a default model.
+
+    *names* (``{address: name}``) names some of those parameters; ``""``
+    clears one. A name not mentioned stands while its parameter does, and
+    goes with it.
     """
     with hub.transaction() as conn:
         stale = [
@@ -171,6 +178,30 @@ def replace_parameter_defaults(
             "INSERT INTO workflow_group_default (workflow_id, address, value) "
             "VALUES (?, ?, ?)",
             [(workflow_id, address, value) for address, value in defaults],
+        )
+        kept = {address for address, _value in defaults}
+        conn.executemany(
+            "DELETE FROM workflow_group_parameter_name "
+            "WHERE workflow_id = ? AND address = ?",
+            [
+                (workflow_id, address)
+                for (address,) in conn.execute(
+                    "SELECT address FROM workflow_group_parameter_name "
+                    "WHERE workflow_id = ?",
+                    (workflow_id,),
+                ).fetchall()
+                if address not in kept or (names or {}).get(address) == ""
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO workflow_group_parameter_name (workflow_id, address, name) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT(workflow_id, address) DO UPDATE SET name = excluded.name",
+            [
+                (workflow_id, address, name)
+                for address, name in (names or {}).items()
+                if name and address in kept
+            ],
         )
 
 
@@ -570,6 +601,7 @@ def delete_manual_workflow(hub: HubDatabase, workflow_id: str) -> None:
         )
         for table in (
             "workflow_group_default",
+            "workflow_group_parameter_name",
             "workflow_group_pins",
             "workflow_group_picture_input",
             "workflow_group_attr",

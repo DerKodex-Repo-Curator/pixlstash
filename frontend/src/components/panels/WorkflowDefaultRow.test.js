@@ -30,8 +30,18 @@ describe("a parameter row's name", () => {
     expect(name.findComponent({ name: "Tooltip" }).props("text")).toBe(
       "Resize Image/Mask · resize_type.multiplier",
     );
-    // The field is named as the tip is, so the node is not hover-only.
+    // The field is named after the row and the tip, so the node is not
+    // hover-only.
     expect(wrapper.find("[data-testid='wfdef-input']").attributes("aria-label")).toBe(
+      "multiplier (Resize Image/Mask · resize_type.multiplier)",
+    );
+  });
+
+  it("is the name the owner gave it, where they gave one", () => {
+    const wrapper = mountRow({ row: { ...ROW, name: "Scale" }, node: "Resize Image/Mask" });
+    const name = wrapper.find(".wfdef-name");
+    expect(name.text()).toBe("Scale Yours");
+    expect(name.findComponent({ name: "Tooltip" }).props("text")).toBe(
       "Resize Image/Mask · resize_type.multiplier",
     );
   });

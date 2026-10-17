@@ -1331,6 +1331,18 @@ CREATE TABLE IF NOT EXISTS workflow_group_default (
 )
 """
 
+# What the owner named a parameter they exposed (``resize_type.multiplier``
+# shown as "Scale"), by its ``workflow_group_default`` address. A name goes
+# with its parameter's row: ``replace_parameter_defaults`` drops it then.
+_V2_WORKFLOW_GROUP_PARAMETER_NAME = """
+CREATE TABLE IF NOT EXISTS workflow_group_parameter_name (
+    workflow_id  TEXT NOT NULL,
+    address      TEXT NOT NULL,
+    name         TEXT NOT NULL,
+    PRIMARY KEY (workflow_id, address)
+)
+"""
+
 # Pins, as ``workflow_key_pins``: ``[]`` is somebody who unpinned everything.
 _V2_WORKFLOW_GROUP_PINS = """
 CREATE TABLE IF NOT EXISTS workflow_group_pins (
@@ -1622,6 +1634,7 @@ _V2_WORKFLOW_TABLES = (
     _V2_WORKFLOW_GROUP_ATTR,
     _V2_WORKFLOW_GROUP_HIDDEN,
     _V2_WORKFLOW_GROUP_DEFAULT,
+    _V2_WORKFLOW_GROUP_PARAMETER_NAME,
     _V2_WORKFLOW_GROUP_PINS,
     _V2_WORKFLOW_GROUP_PICTURE_INPUT,
     _V2_WORKFLOW_KEY_SUCCESSOR,

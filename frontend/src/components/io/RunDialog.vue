@@ -525,9 +525,9 @@
           class="rund-f rund-f--2"
         >
           <span class="rund-l">
-            {{ parameterName(field.label) }}
+            {{ parameterTitle(field) }}
             <Tooltip
-              v-if="parameterName(field.label) !== field.label"
+              v-if="parameterTitle(field) !== field.label"
               :text="field.label"
               activator="parent"
             />
@@ -813,9 +813,9 @@
               <!-- A value kept from another workflow or a saved recipe still
                    overrides a fixed one for this run, so it keeps its ↺. -->
               <span class="rund-l">
-                {{ parameterName(field.label) }}
+                {{ parameterTitle(field) }}
                 <Tooltip
-                  v-if="parameterName(field.label) !== field.label"
+                  v-if="parameterTitle(field) !== field.label"
                   :text="field.label"
                   activator="parent"
                 />
@@ -1190,7 +1190,7 @@ import {
   choicesFor,
   nodesByAddress,
   optionsByAddress,
-  parameterName,
+  parameterTitle,
   setEachRun,
 } from "../../utils/workflowPins";
 import {

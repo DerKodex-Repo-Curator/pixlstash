@@ -60,7 +60,7 @@ describe("ExposeParameterDialog", () => {
     expect(wrapper.find('[data-testid="xpd-kind"]').exists()).toBe(false);
     await expose(wrapper).trigger("click");
     expect(wrapper.emitted("expose")).toEqual([
-      [{ slot_label: "core:up", input_name: "scale_by", value: 1.5 }],
+      [{ slot_label: "core:up", input_name: "scale_by", value: 1.5, name: "scale_by" }],
     ]);
   });
 
@@ -81,7 +81,7 @@ describe("ExposeParameterDialog", () => {
     await select(wrapper, "xpd-kind").setValue("number");
     await expose(wrapper).trigger("click");
     expect(wrapper.emitted("expose")).toEqual([
-      [{ slot_label: "label-9", input_name: "count", value: 7 }],
+      [{ slot_label: "label-9", input_name: "count", value: 7, name: "count" }],
     ]);
   });
 
@@ -100,6 +100,35 @@ describe("ExposeParameterDialog", () => {
     const failed = mountDialog({ nodes: [], failed: "No graph." });
     expect(failed.find('[data-testid="xpd-failed"]').text()).toBe("No graph.");
     expect(failed.find('[data-testid="xpd-none"]').exists()).toBe(false);
+  });
+
+  it("suggests the setting alone as its name, and hands over the one typed", async () => {
+    const resize = {
+      node_id: "5",
+      title: "Resize Image/Mask",
+      class_type: "ResizeImageMaskNode",
+      inputs: [
+        { slot_label: "core:rs", input_name: "resize_type", value: "scale by multiplier", kind: "choice", options: ["scale by multiplier"] },
+        { slot_label: "core:rs", input_name: "resize_type.multiplier", value: 4, kind: "number", options: null },
+      ],
+    };
+    const wrapper = mountDialog({ nodes: [resize] });
+    const name = wrapper.find('[data-testid="xpd-name"] input');
+    expect(name.element.value).toBe("resize_type");
+    await select(wrapper, "xpd-input").setValue("resize_type.multiplier");
+    expect(name.element.value).toBe("multiplier");
+    await name.setValue("  Scale ");
+    await expose(wrapper).trigger("click");
+    expect(wrapper.emitted("expose")).toEqual([
+      [{ slot_label: "core:rs", input_name: "resize_type.multiplier", value: 4, name: "Scale" }],
+    ]);
+  });
+
+  it("falls back to the suggested name when the field is cleared", async () => {
+    const wrapper = mountDialog();
+    await wrapper.find('[data-testid="xpd-name"] input').setValue("   ");
+    await expose(wrapper).trigger("click");
+    expect(wrapper.emitted("expose")[0][0].name).toBe("scale_by");
   });
 
   it("tells two nodes of one name apart by their number", () => {

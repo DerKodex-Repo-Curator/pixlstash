@@ -19,7 +19,7 @@
         v-else-if="choosing"
         class="wfdef-select"
         :model-value="String(row.value)"
-        :label="tip || row.label"
+        :label="fieldName"
         hide-label
         :options="options"
         :disabled="busy"
@@ -30,7 +30,7 @@
         v-else
         class="wfdef-text wfdef-input num"
         :value="String(row.value)"
-        :aria-label="tip || row.label"
+        :aria-label="fieldName"
         :disabled="busy"
         data-testid="wfdef-input"
         @change="onChange"
@@ -83,13 +83,13 @@
 
 import { computed } from "vue";
 
-import { parameterName } from "../../utils/workflowPins";
+import { parameterTitle } from "../../utils/workflowPins";
 import AppButton from "../widgets/AppButton.vue";
 import AppSelect from "../widgets/AppSelect.vue";
 import Tooltip from "../widgets/Tooltip.vue";
 
 const props = defineProps({
-  /** `{label, slot_label, input_name, value, provenance, pinned, exposed}`. */
+  /** `{label, slot_label, input_name, value, provenance, pinned, exposed, name}`. */
   row: { type: Object, required: true },
   /** What ComfyUI offers for this value, when it is a choice there. */
   options: { type: Array, default: null },
@@ -101,12 +101,16 @@ const props = defineProps({
 
 const emit = defineEmits(["toggle-pin", "reset", "edit"]);
 
-const name = computed(() => parameterName(props.row.label));
+const name = computed(() => parameterTitle(props.row));
 /** `Node · whole.name`, or "" where the row already says all of it. */
 const tip = computed(() =>
   props.node || name.value !== props.row.label
     ? [props.node, props.row.label].filter(Boolean).join(" · ")
     : "",
+);
+/** The field's accessible name: the name on screen, then what the tip says. */
+const fieldName = computed(() =>
+  tip.value ? `${name.value} (${tip.value})` : name.value,
 );
 const fixed = computed(() => !props.row.pinned);
 const choosing = computed(() => !fixed.value && Boolean(props.options?.length));

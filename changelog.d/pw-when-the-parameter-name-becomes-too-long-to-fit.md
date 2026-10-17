@@ -1,3 +1,4 @@
-- A parameter added from a node setting with a two-part name, such as a resize
-  node's `resize_type.multiplier`, is shown as just `multiplier` in the
-  Workflow tab and the Run form. Hover the name to see its node and full name.
+- Exposing a parameter now asks for its name. It starts as the setting itself,
+  so a resize node's `resize_type.multiplier` is offered as `multiplier`, and
+  you can type your own. The Workflow tab and the Run form show that name;
+  hover it to see the node and the full setting name.

@@ -579,6 +579,7 @@ describe("a refusal the popup offers to fix", () => {
     const tiled = {
       ...def("mode.tiled", "mode.tiled", true, "core:up"),
       exposed: true,
+      name: "Tiling",
     };
     getWorkflowCard.mockResolvedValue({
       card: card({ defaults: [...card().defaults, tiled] }),
@@ -599,8 +600,8 @@ describe("a refusal the popup offers to fix", () => {
       .filter((entry) => entry.attributes("data-testid") === "rund-param-choice");
     expect(list.props("options")).toEqual(["true", "false"]);
     const label = list.element.closest(".rund-f").querySelector(".rund-l");
-    // A dynamic combo's option is named by the option alone, its node after.
-    expect(label.textContent.replace(/\s+/g, " ").trim()).toBe("tiled · Final upscale");
+    // Named as the owner named it when they added it, its node after.
+    expect(label.textContent.replace(/\s+/g, " ").trim()).toBe("Tiling · Final upscale");
     list.vm.$emit("update:modelValue", "false");
     await flushPromises();
     const field = wrapper.vm.defaults.find((entry) => entry.input_name === "mode.tiled");

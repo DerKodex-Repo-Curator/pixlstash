@@ -1400,6 +1400,7 @@ _WORKFLOW_ID_COLUMNS = (
     ("workflow_group_attr", "workflow_id"),
     ("workflow_group_hidden", "workflow_id"),
     ("workflow_group_default", "workflow_id"),
+    ("workflow_group_parameter_name", "workflow_id"),
     ("workflow_group_pins", "workflow_id"),
     ("workflow_group_picture_input", "workflow_id"),
     ("workflow_version", "workflow_id"),
@@ -1609,7 +1610,11 @@ def _rewrite_addresses(
     stage_slots: dict[str, str],
 ) -> None:
     """Rewrite *workflow_id*'s ``core:`` addresses onto the v2 core, in place."""
-    for table in ("workflow_group_default", "workflow_group_picture_input"):
+    for table in (
+        "workflow_group_default",
+        "workflow_group_parameter_name",
+        "workflow_group_picture_input",
+    ):
         cursor = conn.execute(
             f"SELECT * FROM {table} WHERE workflow_id = ?", (workflow_id,)
         )
@@ -1716,6 +1721,7 @@ def _carry_group_state(
         )
     for table, key in (
         ("workflow_group_default", "address"),
+        ("workflow_group_parameter_name", "address"),
         ("workflow_group_pins", None),
         ("workflow_group_picture_input", "address"),
         # Each library's own hide rides with the id, so re-identifying a

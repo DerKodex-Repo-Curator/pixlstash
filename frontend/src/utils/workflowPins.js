@@ -39,6 +39,11 @@ export function parameterName(label) {
   return String(label).split(".").pop();
 }
 
+/** What a parameter row is called: the name the owner gave it, if any. */
+export function parameterTitle(row) {
+  return row.name || parameterName(row.label);
+}
+
 /**
  * `{address: [option]}` for every drop-down `GET …/form-inputs` lists: what
  * ComfyUI offers for each parameter that is a choice there.

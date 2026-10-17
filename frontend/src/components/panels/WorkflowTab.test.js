@@ -3551,13 +3551,15 @@ describe("expose a parameter", () => {
     );
     setWorkflowPins.mockImplementation(async (_key, pins) => ({ pins }));
     await wrapper.find("[data-testid='wftab-expose']").trigger("click");
-    dialog(wrapper).vm.$emit("expose", { ...SCALE, value: 1.5 });
+    dialog(wrapper).vm.$emit("expose", { ...SCALE, value: 1.5, name: "Scale" });
     await flush(wrapper);
-    // Whole-set: the edit that was there goes back with it.
+    // Whole-set: the edit that was there goes back with it, without a name,
+    // so the name it may have stands.
     expect(setWorkflowDefaults).toHaveBeenCalledWith(KEY, [
       { slot_label: "slot-a", input_name: "cfg", value: "7.5" },
-      { ...SCALE, value: 1.5 },
+      { ...SCALE, value: 1.5, name: "Scale" },
     ]);
+    expect(setWorkflowDefaults.mock.calls[0][1][0]).not.toHaveProperty("name");
     // And the pins nobody had chosen are written out, with it among them.
     expect(setWorkflowPins).toHaveBeenCalledWith(KEY, [
       { slot_label: "slot-a", input_name: "steps" },
