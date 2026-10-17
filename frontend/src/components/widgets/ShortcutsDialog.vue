@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import { isReadOnly } from "../../utils/apiClient";
 import {
+  isApplePlatform,
   redoKeyHint,
   selectAllKeyHint,
   undoKeyHint,
@@ -13,6 +14,8 @@ import AppDialog from "./AppDialog.vue";
 // way - a macOS reader was being taught `Ctrl+A` for a chord their keyboard
 // spells `⌘A`, and the shelf's own keycap now reports the platform.
 const undoKeyHintKeys = undoKeyHint();
+// The stack reorder keys, spelled as the Edit stack menu spells them.
+const stackModKey = isApplePlatform() ? "⌘" : "Ctrl";
 const redoKeyHintKeys = redoKeyHint();
 const selectAllKeyHintKeys = selectAllKeyHint();
 
@@ -86,6 +89,14 @@ const open = computed(() => props.modelValue);
         <tr>
           <td><kbd>Ctrl</kbd>+<kbd>Arrow</kbd></td>
           <td>Move cursor without changing selection</td>
+        </tr>
+        <tr :class="{ 'shortcut-disabled': isReadOnly }">
+          <td><kbd>{{ stackModKey }}</kbd>+<kbd>←</kbd> <kbd>→</kbd></td>
+          <td>In an open stack: move the picture earlier or later</td>
+        </tr>
+        <tr :class="{ 'shortcut-disabled': isReadOnly }">
+          <td><kbd>{{ stackModKey }}</kbd>+<kbd>Home</kbd></td>
+          <td>In an open stack: make the picture the cover</td>
         </tr>
         <tr>
           <td><kbd>Space</kbd></td>

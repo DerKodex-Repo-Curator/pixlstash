@@ -155,12 +155,12 @@ finger from the queue's verdict keys. Document it so it is not "fixed" later.
 
 ## Menus
 
-Context menu and the selection pill's overflow, wearing the shipped
-`.ctx-item--danger`, in the existing trailing danger group behind a separator,
-ordered by escalating severity: Keep recipes only → Keep cover only → Move to
-Scrapheap → Delete forever. Glyph `mdi-layers-minus`, the inverse of the
-`mdi-layers-plus` the user pressed to build these stacks. Not `mdi-delete`,
-which would over-claim.
+Context menu and the selection pill's overflow, under **Edit stack ▸** with the
+other actions on an existing stack (the "Changing stack order is
+undiscoverable" design), as that submenu's last row: `.ctx-item--danger`, behind
+a separator, with a second line saying what moves ("The other 3 move to the
+Scrapheap."). Glyph `mdi-layers-minus`, the inverse of the `mdi-layers-plus` the
+user pressed to build these stacks. Not `mdi-delete`, which would over-claim.
 
 **No top-level button in the selection pill.** A floating pill over a photo grid
 is the wrong place for an `error`-filled control, and this is periodic cleanup,
@@ -279,6 +279,13 @@ surface picking 3px". Three components already carry a raw 3px rail.
    change across all the surfaces that carry keycaps, not a per-dialog decision.
 
 ## Keep recipes only (#1315)
+
+**Taken out of the UI** by the Edit stack ▸ design: the name never told people
+that it keeps the cover plus whatever could not be made again, and rather than
+ship a better sentence under a confusing name the action waits for a design of
+its own. The menu rows, the dialog's recipe mode and the keep-every-ghost box
+are gone; the server route below still accepts `keep_recipes`. What follows is
+the design as it shipped, kept for whoever designs it again.
 
 The sibling that moves only the copies that could be made again from their
 recipe, so what leaves keeps its thumbnail and recipe when the Scrapheap is

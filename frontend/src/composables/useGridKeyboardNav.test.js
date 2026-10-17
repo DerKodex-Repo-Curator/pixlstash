@@ -29,6 +29,8 @@ function makeNav({
   showSelectionBar = true,
   searchResultsActive = false,
   searchQuery = "",
+  moveStackMember = undefined,
+  getOpenStackPlace = () => ({ position: 1, count: 3 }),
 } = {}) {
   const selectedImageIds = ref(["a", "b"]);
   const deleteSelected = vi.fn();
@@ -68,6 +70,7 @@ function makeNav({
     selectionBarRef: ref({ openTagInput: vi.fn() }),
     applyScoresForSelection,
     setScore: vi.fn(),
+    ...(moveStackMember ? { moveStackMember, getOpenStackPlace } : {}),
   };
 
   // The composable takes the column count from the grid store; size level 6
@@ -79,9 +82,15 @@ function makeNav({
   useSearchStore().searchQuery = searchQuery;
   const props = {};
   const emit = vi.fn();
-  const { handleKeyDown } = useGridKeyboardNav(deps, props, emit, callbacks);
+  const { handleKeyDown, onGlobalKeyPress } = useGridKeyboardNav(
+    deps,
+    props,
+    emit,
+    callbacks,
+  );
   return {
     handleKeyDown,
+    onGlobalKeyPress,
     deps,
     deleteSelected,
     applyScoresForSelection,
@@ -371,5 +380,104 @@ describe("Escape ladder", () => {
     });
     handleKeyDown(keyEvent({ key: "Escape" }));
     expect(clearSearchQuery).not.toHaveBeenCalled();
+  });
+});
+
+describe("useGridKeyboardNav - reordering an open stack", () => {
+  // A stand-in for the grid's move: "b" belongs to an open stack, and moving it
+  // later swaps it with "c" the way the real reorder lays the stack out again.
+  function stackMove(deps) {
+    return vi.fn((id, where) => {
+      if (id !== "b") return false;
+      if (where === "later") {
+        deps.allGridImages.value = [{ id: "a" }, { id: "c" }, { id: "b" }];
+      }
+      return true;
+    });
+  }
+
+  it("Ctrl+→ moves the cursor's picture and the cursor follows it", () => {
+    const move = vi.fn();
+    const { handleKeyDown, deps, focusCursor } = makeNav({
+      cursorIdx: 1,
+      moveStackMember: move,
+    });
+    move.mockImplementation(stackMove(deps));
+    handleKeyDown(keyEvent({ key: "ArrowRight", ctrlKey: true }));
+    expect(move).toHaveBeenCalledWith("b", "later");
+    expect(deps.cursorIdx.value).toBe(2);
+    expect(focusCursor).toHaveBeenCalledWith(2);
+    // Moving a picture is not a selection change.
+    expect(deps.selectedImageIds.value).toEqual(["a", "b"]);
+  });
+
+  it("Ctrl+← asks for the earlier move", () => {
+    const move = vi.fn(() => true);
+    const { handleKeyDown } = makeNav({ cursorIdx: 1, moveStackMember: move });
+    handleKeyDown(keyEvent({ key: "ArrowLeft", metaKey: true }));
+    expect(move).toHaveBeenCalledWith("b", "earlier");
+  });
+
+  it("falls back to moving the cursor alone outside an open stack", () => {
+    const move = vi.fn(() => true);
+    const { handleKeyDown, deps } = makeNav({
+      cursorIdx: 0,
+      moveStackMember: move,
+      getOpenStackPlace: () => null,
+    });
+    handleKeyDown(keyEvent({ key: "ArrowRight", ctrlKey: true }));
+    expect(move).not.toHaveBeenCalled();
+    expect(deps.cursorIdx.value).toBe(1);
+    expect(deps.selectedImageIds.value).toEqual(["a", "b"]);
+  });
+
+  it("leaves plain and Shift arrows to navigation", () => {
+    const move = vi.fn(() => true);
+    const { handleKeyDown } = makeNav({ cursorIdx: 1, moveStackMember: move });
+    handleKeyDown(keyEvent({ key: "ArrowRight" }));
+    handleKeyDown(keyEvent({ key: "ArrowRight", ctrlKey: true, shiftKey: true }));
+    expect(move).not.toHaveBeenCalled();
+  });
+
+  it("Ctrl+Home makes the cursor's picture the cover instead of scrolling", () => {
+    const move = vi.fn(() => true);
+    const wrapper = { scrollTop: 500, clientHeight: 200 };
+    const { onGlobalKeyPress } = makeNav({
+      cursorIdx: 1,
+      moveStackMember: move,
+      scrollWrapper: wrapper,
+    });
+    onGlobalKeyPress("Home", { ctrlKey: true });
+    expect(move).toHaveBeenCalledWith("b", "cover");
+    expect(wrapper.scrollTop).toBe(500);
+  });
+
+  // On the cover, Ctrl+Home changes nothing, but it is still the stack's key:
+  // falling through would jump the grid to the top under the user.
+  it("keeps a no-op stack key off the scroll and the cursor", () => {
+    const move = vi.fn(() => false);
+    const wrapper = { scrollTop: 500, clientHeight: 200 };
+    const { onGlobalKeyPress, handleKeyDown, deps } = makeNav({
+      cursorIdx: 1,
+      moveStackMember: move,
+      scrollWrapper: wrapper,
+    });
+    onGlobalKeyPress("Home", { ctrlKey: true });
+    expect(wrapper.scrollTop).toBe(500);
+    handleKeyDown(keyEvent({ key: "ArrowLeft", ctrlKey: true }));
+    expect(deps.cursorIdx.value).toBe(1);
+  });
+
+  it("plain Home still scrolls to the top", () => {
+    const move = vi.fn(() => true);
+    const wrapper = { scrollTop: 500, clientHeight: 200 };
+    const { onGlobalKeyPress } = makeNav({
+      cursorIdx: 1,
+      moveStackMember: move,
+      scrollWrapper: wrapper,
+    });
+    onGlobalKeyPress("Home", {});
+    expect(move).not.toHaveBeenCalled();
+    expect(wrapper.scrollTop).toBe(0);
   });
 });

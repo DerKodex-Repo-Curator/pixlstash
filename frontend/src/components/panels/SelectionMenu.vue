@@ -67,26 +67,10 @@
       <div class="ctx-sep" />
     </template>
 
-    <!-- ── Stack / Unstack ───────────────────────────────── -->
+    <!-- ── Stack (mirrors ImageGridContextMenu.vue) ────────── -->
     <template v-if="!isScrapheapView">
       <button
-        v-if="showRemoveStackButton"
-        class="ctx-item"
-        :disabled="isReadOnly"
-        @click="
-          $emit('remove-from-stack');
-          $emit('close');
-        "
-      >
-        <Tooltip
-          text="Remove selected images from their stack"
-          activator="parent"
-        />
-        <v-icon class="ctx-icon">mdi-layers-off</v-icon>
-        Unstack
-      </button>
-      <button
-        v-else-if="selectedCount > 1"
+        v-if="showCreateStackButton"
         class="ctx-item"
         :disabled="isReadOnly"
         @click="
@@ -100,19 +84,6 @@
         />
         <v-icon class="ctx-icon">mdi-layers</v-icon>
         Stack
-      </button>
-      <button
-        v-if="showUnstackMultipleButton"
-        class="ctx-item"
-        :disabled="isReadOnly"
-        @click="
-          $emit('dissolve-stacks');
-          $emit('close');
-        "
-      >
-        <Tooltip text="Dissolve all selected stacks" activator="parent" />
-        <v-icon class="ctx-icon">mdi-layers-off</v-icon>
-        Unstack all
       </button>
       <button
         v-if="showGroupStackButton"
@@ -130,6 +101,18 @@
         <v-icon class="ctx-icon">mdi-layers-plus</v-icon>
         Stack groups
       </button>
+      <EditStackMenu
+        :target="stackEdit"
+        :read-only="isReadOnly"
+        :keep-cover-only-stack-count="keepCoverOnlyStackCount"
+        :keep-cover-only-lock-reason="keepCoverOnlyLockReason"
+        :selected-count="selectedCount"
+        @stack-move="forward('stack-move', $event)"
+        @open-stack="forward('open-stack')"
+        @remove-from-stack="forward('remove-from-stack')"
+        @dissolve-stacks="forward('dissolve-stacks')"
+        @keep-cover-only="forward('keep-cover-only')"
+      />
       <div v-if="showAnyStackAction" class="ctx-sep" />
     </template>
 
@@ -427,50 +410,10 @@
     </template>
 
     <!-- ── Remove / Delete (danger) ────────────────────────
-         Ordered by escalating severity: Keep recipes only → Keep cover only
-         → Move to the Scrapheap → Delete forever; Keep recipes only moves a
-         strict subset of what its sibling moves. There is deliberately NO
-         top-level Keep cover only button on the pill itself: a floating pill over a photo grid
-         is the wrong place for an error-filled control, and this is periodic
-         cleanup rather than a high-frequency verb. -->
-    <button
-      v-if="showKeepCoverOnly"
-      class="ctx-item ctx-item--danger"
-      :disabled="isReadOnly || !!keepCoverOnlyLockReason"
-      @click="
-        $emit('keep-cover-only', { keepRecipes: true });
-        $emit('close');
-      "
-    >
-      <Tooltip
-        :text="
-          keepCoverOnlyLockReason ||
-          'Keep each selected stack\'s cover and move the other pictures that could be made again to the Scrapheap'
-        "
-        activator="parent"
-      />
-      <v-icon class="ctx-icon">{{ KEEP_RECIPES_ONLY_ICON }}</v-icon>
-      {{ keepRecipesOnlyLabel }}
-    </button>
-    <button
-      v-if="showKeepCoverOnly"
-      class="ctx-item ctx-item--danger"
-      :disabled="isReadOnly || !!keepCoverOnlyLockReason"
-      @click="
-        $emit('keep-cover-only');
-        $emit('close');
-      "
-    >
-      <Tooltip
-        :text="
-          keepCoverOnlyLockReason ||
-          'Keep each selected stack\'s cover and move its other pictures to the Scrapheap'
-        "
-        activator="parent"
-      />
-      <v-icon class="ctx-icon">{{ KEEP_COVER_ONLY_ICON }}</v-icon>
-      {{ keepCoverOnlyLabel }}
-    </button>
+         Keep cover only lives under Edit stack ▸. There is deliberately NO
+         top-level Keep cover only button on the pill itself: a floating pill
+         over a photo grid is the wrong place for an error-filled control, and
+         this is periodic cleanup rather than a high-frequency verb. -->
     <button
       v-if="showRemoveButton"
       class="ctx-item ctx-item--danger"
@@ -505,14 +448,9 @@ import { useSnapshotsStore } from "../../stores/useSnapshotsStore";
 import { useLockedSetsStore } from "../../stores/useLockedSetsStore";
 import { useEntityListsStore } from "../../stores/useEntityListsStore";
 import { useLibrariesStore } from "../../stores/useLibrariesStore";
-import {
-  KEEP_COVER_ONLY_ICON,
-  KEEP_RECIPES_ONLY_ICON,
-  KEEP_RECIPES_ONLY_LABEL,
-  keepCoverOnlyMenuLabel,
-} from "../../utils/keepCoverOnly";
 import { ROTATE_CCW, ROTATE_CW, rotateMenuLabel } from "../../utils/rotate";
 import AddToEntityControl from "../widgets/AddToEntityControl.vue";
+import EditStackMenu from "../widgets/EditStackMenu.vue";
 import Tooltip from "../widgets/Tooltip.vue";
 
 const LIKENESS_GROUPS_SORT_KEY = "LIKENESS_GROUPS";
@@ -530,7 +468,8 @@ const props = defineProps({
   hasPluginOptions: Boolean,
   selectedSort: { type: String, default: "" },
   selectedGroupName: String,
-  selectedMultipleStackIds: { type: Array, default: () => [] },
+  // What the selection is as far as stacks go (see EditStackMenu's `target`).
+  stackEdit: { type: Object, default: null },
   // How many collapsible stacks the selection names. The unit of Keep cover
   // only is the stack, so the item is offered only when the selection names at
   // least one, and its label counts stacks rather than echoing the tile count.
@@ -544,7 +483,6 @@ const props = defineProps({
   // and doubles as their tooltip; null while at least one can be turned, since
   // a mixed selection rotates what it can and reports the skips.
   rotateBlockReason: { type: String, default: null },
-  showRemoveFromStack: Boolean,
 });
 
 const emit = defineEmits([
@@ -555,6 +493,8 @@ const emit = defineEmits([
   "remove-from-stack",
   "create-stack",
   "dissolve-stacks",
+  "stack-move",
+  "open-stack",
   "create-stacks-from-groups",
   "open-tag-input",
   "auto-tag",
@@ -607,18 +547,12 @@ const autoTagSubmenuOpen = ref(false);
 const descriptionSubmenuOpen = ref(false);
 const identicalSnapshotIds = ref(new Set());
 
-const showRemoveStackButton = computed(() => {
-  if (props.isScrapheapView) return false;
-  return props.showRemoveFromStack === true;
-});
-
-// True when selected images span multiple stacks (or one stack mixed with
-// non-stacked images) - the single-stack case is handled by showRemoveStackButton.
-const showUnstackMultipleButton = computed(() => {
-  if (props.isScrapheapView) return false;
-  if (showRemoveStackButton.value) return false;
-  return props.selectedMultipleStackIds.length > 0;
-});
+// A selection that is all one stack is edited, not stacked again.
+const showCreateStackButton = computed(
+  () =>
+    props.selectedCount > 1 &&
+    !(props.stackEdit && props.stackEdit.kind !== "stacks"),
+);
 
 const showGroupStackButton = computed(() => {
   if (props.isScrapheapView) return false;
@@ -630,33 +564,17 @@ const showGroupStackButton = computed(() => {
 const showAnyStackAction = computed(() => {
   if (props.isScrapheapView || props.isReadOnly) return false;
   return (
-    showRemoveStackButton.value ||
-    (props.selectedCount > 1 && !showRemoveStackButton.value) ||
-    showUnstackMultipleButton.value ||
-    showGroupStackButton.value
+    showCreateStackButton.value ||
+    showGroupStackButton.value ||
+    !!props.stackEdit
   );
 });
 
-// Offered only when the selection actually names a stack, the same gating the
-// stack actions above use, and the reason ignoring loose pictures is honest.
-const showKeepCoverOnly = computed(
-  () => !props.isScrapheapView && props.keepCoverOnlyStackCount > 0,
-);
-
-const keepRecipesOnlyLabel = computed(() =>
-  keepCoverOnlyMenuLabel({
-    stackCount: props.keepCoverOnlyStackCount,
-    selectedCount: props.selectedCount,
-    label: KEEP_RECIPES_ONLY_LABEL,
-  }),
-);
-
-const keepCoverOnlyLabel = computed(() =>
-  keepCoverOnlyMenuLabel({
-    stackCount: props.keepCoverOnlyStackCount,
-    selectedCount: props.selectedCount,
-  }),
-);
+function forward(eventName, payload) {
+  if (payload !== undefined) emit(eventName, payload);
+  else emit(eventName);
+  emit("close");
+}
 
 // Same copy as the context menu's pair, from the same helper, because the two
 // menus are held to label-for-label parity (#403) and a second wording here

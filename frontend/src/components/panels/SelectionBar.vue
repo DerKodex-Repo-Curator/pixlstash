@@ -130,11 +130,10 @@
             :has-plugin-options="pluginOptions.length > 0"
             :selected-sort="props.selectedSort"
             :selected-group-name="props.selectedGroupName"
-            :selected-multiple-stack-ids="props.selectedMultipleStackIds"
+            :stack-edit="props.stackEdit"
             :keep-cover-only-stack-count="props.keepCoverOnlyStackCount"
             :keep-cover-only-lock-reason="props.keepCoverOnlyLockReason"
             :rotate-block-reason="props.rotateBlockReason"
-            :show-remove-from-stack="props.showRemoveFromStack"
             @close="selectionMenuOpen = false"
             @set-project="$emit('set-project', $event)"
             @add-to-character="$emit('add-to-character', $event)"
@@ -143,6 +142,8 @@
             @remove-from-stack="$emit('remove-from-stack')"
             @create-stack="$emit('create-stack')"
             @dissolve-stacks="$emit('dissolve-stacks')"
+            @stack-move="$emit('stack-move', $event)"
+            @open-stack="$emit('open-stack')"
             @create-stacks-from-groups="$emit('create-stacks-from-groups')"
             @open-tag-input="openTagInput()"
             @auto-tag="$emit('auto-tag', $event)"
@@ -156,7 +157,7 @@
             @rotate-left="$emit('rotate-left')"
             @rotate-right="$emit('rotate-right')"
             @remove-from-group="$emit('remove-from-group')"
-            @keep-cover-only="$emit('keep-cover-only', $event)"
+            @keep-cover-only="$emit('keep-cover-only')"
             @delete-selected="$emit('delete-selected')"
             @move-to-library="$emit('move-to-library', $event)"
           />
@@ -264,8 +265,8 @@ const props = defineProps({
     default: () => ({ hasImages: false, hasVideos: false }),
   },
   comfyuiConfigured: { type: Boolean, default: false },
-  showRemoveFromStack: { type: Boolean, default: false },
-  selectedMultipleStackIds: { type: Array, default: () => [] },
+  // What the selection is as far as stacks go (see EditStackMenu's `target`).
+  stackEdit: { type: Object, default: null },
   // Forwarded straight to SelectionMenu: Keep cover only lives in the overflow
   // only, never as a top-level pill button.
   keepCoverOnlyStackCount: { type: Number, default: 0 },
@@ -296,6 +297,8 @@ const emit = defineEmits([
   "create-stack",
   "remove-from-stack",
   "dissolve-stacks",
+  "stack-move",
+  "open-stack",
   "create-stacks-from-groups",
   "run-plugin",
   "tags-applied",
