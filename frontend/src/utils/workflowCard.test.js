@@ -137,6 +137,26 @@ describe("cardAccessibleName", () => {
     expect(name).toContain("rated 4.8 of 5");
   });
 
+  it("names a LoRA loaded several times once, with how many times", () => {
+    const name = cardAccessibleName({
+      ...CARD,
+      loras: [
+        { name: "lightning", sha256: "a" },
+        { name: "angles", sha256: "b" },
+        { name: "lightning", sha256: "a" },
+        // One name, two files: a twin in another folder.
+        { name: "lightning", sha256: "c" },
+        // Slots naming no file are not one model.
+        { name: null },
+        { name: null },
+      ],
+    });
+    expect(name).toContain(
+      "LoRAs: lightning, workflow LoRA, 2 times; angles, workflow LoRA; lightning, workflow LoRA;",
+    );
+    expect(name.match(/times/g)).toHaveLength(1);
+  });
+
   it("says so when there are no LoRAs and no rating", () => {
     const name = cardAccessibleName({
       name: "Bare",

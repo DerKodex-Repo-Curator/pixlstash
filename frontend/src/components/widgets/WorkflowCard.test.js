@@ -309,22 +309,32 @@ describe("WorkflowCard height", () => {
 
   it("fits the strip's worst case in the narrowest card row", () => {
     // The grid's 240px column floor is the narrowest card: its own 1px border
-    // and the meta padding come off it. The worst case is STRIP_MARKS marks,
-    // the hairline and "+N" (~20px, "+12" at --text-2xs) - and
+    // and the meta padding come off it. The worst case is STRIP_SLOTS worth of
+    // marks, the hairline and "+N" (~20px, "+12" at --text-2xs) - and
     // `overflow: hidden` clips the LAST item, which is the "+N", so it has to
-    // fit outright.
+    // fit outright. A mark with a "×N" (~28px for "×16" in its pill) costs two
+    // slots, so every mix of plain and counted marks is checked.
     const t = tokens();
-    const marks = Number(
-      read("./WorkflowCard.vue").match(/STRIP_MARKS = (\d+)/)[1],
+    const slots = Number(
+      read("./WorkflowCard.vue").match(/STRIP_SLOTS = (\d+)/)[1],
     );
     const floor = Number(
       read("../views/WorkflowsView.vue").match(/COLUMN_MIN = (\d+)/)[1],
     );
     const row = floor - 2 * 1 - 2 * px(rule(".wf-card__meta").padding, t);
     const gap = px(rule(".wf-card__strip").gap, t);
+    const countGap = px(rule(".wf-card__mark").gap, t);
     const hairline = px(rule(".wf-card__rule").width, t);
-    const worst = marks * t["--wf-mark"] + hairline + 20 + (marks + 1) * gap;
-    expect(worst).toBeLessThanOrEqual(row);
+    for (let counted = 0; 2 * counted <= slots; counted++) {
+      const marks = slots - counted;
+      const worst =
+        marks * t["--wf-mark"] +
+        counted * (countGap + 28) +
+        hairline +
+        20 +
+        (marks + 1) * gap;
+      expect(worst, `${counted} counted`).toBeLessThanOrEqual(row);
+    }
   });
 
   it("keeps row 4 clear of the ⓘ button", () => {
@@ -457,6 +467,39 @@ describe("WorkflowCard", () => {
       );
     },
   );
+
+  it("draws one mark and a ×N for a LoRA loaded several times", () => {
+    const loras = [
+      ...Array(8).fill({ name: "lightning", filename: "lightning.safetensors" }),
+      ...Array(8).fill({ name: "angles", filename: "angles.safetensors" }),
+      { name: "angles", filename: "angles_fp8.safetensors" },
+    ];
+    const wrapper = mountCard({ ...BARE, loras });
+    const marks = wrapper.findAll(".wf-card__strip .wf-card__mark");
+    // The base model, then each LoRA once.
+    expect(marks).toHaveLength(3);
+    expect(
+      marks.map((mark) => mark.find(".wf-card__mark-count").exists()),
+    ).toEqual([false, true, true]);
+    expect(marks[1].find(".wf-card__mark-count").text()).toBe("×8");
+    // Two slots per counted mark: base 1 + 2 + 2 fills the strip, and the
+    // "+1" is the FP8 build: one name, but a file of its own.
+    expect(wrapper.find(".wf-card__mark-more").text()).toBe("+1");
+    // Row 3 still counts loaders, which the strip now adds up to.
+    expect(wrapper.find(".wf-card__lora-count").text()).toBe("17 LoRAs");
+  });
+
+  it("counts every loader of a model the strip left off in its +N", () => {
+    const wrapper = mountCard({
+      ...BARE,
+      loras: [
+        ...Array.from({ length: 4 }, (_, i) => ({ name: `lora-${i}` })),
+        ...Array(3).fill({ name: "repeated" }),
+      ],
+    });
+    expect(wrapper.findAll(".wf-card__strip .wf-card__mark")).toHaveLength(5);
+    expect(wrapper.find(".wf-card__mark-more").text()).toBe("+3");
+  });
 
   it("prints the base model's name once, beside the LoRA count", () => {
     const row = mountCard({

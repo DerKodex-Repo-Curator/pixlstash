@@ -290,6 +290,25 @@ export function lorasUnread(card) {
 }
 
 /**
+ * The card's LoRAs, one entry per FILE with how many loaders load it:
+ * `[{ lora, count }]`, in first-loaded order. A graph that chains one adapter
+ * into eight samplers reads as one model eight times, not as eight models.
+ * Keyed on the file's hash, else its filename: `name` has the folder, the
+ * extension and the precision taken out of it, so two files can share one. A
+ * slot naming no file is never merged with another.
+ */
+export function loraGroups(card) {
+  const groups = new Map();
+  for (const lora of card.loras ?? []) {
+    const key = lora.sha256 || lora.filename || lora.name || Symbol();
+    const group = groups.get(key);
+    if (group) group.count += 1;
+    else groups.set(key, { lora, count: 1 });
+  }
+  return [...groups.values()];
+}
+
+/**
  * The slot kinds that name the BASE MODEL, most preferred first.
  *
  * **Kept identical to `BASE_MODEL_KINDS`** in
@@ -449,9 +468,9 @@ export function cardAccessibleName(card) {
   const count = card.picture_count ?? 0;
   const bases = baseModels(card);
   const checkpoint = bases[0];
-  const loras = (card.loras ?? []).map((lora) => {
+  const loras = loraGroups(card).map(({ lora, count: loaded }) => {
     const quant = quantBadge(lora.quant);
-    return `${modelDisplayName(lora)}, ${quant ? `${quant.title}, ` : ""}workflow LoRA`;
+    return `${modelDisplayName(lora)}, ${quant ? `${quant.title}, ` : ""}workflow LoRA${loaded > 1 ? `, ${loaded} times` : ""}`;
   });
   const facts = factChips(card).map((chip) => chip.label);
   const parts = [
