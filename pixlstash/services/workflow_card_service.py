@@ -1040,19 +1040,17 @@ def _describe_slots(
             else:
                 name = next_name(slot)
                 filename = _slot_filename(widget, name, marks_by_name)
+                kind = _seedvr2_kind(
+                    str(slot.get("class_type") or ""), seedvr2_is_base
+                ) or (slot_kind(widget) if widget else "model")
                 figure.models.append(
                     SlotModel(
                         name=_derived(filename),
-                        kind=_seedvr2_kind(
-                            str(slot.get("class_type") or ""), seedvr2_is_base
-                        )
-                        or (slot_kind(widget) if widget else "model"),
+                        kind=kind,
                         label=str(slot.get("label") or "") or None,
                         filename=name,
                         **_mark_fields(
-                            marks_by_name.get((name or "").lower()),
-                            filename,
-                            slot_kind(widget) if widget else "model",
+                            marks_by_name.get((name or "").lower()), filename, kind
                         ),
                     )
                 )
