@@ -10353,7 +10353,8 @@ Quality before provenance: an exact filename beats a fuzzy declaration. A
   `mark`, `mark_tab`, `mark_colors`, `mark_icon` from
   `known_base_models.model_tile(canonical, filename, display_name,
   checkpoint=...)`, guesses included, on `GET /checkpoints`, `GET /adapters`
-  and every card slot (`ShelfMark.tile`). Each table entry carries the short
+  and every card slot (`ShelfMark.tile`; a slot the shelf does not hold is
+  named from its filename alone, through `identify`, `_mark_fields`). Each table entry carries the short
   name people write for it (`mark`, one or two lines), an optional `role`,
   `few_step`, `file_version` (Qwen's 2511 comes from the file), and a `maker`
   (`MAKERS`, brand colours darkened to 4:1) or a family `icon`
@@ -10366,8 +10367,9 @@ Quality before provenance: an exact filename beats a fuzzy declaration. A
   (`lightning`, `hyper`, `lcm`, `dmd2`, `turbo`) gives `⚡` and a step count.
   `KNOWN_FINE_TUNES` names a fine-tune checkpoint with a mark of its own
   (Juggernaut: J on its logo's purple) whatever base it was identified as.
-  Every name and role is held to the 28px tile at 8.25px by
-  `frontend/e2e/specs/model-tile-names.spec.js`.
+  Every table `mark` line is held to the tile's 24px line at 8.25px, and
+  every `role` to 28px, by `frontend/e2e/specs/model-tile-names.spec.js`; a
+  fine-tune's own second line is not.
 
 `quant` is **two sources folded into one vocabulary**, and the fold happens on
 the way out rather than on the way in. The column holds whichever source wrote

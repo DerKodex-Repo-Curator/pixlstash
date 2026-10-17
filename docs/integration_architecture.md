@@ -1288,8 +1288,9 @@ the two sides have agreed:
    `mark`, `mark_tab`, `mark_colors` and `mark_icon` (#1951) are the tile the
    server names for a slot of a known base model, the same four fields as on
    its `GET /checkpoints` or `GET /adapters` row
-   (`known_base_models.model_tile`), so the card and the ComfyUI pack draw one
-   tile without a table of their own; all null keeps the generated mark.
+   (`known_base_models.model_tile`), so a client draws the tile without a
+   table of its own; all null keeps the generated mark. The card draws it; the
+   ComfyUI pack does not read these fields yet.
 
    `icon`, `base_model` and `base_model_folded` are served on **every** card's
    slots, not only

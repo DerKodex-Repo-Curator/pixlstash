@@ -377,7 +377,7 @@ const ringClass = computed(() =>
 .mmark-name--over {
   position: absolute;
   inset: 0 0 auto 0;
-  padding-bottom: 1px;
+  padding-bottom: var(--space-1);
   line-height: 0.95;
 }
 

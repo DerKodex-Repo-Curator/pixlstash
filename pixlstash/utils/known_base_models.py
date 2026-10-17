@@ -79,6 +79,7 @@ entries claim stops the server booting (:func:`_build_index`), by design.
 from __future__ import annotations
 
 import difflib
+import functools
 import re
 from typing import Iterable, Optional
 
@@ -96,8 +97,9 @@ from pixlstash.utils.model_utils import derive_model_name
 # REFI, EDIT, RAW, HD); ``few_step`` puts a bolt on the tab instead;
 # ``file_version`` takes the second line from the filename (Qwen 2511);
 # ``maker`` picks the tile colour from :data:`MAKERS` and ``icon`` a family
-# icon from :data:`FAMILY_ICONS`. Every line must fit the 28px tile at 8.25px,
-# which ``frontend/e2e/specs/model-tile-names.spec.js`` measures in Chromium.
+# icon from :data:`FAMILY_ICONS`. Every ``mark`` line must fit the 28px tile's
+# 24px line at 8.25px, which ``frontend/e2e/specs/model-tile-names.spec.js``
+# measures in Chromium; a fine-tune's own second line is not measured.
 # Closed models carry none: they never exist as files.
 KNOWN_BASE_MODELS: dict[str, dict] = {
     # --- Stable Diffusion line ---------------------------------------------
@@ -196,6 +198,20 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
             "flux 2 dev",
             "flux.2 dev",
             "black-forest-labs/FLUX.2-dev",
+        ],
+    },
+    # The small FLUX.2s: a 4-step distilled build and an undistilled base, at
+    # 4B and 9B. Their own family, because a Klein LoRA does not load on dev.
+    "FLUX.2 Klein": {
+        "family": "flux2_klein",
+        "modality": "image",
+        "mark": ["Flux", "Klein"],
+        "few_step": True,
+        "maker": "Black Forest Labs",
+        "aliases": [
+            "flux2klein",
+            "black-forest-labs/FLUX.2-klein-4B",
+            "black-forest-labs/FLUX.2-klein-9B",
         ],
     },
     "Chroma1 HD": {
@@ -545,6 +561,7 @@ FAMILY_LABELS: dict[str, str] = {
     "sd35": "SD 3.5",
     "flux1": "FLUX.1",
     "flux2": "FLUX.2",
+    "flux2_klein": "FLUX.2 Klein",
     "chroma": "Chroma",
     "zimage": "Z-Image",
     "qwen": "Qwen-Image",
@@ -919,8 +936,18 @@ _PACKAGING_WORDS = frozenset(
     {
         *("pruned", "emaonly", "ema", "noema", "nonema", "vae", "bakedvae"),
         *("fixed", "full", "dev", "t2v", "i2v", "ti2v", "high", "low", "noise"),
+        *("convrot", "mixed", "scaled", "fast", "awq", "gptq"),
     }
 )
+# A precision anywhere in a name (`seedvr2_7b_int8_convrot`), where the shelf's
+# own quant parser only strips one at the end.
+_QUANT_WORD_RE = re.compile(
+    r"(?:bf|fp|int|nvfp|mxfp|nf|e\dm|i?q)\d\w*|[fi](?:4|8|16|32)", re.IGNORECASE
+)
+
+# Words that say what kind of file it is rather than which, so never a
+# LoRA's own initials (`my_style_lora` is MS, not ML).
+_KIND_WORDS = frozenset({"lora", "lycoris", "locon", "loha", "lokr", "dora"})
 
 # Words that join two others in a name, so "World of Wordcraft" is WW. The
 # shelf's own list (``MARK_FILLER_WORDS`` in ``frontend/src/utils/modelShelf.js``).
@@ -929,6 +956,7 @@ _FILLER_WORDS = frozenset(
 )
 
 
+@functools.cache
 def _vocabulary(canonical: str) -> frozenset[str]:
     """Every name of the base model's family, and each word and number in one.
 
@@ -947,11 +975,16 @@ def _vocabulary(canonical: str) -> frozenset[str]:
     ) | {_norm(name) for name in names}
 
 
+@functools.cache
+def _vocabulary_pattern(vocabulary: frozenset[str]) -> re.Pattern:
+    """Any run of *vocabulary* words and digits, longest word tried first."""
+    words = sorted(vocabulary, key=len, reverse=True)
+    return re.compile("(?:" + "|".join(map(re.escape, words)) + r"|\d+)*")
+
+
 def _leftover_is(text: str, vocabulary: frozenset[str]) -> bool:
     """Whether *text* (normalised) is nothing but *vocabulary* words and digits."""
-    words = sorted(vocabulary, key=len, reverse=True)
-    pattern = "(?:" + "|".join(map(re.escape, words)) + r"|\d+)*"
-    return re.fullmatch(pattern, text) is not None
+    return _vocabulary_pattern(vocabulary).fullmatch(text) is not None
 
 
 def _is_release(canonical: str, tokens: list[str], vocabulary: frozenset[str]) -> bool:
@@ -987,6 +1020,7 @@ def _is_release(canonical: str, tokens: list[str], vocabulary: frozenset[str]) -
                 or _norm(token) in ROLE_WORDS
                 or _norm(token) in _SPEED_WORDS
                 or _norm(token) in _PACKAGING_WORDS
+                or _QUANT_WORD_RE.fullmatch(token)
                 for token in rest
             ):
                 return True
@@ -1023,8 +1057,9 @@ def _own_line(name: str, vocabulary: frozenset[str]) -> Optional[str]:
     """A fine-tune's or LoRA's second line: its own initials and version.
 
     Words of the base model's own names are not its own (``Juggernaut XL v9``
-    is JU9, ``Qwen-Image-Edit-2511-Lightning-4steps`` is LI), nor is a role
-    word, nor a long number (a base's ``2511``). The version is a ``v<n>``'s
+    is JU9, ``Qwen-Image-Edit-2511-Lightning-4steps`` is LI), nor is a role,
+    packaging or file-kind word (``lora``), nor a long number (a base's
+    ``2511``). The version is a ``v<n>``'s
     major, left off at 1 because a first release says nothing.
     """
     words = re.split(r"[\s_-]+", name)
@@ -1044,6 +1079,9 @@ def _own_line(name: str, vocabulary: frozenset[str]) -> Optional[str]:
         if word
         and _norm(word) not in vocabulary
         and _norm(word) not in ROLE_WORDS
+        and _norm(word) not in _PACKAGING_WORDS
+        and not _QUANT_WORD_RE.fullmatch(word)
+        and _norm(word) not in _KIND_WORDS
         and not re.fullmatch(r"\d{3,}", word)
     ]
     letters = _initials(words)

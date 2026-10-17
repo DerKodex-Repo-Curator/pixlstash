@@ -10,6 +10,7 @@ import re
 
 import pytest
 
+from pixlstash.services.workflow_card_service import _mark_fields
 from pixlstash.utils.known_base_models import (
     COMPANION_LAYOUTS,
     FAMILY_ICONS,
@@ -419,6 +420,27 @@ GRAPHITE = ["#484c53"]
             ["#0c183e"],
             None,
         ),
+        # Packaging and file-kind words are nobody's initials.
+        (
+            "Wan 2.2",
+            "wan22_style_high.safetensors",
+            None,
+            False,
+            ["Wan", "ST"],
+            None,
+            ["#dc5100"],
+            None,
+        ),
+        (
+            "SDXL 1.0",
+            "my_style_lora.safetensors",
+            None,
+            False,
+            ["SDXL", "MS"],
+            None,
+            SDXL,
+            None,
+        ),
         # A family with no maker colour keeps the client's hashed hue.
         (
             "NoobAI-XL",
@@ -428,6 +450,38 @@ GRAPHITE = ["#484c53"]
             ["Noob", "ST"],
             None,
             None,
+            None,
+        ),
+        # A precision mid-name is packaging too.
+        (
+            "SeedVR2",
+            "seedvr2_7b_int8_convrot.safetensors",
+            None,
+            True,
+            ["Seed", "VR2"],
+            None,
+            None,
+            None,
+        ),
+        # Klein's distilled build is few-step; its base says so on the tab.
+        (
+            "FLUX.2 Klein",
+            "flux-2-klein-9b-fp8.safetensors",
+            None,
+            True,
+            ["Flux", "Klein"],
+            "\u26a1",
+            GRAPHITE,
+            None,
+        ),
+        (
+            "FLUX.2 Klein",
+            "flux-2-klein-base-9b.safetensors",
+            None,
+            True,
+            ["Flux", "Klein"],
+            "BASE",
+            GRAPHITE,
             None,
         ),
         (
@@ -467,3 +521,18 @@ def test_an_unknown_or_closed_base_model_keeps_the_generated_mark():
     assert model_tile(None, "portrait_mix_v2.safetensors", checkpoint=True) is None
     assert model_tile("my private base", "x.safetensors") is None
     assert model_tile("GPT Image 2", "x.safetensors", checkpoint=True) is None
+
+
+def test_a_card_slot_the_shelf_does_not_hold_is_named_from_its_filename():
+    """A workflow's file outside the shelf's folders still draws its tile."""
+    fields = _mark_fields(None, "flux1-dev.sft", "unet")
+    assert (fields["mark"], fields["mark_colors"]) == (["F1D"], ["#484c53"])
+    assert (
+        _mark_fields(None, "z_image_turbo_bf16.safetensors", "unet")["mark_tab"]
+        == "\u26a1"
+    )
+    # Not a base-model slot, so not the release: no few-step bolt.
+    assert (
+        _mark_fields(None, "z_image_turbo_bf16.safetensors", "vae")["mark_tab"] is None
+    )
+    assert "mark" not in _mark_fields(None, "add_detail.safetensors", "lora")
