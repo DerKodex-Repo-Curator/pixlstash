@@ -1585,6 +1585,9 @@ describe("the generated mark's version tab", () => {
     expect(version("Wan 2.2 high noise")).toBe("2.2");
     expect(version("SDXL 1.0")).toBe("1.0");
     expect(version("v1.5.2 base")).toBe("1.5");
+    // The whole minor: one digit of it names a version the file is not.
+    expect(version("Model 1.10")).toBe("1.10");
+    expect(version("Model 0.05")).toBe("0.05");
   });
 
   it("cuts any other first number to two digits", () => {

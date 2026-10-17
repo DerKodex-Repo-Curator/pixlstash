@@ -30,6 +30,8 @@ ROWS = [
     {"display_name": "Return_of_the_King"},
     {"display_name": "In-Context LoRA", "base_model_folded": "flux.1"},
     {"display_name": "The Thing"},
+    {"display_name": "Model 1.10"},
+    {"display_name": "Model 0.05"},
     {"display_name": "  ", "filename": "portrait_mix_v2.safetensors"},
     {"matched_name": "Stable Diffusion 3.5 Large", "filename": "sd3.5_large.st"},
     {"filename": "sd3.5_large_controlnet_canny.safetensors", "base_model": "SD3.5"},

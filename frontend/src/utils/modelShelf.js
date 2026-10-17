@@ -2082,14 +2082,16 @@ function initialsOf(text) {
 
 /**
  * What a mark's version tab shows: the first number in the name. An `x.y`
- * version keeps its dot (`3.5`, `2.2`, `1.0`); anything else is cut to two
- * digits (`2511` is 25, and so is `25.1`, whose major already fills the tab).
+ * version keeps its dot and its whole minor (`3.5`, `1.0`, `1.10`, `0.05`: one
+ * digit of `1.10` would name a version the file is not), and the tab widens to
+ * fit; anything else is cut to two digits (`2511` is 25, and so is `25.1`,
+ * whose major already fills the tab).
  * A zero-padded number (`000002750`) is a counter, not a version, and is
  * skipped; `0.9` is still one. Empty when the name carries no number, and then
  * the mark has no tab.
  */
 function versionOf(text) {
-  const match = /(?<!\d)(?!0\d)(\d+)(?:\.(\d))?/.exec(String(text || ""));
+  const match = /(?<!\d)(?!0\d)(\d+)(?:\.(\d+))?/.exec(String(text || ""));
   if (!match) return "";
   const [, major, minor] = match;
   return major.length === 1 && minor ? `${major}.${minor}` : major.slice(0, 2);
