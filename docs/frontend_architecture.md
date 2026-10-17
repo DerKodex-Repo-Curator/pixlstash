@@ -5882,7 +5882,8 @@ WO). **The two rules must not be unified**, however similar the palettes look.
 **Two letters and a version tab.** The letters come only from words that start
 with a letter, and the first number in the name rides on a pill at the tile's
 corner: an `x.y` version keeps its dot and its whole minor (`1.10` stays
-`1.10`, never `1.1`), anything else is cut to two digits.
+`1.10`, never `1.1`; a longer minor is a date or a counter and leaves the major
+alone), anything else is cut to two digits.
 `Stable Diffusion 3.5 Large` is SD with a 3.5 tab, and the ControlNet
 `sd3.5 large controlnet canny` beside it is SL with 3.5, where two letters alone
 drew SD and S5. The tab is the tile's own pair inverted (ink fill, tile-coloured

@@ -1588,6 +1588,9 @@ describe("the generated mark's version tab", () => {
     // The whole minor: one digit of it names a version the file is not.
     expect(version("Model 1.10")).toBe("1.10");
     expect(version("Model 0.05")).toBe("0.05");
+    // Past two digits it is a date or a counter, and only the major is true.
+    expect(version("Flux 2.2025-10-17")).toBe("2");
+    expect(version("lora_1.000002750")).toBe("1");
   });
 
   it("cuts any other first number to two digits", () => {
