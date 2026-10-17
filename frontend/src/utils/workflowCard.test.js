@@ -436,3 +436,47 @@ describe("the type chip", () => {
     );
   });
 });
+
+// ── Feature models said in words (#1939) ─────────────────────────────────
+describe("the feature chips", () => {
+  const FEATURED = {
+    name: "Pose and depth",
+    type: "txt2img",
+    type_label: "Text to Image",
+    imported: true,
+    models: [
+      { name: "real-xl", title: "Real XL", kind: "checkpoint" },
+      { name: "upscaler-4x", kind: "upscale" },
+      { name: "cn-depth", title: "Depth XL", kind: "controlnet" },
+      { name: "ae", kind: "vae" },
+      { name: "cn-canny", title: "Canny XL", kind: "controlnet" },
+    ],
+  };
+
+  it("says each kind after the type, counted, with the files on hover", () => {
+    const chips = factChips(FEATURED, { short: true });
+    expect(chips.map((chip) => chip.label)).toEqual([
+      "T2I",
+      "ControlNet ×2",
+      "Upscale",
+      "imported",
+    ]);
+    expect(chips[1].title).toBe("Depth XL, Canny XL");
+    expect(chips[2].title).toBe("upscaler-4x");
+    // The ordinary neutral fact chip: one row, one voice.
+    expect(chips.every((chip) => chip.fact && !chip.badge)).toBe(true);
+    // Nothing for a VAE, and nothing at all for a card with no feature model.
+    expect(factChips({ ...FEATURED, models: [] }).map((c) => c.label)).toEqual(
+      ["Text to Image", "imported"],
+    );
+  });
+
+  it("speaks each feature model with its kind, and the kind only once", () => {
+    const spoken = cardAccessibleName(FEATURED);
+    expect(spoken).toContain(
+      "Depth XL, ControlNet; Canny XL, ControlNet; upscaler-4x, Upscale",
+    );
+    expect(spoken).toContain("facts: Text to Image, imported");
+    expect(spoken).not.toContain("ControlNet ×2");
+  });
+});

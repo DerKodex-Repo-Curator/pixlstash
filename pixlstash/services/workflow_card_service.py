@@ -74,6 +74,7 @@ from pixlstash.services.model_shelf_service import (
     base_model_family,
 )
 from pixlstash.services.workflow_hash import (
+    SHA256_FIELD_RE,
     SHELF_ID_FIELD,
     WorkflowGraphError,
     asset_reference,
@@ -177,6 +178,9 @@ _SLOT_KINDS = {
     "model_name": "upscale",
     "style_model_name": "style",
     "control_net_name": "controlnet",
+    # The ComfyUI-PixlStash loaders' digest spellings of the same two slots.
+    "control_net_sha256": "controlnet",
+    "upscale_model_sha256": "upscale",
     "gligen_name": "gligen",
     "hypernetwork_name": "hypernetwork",
     "photomaker_model_name": "photomaker",
@@ -1109,10 +1113,19 @@ def _slot_filename(
     ``75``. An id the shelf no longer holds is ``None``, the forgotten-model
     state, so the missing-checkpoint signals still fire. The shelf lookup
     itself stays keyed on the raw id.
+
+    A pack loader's digest (``control_net_sha256``) becomes the shelf row's
+    file the same way, or a card would print 64 hex digits for every one the
+    shelf has no title for (#1939). A digest the shelf does not hold stays
+    itself: unlike an id, it still names one file.
     """
-    if widget != SHELF_ID_FIELD or not name:
+    if not name:
         return name
     mark = marks.get(name.lower())
+    if SHA256_FIELD_RE.search(widget):
+        return (mark.filename if mark else None) or name
+    if widget != SHELF_ID_FIELD:
+        return name
     return mark.filename if mark else None
 
 

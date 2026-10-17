@@ -231,6 +231,38 @@ def test_loaded_model_widgets_reads_a_numeric_shelf_id() -> None:
     assert loaded_model_widgets(api) == []
 
 
+def test_loaded_model_widgets_reads_the_pack_loaders_digests() -> None:
+    """The pack's ControlNet and upscale loaders name their file by digest
+    (#1939), in both serialisations, under the digest widget."""
+    cn, up = "a" * 64, "b" * 64
+    api = {
+        "1": {
+            "class_type": "PixlStashControlNetLoader",
+            "inputs": {"control_net_sha256": cn},
+        },
+        "2": {
+            "class_type": "PixlStashUpscaleModelLoader",
+            "inputs": {"upscale_model_sha256": up},
+        },
+    }
+    ui = {
+        "nodes": [
+            {
+                "id": int(node_id),
+                "type": node["class_type"],
+                "inputs": [{"name": widget, "widget": {"name": widget}}],
+                "widgets_values": [value],
+            }
+            for node_id, node in api.items()
+            for widget, value in node["inputs"].items()
+        ],
+        "links": [],
+    }
+    expected = [("control_net_sha256", cn), ("upscale_model_sha256", up)]
+    assert loaded_model_widgets(api) == expected
+    assert loaded_model_widgets(ui) == expected
+
+
 def test_a_subgraph_loader_reads_the_file_its_instance_names() -> None:
     """The instance's value, not the definition's default.
 

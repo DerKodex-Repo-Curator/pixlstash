@@ -12,7 +12,13 @@ from functools import lru_cache
 from typing import Any
 
 from pixlstash.pixl_logging import get_logger
-from pixlstash.services.comfyui_recipe_service import model_filename_fields
+from pixlstash.services.comfyui_recipe_service import (
+    CONTROLNET_LOADER_DIGEST,
+    PIXLSTASH_CONTROLNET_LOADER,
+    PIXLSTASH_UPSCALE_MODEL_LOADER,
+    UPSCALE_MODEL_LOADER_DIGEST,
+    model_filename_fields,
+)
 from pixlstash.services.comfyui_ui_graph import _WIDGET_OVERRIDES, inline_subgraphs
 from pixlstash.services.workflow_hash import (
     IMAGE_EXTENSIONS,
@@ -667,6 +673,15 @@ _NAME_FIRST_CLASSES = _CHECKPOINT_CLASSES | _UNET_CLASSES | _LORA_CLASSES
 # shelf row and would draw a mark for a file nobody loads.
 _NOT_A_MODEL_WIDGET = frozenset({"config_name"})
 
+# The ComfyUI-PixlStash loaders that name a ControlNet or an upscale model by
+# digest. Read for a card only, never through `MODEL_FILENAME_FIELDS`: the
+# pre-flight would then check a digest against ComfyUI's filename combo. The
+# card's shelf lookup resolves a digest as it resolves a filename (#1939).
+_PACK_DIGEST_WIDGETS = {
+    PIXLSTASH_CONTROLNET_LOADER: CONTROLNET_LOADER_DIGEST,
+    PIXLSTASH_UPSCALE_MODEL_LOADER: UPSCALE_MODEL_LOADER_DIGEST,
+}
+
 
 @lru_cache(maxsize=1)
 def _base_model_widgets() -> tuple[str, ...]:
@@ -724,6 +739,9 @@ def loaded_model_widgets(workflow: dict) -> list[tuple[str, str]]:
     workflow loads no models" -- and why a card drawn from this must not turn
     a missing slot into a claim (``utils/workflowCard.checkpointUnread``).
 
+    The pack's ControlNet and upscale loaders name their file by digest and
+    are read as well (:data:`_PACK_DIGEST_WIDGETS`), under their digest widget.
+
     Muted and bypassed nodes are skipped, because they do not load anything
     when the workflow runs.
 
@@ -733,12 +751,22 @@ def loaded_model_widgets(workflow: dict) -> list[tuple[str, str]]:
     if not isinstance(workflow, dict):
         return []
     if is_api_format(workflow):
-        return [
-            (widget, value)
-            for _id, _cls, widget, value in iter_model_fields_api(
-                workflow, shelf_ids_as_text=True
+        found = []
+        for node_id, node in workflow.items():
+            found.extend(
+                (widget, value)
+                for _id, _cls, widget, value in iter_model_fields_api(
+                    {node_id: node}, shelf_ids_as_text=True
+                )
             )
-        ]
+            if not isinstance(node, dict):
+                continue
+            digest = _PACK_DIGEST_WIDGETS.get(node.get("class_type"))
+            inputs = node.get("inputs")
+            value = inputs.get(digest) if digest and isinstance(inputs, dict) else None
+            if isinstance(value, str) and value:
+                found.append((digest, value))
+        return found
     return _loaded_model_widgets_ui(workflow)
 
 
@@ -768,6 +796,9 @@ def _loaded_model_widgets_ui(workflow: dict) -> list[tuple[str, str]]:
                 for widget in _base_model_widgets()
                 if widget not in widgets
             )
+            digest = _PACK_DIGEST_WIDGETS.get(class_type)
+            if digest:
+                named.append((digest, _get_widget_value_ui(node, digest)))
             for widget, value in named:
                 value = _shelf_id_text(widget, value)
                 if isinstance(value, str) and value:

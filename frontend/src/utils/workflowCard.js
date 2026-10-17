@@ -458,7 +458,31 @@ export function shortTypeLabel(card) {
 }
 
 /**
- * The special-facts row: the workflow's type, whether it is manual or was
+ * The feature-model kinds the facts row says in words (#1939), in the row's
+ * order: the parts that change what running the workflow asks for or
+ * produces. A word and not a mark, because a mark's colour is its base
+ * model's and an SDXL ControlNet would read as the SDXL checkpoint beside it.
+ * The VAE and the text encoders stay in ⓘ; IP-Adapter has no slot kind yet.
+ */
+const FEATURE_KINDS = {
+  controlnet: "ControlNet",
+  style: "Style",
+  upscale: "Upscale",
+};
+
+/** `[{ word, models }]` for each feature kind the card loads, in row order. */
+export function featureGroups(card) {
+  return Object.entries(FEATURE_KINDS)
+    .map(([kind, word]) => ({
+      word,
+      models: (card.models ?? []).filter((model) => model.kind === kind),
+    }))
+    .filter(({ models }) => models.length);
+}
+
+/**
+ * The special-facts row: the workflow's type, the feature models it loads
+ * ("ControlNet ×2", the files on hover), whether it is manual or was
  * imported, and what a manual one was made from. `short` spells the type the
  * way the card's chip does (`T2I`).
  *
@@ -482,15 +506,26 @@ export function factChips(card, { short = false } = {}) {
     // already spells out in full. Falls back to the token for a payload
     // that predates `type_label`.
     short ? shortTypeLabel(card) : card.type_label || card.type,
+    // After the type, because each one is that kind of fact: a ControlNet
+    // workflow needs a control image. `feature` keeps it out of the spoken
+    // facts, where `cardAccessibleName` names each model instead.
+    ...featureGroups(card).map(({ word, models }) => ({
+      label: models.length > 1 ? `${word} ×${models.length}` : word,
+      title: models.map(modelDisplayName).filter(Boolean).join(", ") || null,
+      feature: true,
+    })),
     card.imported && !card.manual ? "imported" : null,
     card.manual && card.from_name ? `from ${card.from_name}` : null,
   ].filter(Boolean);
-  return labels.map((label, i) => ({
-    key: `fact-${i}`,
-    label,
-    fact: true,
-    badge: Boolean(card.manual) && label === "Manual",
-  }));
+  return labels.map((entry, i) => {
+    const chip = typeof entry === "string" ? { label: entry } : entry;
+    return {
+      key: `fact-${i}`,
+      ...chip,
+      fact: true,
+      badge: Boolean(card.manual) && chip.label === "Manual",
+    };
+  });
 }
 
 /** "4.9 of 5", or null when nothing is rated (0 or missing). */
@@ -525,7 +560,16 @@ export function cardAccessibleName(card) {
     const quant = quantBadge(lora.quant);
     return `${modelDisplayName(lora)}, ${quant ? `${quant.title}, ` : ""}workflow LoRA${loaded > 1 ? `, ${loaded} times` : ""}`;
   });
-  const facts = factChips(card).map((chip) => chip.label);
+  const facts = factChips(card)
+    .filter((chip) => !chip.feature)
+    .map((chip) => chip.label);
+  // Each feature model with its kind ("Canny XL, ControlNet"): the chip says
+  // only the kind, and this string is all a screen reader gets.
+  const features = featureGroups(card).flatMap(({ word, models }) =>
+    models.map((model) =>
+      [modelDisplayName(model), word].filter(Boolean).join(", "),
+    ),
+  );
   const parts = [
     card.name,
     // Straight after the name: it is the one thing here that asks for
@@ -560,6 +604,7 @@ export function cardAccessibleName(card) {
       : lorasUnread(card)
         ? "LoRAs not read"
         : "no LoRAs",
+    features.length ? features.join("; ") : null,
     facts.length ? `facts: ${facts.join(", ")}` : null,
     outputCount(card, count),
     ratingLabel(card.rating) ? `rated ${ratingLabel(card.rating)}` : null,
