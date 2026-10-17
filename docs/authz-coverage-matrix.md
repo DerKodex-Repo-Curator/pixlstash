@@ -998,6 +998,7 @@ The middleware checks the same list first, by the path's shape (`auth.comfyui_sc
 | POST | `/api/v1/picture_sets/{id}/members` | owner_only | The saver files the picture in a set |
 | GET | `/api/v1/picture_sets/{id}/thumbnail` | set_scoped | A set's face on a model in the adapter picker |
 | GET | `/api/v1/pictures` | scoped_list | Picture picker and the loader nodes |
+| GET | `/api/v1/pictures/count` | scoped_list | The picture picker's total beside Everything |
 | POST | `/api/v1/pictures/face-search` | scoped_list | Face search |
 | POST | `/api/v1/pictures/import` | owner_only | The saver imports a picture |
 | GET | `/api/v1/pictures/import/status` | owner_only | The saver waits for the import |

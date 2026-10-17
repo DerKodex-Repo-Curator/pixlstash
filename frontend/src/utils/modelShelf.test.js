@@ -155,6 +155,8 @@ const QUANT_NON_VOCABULARY = [
   ["portrait_mix_v2.safetensors", "portrait mix v2"],
   ["juggernaut_xl_v9.safetensors", "juggernaut xl v9"],
   ["Anything-XL.safetensors", "Anything XL"],
+  // `constructor` is on every Object, so a bare `in` lookup ate it as a quant.
+  ["clementine_constructor.safetensors", "clementine constructor"],
 ];
 
 describe("the quant postfix", () => {
@@ -1559,6 +1561,52 @@ describe("the generated mark's initials", () => {
 
   it("matches whole words only", () => {
     expect(initials("Forest Inpaint")).toBe("FI");
+  });
+
+  it("takes letters from words that start with one", () => {
+    // A number is the version, never an initial: the old rule drew the first
+    // of these as S5.
+    expect(initials("sd3.5 large controlnet canny")).toBe("SL");
+    expect(initials("Stable Diffusion 3.5-Large")).toBe("SD");
+    expect(initials("Wan 2.2 high noise")).toBe("WH");
+    // One lettered word gives its first two letters, never a digit.
+    expect(initials("SDXL 1.0")).toBe("SD");
+    expect(initials("flux1")).toBe("FL");
+    expect(initials("4x-UltraSharp")).toBe("UL");
+  });
+});
+
+describe("the generated mark's version tab", () => {
+  const version = (display_name) => generatedMark({ display_name }).version;
+
+  it("keeps the dot of an x.y version", () => {
+    expect(version("Stable Diffusion 3.5-Large")).toBe("3.5");
+    expect(version("sd3.5 large controlnet canny")).toBe("3.5");
+    expect(version("Wan 2.2 high noise")).toBe("2.2");
+    expect(version("SDXL 1.0")).toBe("1.0");
+    expect(version("v1.5.2 base")).toBe("1.5");
+  });
+
+  it("cuts any other first number to two digits", () => {
+    expect(version("flux1 dev")).toBe("1");
+    expect(version("Qwen Image Edit 2511")).toBe("25");
+    expect(version("Juggernaut XL v9 and 10")).toBe("9");
+    // A two-digit major already fills the tab, so its minor is dropped.
+    expect(version("Model 12.5")).toBe("12");
+  });
+
+  it("is empty when the name carries no number, so no tab is drawn", () => {
+    expect(version("World of Wordcraft")).toBe("");
+  });
+
+  it("skips a zero-padded counter, which is not a version", () => {
+    // A file whose whole name is a training index reads as its raw filename,
+    // which would otherwise put "00" on the tab.
+    expect(generatedMark({ filename: "000002750.safetensors" }).version).toBe(
+      "",
+    );
+    expect(version("lora 0042 v2")).toBe("2");
+    expect(version("SDXL 0.9")).toBe("0.9");
   });
 });
 

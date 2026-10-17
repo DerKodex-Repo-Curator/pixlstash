@@ -86,14 +86,16 @@ function splitQuant(tokens) {
   const popped = [];
   while (kept.length) {
     const last = kept[kept.length - 1].toLowerCase();
-    if (!(last in QUANT_TOKENS) && !QUANT_MODIFIERS.has(last)) break;
+    if (!Object.hasOwn(QUANT_TOKENS, last) && !QUANT_MODIFIERS.has(last)) break;
     popped.push(kept.pop());
   }
   // The guard the whole safety of this rests on: `scaled` and `fast` are
   // ordinary tokens in real model names and may only be eaten when a genuine
   // quant token was eaten with them, or `some_model_scaled` silently becomes
   // `some model`.
-  const real = popped.find((t) => t.toLowerCase() in QUANT_TOKENS);
+  const real = popped.find((t) =>
+    Object.hasOwn(QUANT_TOKENS, t.toLowerCase()),
+  );
   if (!real) return { tokens: [...tokens], quant: null };
   return { tokens: kept, quant: QUANT_TOKENS[real.toLowerCase()] };
 }
@@ -2047,7 +2049,12 @@ const MARK_FILLER_WORDS = new Set([
   "and",
 ]);
 
-/** Up to two initials for a mark, from whatever the row is actually called. */
+/**
+ * Up to two letters for a mark, from whatever the row is actually called: the
+ * first letters of the first two words that start with a letter, so the
+ * version number goes to {@link versionOf} instead of taking a letter's place
+ * (`Stable Diffusion 3.5` is SD, not S3).
+ */
 function initialsOf(text) {
   const all = String(text || "")
     .split(/[\s_\-.]+/)
@@ -2059,9 +2066,32 @@ function initialsOf(text) {
   );
   // Skipping must still leave two words to take a letter from each.
   const words = significant.length > 1 ? significant : all;
-  if (!words.length) return "?";
-  if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
-  return (words[0][0] + words[1][0]).toUpperCase();
+  const lettered = words.filter((word) => /^\p{L}/u.test(word));
+  if (lettered.length > 1) {
+    return (lettered[0][0] + lettered[1][0]).toUpperCase();
+  }
+  if (lettered.length === 1) {
+    return lettered[0]
+      .replace(/\P{L}/gu, "")
+      .slice(0, 2)
+      .toUpperCase();
+  }
+  return words.length ? words[0].slice(0, 2).toUpperCase() : "?";
+}
+
+/**
+ * What a mark's version tab shows: the first number in the name. An `x.y`
+ * version keeps its dot (`3.5`, `2.2`, `1.0`); anything else is cut to two
+ * digits (`2511` is 25, and so is `25.1`, whose major already fills the tab).
+ * A zero-padded number (`000002750`) is a counter, not a version, and is
+ * skipped; `0.9` is still one. Empty when the name carries no number, and then
+ * the mark has no tab.
+ */
+function versionOf(text) {
+  const match = /(?<!\d)(?!0\d)(\d+)(?:\.(\d))?/.exec(String(text || ""));
+  if (!match) return "";
+  const [, major, minor] = match;
+  return major.length === 1 && minor ? `${major}.${minor}` : major.slice(0, 2);
 }
 
 // The mark's tile keeps its palette entry's HUE and pins saturation and
@@ -2139,10 +2169,20 @@ export function markForeground() {
  * they genuinely are one group, and the shelf already treats "not set" as a
  * value rather than an absence.
  *
+ * **The ComfyUI pack ports this** (`web/js/model_mark.js`), so a loader node
+ * draws the same mark; `tests/test_comfyui_pack_model_mark.py` fails when the
+ * two disagree, so change them together.
+ *
+ * **Two letters and a version.** Two letters cannot tell `Stable Diffusion
+ * 3.5 Large` from `sd3.5 large controlnet`, and neither could the old rule's
+ * S5, so the letters say which model and a tab on the corner carries the
+ * version (the mark design round's option D2).
+ *
  * @param {Object} row - a shelf row.
- * @returns {{color: string, ink: string, initials: string}} `color` is an
- *   `hsl()` string, not a hex, because it is renormalised rather than taken
- *   from the palette. `ink` travels with it so the pair cannot be separated.
+ * @returns {{color: string, ink: string, initials: string, version: string}}
+ *   `color` is an `hsl()` string, not a hex, because it is renormalised rather
+ *   than taken from the palette. `ink` travels with it so the pair cannot be
+ *   separated. `version` is the tab's digits, `""` for no tab.
  */
 export function generatedMark(row) {
   const key = baseModelKey(row);
@@ -2152,6 +2192,7 @@ export function generatedMark(row) {
     color: markBackground(entry),
     ink: markForeground(),
     initials: initialsOf(name.text),
+    version: versionOf(name.text),
   };
 }
 

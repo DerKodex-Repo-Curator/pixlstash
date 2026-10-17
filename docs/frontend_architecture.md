@@ -5856,6 +5856,22 @@ come from the same name chain the row's label uses, skipping a short English
 list of joining words after the first word ("World of Wordcraft" is WW, not
 WO). **The two rules must not be unified**, however similar the palettes look.
 
+**Two letters and a version tab.** The letters come only from words that start
+with a letter, and the first number in the name rides on a pill at the tile's
+corner: an `x.y` version keeps its dot, anything else is cut to two digits.
+`Stable Diffusion 3.5 Large` is SD with a 3.5 tab, and the ControlNet
+`sd3.5 large controlnet canny` beside it is SL with 3.5, where two letters alone
+drew SD and S5. The tab is the tile's own pair inverted (ink fill, tile-coloured
+digits and edge), a fixed 15px with `--text-2xs` digits, hanging 6px past the
+corner; a picture or a set's icon in the square hides it. A tab sized as a share
+of the tile was 11px high at 24px, too small to read. **A surface that clips
+must leave the tab its 6px**: the workflow card's strip pads and gives it back
+with a negative margin, and a row with no assignment ring keeps 8px between the
+mark and its text. The letters are 55% of the tile, so they fill it at every
+size; that is the most WW or MW take without touching the edges. The member rows
+of a model set draw through `ModelMark` too, so no surface copies the mark into
+a square of its own.
+
 Keyed on the **folded** base model, so every spelling of FLUX.2 lands on one
 colour instead of scattering across the palette — which is what the folding
 table is for. A row recording no base model hashes on the empty string and
@@ -5864,6 +5880,13 @@ group, and the shelf already treats "not set" as a value rather than an absence.
 
 The mark is `aria-hidden`: the row's accessible name already says which model it
 is, and a mark announcing "FL" would be the same fact twice, less usefully.
+
+**The ComfyUI pack draws the same mark.** Its loader nodes and Browse picker
+cannot import this code, so `web/js/model_mark.js` in the pack is a port of
+`generatedMark` and its name chain. `tests/test_comfyui_pack_model_mark.py` runs
+both in Node over the same rows and fails on any difference: change the two
+together. The pack has no Material Design Icons font, so a picture set's `set_icon`
+(step 2 of `ModelMark`'s face chain) is not drawn there.
 
 **Both set and clear are bulk.** Set was originally gated to a selection of one,
 on the argument that giving forty rows one mark removes the only thing telling

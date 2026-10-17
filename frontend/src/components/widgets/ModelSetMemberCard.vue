@@ -13,19 +13,12 @@
     <!-- The shelf row's own mark when there is a row: the model's icon, or the
          face of the person or set it is assigned to, inside their ring. -->
     <ModelMark
-      v-if="shelfMark"
       class="msm__shelfmark"
-      :row="shelfMark.row"
-      :ring="shelfMark.ring"
-      :style="shelfMark.style"
-    />
-    <span
-      v-else
-      class="msm__mark"
-      :style="{ backgroundColor: initials.color, color: initials.ink }"
       aria-hidden="true"
-      >{{ initials.initials }}</span
-    >
+      :row="mark.row"
+      :ring="mark.ring"
+      :style="mark.style"
+    />
     <div class="msm__body">
       <div class="msm__top">
         <!-- The name is the way in to what ELSE this file has run with, which is
@@ -105,7 +98,6 @@ import { VIcon } from "vuetify/components";
 
 import {
   formatModelSize,
-  generatedMark,
   modelFileTitle,
 } from "../../utils/modelShelf";
 import {
@@ -148,14 +140,19 @@ const props = defineProps({
 const emit = defineEmits(["pick", "reopen"]);
 
 // The shelf's own identity square, so a model looks the same here as in the row
-// list. `generatedMark` reads a row's name and base model, so the member is
-// spelled into that shape rather than a second mark being invented.
-const initials = computed(() =>
-  generatedMark({
-    display_name: props.member.name,
-    filename: props.member.filename,
-    base_model: props.member.base_model ?? null,
-  }),
+// list. A member with no shelf row is spelled into a row's shape, with no ring:
+// there is no row left to say who it is assigned to.
+const mark = computed(
+  () =>
+    props.shelfMark ?? {
+      row: {
+        display_name: props.member.name,
+        filename: props.member.filename,
+        base_model: props.member.base_model ?? null,
+      },
+      ring: null,
+      style: {},
+    },
 );
 
 const size = computed(() => formatModelSize(props.member.file_size));
@@ -218,19 +215,6 @@ const accessibleName = computed(() =>
 .msm--on {
   background: var(--active-wash);
   box-shadow: var(--selection-edge);
-}
-
-.msm__mark {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  width: var(--entity-thumb);
-  height: var(--entity-thumb);
-  border-radius: var(--radius-sm);
-  font-size: var(--text-2xs);
-  font-weight: var(--weight-semibold);
-  letter-spacing: 0.02em;
 }
 
 .msm__body {

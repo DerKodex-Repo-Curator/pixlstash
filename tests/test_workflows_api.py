@@ -2235,6 +2235,7 @@ _COMFYUI_SCOPE_REQUESTS = {
     ("GET", f"{API}/characters"): (f"{API}/characters", None),
     ("GET", f"{API}/sort_mechanisms"): (f"{API}/sort_mechanisms", None),
     ("GET", f"{API}/pictures"): (f"{API}/pictures", None),
+    ("GET", f"{API}/pictures/count"): (f"{API}/pictures/count", None),
     ("GET", f"{API}/pictures/thumbnails/{{id}}.webp"): (
         f"{API}/pictures/thumbnails/{_NO_ROW}.webp",
         None,
@@ -2336,6 +2337,9 @@ _COMFYUI_SCOPE_REFUSED = (
         f"{API}/workflows/run/opening",
         {},
     ),
+    # A sibling of the admitted count, with its policy and its prefix: the
+    # admission is that one route, not the listing family.
+    ("GET", f"{API}/pictures/stats", f"{API}/pictures/stats", None),
     # The shape of an admitted template (a character's field), another route.
     (
         "GET",

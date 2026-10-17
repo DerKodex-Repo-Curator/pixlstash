@@ -43,6 +43,19 @@
         {{ mark.initials }}
       </span>
     </span>
+    <!-- Outside the face, because the face clips: the tab sits over the
+         corner rather than inside it. -->
+    <span
+      v-if="showVersion"
+      class="mmark-version"
+      aria-hidden="true"
+      :style="{
+        backgroundColor: mark.ink,
+        color: mark.color,
+        borderColor: mark.color,
+      }"
+      >{{ mark.version }}</span
+    >
     <!-- The full stop is load-bearing: this text is concatenated into the
          cell's accessible name, and without a separator it runs into whatever
          the next cell says. -->
@@ -180,6 +193,12 @@ const faceUrl = computed(() => {
 
 const mark = computed(() => generatedMark(props.row));
 
+// The version belongs to the generated mark: a picture or a set's icon in the
+// square says nothing about which version the file is.
+const showVersion = computed(
+  () => Boolean(mark.value.version) && !faceUrl.value && !props.ring?.icon,
+);
+
 const ringClass = computed(() =>
   props.ring ? `mmark--ring mmark--${props.ring.style}` : "",
 );
@@ -225,16 +244,46 @@ const ringClass = computed(() =>
    inline because `generatedMark` hands them out together - the tile is
    renormalised to a pinned lightness precisely so the ink can stay constant,
    and splitting the pair across inline style and a stylesheet is what would
-   let one of them change without the other. */
+   let one of them change without the other.
+
+   The letters are a share of the tile rather than a step of the type ramp, so
+   they fill it at every size the mark is drawn at: 55% is the most two wide
+   letters (WW, MW) take without touching the edges. The ComfyUI pack's
+   `paintMark` uses the same share. */
 .mmark-initials {
   display: flex;
   align-items: center;
   justify-content: center;
   width: 100%;
   height: 100%;
-  font-size: var(--text-xs);
+  font-size: calc(var(--entity-thumb) * 0.55);
   font-weight: var(--weight-medium);
-  letter-spacing: 0.02em;
+  letter-spacing: -0.02em;
+  line-height: 1;
+}
+
+/* The version tab (the mark design round's D2): the tile's own pair inverted,
+   so it needs no colour of its own and clears the same contrast the initials
+   do. A fixed size, like the initials, rather than a share of the tile: at
+   24px a proportional tab was 11px high with 8px digits, too small to read.
+   It hangs 6px past the corner, over the ring where there is one. */
+.mmark-version {
+  position: absolute;
+  right: -6px;
+  bottom: -6px;
+  z-index: var(--z-raised);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 var(--space-1);
+  border: 1px solid;
+  border-radius: var(--radius-pill);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-bold);
+  line-height: 1;
 }
 
 /* ── The assignment ring ───────────────────────────────────────────────────

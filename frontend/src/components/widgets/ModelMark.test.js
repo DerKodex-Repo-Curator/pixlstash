@@ -58,6 +58,23 @@ describe("ModelMark", () => {
     expect(wrapper.find(".mmark-initials").text()).toBe("CS");
   });
 
+  it("hangs the version on a tab beside the initials", () => {
+    const wrapper = mountMark({ display_name: "Stable Diffusion 3.5 Large" });
+    expect(wrapper.find(".mmark-initials").text()).toBe("SD");
+    expect(wrapper.find(".mmark-version").text()).toBe("3.5");
+    // No number, no tab: an empty pill would read as a broken one.
+    expect(mountMark().find(".mmark-version").exists()).toBe(false);
+  });
+
+  it("draws no tab over a picture", () => {
+    // A picture says nothing about which version the file is.
+    const wrapper = mountMark({
+      display_name: "Stable Diffusion 3.5 Large",
+      icon_sha256: "a".repeat(64),
+    });
+    expect(wrapper.find(".mmark-version").exists()).toBe(false);
+  });
+
   it("still marks a row with no name at all", () => {
     // `000002750.safetensors` strips to nothing, so the name chain falls back
     // to the raw filename - the mark has to survive that too.

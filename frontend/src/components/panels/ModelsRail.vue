@@ -1612,6 +1612,9 @@ onBeforeUnmount(endDrag);
 
 .mrail-mark {
   flex-shrink: 0;
+  /* The mark's version tab hangs 6px past its corner; with the row's own gap
+     this keeps it off the name. */
+  margin-right: var(--space-2);
 }
 
 .mrail-text {
