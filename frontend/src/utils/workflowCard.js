@@ -162,7 +162,7 @@
 // A card row names the BASE MODEL only (checkpoint, or the unet a Flux or SD3
 // graph carries instead); ⓘ lists every model.
 
-import { quantBadge } from "./modelShelf.js";
+import { generatedMark, modelName, quantBadge } from "./modelShelf.js";
 import { cropImgStyle } from "./squareCrop.js";
 
 /**
@@ -306,6 +306,52 @@ export function loraGroups(card) {
     else groups.set(key, { lora, count: 1 });
   }
   return [...groups.values()];
+}
+
+/**
+ * The rows a card's strip hands `ModelMark`, renamed where two would draw the
+ * same generated mark.
+ *
+ * A mark with no icon is the name's first two initials, its first number and
+ * its base model's colour, so a family of files named alike - a Qwen Image
+ * Edit 2511 checkpoint and two LoRAs for it, an SDXL 1.0 base and refiner -
+ * draws one tile several times. The shelf prints a name beside each mark; the
+ * card prints none, so here the words such marks' names share are dropped and
+ * each is drawn from what is left (`Lightning 4steps V1.0`, `Refiner`). A name
+ * with nothing left keeps its own. Only the mark changes: tooltips and the
+ * accessible name still say the whole name.
+ */
+export function distinctMarkRows(rows) {
+  const lookalikes = new Map();
+  rows.forEach((row, i) => {
+    if (row.icon_sha256) return;
+    const { color, initials, version } = generatedMark(row);
+    const key = `${color}|${initials}|${version}`;
+    lookalikes.set(key, [...(lookalikes.get(key) ?? []), i]);
+  });
+  const renamed = [...rows];
+  for (const members of lookalikes.values()) {
+    if (members.length < 2) continue;
+    // Not on "." - it would split a `1.0` the remainder may need to keep.
+    const words = members.map((i) =>
+      modelName(rows[i]).text.split(/[\s_-]+/).filter(Boolean),
+    );
+    let shared = 0;
+    while (
+      words.every(
+        (name) =>
+          shared < name.length &&
+          name[shared].toLowerCase() === words[0][shared].toLowerCase(),
+      )
+    ) {
+      shared += 1;
+    }
+    members.forEach((i, j) => {
+      const rest = words[j].slice(shared).join(" ");
+      if (rest) renamed[i] = { ...rows[i], display_name: rest };
+    });
+  }
+  return renamed;
 }
 
 /**

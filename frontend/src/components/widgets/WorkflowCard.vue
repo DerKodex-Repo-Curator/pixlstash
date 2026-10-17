@@ -208,6 +208,7 @@ import { quantBadge } from "../../utils/modelShelf";
 import {
   cardAccessibleName,
   baseModels,
+  distinctMarkRows,
   baseModelText,
   coverCellStyle,
   factChips,
@@ -387,7 +388,7 @@ const allMarks = computed(() => {
     ...loras,
   ];
 });
-const stripMarks = computed(() => {
+const shownMarks = computed(() => {
   const shown = [];
   let slots = 0;
   for (const mark of allMarks.value) {
@@ -396,6 +397,12 @@ const stripMarks = computed(() => {
     shown.push(mark);
   }
   return shown;
+});
+// Told apart among the marks actually drawn: a look-alike clipped into "+N" is
+// not on screen to be confused with.
+const stripMarks = computed(() => {
+  const rows = distinctMarkRows(shownMarks.value.map((mark) => mark.row));
+  return shownMarks.value.map((mark, i) => ({ ...mark, row: rows[i] }));
 });
 // Counts the models left off, each as many times as it is loaded, so the
 // marks, their "×N" and the "+N" add up to the loaders the card has.
@@ -634,8 +641,9 @@ const accessibleName = computed(() =>
   flex: none;
 }
 
-/* How many loaders load this one model: the token sheet's count pill
-   (`--badge-size`, `primary`/`on-primary`). */
+/* How many loaders load this one model: the Run dialog's count pill
+   (`.rund-count`), raspberry filled because as text the hue is under the
+   floor. */
 .wf-card__mark-count {
   display: inline-flex;
   align-items: center;
@@ -644,8 +652,8 @@ const accessibleName = computed(() =>
   height: var(--badge-size);
   padding: 0 var(--space-2);
   border-radius: var(--radius-pill);
-  background: rgb(var(--v-theme-primary));
-  color: rgb(var(--v-theme-on-primary));
+  background: rgb(var(--v-theme-secondary));
+  color: rgb(var(--v-theme-on-secondary));
   font-size: var(--text-2xs);
   font-weight: var(--weight-semibold);
   font-variant-numeric: tabular-nums;

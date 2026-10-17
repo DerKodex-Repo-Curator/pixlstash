@@ -489,6 +489,61 @@ describe("WorkflowCard", () => {
     expect(wrapper.find(".wf-card__lora-count").text()).toBe("17 LoRAs");
   });
 
+  it("tells apart marks whose names share their leading words", () => {
+    // Each pair below would draw one tile twice: the initials are the name's
+    // first two words, the tab its first number, the colour its base model.
+    const tiles = (card) =>
+      mountCard(card)
+        .findAll(".wf-card__strip .wf-card__mark")
+        .map((mark) => mark.find(".mmark").text());
+    const qwen = { base_model_folded: "Qwen-Image-Edit", quant: "bf16" };
+    expect(
+      tiles({
+        ...BARE,
+        models: [
+          {
+            ...qwen,
+            name: "qwen image edit 2511",
+            kind: "unet",
+            filename: "qwen_image_edit_2511_bf16.safetensors",
+          },
+        ],
+        loras: [
+          ...Array(8).fill({
+            ...qwen,
+            name: "Qwen Image Edit 2511 Lightning 4steps V1.0",
+            filename: "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+          }),
+          {
+            ...qwen,
+            name: "qwen image edit 2511 multiple angles lora",
+            filename: "qwen-image-edit-2511-multiple-angles-lora.safetensors",
+          },
+        ],
+      }),
+    ).toEqual(["QI25", "LV4", "MA"]);
+    const sdxl = { base_model_folded: "SDXL 1.0", kind: "checkpoint" };
+    expect(
+      tiles({
+        ...BARE,
+        models: [
+          {
+            ...sdxl,
+            name: "sd xl base 1.0",
+            title: "Stable Diffusion XL 1.0 Base",
+            filename: "sd_xl_base_1.0.safetensors",
+          },
+          {
+            ...sdxl,
+            name: "sd xl refiner 1.0",
+            title: "Stable Diffusion XL 1.0 Refiner",
+            filename: "sd_xl_refiner_1.0.safetensors",
+          },
+        ],
+      }),
+    ).toEqual(["BA", "RE"]);
+  });
+
   it("counts every loader of a model the strip left off in its +N", () => {
     const wrapper = mountCard({
       ...BARE,
