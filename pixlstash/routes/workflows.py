@@ -8247,6 +8247,7 @@ def create_router(server) -> APIRouter:
         bindings: list | None,
         object_info: dict | None,
         filled: dict[str, int] | None = None,
+        trial: bool = False,
     ) -> list[dict]:
         """Swap ComfyUI-PixlStash nodes into *graph* for opening in ComfyUI.
 
@@ -8268,6 +8269,9 @@ def create_router(server) -> APIRouter:
         held for ComfyUI filled itself (``POST /workflows/run/opening``):
         that picture is the one loaded there, over a pin the run's own pick
         took the place of.
+
+        *trial* swaps only to see which nodes would be (:func:`_shelf_only`),
+        so a stand-in names the shelf: a read must not make its id.
         """
         if not object_info:
             return []
@@ -8301,7 +8305,7 @@ def create_router(server) -> APIRouter:
             else None,
             library_uuid=_library_uuid(),
             checkpoint_id=_shelf_checkpoint(hub) if by_row else None,
-            shelf_uuid=shelf_uuid(hub) if by_row else None,
+            shelf_uuid=("trial" if trial else shelf_uuid(hub)) if by_row else None,
             controlnet_digest=_shelf_digest(hub, FILE_CONTROLNET),
             upscaler_digest=_shelf_digest(hub, FILE_UPSCALER),
         )
@@ -8347,7 +8351,9 @@ def create_router(server) -> APIRouter:
             for node_id, node in graph.items()
             if not (isinstance(node, dict) and node.get("class_type") == "LoadImage")
         }
-        swapped = _with_pack_nodes(request, workflow_id, trial, bindings, object_info)
+        swapped = _with_pack_nodes(
+            request, workflow_id, trial, bindings, object_info, trial=True
+        )
         return sorted(
             {name for swap in swapped for name in missing.get(swap["node_id"], ())}
         )
