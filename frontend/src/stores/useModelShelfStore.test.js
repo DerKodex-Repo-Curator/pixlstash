@@ -3333,6 +3333,38 @@ describe("sets from pictures are hidden, never deleted", () => {
     expect([...store.selectedSetIds]).toEqual([8]);
   });
 
+  it("narrows the hand-made cards by name, and only the grid's", async () => {
+    const store = shelfWithASet([
+      {
+        id: 7,
+        name: "Seven Up",
+        declined: [],
+        members: [member(checkpoint, "a".repeat(64))],
+      },
+      {
+        id: 8,
+        name: "eight",
+        declined: [],
+        members: [member(lora, "b".repeat(64))],
+      },
+    ]);
+    store.setView({ groupBy: "workflow_set" });
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    const drawn = () => store.handMadeGroups.map((group) => group.set.id);
+
+    // By a member's filename: only set 8 holds `style.st`.
+    store.setFilters({ name: "sTyLe.st" });
+    expect(drawn()).toEqual([8]);
+    // By the set's own name.
+    store.setFilters({ name: "seven" });
+    expect(drawn()).toEqual([7]);
+    // The rail and the set chooser still offer every set.
+    expect(store.shownHandMadeSets.map((set) => set.id)).toEqual([7, 8]);
+    store.setFilters({ name: "" });
+    expect(drawn()).toEqual([7, 8]);
+  });
+
   it("hides a set, remembers it, and draws it again on request", async () => {
     const store = shelfWithASet();
     await store.fetchRows();

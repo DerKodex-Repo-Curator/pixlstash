@@ -5361,9 +5361,9 @@ describe("the two views of the shelf", () => {
     // offers the SAME doors as the buttons it replaces. Lose either and the
     // bar silently stops collapsing.
     const wrapper = await mountShelf([adapter()]);
-    expect(wrapper.find(".shelf-title").classes()).toContain("shelf-fold-1070");
+    expect(wrapper.find(".shelf-title").classes()).toContain("shelf-fold-1262");
     expect(wrapper.find(".shelf-sub--ingap").classes()).toContain(
-      "shelf-fold-1070",
+      "shelf-fold-1262",
     );
     const folded = wrapper
       .findAll(".shelf-toolbar button")

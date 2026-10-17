@@ -4274,10 +4274,10 @@ follow, so a shared control mounted here degrades by the same scoped rules.
 Nothing queries `toolbar` on this bar (dropping `UndoControl` took the one
 control that did); `shelfbar` carries the bar's own three-rung ladder, measured
 and recorded as **Amendment #6** in
-`docs/design/toolbar-responsive-decisions.md`: the full bar wants 1071px. A
-rung 0 sits above it for the name field, which is drawn only at **≥1263px**
-(the full bar plus the field and one gap) and is the first thing to go. At
-**≤1070px** the title and the count go (both report, neither controls), at
+`docs/design/toolbar-responsive-decisions.md`: the full bar wants 1071px, and
+1263px with the name field (180px and a gap). At **≤1262px** the title and the
+count go (both report, neither controls), at **≤1031px** the name field goes
+(Show's own field is always there), at
 **≤840px** `Group` and `Sort` drop their value and keep glyph + chevron (the
 value stays in `title` and in the accessible name), and at **≤680px** `Add ▾`
 and `Model folders` fold into a `TbOverflowMenu` whose rows are the same
@@ -4698,12 +4698,15 @@ Above the kinds sits the **name field** (`NameFilterField.vue`, shared with the
 Workflows menu), writing `filters.name`. It narrows `visibleRows` per file with
 the Models rail picker's `rowMatches` (the name the row shows, or its filename,
 case-blind), before stacks are folded, and counts as one active filter. Like
-`duplicatesOnly` it is not restored on startup. The toolbar holds a second copy
-bound to the same value, ahead of Group, as **rung 0** of the bar's ladder: it
-is drawn only where the full bar plus the field fits, and is absent on the set
-grid, which Show does not narrow. The app's `F` key focuses the toolbar copy,
-or opens Show on the menu's copy when the toolbar's is folded, and does nothing
-on the set grid.
+`duplicatesOnly` it is not restored on startup, nor written to storage. On the
+set grid it narrows the evidence cards as every Show filter does (a card stays
+while any member is shown), and it is the one filter that also narrows the
+hand-made cards: `handMadeGroups` keeps a set whose own name or one of whose
+models matches, while `shownHandMadeSets` (the rail, the set chooser) is built
+from the unnarrowed `allHandMadeGroups`. The toolbar holds a second copy bound
+to the same value, ahead of Group, on both axes; it folds after the title and
+the count (rung 1b of the ladder). The app's `F` key focuses the toolbar copy,
+or opens Show on the menu's copy when the toolbar's is folded.
 
 The menu hangs from the **end** of its button, so the submenu opens on the
 root's **left** (`flex-direction: row-reverse`; DOM order is still root, then

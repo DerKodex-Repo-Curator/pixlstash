@@ -2255,7 +2255,8 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
   function setLabel(set) {
     return handMadeName(withShelfNames(set));
   }
-  const handMadeGroups = computed(() =>
+  /** Every hand-made set as a card, before the name filter. */
+  const allHandMadeGroups = computed(() =>
     handMadeSets.value
       .map((set) => {
         const models = (set.members ?? []).filter(
@@ -2283,12 +2284,32 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
   );
 
   /**
+   * The hand-made cards the set grid draws: narrowed by the name filter alone,
+   * to the sets whose own name or one of whose models' names matches. The
+   * other `Show` filters leave these cards alone, as they always have; the name
+   * does not, or typing one would narrow every card on the grid but these.
+   */
+  const handMadeGroups = computed(() => {
+    const needle = filters.name.trim().toLowerCase();
+    if (!needle) return allHandMadeGroups.value;
+    const named = new Set(
+      rows.value.filter((row) => rowMatches(row, needle)).map((row) => row.id),
+    );
+    return allHandMadeGroups.value.filter(
+      (group) =>
+        setLabel(group.set).toLowerCase().includes(needle) ||
+        group.models.some((model) => named.has(model.id)),
+    );
+  });
+
+  /**
    * The hand-made sets a surface other than the grid offers or names (the
    * rail, the set chooser). Hidden is a filter on the library (#1869), so a
-   * set hidden here is left out of those too, until "Show them" draws it.
+   * set hidden here is left out of those too, until "Show them" draws it. The
+   * name filter is not: it narrows the grid, not what a chooser offers.
    */
   const shownHandMadeSets = computed(() =>
-    handMadeGroups.value.map((group) => group.set),
+    allHandMadeGroups.value.map((group) => group.set),
   );
 
   /**
