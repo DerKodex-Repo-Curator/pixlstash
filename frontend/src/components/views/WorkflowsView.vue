@@ -69,16 +69,6 @@
         />
       </v-menu>
 
-      <!-- The name filter's toolbar copy, bound to the same text as the field
-           at the top of Filters, which is always there when this one folds. -->
-      <NameFilterField
-        ref="nameFieldRef"
-        class="wfv-name-bar"
-        :model-value="store.filters.name"
-        label="Filter workflows by name"
-        @update:model-value="(name) => store.setFilters({ name })"
-      />
-
       <!-- "Add" is today's workflow import, unchanged: the file lands through
            `POST /comfyui/workflows/import`, the route the retired shelf's own
            drop target posted to. The gesture went with the shelf; this screen
@@ -94,6 +84,16 @@
         tabindex="-1"
         aria-hidden="true"
         @change="filesChosen"
+      />
+
+      <!-- The name filter's toolbar copy, bound to the same text as the field
+           at the top of Filters, which is always there when this one folds. -->
+      <NameFilterField
+        ref="nameFieldRef"
+        class="wfv-name-bar"
+        :model-value="store.filters.name"
+        label="Filter workflows by name"
+        @update:model-value="(name) => store.setFilters({ name })"
       />
 
       <span class="wfv-spacer"></span>

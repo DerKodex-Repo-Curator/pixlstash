@@ -2048,7 +2048,7 @@ filtered by.
   (`All` for Type, `Any` for the rest, counting every card) and has no Clear
   of its own. Above the kinds sits a **name field** (`NameFilterField.vue`,
   `filters.name`, a case-blind substring of the card's name, chipped as
-  *Name*); the toolbar carries a second copy of it after Filters, bound to the
+  *Name*); the toolbar carries a second copy of it after *Add…*, bound to the
   same value and folded by a container query when the bar is narrow. The
   app's `F` key (`searchStore.searchFocusToken`) focuses the toolbar copy, or
   opens Filters on the menu's copy when the toolbar's is folded. Keys follow
