@@ -13,6 +13,7 @@ from typing import Any
 
 from pixlstash.pixl_logging import get_logger
 from pixlstash.services.comfyui_recipe_service import model_filename_fields
+from pixlstash.services.comfyui_ui_graph import _WIDGET_OVERRIDES, inline_subgraphs
 from pixlstash.services.workflow_hash import (
     IMAGE_EXTENSIONS,
     MODEL_EXTENSIONS,
@@ -151,7 +152,21 @@ def _iter_ui_graphs(workflow: dict):
     ComfyUI v0.4+ stores reusable subgraph definitions under
     ``workflow["definitions"]["subgraphs"]``, each of which has its own
     ``nodes`` and ``links`` arrays with the same schema as the top-level graph.
+
+    **Read with the instances expanded** (``inline_subgraphs``), so a widget
+    inside a subgraph reads the value its instance supplies rather than the
+    definition's own, which is only a default: a template's loader keeps the
+    file it shipped with there while the instance names the one that runs.
+    Where expanding refuses, the definitions are read as stored, and said.
     """
+    flat, problems = inline_subgraphs(workflow)
+    if flat is not None:
+        yield flat
+        return
+    logger.info(
+        "Subgraphs read as defined, not as their instances set them: %s",
+        "; ".join(problems),
+    )
     yield workflow
     for sg in (workflow.get("definitions") or {}).get("subgraphs") or []:
         if isinstance(sg, dict) and "nodes" in sg:
@@ -165,8 +180,12 @@ def _get_widget_value_ui(node: dict, input_name: str) -> Any:
     in the order they appear in ``node["inputs"]``, skipping non-widget inputs.
     Even when a widget input is overridden by an external link at runtime,
     the ``widgets_values`` slot still holds the last static/default value,
-    which is useful for embedding purposes.
+    which is useful for embedding purposes. A value an expanded subgraph's
+    instance supplies (``_iter_ui_graphs``) wins over that slot.
     """
+    overrides = node.get(_WIDGET_OVERRIDES) or {}
+    if input_name in overrides:
+        return overrides[input_name]
     widgets_values = node.get("widgets_values") or []
     widget_index = 0
     for inp in node.get("inputs") or []:

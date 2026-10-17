@@ -231,6 +231,79 @@ def test_loaded_model_widgets_reads_a_numeric_shelf_id() -> None:
     assert loaded_model_widgets(api) == []
 
 
+def test_a_subgraph_loader_reads_the_file_its_instance_names() -> None:
+    """The instance's value, not the definition's default.
+
+    ComfyUI's Krea 2 templates keep their loaders in a subgraph whose inner
+    ``UNETLoader`` still holds the file the template shipped with, wired to a
+    subgraph input; the instance's own ``widgets_values`` holds the file that
+    runs. Read off the definition, the card named a file the shelf did not
+    have, and the people loader said the base model was not known.
+    """
+    definition_id = "b0e5ca93-2731-42b9-8e0a-d28ea851ff81"
+    unet = {"name": "unet_name", "widget": {"name": "unet_name"}, "link": 1}
+    lora = {"name": "lora_name", "widget": {"name": "lora_name"}, "link": 2}
+    workflow = {
+        "nodes": [
+            {
+                "id": 30,
+                "type": definition_id,
+                "mode": 0,
+                "inputs": [
+                    {"name": "unet_name_1", "widget": {"name": "unet_name_1"}},
+                    {"name": "lora_name_1", "widget": {"name": "lora_name_1"}},
+                ],
+                "widgets_values": ["Mixed_Case_Pick.safetensors", "own.safetensors"],
+            }
+        ],
+        "links": [],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": definition_id,
+                    "inputs": [{"name": "unet_name_1"}, {"name": "lora_name_1"}],
+                    "nodes": [
+                        {
+                            "id": 10,
+                            "type": "UNETLoader",
+                            "mode": 0,
+                            "inputs": [unet],
+                            "widgets_values": ["template.safetensors", "default"],
+                        },
+                        {
+                            "id": 15,
+                            "type": "LoraLoaderModelOnly",
+                            "mode": 0,
+                            "inputs": [lora],
+                            "widgets_values": ["template_lora.safetensors", 1],
+                        },
+                    ],
+                    "links": [
+                        {"id": 1, "origin_id": -10, "origin_slot": 0},
+                        {"id": 2, "origin_id": -10, "origin_slot": 1},
+                    ],
+                }
+            ]
+        },
+    }
+    for link, (target, slot) in zip(
+        workflow["definitions"]["subgraphs"][0]["links"], ((10, 0), (15, 0))
+    ):
+        link.update(target_id=target, target_slot=slot)
+
+    assert loaded_model_widgets(workflow) == [
+        ("unet_name", "Mixed_Case_Pick.safetensors"),
+        ("lora_name", "own.safetensors"),
+    ]
+    info = extract_generation_info(workflow)
+    assert info["models"] == ["Mixed_Case_Pick.safetensors"]
+    assert info["loras"] == ["own.safetensors"]
+
+    # A bypassed instance loads nothing, whatever its definition holds.
+    workflow["nodes"][0]["mode"] = 4
+    assert loaded_model_widgets(workflow) == []
+
+
 @pytest.mark.parametrize("workflow_file", _workflow_files(), ids=lambda p: p.name)
 def test_extract_comfy_workflow_info(workflow_file: pathlib.Path) -> None:
     """Smoke test: top-level extraction runs without errors and returns expected keys."""
