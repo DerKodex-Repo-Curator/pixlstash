@@ -21997,6 +21997,26 @@ def test_the_people_a_workflow_offers_are_those_with_a_lora_for_its_base_model(
         [],
         1,
     )
+    assert r.json()["family_label"] is None
+
+    # Identified, the checkpoint's family is named as a person calls it: what
+    # the ComfyUI adapter loaders fill their base_model in with.
+    with env.server.hub.transaction() as conn:
+        conn.execute(
+            "UPDATE model SET base_model = 'SDXL 1.0' WHERE filename = ?",
+            (_SHELF_FILENAME,),
+        )
+    try:
+        r = env.owner.get(f"{API}/workflows/{env.manual}/people")
+        assert r.status_code == 200, r.text
+        assert (r.json()["family"], r.json()["family_label"]) == ("sdxl", "SDXL")
+        assert [p["id"] for p in r.json()["people"]] == [env.env.character_id]
+    finally:
+        with env.server.hub.transaction() as conn:
+            conn.execute(
+                "UPDATE model SET base_model = NULL WHERE filename = ?",
+                (_SHELF_FILENAME,),
+            )
 
 
 # --- the ComfyUI round trip: the people loader and the layout (#1852) -------

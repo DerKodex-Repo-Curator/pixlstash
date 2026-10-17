@@ -303,7 +303,7 @@ from pixlstash.utils.adapter_header import (
     FILE_VAE,
 )
 from pixlstash.utils.image_processing.image_utils import ImageUtils
-from pixlstash.utils.known_base_models import family_of, modality_of
+from pixlstash.utils.known_base_models import family_label, family_of, modality_of
 from pixlstash.utils.comfyui_utilities import NotAWorkflowError, check_comfy_workflow
 from pixlstash.hub.workflow_origin import FILE_ORIGIN, INBOX_ORIGIN
 from pixlstash.utils.sql_chunking import chunked
@@ -2020,6 +2020,14 @@ class WorkflowPeople(BaseModel):
     workflow_id: str
     family: str | None = Field(
         None, description="The base-model family of the workflow's checkpoint."
+    )
+    family_label: str | None = Field(
+        None,
+        description=(
+            "What a person calls `family` (`Krea 2` for `krea2`): what the "
+            "adapter loaders in ComfyUI fill their `base_model` in with. Null "
+            "where `family` is."
+        ),
     )
     people: list[FitPerson] = Field(default_factory=list)
     clash: int = 0
@@ -8042,11 +8050,11 @@ def create_router(server) -> APIRouter:
         if figure is None:
             return None
         checkpoint = next(iter(_base_model_slots(figure.models)), None)
-        return people_who_fit(
-            hub,
-            server.vault,
-            checkpoint.base_model_family if checkpoint is not None else None,
-        )
+        family = checkpoint.base_model_family if checkpoint is not None else None
+        return {
+            **people_who_fit(hub, server.vault, family),
+            "family_label": family_label(family),
+        }
 
     def _people_loader_place(
         workflow_id: str, graph: dict, object_info: dict | None

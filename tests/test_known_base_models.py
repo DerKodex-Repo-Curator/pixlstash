@@ -10,9 +10,12 @@ import re
 
 from pixlstash.utils.known_base_models import (
     COMPANION_LAYOUTS,
+    FAMILY_LABELS,
     KNOWN_BASE_MODELS,
     _norm,
     completions,
+    family_named,
+    family_of,
     fold,
     suggest,
 )
@@ -122,3 +125,18 @@ def test_companion_layouts_join_the_two_family_vocabularies():
         assert kinds and set(kinds) <= {"vae", "text_encoder"}, family
         for layout in set().union(*kinds.values()):
             assert re.fullmatch(r"vae_\d+ch|clip_[lhg]|(um)?t5_xxl", layout), layout
+
+
+def test_every_family_has_one_label_that_names_it_back():
+    """A family with no label is a dropdown entry nobody can read, and a label
+    some other family's alias folds to would narrow to the wrong one."""
+    families = {info["family"] for info in KNOWN_BASE_MODELS.values()}
+    assert set(FAMILY_LABELS) == families
+    assert len({_norm(label) for label in FAMILY_LABELS.values()}) == len(families)
+    for family, label in FAMILY_LABELS.items():
+        assert family_of(label) in (None, family), label
+        assert family_named(label) == family_named(label.upper()) == family
+        assert family_named(family) == family
+    for name, info in KNOWN_BASE_MODELS.items():
+        assert family_named(name) == info["family"], name
+    assert family_named("not a family") is None
