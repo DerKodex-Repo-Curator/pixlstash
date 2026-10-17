@@ -75,6 +75,7 @@ from pixlstash.utils.adapter_header import (
     FILE_ENGINE,
     FILE_TEXT_ENCODER,
     FILE_UNKNOWN,
+    FILE_UPSCALER,
     FILE_VAE,
 )
 from pixlstash.utils.known_base_models import (
@@ -842,10 +843,17 @@ SUPPORT_FILE_KINDS = (FILE_VAE, FILE_TEXT_ENCODER)
 # Kinds that never make a support file needed. An adapter runs on a base model
 # and needs whatever that base needs, so counting it would keep a VAE "in use"
 # by a LoRA whose checkpoint is the thing being deleted. A ControlNet is the
-# same: it conditions a base model and loads no VAE of its own. `unknown` is NOT
+# same: it conditions a base model and loads no VAE of its own, and so is an
+# upscaler, which works on pixels and loads nothing at all. `unknown` is NOT
 # here: it may be a base model we failed to recognise, and keeping a file is the
 # safe answer to not knowing.
-_NOT_CONSUMERS = (*SUPPORT_FILE_KINDS, FILE_ADAPTER, FILE_CONTROLNET, FILE_ENGINE)
+_NOT_CONSUMERS = (
+    *SUPPORT_FILE_KINDS,
+    FILE_ADAPTER,
+    FILE_CONTROLNET,
+    FILE_UPSCALER,
+    FILE_ENGINE,
+)
 
 
 def resolve_recipe_models(
@@ -1872,8 +1880,9 @@ _SET_KIND_RANK = {
     FILE_VAE: 2,
     FILE_TEXT_ENCODER: 3,
     FILE_CONTROLNET: 4,
-    FILE_ADAPTER: 5,
-    FILE_ENGINE: 6,
+    FILE_UPSCALER: 5,
+    FILE_ADAPTER: 6,
+    FILE_ENGINE: 7,
 }
 
 
@@ -2166,6 +2175,7 @@ FILE_KINDS = (
     FILE_VAE,
     FILE_TEXT_ENCODER,
     FILE_CONTROLNET,
+    FILE_UPSCALER,
     FILE_UNKNOWN,
 )
 

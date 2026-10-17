@@ -1095,6 +1095,22 @@ class TestFilesWithNoReadableHeader:
         (row,) = models(hub).values()
         assert (row["file_kind"], row["quant"]) == ("vae", "q8_0")
 
+    def test_a_pth_in_upscale_models_is_a_hashed_upscaler(self, hub, scanner, tmp_path):
+        # Nearly every ESRGAN-family upscaler ships as a `.pth`. Its folder is
+        # the only evidence of what it is, and its digest is what the pack's
+        # Upscale Model Loader fetches it by.
+        folder = tmp_path / "upscale_models"
+        folder.mkdir()
+        (folder / "4xNomos8kSC.pth").write_bytes(b"PK\x03\x04" + b"\0" * 64)
+        folder_id = register_folder(hub, folder)
+
+        result = scanner.scan_folder(folder_id, str(folder), "user")
+
+        assert result.unreadable == 0
+        (row,) = models(hub).values()
+        assert (row["filename"], row["file_kind"]) == ("4xNomos8kSC.pth", "upscaler")
+        assert row["sha256"] is not None
+
     @pytest.mark.parametrize("name", ["unet", "diffusion_models"])
     def test_a_gguf_in_a_diffusion_model_folder_is_a_checkpoint(
         self, hub, scanner, tmp_path, name

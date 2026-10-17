@@ -20911,6 +20911,140 @@ def test_a_run_loads_a_controlnet_comfyui_lacks_off_the_shelf(controlnets):
     assert env.submitted[-1]["graph"]["9"]["class_type"] == "ControlNetLoader"
 
 
+_UPSCALER_FILENAME = "4xNomos8kSC.pth"
+_UPSCALER_DIGEST = _h("upscaler-nomos")
+
+# A ComfyUI with the pack's upscale model loader, listing some other upscaler
+# than the one the graph names.
+UPSCALER_OBJECT_INFO = {
+    "UpscaleModelLoader": {
+        "input": {"required": {"model_name": [["RealESRGAN_x2.pth"], {}]}},
+        "output": ["UPSCALE_MODEL"],
+    },
+    "ImageUpscaleWithModel": {
+        "input": {
+            "required": {
+                "upscale_model": ["UPSCALE_MODEL", {}],
+                "image": ["IMAGE", {}],
+            }
+        },
+        "output": ["IMAGE"],
+    },
+    "PixlStashUpscaleModelLoader": {
+        "input": {"required": {"upscale_model_sha256": ["STRING", {"default": ""}]}},
+        "output": ["UPSCALE_MODEL"],
+    },
+}
+
+
+@pytest.fixture
+def upscalers(with_pack):
+    """``with_pack``, a workflow upscaling with a model the shelf holds a copy
+    of (``workflow``), and the ComfyUI it runs on (``info``)."""
+    env = with_pack
+    info = json.loads(
+        json.dumps({**CHAIN_OBJECT_INFO, **PACK_OBJECT_INFO, **UPSCALER_OBJECT_INFO})
+    )
+    env.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url, **_: (info, None)
+    )
+    hub = env.server.hub
+    with hub.transaction() as conn:
+        model_id = conn.execute(
+            "INSERT INTO model (file_kind, filename, sha256, provenance) "
+            "VALUES ('upscaler', ?, ?, 'scanned')",
+            (_UPSCALER_FILENAME, _UPSCALER_DIGEST),
+        ).lastrowid
+        folder_id = conn.execute(
+            "SELECT id FROM model_folder WHERE path = '/models/test-swap'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO model_file (model_id, model_folder_id, relpath, state) "
+            "VALUES (?, ?, ?, 'present')",
+            (model_id, folder_id, _UPSCALER_FILENAME),
+        )
+    graph = json.loads(json.dumps(CHAIN_DOCUMENT))
+    graph["9"] = {
+        "class_type": "UpscaleModelLoader",
+        "inputs": {"model_name": _UPSCALER_FILENAME},
+    }
+    graph["10"] = {
+        "class_type": "ImageUpscaleWithModel",
+        "inputs": {"upscale_model": ["9", 0], "image": ["3", 0]},
+    }
+    graph["4"]["inputs"]["images"] = ["10", 0]
+    workflow = workflows_routes.store_manual_workflow(hub, "Upscale", graph, "import")
+    try:
+        yield SimpleNamespace(
+            **{**vars(env), "workflow": workflow, "info": info, "model": model_id}
+        )
+    finally:
+        with hub.transaction() as conn:
+            conn.execute("DELETE FROM model_file WHERE model_id = ?", (model_id,))
+            conn.execute("DELETE FROM model WHERE id = ?", (model_id,))
+
+
+def test_an_upscaler_on_the_shelf_opens_in_the_pack_loader(upscalers):
+    """Open in ComfyUI loads the upscaler by its digest, as it does a
+    ControlNet. Wrong if node 9 stays a Load Upscale Model, or goes in on a
+    file the shelf has no copy of."""
+    env = upscalers
+    graph = _opened(env, env.workflow, pixlstash_nodes="true")["workflow"]
+    assert graph["9"] == {
+        "class_type": "PixlStashUpscaleModelLoader",
+        "inputs": {"upscale_model_sha256": _UPSCALER_DIGEST},
+    }
+    assert graph["10"]["inputs"]["upscale_model"] == ["9", 0]
+    assert _opened(env, env.workflow)["workflow"]["9"]["class_type"] == (
+        "UpscaleModelLoader"
+    )
+
+    with env.server.hub.transaction() as conn:
+        conn.execute(
+            "UPDATE model_file SET state = 'missing' WHERE model_id = ?", (env.model,)
+        )
+    graph = _opened(env, env.workflow, pixlstash_nodes="true")["workflow"]
+    assert graph["9"]["class_type"] == "UpscaleModelLoader"
+
+
+def test_a_run_loads_an_upscaler_comfyui_lacks_off_the_shelf(upscalers):
+    """ComfyUI does not list the graph's upscaler and the shelf holds it: a run
+    loads it through the pack's loader, so the pre-flight does not call it
+    missing. Wrong if `missing_models` names it, or the run submits the stock
+    loader."""
+    env = upscalers
+
+    def missing():
+        payload = _preflight(env.owner, workflow_id=env.workflow)
+        return [
+            model
+            for group in payload["groups"]
+            for reason in group["reasons"]
+            if reason["code"] == "missing_models"
+            for model in reason["models"]
+        ]
+
+    assert missing() == []
+    r = env.owner.post(f"{API}/workflows/run", json={"workflow_id": env.workflow})
+    assert r.status_code == 200, r.text
+    graph = env.submitted[-1]["graph"]
+    assert graph["9"] == {
+        "class_type": "PixlStashUpscaleModelLoader",
+        "inputs": {"upscale_model_sha256": _UPSCALER_DIGEST},
+    }
+    assert graph["10"]["inputs"]["upscale_model"] == ["9", 0]
+
+    pack_loader = env.info.pop("PixlStashUpscaleModelLoader")
+    assert missing() == [{"file": _UPSCALER_FILENAME, "folder": "upscale_models"}]
+    env.info["PixlStashUpscaleModelLoader"] = pack_loader
+
+    listed = env.info["UpscaleModelLoader"]["input"]["required"]["model_name"]
+    listed[0] = [_UPSCALER_FILENAME]
+    r = env.owner.post(f"{API}/workflows/run", json={"workflow_id": env.workflow})
+    assert r.status_code == 200, r.text
+    assert env.submitted[-1]["graph"]["9"]["class_type"] == "UpscaleModelLoader"
+
+
 def test_a_pack_from_before_the_shelf_widget_says_restart_comfyui(id_loaders):
     """A shelf checkpoint ComfyUI lacks, on a running pack whose loader has no
     `shelf` widget (#1923): the pre-flight says the pack is out of date, not

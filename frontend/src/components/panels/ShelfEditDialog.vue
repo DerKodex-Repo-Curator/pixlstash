@@ -190,6 +190,7 @@ const FILE_KINDS = [
   { value: "vae", label: "VAE" },
   { value: "text_encoder", label: "Text encoder" },
   { value: "controlnet", label: "ControlNet" },
+  { value: "upscaler", label: "Upscaler" },
   { value: "unknown", label: "Unclassified" },
 ];
 

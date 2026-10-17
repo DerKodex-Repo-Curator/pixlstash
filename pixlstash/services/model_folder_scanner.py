@@ -97,7 +97,11 @@ STATE_REMOVED = "removed"
 # same fields a `.safetensors` with an unreadable header would have, plus the
 # one its name can answer. Parsing the GGUF header is a real subsystem and
 # deliberately not built: the name is enough to shelve and badge the file.
-SHELF_MODEL_SUFFIXES = (".safetensors", ".gguf")
+#
+# ``.pth`` is the same: almost every image upscaler ships as one, and its kind
+# comes from the folder it sits in (``upscale_models/``). Its bytes are hashed,
+# never unpickled.
+SHELF_MODEL_SUFFIXES = (".safetensors", ".gguf", ".pth")
 
 # The one suffix a safetensors header can be read from. Everything else on the
 # shelf is described from its filename alone.
@@ -711,8 +715,8 @@ class ModelFolderScanner:
     ) -> Optional[_FileRecord]:
         """Return the row for a model file whose header this build cannot read.
 
-        A ``.gguf`` today, and any future suffix added to ``SHELF_MODEL_SUFFIXES``
-        without a reader. Everything the header would have answered is left
+        A ``.gguf`` or a ``.pth`` today, and any future suffix added to
+        ``SHELF_MODEL_SUFFIXES`` without a reader. Everything the header would have answered is left
         NULL - which is the same thing a ``.safetensors`` carrying no metadata
         records, and reads on the shelf as "the file did not say" rather than
         as a value.

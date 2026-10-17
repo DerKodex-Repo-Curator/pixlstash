@@ -569,7 +569,15 @@ export const SET_SLOTS = [
     hint: "upscalers, ControlNets",
     add: "Add",
     noun: "other models",
-    kinds: ["unknown", "checkpoint", "vae", "text_encoder", "controlnet", "adapter"],
+    kinds: [
+      "unknown",
+      "checkpoint",
+      "vae",
+      "text_encoder",
+      "controlnet",
+      "upscaler",
+      "adapter",
+    ],
   },
 ];
 

@@ -563,6 +563,12 @@ def test_checkpoint_cannot_be_requested_from_the_adapter_block(shelf_env):
     assert "GET /checkpoints" in r.text
 
 
+def test_the_adapter_block_serves_upscalers(shelf_env):
+    # The pack's Upscale Model Loader browses and fetches them through it.
+    r = shelf_env.owner.get(f"{API}/adapters", params={"file_kind": "upscaler"})
+    assert r.status_code == 200, r.text
+
+
 def test_unhashed_checkpoint_is_listed_and_addressed_by_id(shelf_env):
     """A checkpoint registers with ``sha256`` NULL. It must still be listable,
     and ``model.id`` (AUTOINCREMENT, never reissued) is its only identifier."""

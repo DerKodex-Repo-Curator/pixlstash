@@ -33,6 +33,7 @@ from pixlstash.utils.adapter_header import (
     FILE_CHECKPOINT,
     FILE_CONTROLNET,
     FILE_UNKNOWN,
+    FILE_UPSCALER,
     has_controlnet_markers,
     read_safetensors_header,
     role_from_folder,
@@ -66,7 +67,7 @@ CURRENT_SCHEMA_VERSION = 2
 # reasoning the model-shelf tables were amended into v2 for. ``user_version`` is
 # free (nothing in PixlStash has ever written it), costs no DDL, and an older
 # build ignores it entirely.
-CURRENT_DATA_VERSION = 17
+CURRENT_DATA_VERSION = 18
 
 # `model_file.state` for a copy the last scan actually looked at, spelled out
 # rather than imported from `services.model_folder_scanner`. That module imports
@@ -2072,8 +2073,9 @@ def _backfill_component_roles(
     """Re-file models whose role folder was not yet read when they were shelved.
 
     Written for VAEs and text encoders (data version 1); data version 4 runs it
-    again for the ``unet/`` and ``diffusion_models/`` folders, and data version
-    16 for ``controlnet/``, each restricted with ``only_role`` so it cannot
+    again for the ``unet/`` and ``diffusion_models/`` folders, data version 16
+    for ``controlnet/`` and data version 18 for ``upscale_models/``, each
+    restricted with ``only_role`` so it cannot
     touch the folders an earlier pass already did.
 
     Every row on an existing shelf was classified by tensor markers and a
@@ -2531,6 +2533,12 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
                     # A ControlNet is told by its tensors too, wherever it
                     # sits: one under `diffusion_models/` was a `checkpoint`.
                     _refile_controlnets_by_tensors(conn)
+                if data_version < 18:
+                    # `upscale_models/` started naming `upscaler`, so the
+                    # ComfyUI-PixlStash Upscale Model Loader can fetch one by
+                    # digest. Only its `.safetensors` were shelved, as
+                    # `unknown`; the `.pth` ones arrive with the next scan.
+                    _backfill_component_roles(conn, only_role=FILE_UPSCALER)
                 if data_version < CURRENT_DATA_VERSION:
                     # No placeholder: PRAGMA takes no parameters, and the value
                     # is this module's own constant, nothing from outside.

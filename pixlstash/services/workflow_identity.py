@@ -169,8 +169,11 @@ LORA = "lora"
 # Only these reach a stored document: API graphs have no Reroute or Note, and
 # the UI reduction drops them before anything is stored.
 _PLUMBING_CLASSES = frozenset({"PreviewImage"})
+# The pack's upscale loader is the stock one's stand-in (`_CANONICAL_LOADERS`),
+# so it goes with the stage too.
 _UPSCALE_CLASS_RE = re.compile(
-    r"^(UpscaleModelLoader|ImageUpscaleWithModel|ImageScale|LatentUpscale|UltimateSDUpscale)"
+    r"^(UpscaleModelLoader|PixlStashUpscaleModelLoader|ImageUpscaleWithModel"
+    r"|ImageScale|LatentUpscale|UltimateSDUpscale)"
 )
 _LATENT_UPSCALE_RE = re.compile(r"^LatentUpscale")
 _FACE_DETAILER_CLASS_RE = re.compile(
@@ -250,6 +253,7 @@ _CANONICAL_LOADERS = {
     "PixlStashCLIPLoader": "CLIPLoader",
     "PixlStashVAELoader": "VAELoader",
     "PixlStashControlNetLoader": "ControlNetLoader",
+    "PixlStashUpscaleModelLoader": "UpscaleModelLoader",
 }
 
 # What a removed node's output stands for when an edge is re-wired through it:

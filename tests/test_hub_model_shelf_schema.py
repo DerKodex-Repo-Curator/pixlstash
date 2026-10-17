@@ -953,6 +953,25 @@ class TestComponentRoleBackfill:
         ]
         assert hub.execute("PRAGMA user_version").fetchone()[0] == CURRENT_DATA_VERSION
 
+    def test_a_data_v17_hub_refiles_what_sits_in_upscale_models(self, hub):
+        # `upscale_models/` came to name `upscaler` (data version 18). Only a
+        # `.safetensors` one was shelved before, as `unknown`; one elsewhere
+        # stays as it was.
+        apply_migrations(hub)
+        hub.execute("PRAGMA user_version = 17")
+        folder_id = add_folder(hub, "/models")
+        upscaler = add_model(hub, file_kind="unknown", sha256="x", kind=None)
+        add_file(hub, upscaler, folder_id, "upscale_models/4x_dat.safetensors")
+        elsewhere = add_model(hub, file_kind="unknown", sha256="y", kind=None)
+        add_file(hub, elsewhere, folder_id, "misc/4x_dat_copy.safetensors")
+        hub.commit()
+
+        apply_migrations(hub)
+
+        kinds = dict(hub.execute("SELECT id, file_kind FROM model").fetchall())
+        assert [kinds[upscaler], kinds[elsewhere]] == ["upscaler", "unknown"]
+        assert hub.execute("PRAGMA user_version").fetchone()[0] == CURRENT_DATA_VERSION
+
     def test_a_data_v16_hub_refiles_a_controlnet_by_its_tensors(self, hub, tmp_path):
         # Data version 17: a ControlNet a launcher filed under
         # `diffusion_models/` was a `checkpoint`, and a scan never rewrites

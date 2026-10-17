@@ -149,6 +149,7 @@ from pixlstash.services.comfyui_recipe_service import (
     CHECKPOINT_LOADER_SHELF,
     PIXLSTASH_CHECKPOINT_LOADER,
     PIXLSTASH_CONTROLNET_LOADER,
+    PIXLSTASH_UPSCALE_MODEL_LOADER,
     SWAPPED_CLASSES,
     swap_in_pack_nodes,
     swap_target,
@@ -300,6 +301,7 @@ from pixlstash.utils.adapter_header import (
     FILE_ENGINE,
     FILE_TEXT_ENCODER,
     FILE_UNKNOWN,
+    FILE_UPSCALER,
     FILE_VAE,
 )
 from pixlstash.utils.image_processing.image_utils import ImageUtils
@@ -6950,9 +6952,9 @@ def create_router(server) -> APIRouter:
                         swap["field"],
                     )
                 if not opening:
-                    # Open puts the shelf's loader in on every checkpoint and
-                    # ControlNet it can (`_with_pack_nodes`); a save keeps the
-                    # graph's own.
+                    # Open puts the shelf's loader in on every checkpoint,
+                    # ControlNet and upscaler it can (`_with_pack_nodes`); a
+                    # save keeps the graph's own.
                     _swap_in_shelf_loaders(request, card_key, graph, object_info)
                     # Less a fix's original: a restart would load that one, not
                     # the replacement the row shows.
@@ -8221,13 +8223,14 @@ def create_router(server) -> APIRouter:
         """Swap ComfyUI-PixlStash nodes into *graph* for opening in ComfyUI.
 
         :func:`swap_in_pack_nodes`, each swap only where what it needs is
-        here: a LoRA, a VAE, a CLIP or a ControlNet by digest where the shelf
-        holds a copy of the file for the pack's loader to fetch; a picture by
-        id where the library is known to hold it (:func:`_known_pictures`),
-        else none, for the owner to browse for; a checkpoint or a diffusion
-        model by shelf row where the shelf holds one copy of it and ComfyUI is
-        on this computer, since that loader cannot fetch its file. Nothing is
-        swapped when ComfyUI did not say which nodes it has.
+        here: a LoRA, a VAE, a CLIP, a ControlNet or an upscaler by digest
+        where the shelf holds a copy of the file for the pack's loader to
+        fetch; a picture by id where the library is known to hold it
+        (:func:`_known_pictures`), else none, for the owner to browse for; a
+        checkpoint or a diffusion model by shelf row where the shelf holds one
+        copy of it and ComfyUI is on this computer, since that loader cannot
+        fetch its file. Nothing is swapped when ComfyUI did not say which
+        nodes it has.
 
         Asked of the same graph, it answers the same until the shelf, the
         library, a pin or a file a Load Image names in ComfyUI changes:
@@ -8272,6 +8275,7 @@ def create_router(server) -> APIRouter:
             checkpoint_id=_shelf_checkpoint(hub) if by_row else None,
             shelf_uuid=shelf_uuid(hub) if by_row else None,
             controlnet_digest=_shelf_digest(hub, FILE_CONTROLNET),
+            upscaler_digest=_shelf_digest(hub, FILE_UPSCALER),
         )
         # The VAE and CLIP loaders by digest, as a model fix puts them in: on
         # the same terms (one file the shelf holds, no setting the pack's
@@ -8294,16 +8298,18 @@ def create_router(server) -> APIRouter:
     def _swap_in_shelf_loaders(
         request: Request, card_key: str, graph: dict, object_info: dict
     ) -> list[dict]:
-        """Load each checkpoint and ControlNet this ComfyUI lacks off the shelf.
+        """Load each checkpoint, ControlNet and upscaler this ComfyUI lacks off
+        the shelf.
 
-        For a run: a ``CheckpointLoaderSimple``, ``UNETLoader`` or
-        ``ControlNetLoader`` naming a file ComfyUI does not list becomes the
+        For a run: a ``CheckpointLoaderSimple``, ``UNETLoader``,
+        ``ControlNetLoader`` or ``UpscaleModelLoader`` naming a file ComfyUI
+        does not list becomes the
         pack's loader on the shelf's copy of that file, the swap *Open in
         ComfyUI* makes (:func:`swap_in_pack_nodes`), on the same terms. A
         checkpoint or diffusion model by the shelf's row, only where the shelf
         holds one copy and ComfyUI is on this computer to read it, since that
-        loader cannot fetch its file; a ControlNet by digest, which its loader
-        fetches when it has to. Anywhere else the loader is left as it is, and
+        loader cannot fetch its file; a ControlNet or an upscaler by digest,
+        which its loader fetches when it has to. Anywhere else the loader is left as it is, and
         the pre-flight reports the file missing as before.
         """
         missing = {
@@ -8311,18 +8317,27 @@ def create_router(server) -> APIRouter:
             for item in detect_model_targets(graph, object_info)
             if item
             and item.get("class_type")
-            in ("CheckpointLoaderSimple", "UNETLoader", "ControlNetLoader")
+            in (
+                "CheckpointLoaderSimple",
+                "UNETLoader",
+                "ControlNetLoader",
+                "UpscaleModelLoader",
+            )
         }
         by_row = (
             not {"CheckpointLoaderSimple", "UNETLoader"}.isdisjoint(missing.values())
             and PIXLSTASH_CHECKPOINT_LOADER in object_info
             and _comfyui_is_here(request)
         )
-        by_digest = (
+        controlnet = (
             "ControlNetLoader" in missing.values()
             and PIXLSTASH_CONTROLNET_LOADER in object_info
         )
-        if not by_row and not by_digest:
+        upscaler = (
+            "UpscaleModelLoader" in missing.values()
+            and PIXLSTASH_UPSCALE_MODEL_LOADER in object_info
+        )
+        if not by_row and not controlnet and not upscaler:
             return []
         hub = _hub()
         # Only the loaders whose file ComfyUI lacks: the swap changes each
@@ -8334,8 +8349,9 @@ def create_router(server) -> APIRouter:
             checkpoint_id=_shelf_checkpoint(hub) if by_row else None,
             shelf_uuid=shelf_uuid(hub) if by_row else None,
             controlnet_digest=_shelf_digest(hub, FILE_CONTROLNET)
-            if by_digest
+            if controlnet
             else None,
+            upscaler_digest=_shelf_digest(hub, FILE_UPSCALER) if upscaler else None,
         )
         for swap in swapped:
             logger.info(
