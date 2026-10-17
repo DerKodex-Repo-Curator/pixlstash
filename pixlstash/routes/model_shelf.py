@@ -168,6 +168,8 @@ from pixlstash.utils.known_base_models import (
     SOURCE_FILENAME,
     SOURCE_USER,
     completions,
+    family_label,
+    family_named,
     fold,
 )
 from pixlstash.utils.model_utils import canonical_quant, derive_model_name
@@ -412,6 +414,13 @@ class ModelResponse(BaseModel):
             "narrowing a list to what probably fits, such as the workflows a "
             "LoRA can run on; `family` is the one to state as fact. Null when "
             "no known base model is recorded."
+        ),
+    )
+    base_model_family_label: Optional[str] = Field(
+        default=None,
+        description=(
+            "What a person calls `base_model_family` (`Krea 2` for `krea2`), "
+            "the value `GET /adapters?base_model_family=` narrows by."
         ),
     )
     quant: Optional[str] = Field(
@@ -1628,6 +1637,7 @@ def _to_response(
         matched_name=_matched_name(row),
         family=served_family(row),
         base_model_family=base_model_family(row),
+        base_model_family_label=family_label(base_model_family(row)),
         quant=canonical_quant(row["quant"]),
         weights_id=row["weights_id"],
         trigger_words=trigger_words,
@@ -1675,6 +1685,7 @@ def create_router(server) -> APIRouter:
         file_kinds: tuple[str, ...],
         *,
         base_model: Optional[str],
+        family: Optional[str] = None,
         kind: Optional[str],
         q: Optional[str],
         character_id: Optional[int],
@@ -1697,6 +1708,12 @@ def create_router(server) -> APIRouter:
             sort=sort,
             direction=direction,
         )
+
+        if family is not None:
+            # In Python: the family is folded from the identified base model,
+            # which SQL cannot do. A value naming no family matches nothing.
+            wanted = family_named(family)
+            rows = [row for row in rows if wanted and base_model_family(row) == wanted]
 
         if character_id is not None or set_id is not None:
             entity_type = ENTITY_CHARACTER if character_id is not None else ENTITY_SET
@@ -1767,6 +1784,15 @@ def create_router(server) -> APIRouter:
                 "rows that record none. Omit for all."
             ),
         ),
+        base_model_family: Optional[str] = Query(
+            None,
+            description=(
+                "Only adapters whose base model is in this family, named by "
+                "the family (`krea2`), its label (`Krea 2`) or any base model "
+                "in it (`Krea 2 Turbo`). Filename guesses included, as "
+                "`base_model_family` on the rows. Omit for all."
+            ),
+        ),
         kind: Optional[str] = Query(
             None, description="Adapter algorithm, e.g. `lora` or `lokr`."
         ),
@@ -1807,6 +1833,7 @@ def create_router(server) -> APIRouter:
             adapters=_build_list(
                 (file_kind,),
                 base_model=base_model,
+                family=base_model_family,
                 kind=kind,
                 q=q,
                 character_id=character_id,

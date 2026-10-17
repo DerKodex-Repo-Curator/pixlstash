@@ -458,6 +458,48 @@ def test_base_model_filter_carries_not_set_as_an_explicit_value(shelf_env):
     assert _names(r.json()["adapters"]) == {"alice.safetensors"}
 
 
+def test_the_family_filter_takes_every_base_model_in_the_family(shelf_env):
+    """``base_model_family`` narrows to what fits, not to one spelling: Krea 2
+    covers Raw and Turbo, named by the family, its label or a member."""
+    ids = shelf_env.model_ids
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute(
+            "UPDATE model SET base_model = 'Krea 2 Turbo' WHERE id = ?",
+            (ids["alice.safetensors"],),
+        )
+        conn.execute(
+            "UPDATE model SET base_model = 'krea 2 RAW' WHERE id = ?",
+            (ids["bob.safetensors"],),
+        )
+    try:
+        rows = shelf_env.owner.get(f"{API}/adapters").json()["adapters"]
+        labels = {row["filename"]: row["base_model_family_label"] for row in rows}
+        assert labels["alice.safetensors"] == labels["bob.safetensors"] == "Krea 2"
+        assert labels["dana.safetensors"] is None
+        for value in ("krea2", "Krea 2", "Krea 2 Turbo"):
+            r = shelf_env.owner.get(
+                f"{API}/adapters", params={"base_model_family": value}
+            )
+            assert r.status_code == 200, r.text
+            assert _names(r.json()["adapters"]) == {
+                "alice.safetensors",
+                "bob.safetensors",
+            }, value
+        r = shelf_env.owner.get(
+            f"{API}/adapters", params={"base_model_family": "not a family"}
+        )
+        assert r.json()["adapters"] == []
+    finally:
+        with shelf_env.server.hub.transaction() as conn:
+            for name, base in (
+                ("alice.safetensors", "SDXL 1.0"),
+                ("bob.safetensors", "Flux.1 dev"),
+            ):
+                conn.execute(
+                    "UPDATE model SET base_model = ? WHERE id = ?", (base, ids[name])
+                )
+
+
 def test_base_model_completions_carry_the_shipped_labels_and_the_users_own(
     shelf_env,
 ):

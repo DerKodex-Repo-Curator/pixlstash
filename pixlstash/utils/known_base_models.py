@@ -419,6 +419,33 @@ COMPANION_LAYOUTS: dict[str, dict[str, frozenset[str]]] = {
     "kolors": {"vae": frozenset({"vae_4ch"})},
 }
 
+# Family -> what a person calls it. What a list narrowed by family shows, so
+# "Krea 2" stands for Krea 2, Krea 2 Raw and Krea 2 Turbo alike.
+FAMILY_LABELS: dict[str, str] = {
+    "sd15": "SD 1.5",
+    "sd21": "SD 2.1",
+    "sdxl": "SDXL",
+    "sd35": "SD 3.5",
+    "flux1": "FLUX.1",
+    "flux2": "FLUX.2",
+    "chroma": "Chroma",
+    "zimage": "Z-Image",
+    "qwen": "Qwen-Image",
+    "wan": "Wan",
+    "krea2": "Krea 2",
+    "hunyuan_image": "HunyuanImage",
+    "hunyuan_video": "HunyuanVideo",
+    "ltx2": "LTX-2",
+    "ltxv": "LTXV",
+    "auraflow": "AuraFlow",
+    "sana": "Sana",
+    "hidream": "HiDream",
+    "lumina": "Lumina",
+    "kolors": "Kolors",
+    "pixart": "PixArt",
+    "closed": "Closed models",
+}
+
 
 def _norm(value: str) -> str:
     """Fold case, spacing and punctuation away. The whole spacing axis dies here."""
@@ -473,6 +500,27 @@ def modality_of(raw: Optional[str]) -> Optional[str]:
     """Return ``"image"`` or ``"video"`` for what *raw* folds to, or ``None``."""
     label = fold(raw)
     return KNOWN_BASE_MODELS[label]["modality"] if label else None
+
+
+def family_label(family: Optional[str]) -> Optional[str]:
+    """What a person calls *family* (``krea2`` -> ``Krea 2``), or ``None``."""
+    return FAMILY_LABELS.get(family) if family else None
+
+
+_FAMILY_BY_LABEL = {_norm(label): family for family, label in FAMILY_LABELS.items()}
+
+
+def family_named(value: Optional[str]) -> Optional[str]:
+    """The family *value* names: a family, its label, or any base model in it.
+
+    So a filter given ``Krea 2``, ``krea2`` or ``Krea 2 Turbo`` narrows to the
+    same family. ``None`` when it names none.
+    """
+    if not value:
+        return None
+    if value in FAMILY_LABELS:
+        return value
+    return _FAMILY_BY_LABEL.get(_norm(value)) or family_of(value)
 
 
 # Where a stored canonical label came from, highest first. The scanner writes a

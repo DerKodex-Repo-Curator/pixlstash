@@ -303,7 +303,7 @@ from pixlstash.utils.adapter_header import (
     FILE_VAE,
 )
 from pixlstash.utils.image_processing.image_utils import ImageUtils
-from pixlstash.utils.known_base_models import family_of, modality_of
+from pixlstash.utils.known_base_models import family_label, family_of, modality_of
 from pixlstash.utils.comfyui_utilities import NotAWorkflowError, check_comfy_workflow
 from pixlstash.hub.workflow_origin import FILE_ORIGIN, INBOX_ORIGIN
 from pixlstash.utils.sql_chunking import chunked
@@ -2021,12 +2021,12 @@ class WorkflowPeople(BaseModel):
     family: str | None = Field(
         None, description="The base-model family of the workflow's checkpoint."
     )
-    base_model: str | None = Field(
+    family_label: str | None = Field(
         None,
         description=(
-            "The base model of the workflow's checkpoint as the shelf names "
-            "it (its identified label, else the raw one): what the people "
-            "loader in ComfyUI says it narrows by. Null where `family` is."
+            "What a person calls `family` (`Krea 2` for `krea2`): what the "
+            "adapter loaders in ComfyUI fill their `base_model` in with. Null "
+            "where `family` is."
         ),
     )
     people: list[FitPerson] = Field(default_factory=list)
@@ -8053,13 +8053,7 @@ def create_router(server) -> APIRouter:
         family = checkpoint.base_model_family if checkpoint is not None else None
         return {
             **people_who_fit(hub, server.vault, family),
-            # Said only beside a family: a name the fit was not made by would
-            # claim a narrowing that did not happen.
-            "base_model": (
-                (checkpoint.base_model_folded or checkpoint.base_model)
-                if family
-                else None
-            ),
+            "family_label": family_label(family),
         }
 
     def _people_loader_place(
