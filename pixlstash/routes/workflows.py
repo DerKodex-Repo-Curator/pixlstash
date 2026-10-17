@@ -8168,7 +8168,9 @@ def create_router(server) -> APIRouter:
         folder = "input"
         for kind in ("input", "output", "temp"):
             if name.endswith(f" [{kind}]"):
+                # One annotation, as ComfyUI's `annotated_filepath` reads it.
                 name, folder = name.removesuffix(f" [{kind}]"), kind
+                break
         subfolder, _, filename = name.rpartition("/")
         try:
             data, _ext = _download_comfyui_image(
