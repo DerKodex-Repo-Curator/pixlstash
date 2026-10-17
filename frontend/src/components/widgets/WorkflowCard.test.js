@@ -326,13 +326,17 @@ describe("WorkflowCard height", () => {
     const countGap = px(rule(".wf-card__mark").gap, t);
     const hairline = px(rule(".wf-card__rule").width, t);
     for (let counted = 0; 2 * counted <= slots; counted++) {
-      const marks = slots - counted;
+      // Every mark drawn, counted ones included: each is one `<li>` holding a
+      // tile, and a counted one also its pill, inside its own `countGap`. The
+      // strip's items are these, the hairline and "+N", so `allMarks + 1`
+      // strip gaps.
+      const allMarks = slots - counted;
       const worst =
-        marks * t["--wf-mark"] +
+        allMarks * t["--wf-mark"] +
         counted * (countGap + 28) +
         hairline +
         20 +
-        (marks + 1) * gap;
+        (allMarks + 1) * gap;
       expect(worst, `${counted} counted`).toBeLessThanOrEqual(row);
     }
   });
