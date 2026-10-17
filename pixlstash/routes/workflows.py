@@ -2021,6 +2021,14 @@ class WorkflowPeople(BaseModel):
     family: str | None = Field(
         None, description="The base-model family of the workflow's checkpoint."
     )
+    base_model: str | None = Field(
+        None,
+        description=(
+            "The base model of the workflow's checkpoint as the shelf names "
+            "it (its identified label, else the raw one): what the people "
+            "loader in ComfyUI says it narrows by. Null where `family` is."
+        ),
+    )
     people: list[FitPerson] = Field(default_factory=list)
     clash: int = 0
     unknown: int = 0
@@ -8042,11 +8050,17 @@ def create_router(server) -> APIRouter:
         if figure is None:
             return None
         checkpoint = next(iter(_base_model_slots(figure.models)), None)
-        return people_who_fit(
-            hub,
-            server.vault,
-            checkpoint.base_model_family if checkpoint is not None else None,
-        )
+        family = checkpoint.base_model_family if checkpoint is not None else None
+        return {
+            **people_who_fit(hub, server.vault, family),
+            # Said only beside a family: a name the fit was not made by would
+            # claim a narrowing that did not happen.
+            "base_model": (
+                (checkpoint.base_model_folded or checkpoint.base_model)
+                if family
+                else None
+            ),
+        }
 
     def _people_loader_place(
         workflow_id: str, graph: dict, object_info: dict | None
