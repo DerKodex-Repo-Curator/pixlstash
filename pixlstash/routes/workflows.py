@@ -8324,7 +8324,9 @@ def create_router(server) -> APIRouter:
             )
         }
         swapped = []
-        # A VAE or a CLIP by digest, as `_with_pack_nodes` swaps one in.
+        # A VAE or a CLIP by digest, as `_with_pack_nodes` swaps one in: the
+        # only two classes in `_PACK_MODEL_LOADERS`, and `targets` holds only
+        # the files ComfyUI does not list.
         for item in targets:
             was = item.get("class_type")
             kind = _PACK_MODEL_LOADERS.get(was)
