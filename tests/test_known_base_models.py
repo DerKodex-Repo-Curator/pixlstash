@@ -390,6 +390,18 @@ GRAPHITE = ["#484c53"]
             ["#7a3b12"],
             None,
         ),
+        # A fine-tune checkpoint is not one of the base's releases, so the
+        # role that tells those apart is not its tab.
+        (
+            "Chroma1 HD",
+            "chroma1_hd_myanime.safetensors",
+            None,
+            True,
+            ["CHRO", "MY"],
+            None,
+            ["#7a3b12"],
+            None,
+        ),
         (
             "Pony Diffusion V6 XL",
             "ponyDiffusionV6XL_v6StartWithThisOne.safetensors",

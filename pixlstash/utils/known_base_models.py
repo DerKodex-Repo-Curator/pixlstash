@@ -1119,7 +1119,8 @@ def model_tile(
       the role word in its filename or else its entry's ``role`` on the tab.
     * **A fine-tune or LoRA** shows the base's first line over its own
       initials and version (SDXL over JU9), or its own mark where
-      :data:`KNOWN_FINE_TUNES` has one.
+      :data:`KNOWN_FINE_TUNES` has one. It is none of the base's releases, so
+      its tab is only a role word of its own name.
     """
     tokens = derive_model_name(filename or "").split()
     own_name = name or " ".join(tokens)
@@ -1161,7 +1162,9 @@ def model_tile(
     own_words = {_norm(t) for t in tokens} | set(words)
     if checkpoint:
         label_words = set(re.findall(r"[a-z]+", (canonical or "").casefold()))
-        tab = entry.get("role") or next(
+        # The entry's role tells the base's own releases apart, so only a
+        # release wears it; a role word in the file's own name is its own.
+        tab = (entry.get("role") if release else None) or next(
             (
                 ROLE_WORDS[word]
                 for word in own_words
