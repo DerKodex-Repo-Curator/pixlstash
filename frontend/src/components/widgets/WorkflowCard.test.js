@@ -494,7 +494,7 @@ describe("WorkflowCard", () => {
       ...BARE,
       loras: [
         ...Array.from({ length: 4 }, (_, i) => ({ name: `lora-${i}` })),
-        ...Array(3).fill({ name: "repeated" }),
+        ...Array(3).fill({ name: "repeated", filename: "repeated.safetensors" }),
       ],
     });
     expect(wrapper.findAll(".wf-card__strip .wf-card__mark")).toHaveLength(5);

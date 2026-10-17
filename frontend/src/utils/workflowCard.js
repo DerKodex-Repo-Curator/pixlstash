@@ -300,7 +300,7 @@ export function lorasUnread(card) {
 export function loraGroups(card) {
   const groups = new Map();
   for (const lora of card.loras ?? []) {
-    const key = lora.sha256 || lora.filename || lora.name || Symbol();
+    const key = lora.sha256 || lora.filename || Symbol();
     const group = groups.get(key);
     if (group) group.count += 1;
     else groups.set(key, { lora, count: 1 });

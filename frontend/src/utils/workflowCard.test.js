@@ -146,9 +146,11 @@ describe("cardAccessibleName", () => {
         { name: "lightning", sha256: "a" },
         // One name, two files: a twin in another folder.
         { name: "lightning", sha256: "c" },
-        // Slots naming no file are not one model.
+        // Slots naming no file are not one model, whatever they are called.
         { name: null },
         { name: null },
+        { name: "twin" },
+        { name: "twin" },
       ],
     });
     expect(name).toContain(
