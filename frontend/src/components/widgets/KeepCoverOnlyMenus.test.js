@@ -359,3 +359,16 @@ describe("the lightbox menu", () => {
     expect(wrapper.emitted("stack-move")).toEqual([["later"]]);
   });
 });
+
+describe("the Edit stack submenu and the keyboard", () => {
+  it("shuts when focus leaves it, not when focus moves inside it", async () => {
+    const wrapper = mountContextMenu({ stackEdit: SECOND_OF_FOUR });
+    const wrap = editStackWrap(wrapper);
+    await wrap.trigger("focusin");
+    const inside = wrap.find(".ctx-submenu button.ctx-item").element;
+    await wrap.trigger("focusout", { relatedTarget: inside });
+    expect(wrap.find(".ctx-submenu").exists()).toBe(true);
+    await wrap.trigger("focusout", { relatedTarget: document.body });
+    expect(wrap.find(".ctx-submenu").exists()).toBe(false);
+  });
+});

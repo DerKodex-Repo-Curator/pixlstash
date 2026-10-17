@@ -9,6 +9,7 @@
     @mouseenter="open = true"
     @mouseleave="open = false"
     @focusin="open = true"
+    @focusout="onFocusOut"
   >
     <button
       class="ctx-item"
@@ -168,6 +169,12 @@ const emit = defineEmits([
 ]);
 
 const open = ref(false);
+
+// Focus leaving the row and its submenu shuts the submenu, as the pointer
+// leaving it does; moving between the row and its own items does not.
+function onFocusOut(event) {
+  if (!event.currentTarget.contains(event.relatedTarget)) open.value = false;
+}
 
 const keys = computed(() => {
   const apple = isApplePlatform();

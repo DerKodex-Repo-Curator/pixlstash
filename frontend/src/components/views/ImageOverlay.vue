@@ -2271,7 +2271,7 @@ async function moveStackMember(pictureId, where) {
   try {
     await setStackOrder(stackId, nextIds.map(Number));
     emit("overlay-change", {
-      imageId: image.value?.id ?? null,
+      imageId: pictureId,
       fields: { stack: true },
       stackId,
     });

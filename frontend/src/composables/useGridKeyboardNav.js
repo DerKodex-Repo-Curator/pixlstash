@@ -126,7 +126,7 @@ export function useGridKeyboardNav(
     if (isReadOnly.value || cursorIdx.value === null) return false;
     if (overlayOpen.value || reviewOverlayOpen?.value) return false;
     const img = allGridImages.value[cursorIdx.value];
-    if (!img?.id || !getOpenStackPlace(img)) return false;
+    if (img?.id == null || !getOpenStackPlace(img)) return false;
     if (!moveStackMember(img.id, where)) return true;
     const newIdx = allGridImages.value.findIndex(
       (item) => getPictureId(item?.id) === getPictureId(img.id),
