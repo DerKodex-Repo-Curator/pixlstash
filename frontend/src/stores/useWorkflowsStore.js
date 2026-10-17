@@ -86,6 +86,8 @@ export const DEFAULT_FILTERS = Object.freeze({
   // The server's `origin_category`: `comfyui`, `pictures` or `own`.
   origin: null,
   minRating: null,
+  // Text the card's name must contain, ignoring case.
+  name: "",
 });
 
 /** Does this card keep something deleted? */
@@ -182,7 +184,11 @@ export const useWorkflowsStore = defineStore("workflows", () => {
    */
   const filteredCards = computed(() => {
     const view = filters.value;
+    const needle = view.name.trim().toLowerCase();
     return cards.value.filter((card) => {
+      if (needle && !(card.name ?? "").toLowerCase().includes(needle)) {
+        return false;
+      }
       if (view.ghosts && !keepsGhost(card)) return false;
       if (view.type != null && card.type !== view.type) return false;
       if (

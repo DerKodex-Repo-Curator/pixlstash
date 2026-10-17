@@ -2023,10 +2023,11 @@ the core rule groups workflows instead (there is no merge or split), and a check
 LoRA that used to be a member is a recipe value the workflow's pictures are
 filtered by.
 
-- **Toolbar**: Sort (Your ratings / Recently used / Recently changed /
-  Recently created / Picture count / Name) in the
-  shipped `.tbm` popover, *Add…*, which is today's workflow import
-  (`POST /comfyui/workflows/import`) rather than anything new, and then the
+- **Toolbar**: *Add…* first, which is today's workflow import
+  (`POST /comfyui/workflows/import`) rather than anything new; then Sort (Your
+  ratings / Recently used / Recently changed / Recently created / Picture
+  count / Name) in the shipped `.tbm` popover, Filters and the name field
+  (below); and then the
   app-wide tail — `[separator] [TbGlobalActions]` in its own `--space-3`
   cluster, `rail-name="inspector"`. Replacing the grid replaces the grid's
   toolbar, so without the tail nothing on this screen opens Settings or the
@@ -2046,8 +2047,13 @@ filtered by.
   one list that grows with the library, has a find field over its radios
   and scrolls after six rows. Each pick-one list leads with its off row
   (`All` for Type, `Any` for the rest, counting every card) and has no Clear
-  of its own. Keys follow the grid's: ↑/↓ move through the root rows, → or
-  Enter opens a submenu on its chosen radio (or the Checkpoint field), ←
+  of its own. Above the kinds sits a **name field** (`NameFilterField.vue`,
+  `filters.name`, a case-blind substring of the card's name, chipped as
+  *Name*); the toolbar carries a second copy of it after Filters, bound to the
+  same value and folded by a container query when the bar is narrow. The
+  app's `F` key (`searchStore.searchFocusToken`) focuses the toolbar copy, or
+  opens Filters on the menu's copy when the toolbar's is folded. Keys follow
+  the grid's: ↑/↓ move through the root rows, → or Enter opens a submenu on its chosen radio (or the Checkpoint field), ←
   returns to the row, caught in the capture phase because the radiogroup
   would otherwise take it as "previous". Which side applies which filter is in the
   `useWorkflowsStore` row of §3. The funnel's badge and the strip both count
@@ -4269,8 +4275,10 @@ follow, so a shared control mounted here degrades by the same scoped rules.
 Nothing queries `toolbar` on this bar (dropping `UndoControl` took the one
 control that did); `shelfbar` carries the bar's own three-rung ladder, measured
 and recorded as **Amendment #6** in
-`docs/design/toolbar-responsive-decisions.md`: the full bar wants 1071px, so at
-**≤1070px** the title and the count go (both report, neither controls), at
+`docs/design/toolbar-responsive-decisions.md`: the full bar wants 1071px, and
+1263px with the name field (180px and a gap). At **≤1262px** the title and the
+count go (both report, neither controls), at **≤1031px** the name field goes
+(Show's own field is always there), at
 **≤840px** `Group` and `Sort` drop their value and keep glyph + chevron (the
 value stays in `title` and in the accessible name), and at **≤680px** `Add ▾`
 and `Model folders` fold into a `TbOverflowMenu` whose rows are the same
@@ -4686,6 +4694,20 @@ drawn, and a root row says whether its filter is on: nothing at rest, a count
 when narrowed, and `4 of 5` for Type, whose rest state is every block on. That
 rest state is also why the header keeps **Reset** where the other two menus say
 Clear all: clearing every box here would empty the shelf.
+
+Above the kinds sits the **name field** (`NameFilterField.vue`, shared with the
+Workflows menu), writing `filters.name`. It narrows `visibleRows` per file with
+the Models rail picker's `rowMatches` (the name the row shows, or its filename,
+case-blind), before stacks are folded, and counts as one active filter. Like
+`duplicatesOnly` it is not restored on startup, nor written to storage. On the
+set grid it narrows the evidence cards as every Show filter does (a card stays
+while any member is shown), and it is the one filter that also narrows the
+hand-made cards: `handMadeGroups` keeps a set whose own name or one of whose
+models matches, while `shownHandMadeSets` (the rail, the set chooser) is built
+from the unnarrowed `allHandMadeGroups`. The toolbar holds a second copy bound
+to the same value, ahead of Group, on both axes; it folds after the title and
+the count (rung 1b of the ladder). The app's `F` key focuses the toolbar copy,
+or opens Show on the menu's copy when the toolbar's is folded.
 
 The menu hangs from the **end** of its button, so the submenu opens on the
 root's **left** (`flex-direction: row-reverse`; DOM order is still root, then

@@ -2494,6 +2494,42 @@ describe("duplicate copies", () => {
     expect(useModelShelfStore().filters.duplicatesOnly).toBe(false);
   });
 
+  it("narrows by the shown name or the filename, ignoring case", async () => {
+    listAdapters.mockResolvedValue([
+      adapter({ id: 1 }),
+      adapter({
+        id: 2,
+        display_name: null,
+        filename: "Other_Thing_v2.safetensors",
+      }),
+    ]);
+    const store = useModelShelfStore();
+    await store.fetchRows();
+
+    await store.setFilters({ name: "   " });
+    expect(store.activeCount).toBe(0);
+    expect(store.visibleRows.length).toBe(2);
+    await store.setFilters({ name: "  CYANwood " });
+    expect(store.visibleRows.map((r) => r.id)).toEqual([1]);
+    expect(store.activeCount).toBe(1);
+    // The filename, for someone typing what is on disk.
+    await store.setFilters({ name: "other_thing_V2" });
+    expect(store.visibleRows.map((r) => r.id)).toEqual([2]);
+
+    // A search is not remembered across a reload, and typing one writes
+    // nothing to storage.
+    const writes = vi.spyOn(Storage.prototype, "setItem");
+    await store.setFilters({ name: "cyan" });
+    expect(writes).not.toHaveBeenCalled();
+    writes.mockRestore();
+    setActivePinia(createPinia());
+    expect(useModelShelfStore().filters.name).toBe("");
+
+    await store.resetFilters();
+    expect(store.filters.name).toBe("");
+    expect(store.visibleRows.length).toBe(2);
+  });
+
   it("keeps the count when the folder axis narrows a draw to one copy", async () => {
     listAdapters.mockResolvedValue([
       adapter({
@@ -3295,6 +3331,50 @@ describe("sets from pictures are hidden, never deleted", () => {
 
     store.selectVisible();
     expect([...store.selectedSetIds]).toEqual([8]);
+  });
+
+  it("narrows the hand-made cards by name, and only the grid's", async () => {
+    const store = shelfWithASet([
+      {
+        id: 7,
+        name: "Seven Up",
+        declined: [],
+        members: [member(checkpoint, "a".repeat(64))],
+      },
+      {
+        id: 8,
+        name: "eight",
+        declined: [],
+        members: [member(lora, "b".repeat(64))],
+      },
+      {
+        id: 9,
+        name: "nine",
+        declined: [],
+        members: [
+          member({ id: 99, name: "Lonely_Ink.safetensors" }, "c".repeat(64)),
+        ],
+      },
+    ]);
+    store.setView({ groupBy: "workflow_set" });
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    const drawn = () => store.handMadeGroups.map((group) => group.set.id);
+
+    // By a member's filename: only set 8 holds `style.st`.
+    store.setFilters({ name: "sTyLe.st" });
+    expect(drawn()).toEqual([8]);
+    // By the set's own name.
+    store.setFilters({ name: "seven" });
+    expect(drawn()).toEqual([7]);
+    // The rail and the set chooser still offer every set.
+    expect(store.shownHandMadeSets.map((set) => set.id)).toEqual([7, 8, 9]);
+    // By the name a member's card shows when the shelf has no row for it (its
+    // block not fetched): set 9's member is not among the rows.
+    store.setFilters({ name: "LONELY ink" });
+    expect(drawn()).toEqual([9]);
+    store.setFilters({ name: "" });
+    expect(drawn()).toEqual([7, 8, 9]);
   });
 
   it("hides a set, remembers it, and draws it again on request", async () => {

@@ -41,7 +41,7 @@
          on the press, and it has no selection to hang on. Every other verb
          lives on the row or in the selection pill (#904). -->
     <div class="shelf-toolbar">
-      <span class="shelf-title shelf-fold-1070">Models</span>
+      <span class="shelf-title shelf-fold-1262">Models</span>
 
       <!-- Two views of one destination, not two destinations. The runs are
            models too - still in ai-toolkit's output folder rather than on the
@@ -268,7 +268,7 @@
            "8 runs"), so anywhere to their left it shoves Add and Model
            folders sideways every time the tab changes. Here the spacer
            absorbs the difference and nothing moves. -->
-      <span class="shelf-sub shelf-sub--ingap shelf-fold-1070">{{
+      <span class="shelf-sub shelf-sub--ingap shelf-fold-1262">{{
         isShelfTab ? countLabel : runsCountLabel
       }}</span>
 
@@ -288,6 +288,17 @@
              about a selection the reader just made - they are about a list that
              is not in front of them. -->
         <template v-if="isShelfTab">
+          <!-- The name filter's toolbar copy, bound to the same text as the
+               field at the top of Show, which is always there when this one
+               folds (rung 1b). On the set grid it narrows the cards as Show
+               does, and the hand-made ones by their own name too. -->
+          <NameFilterField
+            ref="nameFieldRef"
+            class="shelf-name-bar"
+            :model-value="store.filters.name"
+            label="Filter models by name"
+            @update:model-value="(name) => store.setFilters({ name })"
+          />
           <v-menu
             v-model="groupMenuOpen"
             :close-on-content-click="false"
@@ -396,7 +407,10 @@
                 :tooltip="showButtonTitle"
               />
             </template>
-            <ShelfShowPanel :open="showMenuOpen" />
+            <ShelfShowPanel
+              :open="showMenuOpen"
+              :focus-name-request="nameFocusRequest"
+            />
           </v-menu>
         </template>
 
@@ -1663,6 +1677,7 @@ import {
 } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import ShelfShowPanel from "../panels/ShelfShowPanel.vue";
+import NameFilterField from "../widgets/NameFilterField.vue";
 import ShelfSortPanel from "../panels/ShelfSortPanel.vue";
 import ShelfSelectionBar from "../panels/ShelfSelectionBar.vue";
 import WorkflowSetRenameDialog from "../panels/WorkflowSetRenameDialog.vue";
@@ -1718,6 +1733,7 @@ import { useModelFolderGates } from "../../composables/useModelFolderGates";
 import { useNoticeStore } from "../../stores/useNoticeStore";
 import { useOperationStore } from "../../stores/useOperationStore";
 import { useReviewSessionsStore } from "../../stores/useReviewSessionsStore";
+import { useSearchStore } from "../../stores/useSearchStore";
 import { useSidebarStore } from "../../stores/useSidebarStore";
 import { useUserPrefsStore } from "../../stores/useUserPrefsStore";
 import { errorDetail } from "../../utils/apiError";
@@ -1846,6 +1862,22 @@ watch(
 const userPrefs = useUserPrefsStore();
 const rootEl = ref(null);
 const showMenuOpen = ref(false);
+const nameFocusRequest = ref(0);
+const nameFieldRef = ref(null);
+// The app's search key (F) finds by name here: the toolbar's field when the bar
+// has room for it, else the one at the top of Show.
+watch(
+  () => useSearchStore().searchFocusToken,
+  () => {
+    if (!isShelfTab.value) return;
+    if (nameFieldRef.value?.isShown()) {
+      nameFieldRef.value.focus();
+      return;
+    }
+    showMenuOpen.value = true;
+    nameFocusRequest.value += 1;
+  },
+);
 const sortMenuOpen = ref(false);
 const folderMenuOpen = ref(false);
 const folderMenuAt = ref([0, 0]);
@@ -4993,8 +5025,9 @@ watch(
    Chromium at `width: max-content`, with the widest content each control can
    hold (a 12ch Group value, a 12ch Sort value, the shelf tab's long count):
 
-     full                1071px
-     after rung 1         840px
+     full                1263px   (1071px before the name field)
+     after rung 1        1032px
+     after rung 1b        840px
      after rung 2         679px
      after rung 3         565px   ← the floor
 
@@ -5023,12 +5056,28 @@ watch(
   display: none;
 }
 
+/* The toolbar's name field. A fixed width, so typing never moves the bar. */
+.shelf-name-bar {
+  width: 180px;
+  flex: none;
+}
+
 /* Rung 1. The two things on the bar that REPORT rather than control: the
    view's own name, which the sidebar and the tab pair beside it both already
    say, and the count, whose two widths ("1,842 models · 12 copies" vs "8
-   runs") are why the spacer sits where it does. Buys 231px. */
-@container shelfbar (max-width: 1046px) {
-  .shelf-fold-1070 {
+   runs") are why the spacer sits where it does. They go before the name
+   field, a control: the full bar plus the field (180px and a 12px gap) is
+   1071 + 192 = 1263px. Buys 231px. */
+@container shelfbar (max-width: 1238px) {
+  .shelf-fold-1262 {
+    display: none;
+  }
+}
+
+/* Rung 1b. The name field, a shortcut to the one at the top of Show: 840 +
+   192 = 1032px is what the bar needs with it after rung 1. */
+@container shelfbar (max-width: 1007px) {
+  .shelf-name-bar {
     display: none;
   }
 }

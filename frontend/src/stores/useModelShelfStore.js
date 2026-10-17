@@ -66,6 +66,7 @@ import {
   PICK_ORDERS,
   railListed,
   rowBaseModel,
+  rowMatches,
   setCard,
   setCheckpoint,
   setGroups,
@@ -745,6 +746,11 @@ function defaultFilters() {
     // again. Not restored on startup either, for the same reason: it is how a
     // hide is taken back, not a way to keep the shelf.
     showHidden: false,
+    // The name filter's text, matched as the Models rail's picker matches: the
+    // name the row shows or its filename. Not restored on startup either: a
+    // search is a question, and a shelf that opened still narrowed by
+    // yesterday's would read as missing models.
+    name: "",
   };
 }
 
@@ -1097,7 +1103,10 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
   let epoch = 0;
 
   function remember() {
-    writeStored(FILTERS_KEY, { v: FILTERS_SCHEMA_VERSION, ...filters });
+    // The name text is left out: it is never restored, so writing it on every
+    // keystroke would only leave a search lying in storage.
+    const { name: _name, ...kept } = filters;
+    writeStored(FILTERS_KEY, { v: FILTERS_SCHEMA_VERSION, ...kept });
   }
 
   /** Persist the view axes and the collapsed sets as one versioned blob. */
@@ -1461,6 +1470,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     const kinds = filters.adapterKinds;
     const bases = filters.baseModels;
     const capabilities = filters.capabilities;
+    const needle = filters.name.trim().toLowerCase();
     const shown = offeredRows.value
       .filter((row) => {
         // The type checkboxes narrow here as well as choosing what to fetch:
@@ -1504,6 +1514,9 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
         if (filters.duplicatesOnly && presentCopies(row.locations) < 2) {
           return false;
         }
+        // Per file, before the fold below, so a run whose cover's name does
+        // not match is still found by the step that does.
+        if (!rowMatches(row, needle)) return false;
         return true;
       })
       .map(displayRow);
@@ -2242,7 +2255,8 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
   function setLabel(set) {
     return handMadeName(withShelfNames(set));
   }
-  const handMadeGroups = computed(() =>
+  /** Every hand-made set as a card, before the name filter. */
+  const allHandMadeGroups = computed(() =>
     handMadeSets.value
       .map((set) => {
         const models = (set.members ?? []).filter(
@@ -2270,12 +2284,39 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
   );
 
   /**
+   * The hand-made cards the set grid draws: narrowed by the name filter alone,
+   * to the sets whose own name or one of whose models' names matches. The
+   * other `Show` filters leave these cards alone, as they always have; the name
+   * does not, or typing one would narrow every card on the grid but these.
+   */
+  const handMadeGroups = computed(() => {
+    const needle = filters.name.trim().toLowerCase();
+    if (!needle) return allHandMadeGroups.value;
+    const named = new Set(
+      rows.value.filter((row) => rowMatches(row, needle)).map((row) => row.id),
+    );
+    // A loaded row also matches by filename, but a row is only here when its
+    // block was fetched, so the name the member's card shows (and its label)
+    // count too: a set must not drop out because its kind was never fetched.
+    const hit = (text) => (text ?? "").toLowerCase().includes(needle);
+    return allHandMadeGroups.value.filter(
+      (group) =>
+        hit(setLabel(group.set)) ||
+        (group.set.members ?? []).some(
+          (member) =>
+            named.has(member.id) || hit(member.name) || hit(member.label),
+        ),
+    );
+  });
+
+  /**
    * The hand-made sets a surface other than the grid offers or names (the
    * rail, the set chooser). Hidden is a filter on the library (#1869), so a
-   * set hidden here is left out of those too, until "Show them" draws it.
+   * set hidden here is left out of those too, until "Show them" draws it. The
+   * name filter is not: it narrows the grid, not what a chooser offers.
    */
   const shownHandMadeSets = computed(() =>
-    handMadeGroups.value.map((group) => group.set),
+    allHandMadeGroups.value.map((group) => group.set),
   );
 
   /**
@@ -3364,6 +3405,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     if (filters.capabilities.length) n += 1;
     if (filters.duplicatesOnly) n += 1;
     if (filters.showHidden) n += 1;
+    if (filters.name.trim()) n += 1;
     return n;
   });
 
@@ -4211,7 +4253,9 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
    */
   function setFilters(patch, { refetch = false } = {}) {
     Object.assign(filters, patch);
-    remember();
+    // The name text is never stored, so a keystroke in the name field writes
+    // nothing.
+    if (Object.keys(patch).some((key) => key !== "name")) remember();
     return refetch ? fetchRows() : Promise.resolve();
   }
 

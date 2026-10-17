@@ -37,7 +37,7 @@ const open = computed(() => props.modelValue);
         </tr>
         <tr>
           <td><kbd>F</kbd></td>
-          <td>Open search</td>
+          <td>Open search (on Models and Workflows: filter by name)</td>
         </tr>
         <tr :class="{ 'shortcut-disabled': isReadOnly }">
           <td><kbd>1</kbd> – <kbd>5</kbd></td>
