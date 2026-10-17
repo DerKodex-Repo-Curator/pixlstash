@@ -1260,6 +1260,53 @@ def test_workflow_type():
     assert workflow_type(_doc(named)) == "txt2img"
 
 
+def _seedvr2(load: str = "S1", model: str = "S2") -> dict:
+    """ComfyUI's own SeedVR2 upscale, as its template wires it."""
+    return {
+        load: _node("LoadImage", image="in.png"),
+        model: _node("UNETLoader", unet_name="seedvr2_7b.safetensors"),
+        "S3": _node("VAELoader", vae_name="seedvr2_ema_vae.safetensors"),
+        "S4": _node("SeedVR2Preprocess", resized_images=[load, 0]),
+        "S5": _node("VAEEncodeTiled", pixels=["S4", 0], vae=["S3", 0]),
+        "S6": _node(
+            "SeedVR2Conditioning", model=[model, 0], vae_conditioning=["S5", 0]
+        ),
+        "S7": _node(
+            "KSampler",
+            model=[model, 0],
+            positive=["S6", 0],
+            negative=["S6", 1],
+            latent_image=["S5", 0],
+            seed=1,
+            steps=1,
+        ),
+        "S8": _node("VAEDecodeTiled", samples=["S7", 0], vae=["S3", 0]),
+        "S9": _node("SaveImage", images=["S8", 0], filename_prefix="up"),
+    }
+
+
+def test_seedvr2_is_an_upscale():
+    # SeedVR2 the only model sampled: an upscale workflow (#1939).
+    alone = _seedvr2()
+    assert workflow_type(_doc(alone)) == "upscale"
+    assert special_groups(_doc(alone)) == (UPSCALE,)
+    # Beside a prompted pass: that pass's type, with upscaling.
+    beside = _graph(extra=_seedvr2())
+    assert workflow_type(_doc(beside)) == "txt2img"
+    assert special_groups(_doc(beside)) == (UPSCALE,)
+    # The SeedVR2 pack's upscaler samples inside itself; its loader is not
+    # on its own evidence of upscaling.
+    pack = {
+        "1": _node("LoadImage", image="in.png"),
+        "2": _node("SeedVR2LoadDiTModel", model="seedvr2_7b.safetensors"),
+        "3": _node("SeedVR2VideoUpscaler", image=["1", 0], dit=["2", 0]),
+        "4": _node("SaveImage", images=["3", 0], filename_prefix="up"),
+    }
+    assert workflow_type(_doc(pack)) == "upscale"
+    loaded = _graph(extra={"S2": _node("SeedVR2LoadDiTModel", model="x.safetensors")})
+    assert special_groups(_doc(loaded)) == ()
+
+
 PAIRED_API = Path(__file__).parent / "comfyui_workflows" / "paired" / "multigpu" / "api"
 
 

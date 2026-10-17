@@ -83,6 +83,7 @@ from pixlstash.services.workflow_hash import (
 )
 from pixlstash.services.workflow_identity import (
     CORE_ADDRESS_PREFIX,
+    SEEDVR2_CLASS_RE,
     Slot,
     base_model_kind,
     core_node_labels,
@@ -981,6 +982,10 @@ def _describe_slots(
             by_widget.setdefault(widget, []).append(filename)
         taken: Counter = Counter()
         repeated, by_label = wired.get(card.workflow_key, (set(), {}))
+        # A SeedVR2 DiT is the base model only where nothing else is.
+        seedvr2_is_base = not any(
+            base_model_kind(str(slot.get("widget") or "")) for slot in card.slots
+        )
 
         def next_name(slot: dict) -> Optional[str]:
             # By wiring where the widget sits on two loaders, else the one
@@ -1015,7 +1020,10 @@ def _describe_slots(
                 figure.models.append(
                     SlotModel(
                         name=_derived(filename),
-                        kind=slot_kind(widget) if widget else "model",
+                        kind=_seedvr2_kind(
+                            str(slot.get("class_type") or ""), seedvr2_is_base
+                        )
+                        or (slot_kind(widget) if widget else "model"),
                         label=str(slot.get("label") or "") or None,
                         filename=name,
                         **_mark_fields(
@@ -1048,6 +1056,24 @@ def _describe_slots(
                         **fields,
                     )
                 )
+
+
+def _seedvr2_kind(class_type: str, is_base: bool) -> Optional[str]:
+    """What a SeedVR2 pack loader's slot is, or ``None`` for any other loader.
+
+    The pack names both its files under a bare ``model`` widget, which says
+    nothing (#1939). Its VAE is a VAE. Its DiT is an upscale model, and the
+    base model of a workflow that loads no other, which is then an upscale
+    workflow (``workflow_identity._samples_only_seedvr2``). ComfyUI's own
+    SeedVR2 loads through ``UNETLoader`` and reads as a base model already.
+    """
+    # ponytail: by class; a core `UNETLoader` SeedVR2 beside another base model
+    # stays a base model, since telling it apart needs the graph's wiring.
+    if not SEEDVR2_CLASS_RE.match(class_type):
+        return None
+    if "VAE" in class_type:
+        return "vae"
+    return "unet" if is_base else "upscale"
 
 
 def _fill_base_model(

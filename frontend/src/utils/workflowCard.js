@@ -470,10 +470,11 @@ const FEATURE_KINDS = {
   upscale: "Upscale",
 };
 
-/** `[{ word, models }]` for each feature kind the card loads, in row order. */
+/** `[{ kind, word, models }]` per feature kind the card loads, in row order. */
 export function featureGroups(card) {
   return Object.entries(FEATURE_KINDS)
     .map(([kind, word]) => ({
+      kind,
       word,
       models: (card.models ?? []).filter((model) => model.kind === kind),
     }))
@@ -508,12 +509,15 @@ export function factChips(card, { short = false } = {}) {
     short ? shortTypeLabel(card) : card.type_label || card.type,
     // After the type, because each one is that kind of fact: a ControlNet
     // workflow needs a control image. `feature` keeps it out of the spoken
-    // facts, where `cardAccessibleName` names each model instead.
-    ...featureGroups(card).map(({ word, models }) => ({
-      label: models.length > 1 ? `${word} ×${models.length}` : word,
-      title: models.map(modelDisplayName).filter(Boolean).join(", ") || null,
-      feature: true,
-    })),
+    // facts, where `cardAccessibleName` names each model instead. Not a kind
+    // the type chip already says: an upscale workflow's upscaler.
+    ...featureGroups(card)
+      .filter(({ kind }) => kind !== card.type)
+      .map(({ word, models }) => ({
+        label: models.length > 1 ? `${word} ×${models.length}` : word,
+        title: models.map(modelDisplayName).filter(Boolean).join(", ") || null,
+        feature: true,
+      })),
     card.imported && !card.manual ? "imported" : null,
     card.manual && card.from_name ? `from ${card.from_name}` : null,
   ].filter(Boolean);

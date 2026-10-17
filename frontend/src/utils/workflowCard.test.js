@@ -479,4 +479,18 @@ describe("the feature chips", () => {
     expect(spoken).toContain("facts: Text to Image, imported");
     expect(spoken).not.toContain("ControlNet ×2");
   });
+
+  it("says Upscale once on an upscale workflow, by its type", () => {
+    const upscale = {
+      name: "SeedVR2",
+      type: "upscale",
+      type_label: "Upscale",
+      models: [{ name: "4x-ultrasharp", kind: "upscale" }],
+    };
+    expect(factChips(upscale, { short: true }).map((c) => c.label)).toEqual([
+      "Upscale",
+    ]);
+    // The model is still spoken, with its kind.
+    expect(cardAccessibleName(upscale)).toContain("4x-ultrasharp, Upscale");
+  });
 });

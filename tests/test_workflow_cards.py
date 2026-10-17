@@ -71,7 +71,7 @@ from pixlstash.tasks.workflow_card_backfill_task import (
     FamilyReidentifyTask,
     WorkflowCardBackfillTask,
 )
-from tests.test_workflow_identity import _graph, _node
+from tests.test_workflow_identity import _graph, _node, _seedvr2
 
 CARD_TABLES = (
     "workflow_variant",
@@ -493,6 +493,47 @@ def test_a_topology_cached_before_the_traits_column_is_re_derived(hub, monkeypat
         before["specials"],
     )
     assert _drained(finder)
+
+
+def test_data_step_20_re_reads_a_seedvr2_topology(tmp_path, monkeypatch):
+    """A SeedVR2 graph cached before it was an upscale (#1939) is re-read by
+    the specials pass, type included, and a graph without it is left alone."""
+    hub = HubDatabase(str(tmp_path / "hub.db"))
+    seedvr2 = record_api_graph(hub, _seedvr2())
+    plain = record_api_graph(hub, _graph())
+    with hub.transaction() as conn:
+        # As the build before wrote it.
+        conn.execute(
+            "UPDATE workflow_topology_core SET specials = '', workflow_type = NULL "
+            "WHERE topology_hash = ?",
+            (seedvr2.topology_hash,),
+        )
+        conn.execute("PRAGMA user_version = 19")
+    path = hub.path
+    hub.close()
+    hub = HubDatabase(path)
+    try:
+
+        def row(keys):
+            return hub.fetchone(
+                "SELECT specials, workflow_type FROM workflow_topology_core "
+                "WHERE topology_hash = ?",
+                (keys.topology_hash,),
+            )
+
+        assert row(seedvr2)["specials"] is None
+        assert row(plain)["specials"] == ""
+
+        def explode(*args, **kwargs):
+            raise AssertionError("core_hash was re-run to fill specials alone")
+
+        monkeypatch.setattr(workflow_cards, "core_hash", explode)
+        finder = WorkflowCardBackfillFinder(hub=hub)
+        assert finder.find_task()._run_task()["identified"] == 1
+        assert tuple(row(seedvr2)) == (UPSCALE, "upscale")
+        assert _drained(finder)
+    finally:
+        hub.close()
 
 
 def test_filling_specials_alone_does_not_rerun_the_refinement(hub, monkeypatch):
@@ -2541,3 +2582,40 @@ def test_stage_details_name_each_kind_and_the_model_only_where_one_loads():
     assert said("model", model=None) == {"upscale": "Upscale model"}
     # A kind a newer build wrote is left out rather than printed raw.
     assert said("from-the-future") == {}
+
+
+def test_the_seedvr2_packs_loaders_are_an_upscaler_and_its_vae(hub):
+    """The pack names both files under a bare `model` widget (#1939): its DiT
+    is an upscale model beside a base model, and the base model alone."""
+
+    def kinds(slots):
+        card = SimpleNamespace(
+            slots=slots, variants=["v"], workflow_key="w", topology_hash="t"
+        )
+        figure = SimpleNamespace(card=card, models=[], loras=[])
+        names = {"v": [(s["widget"], s["file"]) for s in slots]}
+        workflow_card_service._describe_slots(hub, [figure], names)
+        # Kinds only: two slots on one widget are named by wiring, which
+        # needs the stored document this stand-in does not have.
+        return [m.kind for m in figure.models]
+
+    dit = {
+        "label": "a/model",
+        "class_type": "SeedVR2LoadDiTModel",
+        "widget": "model",
+        "file": "seedvr2_7b.safetensors",
+    }
+    vae = {
+        "label": "b/model",
+        "class_type": "SeedVR2LoadVAEModel",
+        "widget": "model",
+        "file": "ema_vae.safetensors",
+    }
+    unet = {
+        "label": "c/unet_name",
+        "class_type": "UNETLoader",
+        "widget": "unet_name",
+        "file": "base.safetensors",
+    }
+    assert kinds([dit, vae, unet]) == ["upscale", "vae", "unet"]
+    assert kinds([dit, vae]) == ["unet", "vae"]
