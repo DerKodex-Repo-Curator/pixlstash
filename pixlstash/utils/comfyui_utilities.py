@@ -21,6 +21,7 @@ from pixlstash.services.comfyui_recipe_service import (
 )
 from pixlstash.services.comfyui_ui_graph import _WIDGET_OVERRIDES, inline_subgraphs
 from pixlstash.services.workflow_hash import (
+    DIGEST_PREFIX_RE,
     IMAGE_EXTENSIONS,
     MODEL_EXTENSIONS,
     SHELF_ID_FIELD,
@@ -764,7 +765,8 @@ def loaded_model_widgets(workflow: dict) -> list[tuple[str, str]]:
             digest = _PACK_DIGEST_WIDGETS.get(node.get("class_type"))
             inputs = node.get("inputs")
             value = inputs.get(digest) if digest and isinstance(inputs, dict) else None
-            if isinstance(value, str) and value:
+            value = _pack_digest(value)
+            if value:
                 found.append((digest, value))
         return found
     return _loaded_model_widgets_ui(workflow)
@@ -798,12 +800,25 @@ def _loaded_model_widgets_ui(workflow: dict) -> list[tuple[str, str]]:
             )
             digest = _PACK_DIGEST_WIDGETS.get(class_type)
             if digest:
-                named.append((digest, _get_widget_value_ui(node, digest)))
+                named.append((digest, _pack_digest(_get_widget_value_ui(node, digest))))
             for widget, value in named:
                 value = _shelf_id_text(widget, value)
                 if isinstance(value, str) and value:
                     found.append((widget, value))
     return found
+
+
+def _pack_digest(value):
+    """*value* lowercased when it is a digest, else ``None``.
+
+    The structural hash's rule for a digest widget
+    (``workflow_hash.structural_widget_value``): anything else in one names
+    nothing, so prose typed there never becomes a ControlNet on a card.
+    """
+    if not isinstance(value, str):
+        return None
+    lowered = value.lower()
+    return lowered if DIGEST_PREFIX_RE.match(lowered) else None
 
 
 def _shelf_id_text(widget: str, value):

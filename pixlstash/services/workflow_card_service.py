@@ -1116,8 +1116,9 @@ def _slot_filename(
 
     A pack loader's digest (``control_net_sha256``) becomes the shelf row's
     file the same way, or a card would print 64 hex digits for every one the
-    shelf has no title for (#1939). A digest the shelf does not hold stays
-    itself: unlike an id, it still names one file.
+    shelf holds but has no title for (#1939). A digest the shelf does not hold
+    stays itself: unlike an id, it still names one file, and it is the only
+    name the workflow gives it.
     """
     if not name:
         return name

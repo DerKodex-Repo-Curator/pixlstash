@@ -261,6 +261,9 @@ def test_loaded_model_widgets_reads_the_pack_loaders_digests() -> None:
     expected = [("control_net_sha256", cn), ("upscale_model_sha256", up)]
     assert loaded_model_widgets(api) == expected
     assert loaded_model_widgets(ui) == expected
+    # Only a digest names a model there, as the structural hash reads it.
+    api["1"]["inputs"]["control_net_sha256"] = "canny.safetensors"
+    assert loaded_model_widgets(api) == expected[1:]
 
 
 def test_a_subgraph_loader_reads_the_file_its_instance_names() -> None:
