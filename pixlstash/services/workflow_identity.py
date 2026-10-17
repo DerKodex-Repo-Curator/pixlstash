@@ -176,6 +176,12 @@ _UPSCALE_CLASS_RE = re.compile(
     r"|ImageScale|LatentUpscale|UltimateSDUpscale)"
 )
 _LATENT_UPSCALE_RE = re.compile(r"^LatentUpscale")
+# SeedVR2 is an upscaler (#1939), and every node of it says so: ComfyUI's own
+# (`SeedVR2Conditioning` and friends) and the SeedVR2 pack's
+# (`SeedVR2VideoUpscaler`, its `SeedVR2Load*Model` loaders). Read for the
+# card's type and stages only, never by `node_groups`: stripping it from the
+# core would move every SeedVR2 workflow's identity, which is a core rule.
+SEEDVR2_CLASS_RE = re.compile(r"^SeedVR2")
 _FACE_DETAILER_CLASS_RE = re.compile(
     r"^(FaceDetailer|Detailer|SAMLoader|SAMDetector|UltralyticsDetectorProvider"
     r"|BboxDetector|SegmDetector|ONNXDetector)"
@@ -644,6 +650,12 @@ def special_groups(document: dict) -> tuple[str, ...]:
     }
     if intermediate_saves(nodes):
         present.add(INTERMEDIATE_SAVE)
+    # A graph that runs SeedVR2 upscales, beside whatever else it samples.
+    if any(
+        SEEDVR2_CLASS_RE.match(node.class_type) and "Load" not in node.class_type
+        for node in nodes.values()
+    ):
+        present.add(UPSCALE)
     return tuple(group for group in SPECIAL_GROUPS if group in present)
 
 
@@ -1323,7 +1335,8 @@ def workflow_type(document: dict) -> Optional[str]:
     """What kind of picture the workflow makes, from its node classes.
 
     One of ``video``, ``outpaint``, ``inpaint``, ``upscale``, ``img2img``,
-    ``txt2img``, tested in that order: a graph that saves a video is a video
+    ``txt2img``, tested in that order (a picture upscaled by SeedVR2 alone is
+    ``upscale``, :func:`_samples_only_seedvr2`): a graph that saves a video is a video
     workflow whatever it starts from (an empty video latent would otherwise
     read as ``txt2img``, a start frame as ``img2img``), an outpaint graph also
     encodes for inpaint, and an img2img graph may still carry an empty latent.
@@ -1352,6 +1365,8 @@ def reduced_workflow_type(nodes: dict[str, ReducedNode]) -> Optional[str]:
     }:
         return "inpaint"
     has_picture_input = any(is_picture_loader(cls) for cls in classes)
+    if has_picture_input and _samples_only_seedvr2(nodes):
+        return "upscale"
     has_sampler = any(_SAMPLER_CLASS_RE.search(cls) for cls in classes)
     if (
         has_picture_input
@@ -1368,6 +1383,28 @@ def reduced_workflow_type(nodes: dict[str, ReducedNode]) -> Optional[str]:
     if any(re.search(r"Empty.*Latent", cls) for cls in classes):
         return "txt2img"
     return None
+
+
+def _samples_only_seedvr2(nodes: dict[str, ReducedNode]) -> bool:
+    """Whether SeedVR2 is the only model this graph samples with (#1939).
+
+    It is when the graph runs SeedVR2 and every node taking a ``positive``
+    conditioning takes it from a SeedVR2 node, as ComfyUI's own template's
+    sampler does from ``SeedVR2Conditioning``; the SeedVR2 pack's upscaler
+    samples inside itself and takes none. A graph that also samples another
+    model with a prompt is that pass's type, and has upscaling.
+    """
+    seedvr2 = {
+        node_id
+        for node_id, node in nodes.items()
+        if SEEDVR2_CLASS_RE.match(node.class_type)
+    }
+    return bool(seedvr2) and all(
+        source in seedvr2
+        for node in nodes.values()
+        for name, source, _slot in node.inputs
+        if name == "positive"
+    )
 
 
 # A video workflow by what it starts from. Not a :func:`workflow_type`: the

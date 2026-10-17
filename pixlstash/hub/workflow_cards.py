@@ -505,6 +505,7 @@ def record_identity(hub: HubDatabase, structural_hash: str) -> Optional[str]:
         else (
             ",".join(special_groups(document)),
             ",".join(graph_traits(document, strip_loras=STRIP_LORAS_FOR_STACKS)),
+            workflow_type(document),
         )
     )
     with hub.transaction() as conn:
@@ -513,13 +514,15 @@ def record_identity(hub: HubDatabase, structural_hash: str) -> Optional[str]:
             _cache_topology(conn, topology_hash, document, document_slots, core)
         elif cached is not None:
             # The whole cost of the upgrade for an already-cached topology: a
-            # reduction and a strip, no refinement, and the row's stack key, type and slots
-            # are left exactly where the grid is already reading them.
+            # reduction and a strip, no refinement, and the row's stack key and
+            # slots are left exactly where the grid is already reading them.
+            # The type is read again with the stages: it is a label, never part
+            # of a key, and a stage rule can be a type rule too (SeedVR2, #1939).
             # `core_version` is in the WHERE so a row re-stamped under another
             # rule between the read and here is not written by this branch.
             conn.execute(
-                "UPDATE workflow_topology_core SET specials = ?, traits = ? "
-                "WHERE topology_hash = ? AND core_version = ?",
+                "UPDATE workflow_topology_core SET specials = ?, traits = ?, "
+                "workflow_type = ? WHERE topology_hash = ? AND core_version = ?",
                 (
                     *cached,
                     topology_hash,

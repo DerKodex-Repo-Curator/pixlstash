@@ -70,7 +70,7 @@ CURRENT_SCHEMA_VERSION = 2
 # reasoning the model-shelf tables were amended into v2 for. ``user_version`` is
 # free (nothing in PixlStash has ever written it), costs no DDL, and an older
 # build ignores it entirely.
-CURRENT_DATA_VERSION = 19
+CURRENT_DATA_VERSION = 20
 
 # `model_file.state` for a copy the last scan actually looked at, spelled out
 # rather than imported from `services.model_folder_scanner`. That module imports
@@ -2570,6 +2570,23 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
                     # `unknown`: a VAE could be a `checkpoint` only by a folder
                     # or by the owner, and the owner's word stands.
                     _refile_by_tensors(conn, FILE_VAE, has_vae_markers, (FILE_UNKNOWN,))
+                if data_version < 20:
+                    # SeedVR2 is an upscaler (#1939): a graph running it has
+                    # the upscale stage, and one sampling nothing else is an
+                    # upscale workflow. The variant finder re-reads a NULL
+                    # `specials`, and the type with it, as for step 11.
+                    conn.execute(
+                        "UPDATE workflow_topology_core SET specials = NULL "
+                        "WHERE topology_hash IN ("
+                        "SELECT r.topology_hash FROM workflow_recipe r "
+                        "JOIN workflow_recipe_graph g "
+                        "ON g.structural_hash = r.structural_hash "
+                        "WHERE g.document LIKE '%SeedVR2%' "
+                        "UNION SELECT v.topology_hash FROM workflow_variant v "
+                        "JOIN workflow_recipe_graph g "
+                        "ON g.structural_hash = v.structural_hash "
+                        "WHERE g.document LIKE '%SeedVR2%')"
+                    )
                 if data_version < CURRENT_DATA_VERSION:
                     # No placeholder: PRAGMA takes no parameters, and the value
                     # is this module's own constant, nothing from outside.

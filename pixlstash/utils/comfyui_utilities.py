@@ -12,9 +12,16 @@ from functools import lru_cache
 from typing import Any
 
 from pixlstash.pixl_logging import get_logger
-from pixlstash.services.comfyui_recipe_service import model_filename_fields
+from pixlstash.services.comfyui_recipe_service import (
+    CONTROLNET_LOADER_DIGEST,
+    PIXLSTASH_CONTROLNET_LOADER,
+    PIXLSTASH_UPSCALE_MODEL_LOADER,
+    UPSCALE_MODEL_LOADER_DIGEST,
+    model_filename_fields,
+)
 from pixlstash.services.comfyui_ui_graph import _WIDGET_OVERRIDES, inline_subgraphs
 from pixlstash.services.workflow_hash import (
+    DIGEST_PREFIX_RE,
     IMAGE_EXTENSIONS,
     MODEL_EXTENSIONS,
     SHELF_ID_FIELD,
@@ -658,14 +665,35 @@ def extract_generation_info(workflow: dict) -> dict:
 
 # The loaders whose model name is the FIRST widget value, for the UI-format
 # node that declares no inputs at all and is therefore a bare positional array.
-# Only these three: every other loader in the map below either interleaves its
-# widgets or carries several, and a positional guess there would name the wrong
-# file rather than none.
-_NAME_FIRST_CLASSES = _CHECKPOINT_CLASSES | _UNET_CLASSES | _LORA_CLASSES
+# The three families, and the loaders whose model name is their ONLY widget
+# (ComfyUI's `/object_info`; DiffControlNetLoader's other input is a MODEL
+# link). Every other loader in the map below either interleaves its widgets or
+# carries several, and a positional guess there would name the wrong file
+# rather than none.
+_ONE_WIDGET_LOADERS = frozenset(
+    {
+        "ControlNetLoader",
+        "DiffControlNetLoader",
+        "UpscaleModelLoader",
+        "StyleModelLoader",
+    }
+)
+_NAME_FIRST_CLASSES = (
+    _CHECKPOINT_CLASSES | _UNET_CLASSES | _LORA_CLASSES | _ONE_WIDGET_LOADERS
+)
 
 # `config_name` is a YAML beside the checkpoint, not a model: it reaches no
 # shelf row and would draw a mark for a file nobody loads.
 _NOT_A_MODEL_WIDGET = frozenset({"config_name"})
+
+# The ComfyUI-PixlStash loaders that name a ControlNet or an upscale model by
+# digest. Read for a card only, never through `MODEL_FILENAME_FIELDS`: the
+# pre-flight would then check a digest against ComfyUI's filename combo. The
+# card's shelf lookup resolves a digest as it resolves a filename (#1939).
+_PACK_DIGEST_WIDGETS = {
+    PIXLSTASH_CONTROLNET_LOADER: CONTROLNET_LOADER_DIGEST,
+    PIXLSTASH_UPSCALE_MODEL_LOADER: UPSCALE_MODEL_LOADER_DIGEST,
+}
 
 
 @lru_cache(maxsize=1)
@@ -705,8 +733,8 @@ def loaded_model_widgets(workflow: dict) -> list[tuple[str, str]]:
     Both serialisations, like :func:`extract_generation_info`, and the same
     best effort: a **UI-format** file names its widget values by position, so a
     name is read off ``widgets_values`` through the node's declared inputs, and
-    falls back to slot 0 only for the three loader families whose model name is
-    the first widget (:data:`_NAME_FIRST_CLASSES`).
+    falls back to slot 0 only for the loaders whose model name is the first
+    widget (:data:`_NAME_FIRST_CLASSES`).
 
     **Which widget each loader reads is ``MODEL_FILENAME_FIELDS``'** (through
     ``model_filename_fields``, so a ComfyUI-MultiGPU wrapper reads as the
@@ -724,6 +752,9 @@ def loaded_model_widgets(workflow: dict) -> list[tuple[str, str]]:
     workflow loads no models" -- and why a card drawn from this must not turn
     a missing slot into a claim (``utils/workflowCard.checkpointUnread``).
 
+    The pack's ControlNet and upscale loaders name their file by digest and
+    are read as well (:data:`_PACK_DIGEST_WIDGETS`), under their digest widget.
+
     Muted and bypassed nodes are skipped, because they do not load anything
     when the workflow runs.
 
@@ -733,12 +764,23 @@ def loaded_model_widgets(workflow: dict) -> list[tuple[str, str]]:
     if not isinstance(workflow, dict):
         return []
     if is_api_format(workflow):
-        return [
-            (widget, value)
-            for _id, _cls, widget, value in iter_model_fields_api(
-                workflow, shelf_ids_as_text=True
+        found = []
+        for node_id, node in workflow.items():
+            if not isinstance(node, dict):
+                continue
+            found.extend(
+                (widget, value)
+                for _id, _cls, widget, value in iter_model_fields_api(
+                    {node_id: node}, shelf_ids_as_text=True
+                )
             )
-        ]
+            digest = _PACK_DIGEST_WIDGETS.get(node.get("class_type"))
+            inputs = node.get("inputs")
+            value = inputs.get(digest) if digest and isinstance(inputs, dict) else None
+            value = _pack_digest(value)
+            if value:
+                found.append((digest, value))
+        return found
     return _loaded_model_widgets_ui(workflow)
 
 
@@ -760,7 +802,7 @@ def _loaded_model_widgets_ui(workflow: dict) -> list[tuple[str, str]]:
                 and class_type in _NAME_FIRST_CLASSES
             ):
                 # No input declared the widget, so the array is bare and the
-                # model name is slot 0 - true of these three families only.
+                # model name is slot 0 - true of these loaders only.
                 values = node.get("widgets_values") or []
                 named = [(widgets[0], values[0] if values else None)]
             named.extend(
@@ -768,11 +810,33 @@ def _loaded_model_widgets_ui(workflow: dict) -> list[tuple[str, str]]:
                 for widget in _base_model_widgets()
                 if widget not in widgets
             )
+            digest = _PACK_DIGEST_WIDGETS.get(class_type)
+            if digest:
+                # The digest is the pack loader's only widget, so a bare
+                # array holds it at slot 0.
+                value = _get_widget_value_ui(node, digest)
+                if value is None:
+                    value = (node.get("widgets_values") or [None])[0]
+                named.append((digest, _pack_digest(value)))
             for widget, value in named:
                 value = _shelf_id_text(widget, value)
                 if isinstance(value, str) and value:
                     found.append((widget, value))
     return found
+
+
+def _pack_digest(value):
+    """*value* lowercased when it is a digest, else ``None``.
+
+    The structural hash's rule for a digest widget
+    (``workflow_hash.structural_widget_value``): anything else in one names
+    nothing, so prose typed there never becomes a ControlNet on a card.
+    """
+    if not isinstance(value, str):
+        return None
+    lowered = value.lower()
+    # `fullmatch`: the pattern's `$` also matches before a trailing newline.
+    return lowered if DIGEST_PREFIX_RE.fullmatch(lowered) else None
 
 
 def _shelf_id_text(widget: str, value):

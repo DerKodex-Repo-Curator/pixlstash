@@ -5468,6 +5468,34 @@ def test_a_manual_workflows_base_models_read_as_an_automatic_cards_do(
     assert [m["name"].lower() for m in models] == ["wan t2v high", "wan t2v low"]
 
 
+def test_the_pack_loaders_digests_reach_the_card_as_their_kind(
+    workflow_env, tmp_path, monkeypatch
+):
+    """The pack's ControlNet and upscale loaders name their file by digest
+    (#1939): the card serves each as its kind, named by the shelf row the
+    digest resolves to, and a digest the shelf lacks as itself."""
+    unknown = _h("an-upscaler-nobody-scanned")
+    graph = {
+        "1": {
+            "class_type": "PixlStashControlNetLoader",
+            "inputs": {"control_net_sha256": _h("realvisxl-digest").upper()},
+        },
+        "2": {
+            "class_type": "PixlStashUpscaleModelLoader",
+            "inputs": {"upscale_model_sha256": unknown},
+        },
+        "3": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+    }
+    key = _file_a_workflow(
+        workflow_env.server, tmp_path, monkeypatch, "pack.json", graph
+    )
+    models = _by_key(_cards(workflow_env.owner))[key]["models"]
+    assert [(m["kind"], m["name"], m["title"]) for m in models] == [
+        ("controlnet", _SHELF_DERIVED, _SHELF_TITLE),
+        ("upscale", unknown, None),
+    ]
+
+
 def test_the_shelfs_picture_needs_one_candidate_where_its_name_needs_agreement(
     workflow_env,
 ):

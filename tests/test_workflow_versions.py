@@ -244,6 +244,30 @@ def test_a_cached_description_follows_the_version(folders, hub):
     assert workflow_card_reads._MANUAL_FACTS[workflow_id] == (2, (None, None))
 
 
+def test_a_description_reads_the_stored_conversion_once_it_lands(folders, hub):
+    # The conversion names every widget, where the editor file's bare arrays
+    # do not (#1939), and it lands on a version already read, so the cached
+    # description has to follow it.
+    workflow_id = comfyui_module.store_manual_workflow(hub, "w", PLAIN, "import")
+    before = workflows_routes._manual_model_widgets(hub, workflow_id)
+    assert ("control_net_name", "canny.safetensors") not in before
+    converted = {
+        "1": {
+            "class_type": "ControlNetLoader",
+            "inputs": {"control_net_name": "canny.safetensors"},
+        }
+    }
+    canonical = workflow_bindings.canonical(
+        workflow_bindings.migrate_placeholders(PLAIN)[0]
+    )
+    assert set_manual_api_document(hub, [workflow_id], converted, canonical) == [
+        workflow_id
+    ]
+    assert workflows_routes._manual_model_widgets(hub, workflow_id) == (
+        ("control_net_name", "canny.safetensors"),
+    )
+
+
 def test_a_cached_description_is_not_handed_to_a_workflow_reusing_the_id(folders, hub):
     # A workflow made from a file reuses its id after a delete: the same id at
     # the same version number, stored at another time, is read afresh.
