@@ -766,14 +766,14 @@ def loaded_model_widgets(workflow: dict) -> list[tuple[str, str]]:
     if is_api_format(workflow):
         found = []
         for node_id, node in workflow.items():
+            if not isinstance(node, dict):
+                continue
             found.extend(
                 (widget, value)
                 for _id, _cls, widget, value in iter_model_fields_api(
                     {node_id: node}, shelf_ids_as_text=True
                 )
             )
-            if not isinstance(node, dict):
-                continue
             digest = _PACK_DIGEST_WIDGETS.get(node.get("class_type"))
             inputs = node.get("inputs")
             value = inputs.get(digest) if digest and isinstance(inputs, dict) else None
