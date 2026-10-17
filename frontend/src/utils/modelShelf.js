@@ -2073,16 +2073,18 @@ export function initialsOf(text) {
   const lettered = words.filter(
     (word) => /^\p{L}/u.test(word) && !/^v\d/i.test(word),
   );
+  // By code point, not UTF-16 unit, so a letter outside the BMP ("𝐀pple") is
+  // taken whole instead of as a lone surrogate.
   if (lettered.length > 1) {
-    return (lettered[0][0] + lettered[1][0]).toUpperCase();
+    return ([...lettered[0]][0] + [...lettered[1]][0]).toUpperCase();
   }
   if (lettered.length === 1) {
-    return lettered[0]
-      .replace(/\P{L}/gu, "")
+    return [...lettered[0].replace(/\P{L}/gu, "")]
       .slice(0, 2)
+      .join("")
       .toUpperCase();
   }
-  return words.length ? words[0].slice(0, 2).toUpperCase() : "?";
+  return words.length ? [...words[0]].slice(0, 2).join("").toUpperCase() : "?";
 }
 
 /**

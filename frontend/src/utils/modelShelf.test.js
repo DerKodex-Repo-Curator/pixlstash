@@ -1574,6 +1574,12 @@ describe("the generated mark's initials", () => {
     expect(initials("flux1")).toBe("FL");
     expect(initials("4x-UltraSharp")).toBe("UL");
   });
+
+  it("takes a letter outside the BMP whole, never half of one", () => {
+    expect(initials("𝐀pple 𝐁anana")).toBe("𝐀𝐁");
+    expect(initials("𝐀𝐁𝐂")).toBe("𝐀𝐁");
+    expect(initials("1😀")).toBe("1😀");
+  });
 });
 
 describe("the generated mark's version tab", () => {
