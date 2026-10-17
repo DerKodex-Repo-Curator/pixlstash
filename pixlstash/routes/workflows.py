@@ -3462,7 +3462,7 @@ def _model_widgets_at(
     workflow_id: str,
     version: int | None,
     version_at: str | None,
-    converted: bool = False,
+    converted: bool,
 ) -> tuple:
     """:func:`_manual_model_widgets` of the version *version* stored at *version_at*.
 
