@@ -120,8 +120,9 @@ function familyFit(checkpoint, lora) {
  * @param {Array<Object>} loras - shelf rows (`listAdapters`), with `attachments`.
  * @param {Array<Object>} characters - `[{id, name}]`.
  * @returns {{people: Array<{id: number, name: string, loras: Array<Object>}>,
- *   clash: number, unknown: number, family: string|null}} each person's
- *   matching LoRAs, in the shelf's order, and the checkpoint's own family.
+ *   clash: number, unknown: number, family: string|null,
+ *   baseModel: string|null}} each person's matching LoRAs, in the shelf's
+ *   order, and the checkpoint's own family and base-model label.
  */
 export function fitPeople(card, loras, characters) {
   const checkpoint = card ? checkpointModel(card) : null;
@@ -149,7 +150,13 @@ export function fitPeople(card, loras, characters) {
       clash += 1;
     }
   }
-  return { people, clash, unknown, family: checkpoint?.base_model_family || null };
+  return {
+    people,
+    clash,
+    unknown,
+    family: checkpoint?.base_model_family || null,
+    baseModel: checkpoint?.base_model_folded || checkpoint?.base_model || null,
+  };
 }
 
 /**

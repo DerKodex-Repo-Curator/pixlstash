@@ -8053,8 +8053,13 @@ def create_router(server) -> APIRouter:
             return None
         checkpoint = next(iter(_base_model_slots(figure.models)), None)
         family = checkpoint.base_model_family if checkpoint is not None else None
+        base_model = (
+            checkpoint.base_model_folded or checkpoint.base_model
+            if checkpoint is not None
+            else None
+        )
         return {
-            **people_who_fit(hub, server.vault, family),
+            **people_who_fit(hub, server.vault, family, base_model),
             "family_label": family_label(family),
         }
 

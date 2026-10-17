@@ -22469,6 +22469,27 @@ def test_open_says_where_the_people_loader_goes(a_persons_lora):
     ]
     note = env.owner.get(f"{API}/workflows/{env.manual}/people").json()["note"]
     assert note.startswith("This workflow's base model is not known")
+    # A base model the shelf names but no family table knows is named, never
+    # called unknown.
+    hub = env.server.hub
+    with hub.transaction() as conn:
+        stated = conn.execute(
+            "UPDATE model SET base_model = 'Example Base' WHERE filename = ?",
+            ("realvisxl.safetensors",),
+        ).rowcount
+    try:
+        assert stated == 1
+        note = env.owner.get(f"{API}/workflows/{env.manual}/people").json()["note"]
+        assert note == (
+            "PixlStash cannot tell which LoRAs fit Example Base, this workflow's "
+            "base model, so no person's LoRA can be matched to it."
+        )
+    finally:
+        with hub.transaction() as conn:
+            conn.execute(
+                "UPDATE model SET base_model = NULL WHERE filename = ?",
+                ("realvisxl.safetensors",),
+            )
 
 
 def test_open_places_a_people_loader_after_every_copy_of_the_model(

@@ -3329,7 +3329,9 @@ model of the card; a card that names none answers everybody as `unknown`).
 `unknown` counts the people nothing vouches for and `clash` those whose every
 LoRA is for another base model, and `note` says why nobody is offered, in the
 Run popup's words (`_nobody_fits_note`; `personNote` in `RunDialog.vue` holds
-the same sentences, change both together). It is the read the people loader in
+the same sentences, change both together). A checkpoint whose base model the
+shelf names but `known_base_models` gives no family is named in the note,
+never called unknown. It is the read the people loader in
 ComfyUI asks on a canvas opened from PixlStash (#1852), and the one the Run
 popup's Person field is to share (#1850, which still works the rule out in
 the client).

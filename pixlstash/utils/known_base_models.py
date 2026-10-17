@@ -276,6 +276,12 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
         "modality": "video",
         "aliases": ["ltxv", "ltx video", "ltx", "Lightricks/LTX-Video"],
     },
+    # --- MiniMax --------------------------------------------------------------
+    "MiniMax H3": {
+        "family": "minimax_h3",
+        "modality": "video",
+        "aliases": [],
+    },
     # --- SDXL-architecture community bases ------------------------------------
     # family='sdxl' is the load-compatibility fact; the canonical name is the
     # works-properly fact. Both are needed and neither implies the other.
@@ -443,6 +449,7 @@ FAMILY_LABELS: dict[str, str] = {
     "lumina": "Lumina",
     "kolors": "Kolors",
     "pixart": "PixArt",
+    "minimax_h3": "MiniMax H3",
     "closed": "Closed models",
 }
 

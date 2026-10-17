@@ -2642,7 +2642,7 @@ const personFits = computed(() =>
         [...adapters.value, ...unknownLoras.value].filter((row) => !row.hidden),
         entityLists.characters,
       )
-    : { people: [], clash: 0, unknown: 0, family: null },
+    : { people: [], clash: 0, unknown: 0, family: null, baseModel: null },
 );
 /** The people picked for this run, in the order picked; never the fixed one. */
 const personIds = ref([]);
@@ -2667,7 +2667,10 @@ const showPerson = computed(
 );
 const personNote = computed(() => {
   if (fixedPerson.value) return "";
-  const { people, clash, unknown, family } = personFits.value;
+  const { people, clash, unknown, family, baseModel } = personFits.value;
+  if (!family && baseModel) {
+    return `PixlStash cannot tell which LoRAs fit ${baseModel}, this workflow's base model, so no person's LoRA can be matched to it.`;
+  }
   if (!family) {
     return "This workflow's base model is not known, so no person's LoRA can be matched to it.";
   }

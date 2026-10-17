@@ -17,6 +17,7 @@ from pixlstash.utils.known_base_models import (
     family_named,
     family_of,
     fold,
+    modality_of,
     suggest,
 )
 
@@ -113,6 +114,13 @@ def test_closed_models_are_marked():
     assert {"Wan 2.2", "LTXV 13B", "HunyuanVideo 1.5"} <= {
         name for name, i in KNOWN_BASE_MODELS.items() if i["modality"] == "video"
     }
+
+
+def test_minimax_h3_has_a_family():
+    """A workflow on it said its base model was not known, though the shelf
+    named it."""
+    assert family_of("MiniMax H3") == family_of("minimax_h3") == "minimax_h3"
+    assert modality_of("MiniMax H3") == "video"
 
 
 def test_companion_layouts_join_the_two_family_vocabularies():
