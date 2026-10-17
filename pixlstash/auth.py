@@ -119,6 +119,9 @@ COMFYUI_SCOPE_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/v1/characters"),
         ("GET", "/api/v1/sort_mechanisms"),
         ("GET", "/api/v1/pictures"),
+        # The total beside "Everything" in the picture picker: the same
+        # filters and token scope as the list above, so it reveals less.
+        ("GET", "/api/v1/pictures/count"),
         ("GET", "/api/v1/pictures/thumbnails/{id}.webp"),
         ("GET", "/api/v1/picture_sets/{id}/thumbnail"),
         # A character's thumbnail is served by the field route.
