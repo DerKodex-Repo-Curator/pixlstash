@@ -1232,6 +1232,20 @@ def workflow_group_defaults(hub: HubDatabase, workflow_id: str) -> dict[str, str
     }
 
 
+def workflow_group_parameter_names(
+    hub: HubDatabase, workflow_id: str
+) -> dict[str, str]:
+    """``{address: name}``: what the owner named a workflow's parameters."""
+    return {
+        address: name
+        for address, name in hub.fetchall(
+            "SELECT address, name FROM workflow_group_parameter_name "
+            "WHERE workflow_id = ?",
+            (workflow_id,),
+        )
+    }
+
+
 def model_fix_labels(
     hub: HubDatabase, topology_hash: str, was: str, kind: str
 ) -> list[str]:

@@ -576,17 +576,21 @@ describe("a refusal the popup offers to fix", () => {
   });
 
   it("sets an on-or-off parameter to the value, and names an added one's node", async () => {
-    const tiled = { ...def("tiled", "tiled", true, "core:up"), exposed: true };
+    const tiled = {
+      ...def("mode.tiled", "mode.tiled", true, "core:up"),
+      exposed: true,
+      name: "Tiling",
+    };
     getWorkflowCard.mockResolvedValue({
       card: card({ defaults: [...card().defaults, tiled] }),
-      pins: [{ slot_label: "core:up", input_name: "tiled" }],
+      pins: [{ slot_label: "core:up", input_name: "mode.tiled" }],
     });
     getWorkflowFormInputs.mockResolvedValue({
       nodes: [
         {
           node_id: "8",
           title: "Final upscale",
-          inputs: [{ slot_label: "core:up", input_name: "tiled", options: null }],
+          inputs: [{ slot_label: "core:up", input_name: "mode.tiled", options: null }],
         },
       ],
     });
@@ -595,10 +599,12 @@ describe("a refusal the popup offers to fix", () => {
       .findAllComponents({ name: "AppSelect" })
       .filter((entry) => entry.attributes("data-testid") === "rund-param-choice");
     expect(list.props("options")).toEqual(["true", "false"]);
-    expect(list.element.closest(".rund-f").textContent).toContain("Final upscale");
+    const label = list.element.closest(".rund-f").querySelector(".rund-l");
+    // Named as the owner named it when they added it, its node after.
+    expect(label.textContent.replace(/\s+/g, " ").trim()).toBe("Tiling · Final upscale");
     list.vm.$emit("update:modelValue", "false");
     await flushPromises();
-    const field = wrapper.vm.defaults.find((entry) => entry.input_name === "tiled");
+    const field = wrapper.vm.defaults.find((entry) => entry.input_name === "mode.tiled");
     // The boolean, never the word: ComfyUI reads the text "false" as on.
     expect(wrapper.vm.runValue(field)).toBe(false);
   });

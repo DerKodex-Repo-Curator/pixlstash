@@ -3821,8 +3821,9 @@ function writeDefault(row, edit = null) {
 }
 
 /**
- * Expose a parameter: `entry` (`{slot_label, input_name, value}`, the dialog's
- * pick) becomes one of the workflow's own values, set each run.
+ * Expose a parameter: `entry` (`{slot_label, input_name, value, name}`, the
+ * dialog's pick) becomes one of the workflow's own values, set each run, under
+ * the name it was given.
  *
  * Two whole-set writes, the default and then its pin. If the pin fails the row
  * is still there, fixed, and its lock frees it.
@@ -3849,7 +3850,7 @@ function exposeParameter(entry) {
     try {
       const body = await setWorkflowDefaults(key, [
         ...editedExcept(rows, entry.slot_label, entry.input_name),
-        { ...address, value: entry.value },
+        { ...address, value: entry.value, name: entry.name },
       ]);
       if (stillOn(key)) detail.value = body;
       const stored = body.pins;

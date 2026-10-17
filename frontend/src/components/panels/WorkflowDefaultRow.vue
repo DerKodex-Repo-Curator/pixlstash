@@ -1,10 +1,10 @@
 <template>
   <div :class="['wfdef', { 'wfdef--fixed': fixed, 'wfdef--choice': choosing }]">
     <span class="wfdef-name">
-      {{ row.label }}
-      <!-- An added parameter is named after its setting alone, and two nodes
-           can have a setting of one name: the node says which. -->
-      <span v-if="node" class="wfdef-node">{{ node }}</span>
+      {{ name }}
+      <!-- The setting alone fits the half rail; its node (which of two
+           settings of one name this is) and its whole name are the tip. -->
+      <Tooltip v-if="tip" :text="tip" activator="parent" />
       <!-- Only the exception is marked (#1653): where the computed values
            come from is drawn once, in the tab's head, and "Yours" is the one
            provenance the owner can act on (↺). -->
@@ -19,7 +19,7 @@
         v-else-if="choosing"
         class="wfdef-select"
         :model-value="String(row.value)"
-        :label="row.label"
+        :label="fieldName"
         hide-label
         :options="options"
         :disabled="busy"
@@ -30,7 +30,7 @@
         v-else
         class="wfdef-text wfdef-input num"
         :value="String(row.value)"
-        :aria-label="row.label"
+        :aria-label="fieldName"
         :disabled="busy"
         data-testid="wfdef-input"
         @change="onChange"
@@ -83,11 +83,13 @@
 
 import { computed } from "vue";
 
+import { parameterTitle } from "../../utils/workflowPins";
 import AppButton from "../widgets/AppButton.vue";
 import AppSelect from "../widgets/AppSelect.vue";
+import Tooltip from "../widgets/Tooltip.vue";
 
 const props = defineProps({
-  /** `{label, slot_label, input_name, value, provenance, pinned, exposed}`. */
+  /** `{label, slot_label, input_name, value, provenance, pinned, exposed, name}`. */
   row: { type: Object, required: true },
   /** What ComfyUI offers for this value, when it is a choice there. */
   options: { type: Array, default: null },
@@ -99,6 +101,17 @@ const props = defineProps({
 
 const emit = defineEmits(["toggle-pin", "reset", "edit"]);
 
+const name = computed(() => parameterTitle(props.row));
+/** `Node · whole.name`, or "" where the row already says all of it. */
+const tip = computed(() =>
+  props.node || name.value !== props.row.label
+    ? [props.node, props.row.label].filter(Boolean).join(" · ")
+    : "",
+);
+/** The field's accessible name: the name on screen, then what the tip says. */
+const fieldName = computed(() =>
+  tip.value ? `${name.value} (${tip.value})` : name.value,
+);
 const fixed = computed(() => !props.row.pinned);
 const choosing = computed(() => !fixed.value && Boolean(props.options?.length));
 
@@ -156,10 +169,6 @@ function onChange(event) {
   font-size: var(--text-2xs);
   font-weight: var(--weight-semibold);
   color: rgb(var(--v-theme-on-surface));
-}
-
-.wfdef-node {
-  font-size: var(--text-2xs);
 }
 
 .wfdef-value {

@@ -3551,13 +3551,15 @@ describe("expose a parameter", () => {
     );
     setWorkflowPins.mockImplementation(async (_key, pins) => ({ pins }));
     await wrapper.find("[data-testid='wftab-expose']").trigger("click");
-    dialog(wrapper).vm.$emit("expose", { ...SCALE, value: 1.5 });
+    dialog(wrapper).vm.$emit("expose", { ...SCALE, value: 1.5, name: "Scale" });
     await flush(wrapper);
-    // Whole-set: the edit that was there goes back with it.
+    // Whole-set: the edit that was there goes back with it, without a name,
+    // so the name it may have stands.
     expect(setWorkflowDefaults).toHaveBeenCalledWith(KEY, [
       { slot_label: "slot-a", input_name: "cfg", value: "7.5" },
-      { ...SCALE, value: 1.5 },
+      { ...SCALE, value: 1.5, name: "Scale" },
     ]);
+    expect(setWorkflowDefaults.mock.calls[0][1][0]).not.toHaveProperty("name");
     // And the pins nobody had chosen are written out, with it among them.
     expect(setWorkflowPins).toHaveBeenCalledWith(KEY, [
       { slot_label: "slot-a", input_name: "steps" },
@@ -3567,11 +3569,13 @@ describe("expose a parameter", () => {
     expect(dialog(wrapper).exists()).toBe(false);
     expect(lockOf(wrapper, "scale_by").attributes("aria-pressed")).toBe("false");
     expect(inFixedGroup(wrapper, "scale_by")).toBe(false);
-    // Named after its setting alone, so the row says which node's it is; a
+    // Named after its setting alone, so its tip says which node's it is; a
     // parameter the pictures vote on needs no telling, though its node is
     // in the same read.
-    expect(rowNamed(wrapper, "scale_by").find(".wfdef-node").text()).toBe("Final upscale");
-    expect(rowNamed(wrapper, "sampler_name").find(".wfdef-node").exists()).toBe(false);
+    const tip = (name) =>
+      rowNamed(wrapper, name).find(".wfdef-name").findComponent({ name: "Tooltip" });
+    expect(tip("scale_by").props("text")).toBe("Final upscale · scale_by");
+    expect(tip("sampler_name").exists()).toBe(false);
     // Its ↺ would have nothing to go back to: the button removes the row.
     expect(
       rowNamed(wrapper, "scale_by").find("[data-testid='wfdef-reset']").attributes("aria-label"),

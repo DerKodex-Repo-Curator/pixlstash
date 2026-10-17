@@ -7,6 +7,8 @@ import {
   nodeNames,
   nodesByAddress,
   optionsByAddress,
+  parameterName,
+  parameterTitle,
 } from "./workflowPins";
 
 const NODES = [
@@ -64,5 +66,18 @@ describe("a parameter's node", () => {
       "b/text": "Prompt #7",
       "c/scale_by": "Upscale",
     });
+  });
+});
+
+describe("a parameter's name", () => {
+  it("is the setting alone, without the dynamic combo it is an option of", () => {
+    expect(parameterName("resize_type.multiplier")).toBe("multiplier");
+    expect(parameterName("resize_type.multiplier 2")).toBe("multiplier 2");
+    expect(parameterName("steps")).toBe("steps");
+  });
+
+  it("is the one the owner gave it, where they gave one", () => {
+    expect(parameterTitle({ label: "resize_type.multiplier", name: "Scale" })).toBe("Scale");
+    expect(parameterTitle({ label: "resize_type.multiplier", name: null })).toBe("multiplier");
   });
 });

@@ -9528,6 +9528,50 @@ def test_an_input_nothing_maps_is_offered_and_a_run_sets_it_once_exposed(runnabl
     assert (ran["scale_by"], ran["upscale_method"]) == (2.5, "1024")
 
 
+def test_a_parameter_keeps_the_name_it_was_given_until_it_goes(runnable):
+    """A parameter's name: given with its value, kept by a write that does
+    not mention it, cleared by ``""``, and gone with the parameter.
+
+    Wrong if a later value edit (which never sends names) wipes the name, or if
+    exposing the same setting again brings back the name it had before.
+    """
+    document = json.loads(json.dumps(RUN_DOCUMENT))
+    document["3"]["inputs"].update({"steps": 13, "cfg": 1.5, "seed": 5})
+    manual = create_manual_workflow(runnable.server.hub, "Named", document, "import")
+
+    def put(*defaults) -> dict:
+        r = runnable.owner.put(
+            f"{API}/workflows/{manual}/defaults", json={"defaults": list(defaults)}
+        )
+        assert r.status_code == 200, r.text
+        values = r.json()["card"]["default_recipe"]["values"]
+        return {v["input_name"]: v for v in values}
+
+    runnable.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url, **_: (RUN_OBJECT_INFO, None)
+    )
+    r = runnable.owner.get(f"{API}/workflows/{manual}/form-inputs")
+    assert r.status_code == 200, r.text
+    listed = {
+        row["input_name"]: row for node in r.json()["nodes"] for row in node["inputs"]
+    }
+    steps = {k: listed["steps"][k] for k in ("slot_label", "input_name")}
+    cfg = {k: listed["cfg"][k] for k in ("slot_label", "input_name")}
+
+    rows = put({**steps, "value": 9, "name": "  Steps  "}, {**cfg, "value": 4})
+    assert (rows["steps"]["name"], rows["cfg"]["name"]) == ("Steps", None)
+    # The Workflow tab's next edit sends the set back without names.
+    rows = put({**steps, "value": 10}, {**cfg, "value": 5})
+    assert (rows["steps"]["value"], rows["steps"]["name"]) == (10, "Steps")
+    rows = put({**steps, "value": 10, "name": ""}, {**cfg, "value": 5})
+    assert rows["steps"]["name"] is None
+
+    put({**steps, "value": 10, "name": "Steps"})
+    # Left out of the set: the edit goes, and its name with it.
+    assert put({**cfg, "value": 5})["steps"]["name"] is None
+    assert put({**steps, "value": 10})["steps"]["name"] is None
+
+
 @pytest.fixture
 def merged_checkpoint(runnable):
     """The shelf after a duplicate merge: one model, one name gone, one kept.

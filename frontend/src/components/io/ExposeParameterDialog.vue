@@ -30,6 +30,15 @@
         :options="inputOptions"
         data-testid="xpd-input"
       />
+      <!-- What the parameter rows and the Run form call it. Starts as the
+           setting alone (`multiplier`, not `resize_type.multiplier`). -->
+      <AppInput
+        v-model="name"
+        label="Name"
+        :placeholder="input ? parameterName(input.input_name) : ''"
+        data-testid="xpd-name"
+        @enter="accept"
+      />
       <!-- Asked only where ComfyUI did not say: the value in the graph is then
            the one clue, and `7` may be a number or a piece of text. -->
       <AppSelect
@@ -76,9 +85,10 @@
  */
 import { computed, nextTick, ref, watch } from "vue";
 
-import { nodeNames } from "../../utils/workflowPins";
+import { nodeNames, parameterName } from "../../utils/workflowPins";
 import AppButton from "../widgets/AppButton.vue";
 import AppDialog from "../widgets/AppDialog.vue";
+import AppInput from "../widgets/AppInput.vue";
 import AppSelect from "../widgets/AppSelect.vue";
 
 const KINDS = [
@@ -101,6 +111,7 @@ const emit = defineEmits(["close", "expose"]);
 const nodeId = ref("");
 const inputName = ref("");
 const kind = ref("text");
+const name = ref("");
 let invoker = null;
 
 const node = computed(() =>
@@ -148,6 +159,7 @@ watch(
   input,
   (entry) => {
     if (entry) kind.value = guessed(entry.value);
+    name.value = entry ? parameterName(entry.input_name) : "";
   },
   { immediate: true },
 );
@@ -191,6 +203,8 @@ function accept() {
     slot_label: input.value.slot_label,
     input_name: input.value.input_name,
     value: value.value,
+    // Cleared: the row falls back to the setting's own name.
+    name: name.value.trim() || parameterName(input.value.input_name),
   });
   restoreFocus();
 }

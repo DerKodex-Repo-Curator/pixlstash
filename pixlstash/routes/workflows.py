@@ -506,6 +506,9 @@ class WorkflowDefault(BaseModel):
     ``exposed`` is a parameter the owner added (``GET …/form-inputs`` lists
     what can be): its pictures do not vote on it, so a ``PUT …/defaults``
     without it removes the row rather than putting a computed value back.
+
+    ``name`` is what the owner called the parameter when they added it, or
+    null; a client shows it in place of ``label``.
     """
 
     label: str
@@ -514,6 +517,7 @@ class WorkflowDefault(BaseModel):
     value: bool | int | float | str
     provenance: str
     exposed: bool = False
+    name: str | None = None
 
 
 class WorkflowCover(BaseModel):
@@ -1039,9 +1043,14 @@ class ParameterAddress(BaseModel):
 
 
 class CardDefault(ParameterAddress):
-    """One parameter the owner has set this workflow to start from."""
+    """One parameter the owner has set this workflow to start from.
+
+    ``name`` names it on screen; left out, a name it has stands, and ``""``
+    clears it.
+    """
 
     value: bool | int | float | str
+    name: str | None = Field(None, max_length=MAX_LABEL_LENGTH)
 
 
 class CardDefaults(BaseModel):
@@ -3576,6 +3585,7 @@ def _defaults_payload(values) -> list[WorkflowDefault]:
             value=default.value,
             provenance=default.provenance,
             exposed=default.exposed,
+            name=default.name,
         )
         for default in values
     ]
@@ -4672,17 +4682,22 @@ def create_router(server) -> APIRouter:
         server.auth.ensure_secure_when_required(request)
         hub = _hub()
         _require_workflow(hub, workflow_id)
+        rows = [
+            (
+                f"{default.slot_label}{OVERRIDE_ADDRESS_SEPARATOR}{default.input_name}",
+                default,
+            )
+            for default in payload.defaults
+        ]
         replace_parameter_defaults(
             hub,
             workflow_id,
-            [
-                (
-                    f"{default.slot_label}{OVERRIDE_ADDRESS_SEPARATOR}"
-                    f"{default.input_name}",
-                    _stored_value(default.value),
-                )
-                for default in payload.defaults
-            ],
+            [(address, _stored_value(default.value)) for address, default in rows],
+            {
+                address: default.name.strip()
+                for address, default in rows
+                if default.name is not None
+            },
         )
         _announce(request, [workflow_id], "changed")
         return _read_detail(hub, workflow_id)
