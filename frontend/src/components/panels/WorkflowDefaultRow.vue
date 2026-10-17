@@ -19,7 +19,7 @@
         v-else-if="choosing"
         class="wfdef-select"
         :model-value="String(row.value)"
-        :label="row.label"
+        :label="tip || row.label"
         hide-label
         :options="options"
         :disabled="busy"
@@ -30,7 +30,7 @@
         v-else
         class="wfdef-text wfdef-input num"
         :value="String(row.value)"
-        :aria-label="row.label"
+        :aria-label="tip || row.label"
         :disabled="busy"
         data-testid="wfdef-input"
         @change="onChange"

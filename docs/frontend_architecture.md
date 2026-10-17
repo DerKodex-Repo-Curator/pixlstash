@@ -2409,10 +2409,13 @@ can no longer see.
   value and `PUT …/pins` with it set each run; the row is added to
   `openedPins` so it shows under *Set each run* at once. Such a row is
   `exposed`: its ↺ is a ✕, "Remove <name> from the parameters", since
-  clearing the edit takes the row away, and it carries its node's name under
-  its own (`nodesByAddress`, the dialog's naming), because a row is labelled
-  by its setting alone and two nodes can each have a `text`. The Run popup
-  puts the same name after the field's label.
+  clearing the edit takes the row away. A row is named by its setting alone,
+  cut to the last dotted part (`parameterName`: a dynamic combo's option
+  `resize_type.multiplier` reads `multiplier`), because the half rail cannot
+  hold more; its node (`nodesByAddress`, the dialog's naming, which says which
+  of two nodes' `text` this is) and its whole name are its tooltip and its
+  field's accessible name. The Run popup, which has the width, puts the node
+  after the shortened label and the whole name in its tooltip.
   A LoRA goes INTO the default recipe from the pile: each ALSO USED fan row
   the summary gives a `sha256` (the one shelf file it is, the route's own
   resolution) has **Add to default** (`PUT …/default-lora`,
