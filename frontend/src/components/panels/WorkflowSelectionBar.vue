@@ -631,7 +631,10 @@ const VerbMenu = () => {
       },
       [
         title ? h(Tooltip, { text: title, activator: "parent" }) : null,
-        h("i", { class: `v-icon mdi ${icon} ctx-icon`, "aria-hidden": "true" }),
+        // An mdi name, or a glyph of its own (the PixlStash and ComfyUI marks).
+        typeof icon === "string"
+          ? h("i", { class: `v-icon mdi ${icon} ctx-icon`, "aria-hidden": "true" })
+          : icon,
         h("span", { class: "ctx-label-text" }, label),
         kbd ? h("span", { class: "ctx-shortcut" }, kbd) : null,
       ],
@@ -727,11 +730,19 @@ const VerbMenu = () => {
                 onKeydown: subKeydown,
               },
               [
-                item("", "Adapted for PixlStash", {
-                  verb: "open-comfyui",
-                  title: adaptedTitle.value,
-                }),
-                item("", "Original", {
+                item(
+                  h("img", {
+                    src: "/Logo.png",
+                    alt: "",
+                    class: "ctx-icon wf-menu-logo",
+                  }),
+                  "Adapted for PixlStash",
+                  {
+                    verb: "open-comfyui",
+                    title: adaptedTitle.value,
+                  },
+                ),
+                item(h(ComfyuiIcon, { class: "ctx-icon" }), "Original", {
                   verb: "open-comfyui-original",
                   title: "With its own savers and loaders instead of PixlStash's",
                 }),
@@ -853,5 +864,12 @@ defineExpose({
    function, which scoped CSS cannot reach. */
 .wf-menu {
   min-width: 210px;
+}
+
+/* The PixlStash mark is the brand in colour, so it takes none of the dimming
+   a monochrome row glyph does; the slot sizes it as the title bar's is. */
+.wf-menu .wf-menu-logo {
+  object-fit: contain;
+  opacity: 1;
 }
 </style>

@@ -2245,8 +2245,8 @@ can no longer see.
   node to ask for the workflow's own nodes; it is offered only where the
   button would open (an address, one workflow, a node that can). The grid's
   card menu (`WorkflowSelectionBar.vue`, ⋯ and right-click) offers both as
-  an *Open in ComfyUI* row with a submenu, *Adapted for PixlStash* and
-  *Original*, gated the same way and refused with a reason rather than hidden
+  an *Open in ComfyUI* row with a submenu, *Adapted for PixlStash* (the
+  PixlStash logo) and *Original* (the ComfyUI mark), gated the same way and refused with a reason rather than hidden
   except where there is no ComfyUI; the row opens the submenu on click, hover,
   Right arrow, Enter or Space, and Left goes back. The gates, the node check
   and the open itself are `composables/useComfyuiOpen.js`, shared by both

@@ -527,6 +527,12 @@ describe("Open in ComfyUI", () => {
     await trigger(wrapper).trigger("click");
     const sub = verbMenus(wrapper)[0].find(".ctx-submenu");
     expect(rowLabels(sub)).toEqual(["Adapted for PixlStash", "Original"]);
+    // Each row wears the mark of whose nodes it opens with.
+    const [adaptedRow, originalRow] = sub.findAll(".ctx-item");
+    expect(adaptedRow.find("img.ctx-icon").attributes("src")).toBe("/Logo.png");
+    expect(adaptedRow.find("svg").exists()).toBe(false);
+    expect(originalRow.find("svg.ctx-icon").exists()).toBe(true);
+    expect(originalRow.find("img").exists()).toBe(false);
 
     await sub.findAll(".ctx-item")[0].trigger("click");
     expect(wrapper.emitted("open-comfyui")).toEqual([[false]]);
