@@ -66,7 +66,7 @@
       :variant="fixed ? 'secondary' : 'ghost'"
       icon-only
       :icon-left="fixed ? 'lock-outline' : 'lock-open-variant-outline'"
-      :tooltip="`Fix ${row.label} for this workflow`"
+      :tooltip="`Pin ${row.label} for this workflow`"
       :aria-pressed="fixed ? 'true' : 'false'"
       :disabled="busy"
       data-testid="wfdef-lock"

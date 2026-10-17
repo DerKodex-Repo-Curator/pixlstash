@@ -18,7 +18,7 @@ focus move and announcement after Show N lands (§1.5 step 3), and the
 Workflow tab is now three bordered panels (Models, LoRAs with the Also used
 pile under a hairline, Parameters), a 64px label column, a star-rating
 histogram in the head in place of the provenance note, and a lock per
-parameter ("Set each run" / "Fixed") in place of the pin and "All N
+parameter ("Set each run" / "Pinned", first shipped as "Fixed") in place of the pin and "All N
 parameters". The Run dialog changed with it: it asks only for the
 parameters set each run and lists the fixed ones read-only. Where this
 document describes a section label, the pin, "All N parameters" or the 96px

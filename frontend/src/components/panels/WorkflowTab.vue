@@ -795,7 +795,7 @@
               aria-hidden="true"
             ></div>
             <!-- The group is one element, label, rows and note, so "in the
-                 Fixed group" is containment rather than document order. -->
+                 Pinned group" is containment rather than document order. -->
             <div class="wftab-rows" data-testid="wftab-fixed-group">
               <!-- More than three fixed rows fold away behind their count. -->
               <details
@@ -803,7 +803,8 @@
                 class="wftab-disclose"
               >
                 <summary class="wftab-sublabel">
-                  Fixed <span class="num">· {{ fixedDefaults.length }}</span>
+                  Pinned
+                  <span class="wftab-count">{{ fixedDefaults.length }}</span>
                 </summary>
                 <div class="wftab-rows">
                   <WorkflowDefaultRow
@@ -821,7 +822,8 @@
               </details>
               <template v-else>
                 <p class="wftab-sublabel">
-                  Fixed <span class="num">· {{ fixedDefaults.length }}</span>
+                  Pinned
+                  <span class="wftab-count">{{ fixedDefaults.length }}</span>
                 </p>
                 <WorkflowDefaultRow
                   v-for="row in fixedDefaults"
@@ -836,7 +838,7 @@
                 />
               </template>
               <p class="wftab-note wftab-quiet">
-                Fixed values are used by every run.
+                Pinned values are used by every run.
               </p>
             </div>
           </template>
@@ -1262,7 +1264,7 @@ import WorkflowStrengthInput from "./WorkflowStrengthInput.vue";
 import WorkflowUseSetMenu from "./WorkflowUseSetMenu.vue";
 import WorkflowVersionMenu from "./WorkflowVersionMenu.vue";
 
-/** Past this many, the Fixed group folds away behind "Fixed · N". */
+/** Past this many, the Pinned group folds away behind "Pinned N". */
 const FIXED_SHOWN = 3;
 
 const store = useWorkflowsStore();
@@ -4296,7 +4298,7 @@ async function checkInstalled(key, { quiet = false } = {}) {
 }
 
 /* One hairline between the two kinds of member of a group: Default and Also
-   used, Set each run and Fixed. */
+   used, Set each run and Pinned. */
 .wftab-rule {
   height: 1px;
   margin: var(--space-1) 0;
@@ -4307,6 +4309,26 @@ async function checkInstalled(key, { quiet = false } = {}) {
   margin: 0;
   font-size: var(--text-xs);
   color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
+}
+
+/* A group's count: a raspberry pill, the charts' hue. As text the raspberry
+   reads 2.3:1 on the dark panel, so it is the fill and on-secondary the label
+   (4.91:1 in both themes). */
+.wftab-count {
+  margin-left: var(--space-3);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--badge-size);
+  height: var(--badge-size);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  background: rgb(var(--v-theme-secondary));
+  color: rgb(var(--v-theme-on-secondary));
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
 }
 
 .wftab-rows {
