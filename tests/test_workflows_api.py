@@ -21122,6 +21122,11 @@ def test_a_run_loads_a_vae_comfyui_lacks_off_the_shelf(with_pack):
         assert env.submitted[-1]["graph"]["9"]["class_type"] == "VAELoader"
         listed[0] = ["test-other-vae.safetensors"]
 
+        # A ComfyUI without the pack's loader has nothing to load it with.
+        pack_loader = info.pop("PixlStashVAELoader")
+        assert missing() == [{"file": filename, "folder": "vae"}]
+        info["PixlStashVAELoader"] = pack_loader
+
         # Its copy gone, the shelf has nothing for the pack's loader to fetch.
         with hub.transaction() as conn:
             conn.execute(
