@@ -20465,11 +20465,12 @@ def test_the_checkpoint_loader_goes_in_only_where_it_can_read_the_file(id_loader
 def test_a_picture_in_comfyuis_input_folder_opens_as_the_library_picture(
     id_loaders,
 ):
-    """A Load Image naming a file in ComfyUI's input folder whose content the
-    library holds opens as the pack's Picture Loader on that picture. Wrong if
-    it stays a Load Image, or if a file the library does not hold becomes a
-    loader on some other picture. One naming a file ComfyUI does not list
-    could not run as it is, and opens as an empty Picture Loader to browse in.
+    """A Load Image naming a file in ComfyUI's input folder, or the output
+    folder its name is annotated with, whose content the library holds opens
+    as the pack's Picture Loader on that picture. Wrong if it stays a Load
+    Image, or if a file the library does not hold becomes a loader on some
+    other picture. One the library holds no picture of, whether ComfyUI has
+    the file or not, opens as an empty Picture Loader to browse in.
     """
     env = id_loaders
     info = json.loads(
@@ -20489,13 +20490,17 @@ def test_a_picture_in_comfyuis_input_folder_opens_as_the_library_picture(
         "in-input.png",
         pixel_sha=ImageUtils.calculate_hash_from_bytes(held),
     )
-    files = {("", "in-input.png"): held, ("sub", "other.png"): b"\x89PNG test-other"}
+    files = {
+        ("input", "", "in-input.png"): held,
+        ("input", "sub", "other.png"): b"\x89PNG test-other",
+        ("output", "", "made.png"): held,
+    }
     fetched = []
 
     def download(base_url, entry):
         fetched.append(entry)
-        key = (entry["subfolder"], entry["filename"])
-        if entry["type"] != "input" or key not in files:
+        key = (entry["type"], entry["subfolder"], entry["filename"])
+        if key not in files:
             raise HTTPException(status_code=404, detail="test-not-there")
         return files[key], ".png"
 
@@ -20515,15 +20520,15 @@ def test_a_picture_in_comfyuis_input_folder_opens_as_the_library_picture(
         },
     }
     assert {"filename": "in-input.png", "subfolder": "", "type": "input"} in fetched
-    assert opened("sub/other.png") == {
-        "class_type": "LoadImage",
-        "inputs": {"image": "sub/other.png"},
-    }
-    assert {"filename": "other.png", "subfolder": "sub", "type": "input"} in fetched
-    assert opened("gone.png") == {
+    assert opened("made.png [output]")["inputs"]["picture_ids"] == str(picture)
+    assert {"filename": "made.png", "subfolder": "", "type": "output"} in fetched
+    empty = {
         "class_type": "PixlStashPictureLoader",
         "inputs": {"picture_ids": "", "library": env.server.vault.library_uuid},
     }
+    assert opened("sub/other.png") == empty
+    assert {"filename": "other.png", "subfolder": "sub", "type": "input"} in fetched
+    assert opened("gone.png") == empty
 
 
 def test_a_diffusion_model_a_vae_and_a_clip_open_as_the_shelfs_loaders(id_loaders):
@@ -21010,10 +21015,10 @@ def test_a_pack_from_before_the_shelf_widget_says_restart_comfyui(id_loaders):
 
 def test_the_picture_loader_goes_in_only_on_a_picture_the_library_holds(id_loaders):
     """A pin (Fixed) or a file a run uploaded says which picture. A file the
-    owner put in ComfyUI's input folder is no picture of the library.
+    owner put in ComfyUI's input folder is no picture of the library, so the
+    loader goes in empty there, for the owner to browse for one.
 
-    Wrong if the loader goes in empty on a file ComfyUI has: it would pick
-    pictures by its own sort over one that loads.
+    Wrong if it goes in on any picture but the one held.
     """
     env = id_loaders
     # ComfyUI holds the file the run uploaded, as it does after a real run.
@@ -21034,7 +21039,11 @@ def test_the_picture_loader_goes_in_only_on_a_picture_the_library_holds(id_loade
     def loader(workflow_id):
         return _opened(env, workflow_id, pixlstash_nodes="true")["workflow"]["7"]
 
-    assert loader(own_file) == document["7"]
+    empty = {
+        "class_type": "PixlStashPictureLoader",
+        "inputs": {"picture_ids": "", "library": env.server.vault.library_uuid},
+    }
+    assert loader(own_file) == empty
 
     r = env.owner.put(
         f"{API}/workflows/{own_file}/inputs",
@@ -21062,8 +21071,8 @@ def test_the_picture_loader_goes_in_only_on_a_picture_the_library_holds(id_loade
 
     # A picture since binned is not one the library holds, pinned or uploaded.
     _bin_picture(env.server, env.picture)
-    assert loader(own_file) == document["7"]
-    assert loader(env.manual)["class_type"] == "LoadImage"
+    assert loader(own_file) == empty
+    assert loader(env.manual) == empty
 
 
 def test_a_held_run_opens_on_the_picture_it_put_in_not_on_the_pin(id_loaders):

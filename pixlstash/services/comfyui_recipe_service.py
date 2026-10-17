@@ -2141,21 +2141,6 @@ SWAPPED_CLASSES = {
 }
 
 
-def _names_no_input_file(object_info: dict, image: Any) -> bool:
-    """Whether a ``LoadImage``'s *image* is a file ComfyUI's input folder
-    does not hold, by the options its ``object_info`` lists. ``False`` where
-    that list does not say (:func:`_combo_options`), and for a name ComfyUI
-    reads out of its output or temp folder (``x.png [output]``), which the
-    list never holds."""
-    options = _combo_options(object_info.get("LoadImage"), "image")
-    return (
-        isinstance(image, str)
-        and options is not None
-        and not image.endswith((" [output]", " [temp]"))
-        and image.removesuffix(" [input]") not in options
-    )
-
-
 def _stands_in(spec: Any, outputs: tuple[str, ...], inputs: dict) -> bool:
     """Whether the pack node *spec* can take a stock loader's place: it hands
     on *outputs* first, and has a widget for every one of *inputs*. A pack
@@ -2197,10 +2182,10 @@ def swap_in_pack_nodes(
     the opened graph is one the workflow may run from next:
 
     * ``LoadImage`` becomes ``PixlStashPictureLoader`` on the picture
-      *pictures* names for the node, of library *library_uuid*. With no
-      picture only where ComfyUI's input folder lacks the file, so the Load
-      Image could not run anyway: empty, that loader picks pictures by its own
-      sort until the owner browses for one.
+      *pictures* names for the node, of library *library_uuid*, and empty
+      where it names none: that loader then picks pictures by its own sort
+      until the owner browses for one. One whose file name is wired in from
+      another node stays, unless *pictures* names its picture.
     * ``CheckpointLoaderSimple`` and ``UNETLoader`` become
       ``PixlStashCheckpointLoader`` on the row *checkpoint_id* names for their
       file, of shelf *shelf_uuid*.
@@ -2216,8 +2201,8 @@ def swap_in_pack_nodes(
         lora_digest: A ``lora_name`` -> the SHA-256 the pack's loader can
             load it by, or ``None``.
         pictures: ``{node_id: picture id}`` for each ``LoadImage`` whose
-            picture this library is known to hold. ``None`` swaps no
-            ``LoadImage``.
+            picture this library is known to hold; any other opens empty.
+            ``None`` swaps no ``LoadImage``.
         library_uuid: The library those ids are of.
         checkpoint_id: A ``ckpt_name`` -> the shelf row the pack's loader can
             load it by, or ``None``. The caller answers only where that
@@ -2289,19 +2274,17 @@ def swap_in_pack_nodes(
             owned = None
             if was == "LoadImage":
                 picture_id = (pictures or {}).get(str(node_id))
-                if picture_id is not None and library_uuid:
-                    owned = {
-                        PICTURE_LOADER_IDS: str(picture_id),
-                        PICTURE_LOADER_LIBRARY: library_uuid,
-                    }
-                elif (
+                # Empty where the library holds no picture of the file: the
+                # owner browses for one. Not over a wire, which would go.
+                if (
                     pictures is not None
                     and library_uuid
-                    and _names_no_input_file(object_info, old.get("image"))
+                    and (picture_id is not None or not is_link(old.get("image")))
                 ):
-                    # It could not run as it is: the owner browses for one.
                     owned = {
-                        PICTURE_LOADER_IDS: "",
+                        PICTURE_LOADER_IDS: ""
+                        if picture_id is None
+                        else str(picture_id),
                         PICTURE_LOADER_LIBRARY: library_uuid,
                     }
             else:
