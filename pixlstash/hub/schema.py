@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import secrets
 import sqlite3
+from typing import Callable
 
 from pixlstash.pixl_logging import get_logger
 from pixlstash.utils.adapter_header import (
@@ -34,7 +35,9 @@ from pixlstash.utils.adapter_header import (
     FILE_CONTROLNET,
     FILE_UNKNOWN,
     FILE_UPSCALER,
+    FILE_VAE,
     has_controlnet_markers,
+    has_vae_markers,
     read_safetensors_header,
     role_from_folder,
 )
@@ -67,7 +70,7 @@ CURRENT_SCHEMA_VERSION = 2
 # reasoning the model-shelf tables were amended into v2 for. ``user_version`` is
 # free (nothing in PixlStash has ever written it), costs no DDL, and an older
 # build ignores it entirely.
-CURRENT_DATA_VERSION = 18
+CURRENT_DATA_VERSION = 19
 
 # `model_file.state` for a copy the last scan actually looked at, spelled out
 # rather than imported from `services.model_folder_scanner`. That module imports
@@ -2164,16 +2167,23 @@ def _backfill_component_roles(
     return refiled
 
 
-def _refile_controlnets_by_tensors(conn: sqlite3.Connection) -> int:
-    """Re-file the ``checkpoint`` and ``unknown`` rows whose tensors are a
-    ControlNet's (:func:`has_controlnet_markers`).
+def _refile_by_tensors(
+    conn: sqlite3.Connection,
+    file_kind: str,
+    has_markers: Callable[[dict], bool],
+    kinds: tuple[str, ...] = (FILE_CHECKPOINT, FILE_UNKNOWN),
+) -> int:
+    """Re-file as *file_kind* the ``checkpoint`` and ``unknown`` rows whose
+    tensors *has_markers* recognises: a ControlNet's
+    (:func:`has_controlnet_markers`) or a VAE's (:func:`has_vae_markers`).
 
     Unlike :func:`_backfill_component_roles` this reads bytes: one
     ``.safetensors`` header per row, off its first present copy. A row with no
     present copy, or one whose header will not read, keeps its kind. A scan
     never rewrites ``file_kind``, so without this a ControlNet shelved under
-    ``diffusion_models/`` stays a checkpoint wherever it is moved to, and the
-    ComfyUI-PixlStash ControlNet Loader is never swapped in for it.
+    ``diffusion_models/`` stays a checkpoint wherever it is moved to, a VAE
+    downloaded into a flat folder stays ``unknown``, and the ComfyUI-PixlStash
+    loader for either is never swapped in for it.
 
     Runs exactly once per hub (see :data:`CURRENT_DATA_VERSION`).
 
@@ -2187,10 +2197,10 @@ def _refile_controlnets_by_tensors(conn: sqlite3.Connection) -> int:
         "SELECT m.id, f.path, mf.relpath FROM model m "
         "JOIN model_file mf ON mf.model_id = m.id "
         "JOIN model_folder f ON f.id = mf.model_folder_id "
-        "WHERE m.file_kind IN (?, ?) AND mf.state = ? "
+        f"WHERE m.file_kind IN ({', '.join('?' * len(kinds))}) AND mf.state = ? "
         "AND lower(mf.relpath) LIKE '%.safetensors' "
         "ORDER BY m.id, f.path, mf.relpath",
-        (FILE_CHECKPOINT, FILE_UNKNOWN, _BACKFILL_LIVE_STATE),
+        (*kinds, _BACKFILL_LIVE_STATE),
     ).fetchall()
     first_copy: dict[int, str] = {}
     for model_id, folder_path, relpath in rows:
@@ -2199,17 +2209,19 @@ def _refile_controlnets_by_tensors(conn: sqlite3.Connection) -> int:
     refiled = 0
     for model_id, path in first_copy.items():
         header = read_safetensors_header(path)
-        if header is None or not has_controlnet_markers(header):
+        if header is None or not has_markers(header):
             continue
         refiled += conn.execute(
             "UPDATE model SET file_kind = ? WHERE id = ?",
-            (FILE_CONTROLNET, model_id),
+            (file_kind, model_id),
         ).rowcount
     if refiled:
         logger.info(
-            "Re-filed %d model rows as ControlNets from their tensors; they "
-            "were registered before a ControlNet was told by them.",
+            "Re-filed %d model rows as %s from their tensors; they were "
+            "registered before a %s was told by them.",
             refiled,
+            file_kind,
+            file_kind,
         )
     return refiled
 
@@ -2532,13 +2544,19 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
                 if data_version < 17:
                     # A ControlNet is told by its tensors too, wherever it
                     # sits: one under `diffusion_models/` was a `checkpoint`.
-                    _refile_controlnets_by_tensors(conn)
+                    _refile_by_tensors(conn, FILE_CONTROLNET, has_controlnet_markers)
                 if data_version < 18:
                     # `upscale_models/` started naming `upscaler`, so the
                     # ComfyUI-PixlStash Upscale Model Loader can fetch one by
                     # digest. Only its `.safetensors` were shelved, as
                     # `unknown`; the `.pth` ones arrive with the next scan.
                     _backfill_component_roles(conn, only_role=FILE_UPSCALER)
+                if data_version < 19:
+                    # A VAE is told by its tensors too: one downloaded into a
+                    # flat folder was `unknown`, so no run loaded it. Only
+                    # `unknown`: a VAE could be a `checkpoint` only by a folder
+                    # or by the owner, and the owner's word stands.
+                    _refile_by_tensors(conn, FILE_VAE, has_vae_markers, (FILE_UNKNOWN,))
                 if data_version < CURRENT_DATA_VERSION:
                     # No placeholder: PRAGMA takes no parameters, and the value
                     # is this module's own constant, nothing from outside.

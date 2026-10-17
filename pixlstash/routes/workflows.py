@@ -8298,25 +8298,24 @@ def create_router(server) -> APIRouter:
     def _swap_in_shelf_loaders(
         request: Request, card_key: str, graph: dict, object_info: dict
     ) -> list[dict]:
-        """Load each checkpoint, ControlNet and upscaler this ComfyUI lacks off
-        the shelf.
+        """Load each model file this ComfyUI lacks off the shelf.
 
         For a run: a ``CheckpointLoaderSimple``, ``UNETLoader``,
-        ``ControlNetLoader`` or ``UpscaleModelLoader`` naming a file ComfyUI
-        does not list becomes the
-        pack's loader on the shelf's copy of that file, the swap *Open in
-        ComfyUI* makes (:func:`swap_in_pack_nodes`), on the same terms. A
-        checkpoint or diffusion model by the shelf's row, only where the shelf
-        holds one copy and ComfyUI is on this computer to read it, since that
-        loader cannot fetch its file; a ControlNet or an upscaler by digest,
-        which its loader fetches when it has to. Anywhere else the loader is left as it is, and
-        the pre-flight reports the file missing as before.
+        ``ControlNetLoader``, ``UpscaleModelLoader``, ``VAELoader`` or
+        ``CLIPLoader`` naming a file ComfyUI does not list becomes the pack's
+        loader on the shelf's copy of that file, the swap *Open in ComfyUI*
+        makes (:func:`_with_pack_nodes`), on the same terms. A checkpoint or
+        diffusion model by the shelf's row, only where the shelf holds one copy
+        and ComfyUI is on this computer to read it, since that loader cannot
+        fetch its file; a ControlNet, an upscaler, a VAE or a CLIP by digest,
+        which its loader fetches when it has to. Anywhere else the loader is
+        left as it is, and the pre-flight reports the file missing as before.
         """
+        targets = [item for item in detect_model_targets(graph, object_info) if item]
         missing = {
             str(item.get("node_id")): item.get("class_type")
-            for item in detect_model_targets(graph, object_info)
-            if item
-            and item.get("class_type")
+            for item in targets
+            if item.get("class_type")
             in (
                 "CheckpointLoaderSimple",
                 "UNETLoader",
@@ -8324,6 +8323,24 @@ def create_router(server) -> APIRouter:
                 "UpscaleModelLoader",
             )
         }
+        swapped = []
+        # A VAE or a CLIP by digest, as `_with_pack_nodes` swaps one in: the
+        # only two classes in `_PACK_MODEL_LOADERS`, and `targets` holds only
+        # the files ComfyUI does not list.
+        for item in targets:
+            was = item.get("class_type")
+            kind = _PACK_MODEL_LOADERS.get(was)
+            if kind is None:
+                continue
+            node_id = str(item.get("node_id"))
+            plan, _refusal = run_service.plan_pixlstash_swap(
+                graph, node_id, kind, {}, object_info, _shelf_digest(_hub(), kind)
+            )
+            if plan is not None:
+                run_service.apply_pixlstash_swap(graph, node_id, plan)
+                swapped.append(
+                    {"node_id": node_id, "was": was, "now": plan["class_type"]}
+                )
         by_row = (
             not {"CheckpointLoaderSimple", "UNETLoader"}.isdisjoint(missing.values())
             and PIXLSTASH_CHECKPOINT_LOADER in object_info
@@ -8337,22 +8354,25 @@ def create_router(server) -> APIRouter:
             "UpscaleModelLoader" in missing.values()
             and PIXLSTASH_UPSCALE_MODEL_LOADER in object_info
         )
-        if not by_row and not controlnet and not upscaler:
-            return []
-        hub = _hub()
-        # Only the loaders whose file ComfyUI lacks: the swap changes each
-        # node in place, so a view of those is the graph it changes.
-        swapped = swap_in_pack_nodes(
-            {node_id: node for node_id, node in graph.items() if node_id in missing},
-            object_info,
-            lambda _name: None,
-            checkpoint_id=_shelf_checkpoint(hub) if by_row else None,
-            shelf_uuid=shelf_uuid(hub) if by_row else None,
-            controlnet_digest=_shelf_digest(hub, FILE_CONTROLNET)
-            if controlnet
-            else None,
-            upscaler_digest=_shelf_digest(hub, FILE_UPSCALER) if upscaler else None,
-        )
+        if by_row or controlnet or upscaler:
+            hub = _hub()
+            # Only the loaders whose file ComfyUI lacks: the swap changes each
+            # node in place, so a view of those is the graph it changes.
+            swapped += swap_in_pack_nodes(
+                {
+                    node_id: node
+                    for node_id, node in graph.items()
+                    if node_id in missing
+                },
+                object_info,
+                lambda _name: None,
+                checkpoint_id=_shelf_checkpoint(hub) if by_row else None,
+                shelf_uuid=shelf_uuid(hub) if by_row else None,
+                controlnet_digest=_shelf_digest(hub, FILE_CONTROLNET)
+                if controlnet
+                else None,
+                upscaler_digest=_shelf_digest(hub, FILE_UPSCALER) if upscaler else None,
+            )
         for swap in swapped:
             logger.info(
                 "[workflows] Card %s loads node %s's %s off the shelf through "

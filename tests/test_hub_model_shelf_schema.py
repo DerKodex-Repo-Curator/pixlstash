@@ -1015,6 +1015,45 @@ class TestComponentRoleBackfill:
         ]
         assert hub.execute("PRAGMA user_version").fetchone()[0] == CURRENT_DATA_VERSION
 
+    def test_a_data_v18_hub_refiles_a_vae_by_its_tensors(self, hub, tmp_path):
+        # Data version 19: a VAE downloaded into a flat folder was `unknown`,
+        # so a run never loaded it off the shelf. Its header says what it is.
+        # A file with one half of an autoencoder is left as it is, and so is a
+        # `checkpoint` one: only a folder or the owner could have said that.
+        apply_migrations(hub)
+        hub.execute("PRAGMA user_version = 18")
+        folder_id = add_folder(hub, str(tmp_path))
+
+        def shelved(name, tensors, file_kind="unknown"):
+            header = {t: {"dtype": "F16", "shape": [1]} for t in tensors}
+            blob = json.dumps(header).encode()
+            (tmp_path / name).write_bytes(struct.pack("<Q", len(blob)) + blob)
+            model_id = add_model(hub, file_kind=file_kind, sha256=name, kind=None)
+            add_file(hub, model_id, folder_id, name)
+            return model_id
+
+        vae = shelved(
+            "seedvr2_ema_vae_fp16.safetensors",
+            ["encoder.conv_in.weight", "decoder.conv_in.weight"],
+        )
+        half = shelved("taesd_decoder.safetensors", ["decoder.conv_in.weight"])
+        corrected = shelved(
+            "owner_says_checkpoint.safetensors",
+            ["encoder.conv_in.weight", "decoder.conv_in.weight"],
+            "checkpoint",
+        )
+        hub.commit()
+
+        apply_migrations(hub)
+
+        kinds = dict(hub.execute("SELECT id, file_kind FROM model").fetchall())
+        assert [kinds[vae], kinds[half], kinds[corrected]] == [
+            "vae",
+            "unknown",
+            "checkpoint",
+        ]
+        assert hub.execute("PRAGMA user_version").fetchone()[0] == CURRENT_DATA_VERSION
+
     def test_a_fresh_hub_records_the_backfill_as_done(self, hub):
         apply_migrations(hub)
 
