@@ -159,6 +159,7 @@ from pixlstash.utils.adapter_header import (
     FILE_ENGINE,
     FILE_TEXT_ENCODER,
     FILE_UNKNOWN,
+    FILE_UPSCALER,
     FILE_VAE,
 )
 from pixlstash.utils.host_open import open_in_file_manager
@@ -190,6 +191,7 @@ logger = get_logger(__name__)
 # into ``/checkpoints`` - filing a text encoder as a base model is the defect
 # this whole kind exists to end. ``controlnet`` likewise: a big one clears
 # the checkpoint threshold, and its own kind is what makes it fetchable here.
+# ``upscaler`` too, which the pack's Upscale Model Loader fetches by digest.
 ADAPTER_BLOCK_FILE_KINDS = (
     FILE_ADAPTER,
     FILE_UNKNOWN,
@@ -197,6 +199,7 @@ ADAPTER_BLOCK_FILE_KINDS = (
     FILE_VAE,
     FILE_TEXT_ENCODER,
     FILE_CONTROLNET,
+    FILE_UPSCALER,
 )
 
 # Constrained here rather than validated in the handler, so an unknown key is a
@@ -1741,9 +1744,9 @@ def create_router(server) -> APIRouter:
             "Every adapter registered on this machine, with each copy's location "
             "and the characters/sets in the active library that use it. "
             "`file_kind` swaps in the other hash-addressable kinds instead: "
-            "`unknown` for the unclassified files, `vae`, `text_encoder` and "
-            "`controlnet` for the support files a generation graph loads beside "
-            "a checkpoint, "
+            "`unknown` for the unclassified files, `vae`, `text_encoder`, "
+            "`controlnet` and `upscaler` for the support files a generation "
+            "graph loads beside a checkpoint, "
             "`engine` for the models PixlStash downloads for itself. None of "
             "them is ever folded into /checkpoints. `base_model=UNASSIGNED` "
             "selects the rows that record no base model."
@@ -1757,7 +1760,8 @@ def create_router(server) -> APIRouter:
             FILE_ADAPTER,
             description=(
                 "`adapter` (default), `unknown`, `vae`, `text_encoder`, "
-                "`controlnet` or `engine`. Checkpoints have their own route."
+                "`controlnet`, `upscaler` or `engine`. Checkpoints have their "
+                "own route."
             ),
         ),
         base_model: Optional[str] = Query(

@@ -105,6 +105,10 @@ FILE_TEXT_ENCODER = "text_encoder"
 # clear `_CHECKPOINT_MIN_PARAMS` and read as `checkpoint`, which the shelf's
 # hash routes refuse, so it needs a name of its own to be fetched by digest.
 FILE_CONTROLNET = "controlnet"
+# An image upscaler (ESRGAN, SwinIR, DAT...), loaded by its own loader, which
+# the ComfyUI-PixlStash Upscale Model Loader stands in for. Mostly `.pth`,
+# which has no header to read, so it is told by its folder alone.
+FILE_UPSCALER = "upscaler"
 
 # Tensors only a ControlNet carries: diffusers' (SD, SDXL, SD3.5, Flux) and the
 # original `control_model.` layout's. Positive evidence as an adapter marker is:
@@ -154,6 +158,12 @@ _ROLE_FOLDERS: dict[str, str] = {
     "diffusionmodels": FILE_CHECKPOINT,
     "controlnet": FILE_CONTROLNET,
     "controlnets": FILE_CONTROLNET,
+    # ComfyUI's `upscale_models/`, and A1111's and Forge's per-architecture
+    # folders.
+    "upscalemodels": FILE_UPSCALER,
+    "esrgan": FILE_UPSCALER,
+    "realesrgan": FILE_UPSCALER,
+    "swinir": FILE_UPSCALER,
 }
 
 # Parameter count above which a marker-free file is a base checkpoint rather
@@ -207,7 +217,7 @@ class AdapterInfo:
             unrecognised LyCORIS variant reads as "an adapter whose kind we do
             not know" rather than being mistaken for a checkpoint.
         file_kind: What the file is: ``"adapter"``, ``"vae"``,
-            ``"text_encoder"``, ``"controlnet"``, ``"checkpoint"`` or
+            ``"text_encoder"``, ``"controlnet"``, ``"upscaler"``, ``"checkpoint"`` or
             ``"unknown"``. Never guesses checkpoint from the absence of markers
             alone; see :func:`classify_model_file`.
         param_count: Total parameters, summed from the tensor shapes already in
@@ -556,8 +566,8 @@ def role_from_folder(path: str) -> Optional[str]:
         path: Path to the model file. May be relative or absolute.
 
     Returns:
-        ``"vae"``, ``"text_encoder"``, ``"controlnet"``, ``"checkpoint"``, or
-        ``None`` when the directory names no role we recognise - which is the answer for a flat folder of mixed
+        ``"vae"``, ``"text_encoder"``, ``"controlnet"``, ``"upscaler"``,
+        ``"checkpoint"``, or ``None`` when the directory names no role we recognise - which is the answer for a flat folder of mixed
         downloads and must never be read as "not a VAE".
     """
     folder = os.path.basename(os.path.dirname(path))
@@ -603,7 +613,7 @@ def classify_model_file(tensor_names, param_count: int, path: str = "") -> str:
 
     Returns:
         ``"adapter"``, ``"vae"``, ``"text_encoder"``, ``"controlnet"``,
-        ``"checkpoint"`` or ``"unknown"``.
+        ``"upscaler"``, ``"checkpoint"`` or ``"unknown"``.
     """
     if has_adapter_markers(tensor_names):
         return FILE_ADAPTER

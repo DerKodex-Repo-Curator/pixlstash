@@ -1655,7 +1655,9 @@ def workflow_defaults(
             (
                 names.get(slot.asset)
                 for slot in base_read.slots
-                if slot.class_type.startswith("UpscaleModelLoader")
+                if slot.class_type.startswith(
+                    ("UpscaleModelLoader", "PixlStashUpscaleModelLoader")
+                )
             ),
             None,
         )

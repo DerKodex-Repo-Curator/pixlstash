@@ -45,7 +45,7 @@ vi.mock("../api/modelShelf", () => ({
   listAdapters: (...args) => {
     if (args[0]?.fileKind === "engine") return listEngines(...args);
     if (args[0]?.fileKind === "unknown") return listUnclassified(...args);
-    if (["vae", "text_encoder", "controlnet"].includes(args[0]?.fileKind)) {
+    if (["vae", "text_encoder", "controlnet", "upscaler"].includes(args[0]?.fileKind)) {
       return listSupport(...args);
     }
     return listAdapters(...args);
@@ -477,8 +477,8 @@ describe("the badge", () => {
 
 describe("the support block", () => {
   it("puts every kind in one bucket from one request each", async () => {
-    // One checkbox, three `file_kind`s. The route takes a single kind, so the
-    // block is three requests, and a reader deciding what to keep sees one list.
+    // One checkbox, four `file_kind`s. The route takes a single kind, so the
+    // block is four requests, and a reader deciding what to keep sees one list.
     const store = useModelShelfStore();
     listSupport
       .mockResolvedValueOnce([adapter({ id: 1, file_kind: "vae", kind: null })])
@@ -487,15 +487,19 @@ describe("the support block", () => {
       ])
       .mockResolvedValueOnce([
         adapter({ id: 5, file_kind: "controlnet", kind: null }),
+      ])
+      .mockResolvedValueOnce([
+        adapter({ id: 7, file_kind: "upscaler", kind: null }),
       ]);
 
     await store.fetchRows();
 
-    expect(store.rows.map((r) => r.id)).toEqual([1, 2, 5]);
+    expect(store.rows.map((r) => r.id)).toEqual([1, 2, 5, 7]);
     expect(listSupport.mock.calls.map(([args]) => args.fileKind)).toEqual([
       "vae",
       "text_encoder",
       "controlnet",
+      "upscaler",
     ]);
   });
 
@@ -510,6 +514,9 @@ describe("the support block", () => {
       ])
       .mockResolvedValueOnce([
         adapter({ id: 5, file_kind: "controlnet", kind: null }),
+      ])
+      .mockResolvedValueOnce([
+        adapter({ id: 7, file_kind: "upscaler", kind: null }),
       ]);
     await store.fetchRows();
 
@@ -520,10 +527,13 @@ describe("the support block", () => {
       ])
       .mockResolvedValueOnce([
         adapter({ id: 6, file_kind: "controlnet", kind: null }),
+      ])
+      .mockResolvedValueOnce([
+        adapter({ id: 8, file_kind: "upscaler", kind: null }),
       ]);
     await store.fetchRows();
 
-    expect(store.rows.map((r) => r.id)).toEqual([3, 4, 6]);
+    expect(store.rows.map((r) => r.id)).toEqual([3, 4, 6, 8]);
   });
 
   it("asks for nothing when the box is off", async () => {

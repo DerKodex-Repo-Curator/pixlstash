@@ -22,6 +22,7 @@ from pixlstash.utils.adapter_header import (
     FILE_CONTROLNET,
     FILE_TEXT_ENCODER,
     FILE_UNKNOWN,
+    FILE_UPSCALER,
     FILE_VAE,
     KIND_UNKNOWN,
     classify_model_file,
@@ -231,6 +232,17 @@ class TestTheFolderNamesTheRole:
                 path=f"/models/{folder}/canny.safetensors",
             )
             == FILE_CONTROLNET
+        )
+
+    @pytest.mark.parametrize(
+        "folder", ["upscale_models", "ESRGAN", "RealESRGAN", "SwinIR"]
+    )
+    def test_an_upscaler_folder_names_an_upscaler(self, folder):
+        # ComfyUI's layout and A1111's. A `.pth` has no header, so the folder
+        # is all there is.
+        assert (
+            classify_model_file((), 0, path=f"/models/{folder}/4x-UltraSharp.pth")
+            == FILE_UPSCALER
         )
 
     def test_markers_still_win_over_the_folder(self):

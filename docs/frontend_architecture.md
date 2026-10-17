@@ -2237,7 +2237,8 @@ can no longer see.
   or the Run popup's pair, `pixlstash_run` and `pixlstash_of` (below)
   (`electron/src/urlPolicy.ts::comfyuiOpenTarget`). **What opens holds
   ComfyUI-PixlStash nodes** in place of the stock savers and single LoRA
-  loaders, and of Load Image, Load Checkpoint and Load ControlNet Model where
+  loaders, and of Load Image, Load Checkpoint, Load ControlNet Model and Load
+  Upscale Model where
   PixlStash holds the picture or the file (the node asks
   `GET …/graph?pixlstash_nodes=true`), so
   a picture queued in ComfyUI comes back. **Open original in ComfyUI**, in the ⋯ menu

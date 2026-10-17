@@ -1052,12 +1052,12 @@ const RAIL_BLOCKS = ["adapters", "checkpoints", "unclassified", "support"];
 /**
  * Which block a row came from, so a fetch only replaces what it asked for.
  *
- * `support` is the one block that is several kinds. A VAE, a text encoder and
- * a ControlNet are separate answers to "what is this file" and one answer to
- * "what does the shelf show", so they are separate `file_kind`s and one
- * checkbox - the alt being boxes nobody wants to tick separately.
+ * `support` is the one block that is several kinds. A VAE, a text encoder, a
+ * ControlNet and an upscaler are separate answers to "what is this file" and
+ * one answer to "what does the shelf show", so they are separate `file_kind`s
+ * and one checkbox - the alt being boxes nobody wants to tick separately.
  */
-const SUPPORT_KINDS = ["vae", "text_encoder", "controlnet"];
+const SUPPORT_KINDS = ["vae", "text_encoder", "controlnet", "upscaler"];
 
 function blockOf(row) {
   if (row.file_kind === "checkpoint") return "checkpoints";

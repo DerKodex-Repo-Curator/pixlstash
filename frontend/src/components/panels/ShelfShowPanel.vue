@@ -249,7 +249,7 @@ const TYPES = [
   {
     key: "support",
     label: "Support files",
-    tip: "VAEs, text encoders and ControlNets - the files a generation graph loads beside a checkpoint",
+    tip: "VAEs, text encoders, ControlNets and upscalers - the files a generation graph loads beside a checkpoint",
   },
   {
     // `unknown` is a first-class stored value, never promoted to checkpoint

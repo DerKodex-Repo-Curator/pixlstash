@@ -1399,6 +1399,21 @@ def test_a_controlnet_off_the_shelf_is_the_same_workflow_as_the_stock_loader():
     assert core_hash(_doc(stock)) == core_hash(_doc(shelf))
 
 
+def test_an_upscaler_off_the_shelf_is_the_same_workflow_as_the_stock_loader():
+    """The same for ``UpscaleModelLoader`` and the pack's upscale loader."""
+
+    def graph(loader: dict) -> dict:
+        return _graph(upscale=True, extra={"40": loader})
+
+    stock = graph(_node("UpscaleModelLoader", model_name="4xNomos8kSC.pth"))
+    shelf = graph(_node("PixlStashUpscaleModelLoader", upscale_model_sha256="dd" * 32))
+    assert topology_hash(stock) != topology_hash(shelf)
+    assert core_hash(_doc(stock)) == core_hash(_doc(shelf))
+    # Both loaders are the upscale stage's, so switching it off drops either.
+    for g in (stock, shelf):
+        assert identity.node_groups(identity._reduce(_doc(g)))["40"] == UPSCALE
+
+
 def test_the_second_text_encoder_of_a_pair_is_a_model_not_a_parameter():
     """``clip_sha256_2`` is the T5 or Llama beside a clip-l, on one node."""
 

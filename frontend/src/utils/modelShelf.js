@@ -525,6 +525,7 @@ const FILE_KIND_LABELS = {
   vae: "VAE",
   text_encoder: "Text encoder",
   controlnet: "ControlNet",
+  upscaler: "Upscaler",
   unknown: "Unclassified",
 };
 
