@@ -21114,6 +21114,14 @@ def test_a_run_loads_a_vae_comfyui_lacks_off_the_shelf(with_pack):
         }
         assert graph["10"]["inputs"]["vae"] == ["9", 0]
 
+        # A ComfyUI that has the file loads it with its own loader.
+        listed = info["VAELoader"]["input"]["required"]["vae_name"]
+        listed[0] = [filename]
+        r = env.owner.post(f"{API}/workflows/run", json={"workflow_id": workflow})
+        assert r.status_code == 200, r.text
+        assert env.submitted[-1]["graph"]["9"]["class_type"] == "VAELoader"
+        listed[0] = ["test-other-vae.safetensors"]
+
         # Its copy gone, the shelf has nothing for the pack's loader to fetch.
         with hub.transaction() as conn:
             conn.execute(
