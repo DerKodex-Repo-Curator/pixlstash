@@ -201,9 +201,10 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
         ],
     },
     # The small FLUX.2s: a 4-step distilled build and an undistilled base, at
-    # 4B and 9B. Their own family, because a Klein LoRA does not load on dev.
+    # 4B and 9B. Named apart for the tile, but in FLUX.2's family: a family
+    # is part of a workflow's identity, and Klein runs have always been flux2.
     "FLUX.2 Klein": {
-        "family": "flux2_klein",
+        "family": "flux2",
         "modality": "image",
         "mark": ["Flux", "Klein"],
         "few_step": True,
@@ -561,7 +562,6 @@ FAMILY_LABELS: dict[str, str] = {
     "sd35": "SD 3.5",
     "flux1": "FLUX.1",
     "flux2": "FLUX.2",
-    "flux2_klein": "FLUX.2 Klein",
     "chroma": "Chroma",
     "zimage": "Z-Image",
     "qwen": "Qwen-Image",
