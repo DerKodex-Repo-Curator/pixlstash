@@ -2054,9 +2054,12 @@ const MARK_FILLER_WORDS = new Set([
  * Up to two letters for a mark, from whatever the row is actually called: the
  * first letters of the first two words that start with a letter, so the
  * version number goes to {@link versionOf} instead of taking a letter's place
- * (`Stable Diffusion 3.5` is SD, not S3).
+ * (`Stable Diffusion 3.5` is SD, not S3). A `v1.0` is a version too, not a
+ * word that happens to start with one (`Lightning 4steps V1.0` is LI, not LV).
+ *
+ * Exported for the workflow card's two-line tiles (`markDetails`).
  */
-function initialsOf(text) {
+export function initialsOf(text) {
   const all = String(text || "")
     .split(/[\s_\-.]+/)
     .filter(Boolean);
@@ -2067,7 +2070,9 @@ function initialsOf(text) {
   );
   // Skipping must still leave two words to take a letter from each.
   const words = significant.length > 1 ? significant : all;
-  const lettered = words.filter((word) => /^\p{L}/u.test(word));
+  const lettered = words.filter(
+    (word) => /^\p{L}/u.test(word) && !/^v\d/i.test(word),
+  );
   if (lettered.length > 1) {
     return (lettered[0][0] + lettered[1][0]).toUpperCase();
   }

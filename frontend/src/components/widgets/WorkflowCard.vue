@@ -86,7 +86,10 @@
                 activator="parent"
                 :describe="false"
               />
-              <ModelMark :row="mark.row" />
+              <ModelMark :row="mark.row" :detail="mark.detail" />
+              <span v-if="mark.count > 1" class="wf-card__mark-count"
+                >×{{ mark.count }}</span
+              >
             </li>
             <li v-if="mark.ruled" class="wf-card__rule" />
           </template>
@@ -205,11 +208,13 @@ import { quantBadge } from "../../utils/modelShelf";
 import {
   cardAccessibleName,
   baseModels,
+  markDetails,
   baseModelText,
   coverCellStyle,
   factChips,
   checkpointMissing,
   checkpointUnread,
+  loraGroups,
   lorasUnread,
   modelDisplayName,
   outputNoun,
@@ -221,12 +226,12 @@ import InfoPopover from "./InfoPopover.vue";
 import ModelMark from "./ModelMark.vue";
 import Tooltip from "./Tooltip.vue";
 
-// How many marks row 2 draws before it counts the rest (#1485). Five --wf-mark
-// (28px) marks, the hairline, "+N" and their 4px gaps are ~185px, inside the
-// row of a card at the grid's 240px column floor; `overflow: hidden` would
-// otherwise clip the "+N" rather than a mark. `WorkflowCard.test.js` sums this
-// against the tokens.
-const STRIP_MARKS = 5;
+// How much row 2 draws before it counts the rest (#1485), in mark-widths: a
+// mark is one slot, a mark with its "×N" two. Five --wf-mark (28px) marks, the
+// hairline, "+N" and their gaps fit the row of a card at the grid's 240px
+// column floor; `overflow: hidden` would otherwise clip the "+N" rather than a
+// mark. `WorkflowCard.test.js` sums this against the tokens.
+const STRIP_SLOTS = 5;
 
 const props = defineProps({
   /** One workflow card (see utils/workflowCard.js for the shape). */
@@ -358,13 +363,15 @@ const base = computed(() => {
 });
 /**
  * Row 2's marks: the base model leads, whatever order the file listed its
- * loaders in, then every LoRA in document order. Clipped to STRIP_MARKS.
+ * loaders in, then one mark per LoRA in first-loaded order, with a "×N" where
+ * several loaders load the same one. Clipped to STRIP_SLOTS.
  */
 const allMarks = computed(() => {
-  const loras = (props.card.loras ?? []).map((lora, i) => ({
+  const loras = loraGroups(props.card).map(({ lora, count }, i) => ({
     key: `lora-${i}`,
     label: markLabel(lora),
     row: markRow(lora),
+    count,
   }));
   if (!base.value) return loras;
   const models = base.value.models;
@@ -376,13 +383,33 @@ const allMarks = computed(() => {
       // The hairline says "the base models end here"; nothing to separate on
       // a card with no LoRAs.
       ruled: i === models.length - 1 && loras.length > 0,
+      count: 1,
     })),
     ...loras,
   ];
 });
-const stripMarks = computed(() => allMarks.value.slice(0, STRIP_MARKS));
-const stripOverflow = computed(
-  () => allMarks.value.length - stripMarks.value.length,
+const shownMarks = computed(() => {
+  const shown = [];
+  let slots = 0;
+  for (const mark of allMarks.value) {
+    slots += mark.count > 1 ? 2 : 1;
+    if (slots > STRIP_SLOTS) break;
+    shown.push(mark);
+  }
+  return shown;
+});
+// Told apart among the marks actually drawn: a look-alike clipped into "+N" is
+// not on screen to be confused with.
+const stripMarks = computed(() => {
+  const details = markDetails(shownMarks.value.map((mark) => mark.row));
+  return shownMarks.value.map((mark, i) => ({ ...mark, detail: details[i] }));
+});
+// Counts the models left off, each as many times as it is loaded, so the
+// marks, their "×N" and the "+N" add up to the loaders the card has.
+const stripOverflow = computed(() =>
+  allMarks.value
+    .slice(stripMarks.value.length)
+    .reduce((sum, mark) => sum + mark.count, 0),
 );
 // Counts the workflow's own LoRAs.
 const loraCount = computed(() => {
@@ -608,7 +635,29 @@ const accessibleName = computed(() =>
 .wf-card__mark {
   position: relative;
   display: inline-flex;
+  align-items: center;
+  /* The strip's own gap, for the same reason: the version tab clears it. */
+  gap: var(--space-3);
   flex: none;
+}
+
+/* How many loaders load this one model: the Run dialog's count pill
+   (`.rund-count`), raspberry filled because as text the hue is under the
+   floor. */
+.wf-card__mark-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--badge-size);
+  height: var(--badge-size);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  background: rgb(var(--v-theme-secondary));
+  color: rgb(var(--v-theme-on-secondary));
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
 }
 
 /* The hairline after the base model: the one thing that says the first mark

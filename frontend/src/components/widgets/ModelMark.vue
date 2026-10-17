@@ -38,9 +38,11 @@
       <span
         v-else
         class="mmark-initials"
+        :class="{ 'mmark-initials--two': detail }"
         :style="{ backgroundColor: mark.color, color: mark.ink }"
       >
-        {{ mark.initials }}
+        <span>{{ mark.initials }}</span>
+        <span v-if="detail">{{ detail }}</span>
       </span>
     </span>
     <!-- Outside the face, because the face clips: the tab sits over the
@@ -109,6 +111,12 @@ const props = defineProps({
    * "assigned to nothing", and it belongs on a shelf row.
    */
   ring: { type: Object, default: null },
+  /**
+   * A second line of letters under the initials, for a host that draws
+   * several marks of one family side by side with no names beside them (the
+   * workflow card, `markDetails`).
+   */
+  detail: { type: String, default: null },
 });
 
 const iconUrl = computed(() =>
@@ -252,6 +260,7 @@ const ringClass = computed(() =>
    `paintMark` uses the same share. */
 .mmark-initials {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   width: 100%;
@@ -260,6 +269,21 @@ const ringClass = computed(() =>
   font-weight: var(--weight-medium);
   letter-spacing: -0.02em;
   line-height: 1;
+}
+
+/* Two lines of two, packed into the top-start corner so the version tab over
+   the bottom-end one covers no letter: 0.36 of the card's 28px mark is 10px,
+   and two lines of it at 0.9 end 2px above the tab. Semibold, because 10px
+   at the single line's medium weight thins out on the tile. Measured in a
+   browser against the widest pair (WM beside a two-digit tab). */
+.mmark-initials--two {
+  align-items: flex-start;
+  justify-content: flex-start;
+  box-sizing: border-box;
+  padding: var(--space-1) 0 0 var(--space-1);
+  font-size: calc(var(--entity-thumb) * 0.36);
+  font-weight: var(--weight-semibold);
+  line-height: 0.9;
 }
 
 /* The version tab (the mark design round's D2): the tile's own pair inverted,

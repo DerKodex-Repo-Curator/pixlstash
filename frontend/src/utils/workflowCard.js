@@ -162,7 +162,12 @@
 // A card row names the BASE MODEL only (checkpoint, or the unet a Flux or SD3
 // graph carries instead); ⓘ lists every model.
 
-import { quantBadge } from "./modelShelf.js";
+import {
+  generatedMark,
+  initialsOf,
+  modelName,
+  quantBadge,
+} from "./modelShelf.js";
 import { cropImgStyle } from "./squareCrop.js";
 
 /**
@@ -287,6 +292,73 @@ export function checkpointMissing(card) {
 /** The same for the LoRA row, and for the same reason. */
 export function lorasUnread(card) {
   return noRecipe(card) && !(card.loras ?? []).length;
+}
+
+/**
+ * The card's LoRAs, one entry per FILE with how many loaders load it:
+ * `[{ lora, count }]`, in first-loaded order. A graph that chains one adapter
+ * into eight samplers reads as one model eight times, not as eight models.
+ * Keyed on the file's hash, else its filename: `name` has the folder, the
+ * extension and the precision taken out of it, so two files can share one. A
+ * slot naming no file is never merged with another.
+ */
+export function loraGroups(card) {
+  const groups = new Map();
+  for (const lora of card.loras ?? []) {
+    const key = lora.sha256 || lora.filename || Symbol();
+    const group = groups.get(key);
+    if (group) group.count += 1;
+    else groups.set(key, { lora, count: 1 });
+  }
+  return [...groups.values()];
+}
+
+/**
+ * A second line of letters for each of a card's marks that would otherwise
+ * draw the same tile, else null: one entry per row.
+ *
+ * A mark with no icon is the name's first two initials, its first number and
+ * its base model's colour, so a family of files named alike - a Qwen Image
+ * Edit 2511 checkpoint and two LoRAs for it, an SDXL 1.0 base and refiner -
+ * draws one tile several times. The shelf prints a name beside each mark; the
+ * card prints none, so such a tile keeps its family's initials on top and
+ * takes a second line from the words its name does not share with the others
+ * (`Lightning 4steps V1.0` is LI, `Refiner` RE). A name with nothing left takes
+ * it from the words after its initials (`qwen image edit 2511` is ED). Only the
+ * tile changes: tooltips and the accessible name still say the whole name.
+ */
+export function markDetails(rows) {
+  const lookalikes = new Map();
+  rows.forEach((row, i) => {
+    if (row.icon_sha256) return;
+    const { color, initials, version } = generatedMark(row);
+    const key = `${color}|${initials}|${version}`;
+    lookalikes.set(key, [...(lookalikes.get(key) ?? []), i]);
+  });
+  const details = rows.map(() => null);
+  for (const members of lookalikes.values()) {
+    if (members.length < 2) continue;
+    // Not on "." - it would split a `1.0` the remainder may need to keep.
+    const words = members.map((i) =>
+      modelName(rows[i]).text.split(/[\s_-]+/).filter(Boolean),
+    );
+    let shared = 0;
+    while (
+      words.every(
+        (name) =>
+          shared < name.length &&
+          name[shared].toLowerCase() === words[0][shared].toLowerCase(),
+      )
+    ) {
+      shared += 1;
+    }
+    members.forEach((i, j) => {
+      const rest = words[j].slice(shared);
+      const letters = initialsOf((rest.length ? rest : words[j].slice(2)).join(" "));
+      if (letters !== "?") details[i] = letters;
+    });
+  }
+  return details;
 }
 
 /**
@@ -449,9 +521,9 @@ export function cardAccessibleName(card) {
   const count = card.picture_count ?? 0;
   const bases = baseModels(card);
   const checkpoint = bases[0];
-  const loras = (card.loras ?? []).map((lora) => {
+  const loras = loraGroups(card).map(({ lora, count: loaded }) => {
     const quant = quantBadge(lora.quant);
-    return `${modelDisplayName(lora)}, ${quant ? `${quant.title}, ` : ""}workflow LoRA`;
+    return `${modelDisplayName(lora)}, ${quant ? `${quant.title}, ` : ""}workflow LoRA${loaded > 1 ? `, ${loaded} times` : ""}`;
   });
   const facts = factChips(card).map((chip) => chip.label);
   const parts = [

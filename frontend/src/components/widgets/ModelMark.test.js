@@ -58,6 +58,11 @@ describe("ModelMark", () => {
     expect(wrapper.find(".mmark-initials").text()).toBe("CS");
   });
 
+  it("takes no letter from a v-number", () => {
+    const wrapper = mountMark({ display_name: "Lightning 4steps V1.0" });
+    expect(wrapper.find(".mmark-initials").text()).toBe("LI");
+  });
+
   it("hangs the version on a tab beside the initials", () => {
     const wrapper = mountMark({ display_name: "Stable Diffusion 3.5 Large" });
     expect(wrapper.find(".mmark-initials").text()).toBe("SD");

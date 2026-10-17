@@ -309,22 +309,36 @@ describe("WorkflowCard height", () => {
 
   it("fits the strip's worst case in the narrowest card row", () => {
     // The grid's 240px column floor is the narrowest card: its own 1px border
-    // and the meta padding come off it. The worst case is STRIP_MARKS marks,
-    // the hairline and "+N" (~20px, "+12" at --text-2xs) - and
+    // and the meta padding come off it. The worst case is STRIP_SLOTS worth of
+    // marks, the hairline and "+N" (~20px, "+12" at --text-2xs) - and
     // `overflow: hidden` clips the LAST item, which is the "+N", so it has to
-    // fit outright.
+    // fit outright. A mark with a "×N" (~28px for "×16" in its pill) costs two
+    // slots, so every mix of plain and counted marks is checked.
     const t = tokens();
-    const marks = Number(
-      read("./WorkflowCard.vue").match(/STRIP_MARKS = (\d+)/)[1],
+    const slots = Number(
+      read("./WorkflowCard.vue").match(/STRIP_SLOTS = (\d+)/)[1],
     );
     const floor = Number(
       read("../views/WorkflowsView.vue").match(/COLUMN_MIN = (\d+)/)[1],
     );
     const row = floor - 2 * 1 - 2 * px(rule(".wf-card__meta").padding, t);
     const gap = px(rule(".wf-card__strip").gap, t);
+    const countGap = px(rule(".wf-card__mark").gap, t);
     const hairline = px(rule(".wf-card__rule").width, t);
-    const worst = marks * t["--wf-mark"] + hairline + 20 + (marks + 1) * gap;
-    expect(worst).toBeLessThanOrEqual(row);
+    for (let counted = 0; 2 * counted <= slots; counted++) {
+      // Every mark drawn, counted ones included: each is one `<li>` holding a
+      // tile, and a counted one also its pill, inside its own `countGap`. The
+      // strip's items are these, the hairline and "+N", so `allMarks + 1`
+      // strip gaps.
+      const allMarks = slots - counted;
+      const worst =
+        allMarks * t["--wf-mark"] +
+        counted * (countGap + 28) +
+        hairline +
+        20 +
+        (allMarks + 1) * gap;
+      expect(worst, `${counted} counted`).toBeLessThanOrEqual(row);
+    }
   });
 
   it("keeps row 4 clear of the ⓘ button", () => {
@@ -457,6 +471,116 @@ describe("WorkflowCard", () => {
       );
     },
   );
+
+  it("draws one mark and a ×N for a LoRA loaded several times", () => {
+    const loras = [
+      ...Array(8).fill({ name: "lightning", filename: "lightning.safetensors" }),
+      ...Array(8).fill({ name: "angles", filename: "angles.safetensors" }),
+      { name: "angles", filename: "angles_fp8.safetensors" },
+    ];
+    const wrapper = mountCard({ ...BARE, loras });
+    const marks = wrapper.findAll(".wf-card__strip .wf-card__mark");
+    // The base model, then each LoRA once.
+    expect(marks).toHaveLength(3);
+    expect(
+      marks.map((mark) => mark.find(".wf-card__mark-count").exists()),
+    ).toEqual([false, true, true]);
+    expect(marks[1].find(".wf-card__mark-count").text()).toBe("×8");
+    // Two slots per counted mark: base 1 + 2 + 2 fills the strip, and the
+    // "+1" is the FP8 build: one name, but a file of its own.
+    expect(wrapper.find(".wf-card__mark-more").text()).toBe("+1");
+    // Row 3 still counts loaders, which the strip now adds up to.
+    expect(wrapper.find(".wf-card__lora-count").text()).toBe("17 LoRAs");
+  });
+
+  it("gives look-alike marks a second line of letters", () => {
+    // Each set below would draw one tile several times: the initials are the
+    // name's first two words, the tab its first number, the colour its base
+    // model. The tab stays.
+    const tiles = (card) =>
+      mountCard(card)
+        .findAll(".wf-card__strip .wf-card__mark .mmark")
+        .map((mark) => [
+          mark.findAll(".mmark-initials > span").map((line) => line.text()),
+          mark.find(".mmark-version").exists(),
+        ]);
+    const qwen = { base_model_folded: "Qwen-Image-Edit", quant: "bf16" };
+    expect(
+      tiles({
+        ...BARE,
+        models: [
+          {
+            ...qwen,
+            name: "qwen image edit 2511",
+            kind: "unet",
+            filename: "qwen_image_edit_2511_bf16.safetensors",
+          },
+        ],
+        loras: [
+          ...Array(8).fill({
+            ...qwen,
+            name: "Qwen Image Edit 2511 Lightning 4steps V1.0",
+            filename: "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+          }),
+          {
+            ...qwen,
+            name: "qwen image edit 2511 multiple angles lora",
+            filename: "qwen-image-edit-2511-multiple-angles-lora.safetensors",
+          },
+        ],
+      }),
+    ).toEqual([
+      [["QI", "ED"], true],
+      [["QI", "LI"], true],
+      [["QI", "MA"], true],
+    ]);
+    const sdxl = { base_model_folded: "SDXL 1.0", kind: "checkpoint" };
+    expect(
+      tiles({
+        ...BARE,
+        models: [
+          {
+            ...sdxl,
+            name: "sd xl base 1.0",
+            title: "Stable Diffusion XL 1.0 Base",
+            filename: "sd_xl_base_1.0.safetensors",
+          },
+          {
+            ...sdxl,
+            name: "sd xl refiner 1.0",
+            title: "Stable Diffusion XL 1.0 Refiner",
+            filename: "sd_xl_refiner_1.0.safetensors",
+          },
+        ],
+      }),
+    ).toEqual([
+      [["SD", "BA"], true],
+      [["SD", "RE"], true],
+    ]);
+    // A mark nothing else looks like keeps one line and its tab.
+    expect(
+      tiles({
+        ...BARE,
+        models: [{ ...sdxl, name: "sd xl base 1.0", title: "SDXL Base 1.0" }],
+        loras: [{ name: "add detail xl 2" }],
+      }),
+    ).toEqual([
+      [["SB"], true],
+      [["AD"], true],
+    ]);
+  });
+
+  it("counts every loader of a model the strip left off in its +N", () => {
+    const wrapper = mountCard({
+      ...BARE,
+      loras: [
+        ...Array.from({ length: 4 }, (_, i) => ({ name: `lora-${i}` })),
+        ...Array(3).fill({ name: "repeated", filename: "repeated.safetensors" }),
+      ],
+    });
+    expect(wrapper.findAll(".wf-card__strip .wf-card__mark")).toHaveLength(5);
+    expect(wrapper.find(".wf-card__mark-more").text()).toBe("+3");
+  });
 
   it("prints the base model's name once, beside the LoRA count", () => {
     const row = mountCard({
