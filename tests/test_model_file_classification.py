@@ -30,6 +30,7 @@ from pixlstash.utils.adapter_header import (
     describe_adapter,
     has_adapter_markers,
     has_controlnet_markers,
+    has_vae_markers,
 )
 from pixlstash.utils.model_utils import (
     canonical_quant,
@@ -145,6 +146,46 @@ class TestFileClassification:
             == FILE_CONTROLNET
         )
 
+    @pytest.mark.parametrize(
+        "conv_in",
+        [
+            [512, 4, 3, 3],  # SD 1.5 / SDXL
+            [512, 16, 3, 3],  # FLUX / SD 3.5
+            [512, 16, 3, 3, 3],  # SeedVR2's 3D VAE
+        ],
+    )
+    def test_both_halves_of_an_autoencoder_make_a_vae_in_any_folder(
+        self, conv_in, tmp_path
+    ):
+        # A VAE downloaded into a flat folder: the folder says nothing, and the
+        # parameter count is far below a checkpoint's.
+        folder = tmp_path / "Downloads"
+        folder.mkdir()
+        path = _write_safetensors(
+            folder / "vae.safetensors",
+            {
+                "encoder.conv_in.weight": _tensor([128, 3, *conv_in[2:]]),
+                "decoder.conv_in.weight": _tensor(conv_in),
+            },
+        )
+        info = describe_adapter(path)
+        assert info is not None
+        assert info.file_kind == FILE_VAE
+
+    @pytest.mark.parametrize(
+        "names",
+        [
+            ["decoder.conv_in.weight"],  # one half only
+            [
+                "first_stage_model.encoder.conv_in.weight",  # baked into a checkpoint
+                "first_stage_model.decoder.conv_in.weight",
+            ],
+        ],
+    )
+    def test_anything_less_than_a_whole_top_level_vae_is_not_one(self, names):
+        assert not has_vae_markers(names)
+        assert classify_model_file(names, 40_000_000) == FILE_UNKNOWN
+
     def test_a_checkpoint_is_not_a_controlnet(self):
         names = [
             "model.diffusion_model.input_blocks.0.0.weight",
@@ -156,9 +197,10 @@ class TestFileClassification:
 
 
 class TestTheFolderNamesTheRole:
-    """The support kinds, which no header signal can assert.
+    """The support kinds, where no header signal asserts them.
 
-    A VAE and a text encoder carry no marker, and their parameter counts land on
+    A text encoder carries no marker, nor does a VAE of a layout the VAE
+    markers do not know, and their parameter counts land on
     both sides of the checkpoint threshold - a CLIP-L below it, a T5-XXL well
     above. The directory is what actually knows, because ComfyUI and the
     launchers that front it file models by role.

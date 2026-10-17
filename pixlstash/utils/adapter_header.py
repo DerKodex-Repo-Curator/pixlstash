@@ -119,13 +119,20 @@ _CONTROLNET_RE = re.compile(
     r"cond_embedding|x_embedder)|input_hint_block|zero_convs)\."
 )
 
+# The first convolution of an autoencoder's two halves, at the top level of the
+# file: SD, SDXL, FLUX and SD3.5 VAEs carry them, and so does SeedVR2's 3D one.
+# Both, so a decoder-only or encoder-only file is not taken for a whole VAE. A
+# checkpoint bakes its VAE in under `first_stage_model.`, which never matches.
+_VAE_TENSORS = frozenset(("encoder.conv_in.weight", "decoder.conv_in.weight"))
+
 # What a directory NAMES the files inside it, normalised by `_normalise_folder`.
 #
 # ComfyUI files models by role (`models/vae`, `models/text_encoders`,
 # `models/clip`) and the launchers that front it mirror the layout, so the role
 # is sitting in the path of nearly every file on a real shelf. That is a better
-# signal than anything the header carries here: a VAE and a text encoder are
-# ordinary tensor bundles with no marker to find, and their parameter counts
+# signal than anything the header carries here: a text encoder, and a VAE whose
+# layout `_VAE_TENSORS` does not know, are ordinary tensor bundles with no
+# marker to find, and their parameter counts
 # straddle the checkpoint threshold from both sides.
 #
 # Only genuinely different words belong here - the normaliser already folds
@@ -391,6 +398,11 @@ def has_controlnet_markers(tensor_names) -> bool:
     )
 
 
+def has_vae_markers(tensor_names) -> bool:
+    """Return whether *tensor_names* hold both halves of an autoencoder."""
+    return _VAE_TENSORS.issubset(tensor_names)
+
+
 def count_parameters(header: dict) -> int:
     """Return the total parameter count implied by a safetensors *header*.
 
@@ -588,8 +600,11 @@ def classify_model_file(tensor_names, param_count: int, path: str = "") -> str:
        checkpoint dropped in someone's ``Lora/`` folder from being filed as a
        LoRA. ControlNet markers (:func:`has_controlnet_markers`) come next, on
        the same footing: a ControlNet in ``diffusion_models/`` is a ControlNet.
-    2. **The directory**, when it names a role. A VAE and a text encoder carry
-       no marker to find, so the layout the user (or their launcher) already
+       So do VAE markers (:func:`has_vae_markers`), which is what files a VAE
+       downloaded into a flat folder as a VAE.
+    2. **The directory**, when it names a role. A text encoder carries no
+       marker to find, nor does a VAE of a layout :data:`_VAE_TENSORS` does not
+       know (a Wan one), so the layout the user (or their launcher) already
        maintains is the best evidence there is. It outranks the parameter count
        because the parameter count is *wrong* for both: they sit either side of
        a threshold that was only ever meant to separate adapters from base
@@ -619,6 +634,8 @@ def classify_model_file(tensor_names, param_count: int, path: str = "") -> str:
         return FILE_ADAPTER
     if has_controlnet_markers(tensor_names):
         return FILE_CONTROLNET
+    if has_vae_markers(tensor_names):
+        return FILE_VAE
     role = role_from_folder(path) if path else None
     if role is not None:
         return role

@@ -21045,6 +21045,88 @@ def test_a_run_loads_an_upscaler_comfyui_lacks_off_the_shelf(upscalers):
     assert env.submitted[-1]["graph"]["9"]["class_type"] == "UpscaleModelLoader"
 
 
+def test_a_run_loads_a_vae_comfyui_lacks_off_the_shelf(with_pack):
+    """A VAE downloaded into a folder ComfyUI does not read, held on the shelf:
+    a run loads it through the pack's loader by digest, as Open in ComfyUI
+    does. Wrong if the Workflow tab's pre-flight still says "VAE missing", or
+    if a VAE the shelf has no copy of is swapped in anyway."""
+    env = with_pack
+    filename = "test-seedvr2_ema_vae_fp16.safetensors"
+    digest = _h("seedvr2-vae")
+    info = json.loads(json.dumps({**CHAIN_OBJECT_INFO, **PACK_OBJECT_INFO}))
+    info["VAELoader"] = {
+        "input": {"required": {"vae_name": [["test-other-vae.safetensors"], {}]}},
+        "output": ["VAE"],
+    }
+    info["VAEDecode"] = {
+        "input": {"required": {"samples": ["LATENT", {}], "vae": ["VAE", {}]}},
+        "output": ["IMAGE"],
+    }
+    info["PixlStashVAELoader"] = {
+        "input": {"required": {"vae_sha256": ["STRING", {"default": ""}]}},
+        "output": ["VAE"],
+    }
+    env.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url, **_: (info, None)
+    )
+    hub = env.server.hub
+    with hub.transaction() as conn:
+        model_id = conn.execute(
+            "INSERT INTO model (file_kind, filename, sha256, provenance) "
+            "VALUES ('vae', ?, ?, 'scanned')",
+            (filename, digest),
+        ).lastrowid
+        folder_id = conn.execute(
+            "SELECT id FROM model_folder WHERE path = '/models/test-swap'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO model_file (model_id, model_folder_id, relpath, state) "
+            "VALUES (?, ?, ?, 'present')",
+            (model_id, folder_id, filename),
+        )
+    graph = json.loads(json.dumps(CHAIN_DOCUMENT))
+    graph["9"] = {"class_type": "VAELoader", "inputs": {"vae_name": filename}}
+    graph["10"] = {
+        "class_type": "VAEDecode",
+        "inputs": {"samples": ["3", 0], "vae": ["9", 0]},
+    }
+    graph["4"]["inputs"]["images"] = ["10", 0]
+    workflow = workflows_routes.store_manual_workflow(hub, "SeedVR2", graph, "import")
+
+    def missing():
+        payload = _preflight(env.owner, workflow_id=workflow)
+        return [
+            model
+            for group in payload["groups"]
+            for reason in group["reasons"]
+            if reason["code"] == "missing_models"
+            for model in reason["models"]
+        ]
+
+    try:
+        assert missing() == []
+        r = env.owner.post(f"{API}/workflows/run", json={"workflow_id": workflow})
+        assert r.status_code == 200, r.text
+        graph = env.submitted[-1]["graph"]
+        assert graph["9"] == {
+            "class_type": "PixlStashVAELoader",
+            "inputs": {"vae_sha256": digest},
+        }
+        assert graph["10"]["inputs"]["vae"] == ["9", 0]
+
+        # Its copy gone, the shelf has nothing for the pack's loader to fetch.
+        with hub.transaction() as conn:
+            conn.execute(
+                "UPDATE model_file SET state = 'missing' WHERE model_id = ?",
+                (model_id,),
+            )
+        assert missing() == [{"file": filename, "folder": "vae"}]
+    finally:
+        with hub.transaction() as conn:
+            conn.execute("DELETE FROM model_file WHERE model_id = ?", (model_id,))
+            conn.execute("DELETE FROM model WHERE id = ?", (model_id,))
+
+
 def test_a_pack_from_before_the_shelf_widget_says_restart_comfyui(id_loaders):
     """A shelf checkpoint ComfyUI lacks, on a running pack whose loader has no
     `shelf` widget (#1923): the pre-flight says the pack is out of date, not
