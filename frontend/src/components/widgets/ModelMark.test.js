@@ -61,7 +61,7 @@ describe("ModelMark", () => {
   it("hangs the version on a tab beside the initials", () => {
     const wrapper = mountMark({ display_name: "Stable Diffusion 3.5 Large" });
     expect(wrapper.find(".mmark-initials").text()).toBe("SD");
-    expect(wrapper.find(".mmark-version").text()).toBe("35");
+    expect(wrapper.find(".mmark-version").text()).toBe("3.5");
     // No number, no tab: an empty pill would read as a broken one.
     expect(mountMark().find(".mmark-version").exists()).toBe(false);
   });

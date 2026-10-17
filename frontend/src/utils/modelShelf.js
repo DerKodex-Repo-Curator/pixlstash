@@ -2080,13 +2080,16 @@ function initialsOf(text) {
 }
 
 /**
- * The digits a mark's version tab shows: the first number in the name, its
- * dots dropped, at most two digits (`3.5` is 35, `2511` is 25). Empty when
- * the name carries no number, and then the mark has no tab.
+ * What a mark's version tab shows: the first number in the name. An `x.y`
+ * version keeps its dot (`3.5`, `2.2`, `1.0`); anything else is cut to two
+ * digits (`2511` is 25, and so is `25.1`, whose major already fills the tab).
+ * Empty when the name carries no number, and then the mark has no tab.
  */
 function versionOf(text) {
-  const match = /\d+(?:\.\d+)*/.exec(String(text || ""));
-  return match ? match[0].replace(/\./g, "").slice(0, 2) : "";
+  const match = /(\d+)(?:\.(\d))?/.exec(String(text || ""));
+  if (!match) return "";
+  const [, major, minor] = match;
+  return major.length === 1 && minor ? `${major}.${minor}` : major.slice(0, 2);
 }
 
 // The mark's tile keeps its palette entry's HUE and pins saturation and

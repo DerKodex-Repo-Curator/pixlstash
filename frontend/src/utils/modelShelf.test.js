@@ -1579,12 +1579,20 @@ describe("the generated mark's initials", () => {
 describe("the generated mark's version tab", () => {
   const version = (display_name) => generatedMark({ display_name }).version;
 
-  it("carries the first number, dots dropped, at most two digits", () => {
-    expect(version("Stable Diffusion 3.5-Large")).toBe("35");
-    expect(version("sd3.5 large controlnet canny")).toBe("35");
+  it("keeps the dot of an x.y version", () => {
+    expect(version("Stable Diffusion 3.5-Large")).toBe("3.5");
+    expect(version("sd3.5 large controlnet canny")).toBe("3.5");
+    expect(version("Wan 2.2 high noise")).toBe("2.2");
+    expect(version("SDXL 1.0")).toBe("1.0");
+    expect(version("v1.5.2 base")).toBe("1.5");
+  });
+
+  it("cuts any other first number to two digits", () => {
     expect(version("flux1 dev")).toBe("1");
     expect(version("Qwen Image Edit 2511")).toBe("25");
     expect(version("Juggernaut XL v9 and 10")).toBe("9");
+    // A two-digit major already fills the tab, so its minor is dropped.
+    expect(version("Model 12.5")).toBe("12");
   });
 
   it("is empty when the name carries no number, so no tab is drawn", () => {

@@ -592,10 +592,15 @@ const accessibleName = computed(() =>
 
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  /* Wide enough that a mark's version tab, which hangs 6px past its corner,
+     clears the next mark. */
+  gap: var(--space-3);
   min-width: 0;
-  margin: 0;
-  padding: 0;
+  /* Room for that tab below and after each mark: `overflow: hidden` clips at
+     the padding edge, and the negative margin hands the room back, so the
+     card's rows do not move. */
+  margin: 0 calc(-1 * var(--space-3)) calc(-1 * var(--space-3)) 0;
+  padding: 0 var(--space-3) var(--space-3) 0;
   overflow: hidden;
   list-style: none;
 }

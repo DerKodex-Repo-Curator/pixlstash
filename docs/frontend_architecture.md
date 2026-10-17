@@ -5861,14 +5861,19 @@ WO). **The two rules must not be unified**, however similar the palettes look.
 
 **Two letters and a version tab.** The letters come only from words that start
 with a letter, and the first number in the name rides on a pill at the tile's
-corner, dots dropped and at most two digits: `Stable Diffusion 3.5 Large` is SD
-with a 35 tab, and the ControlNet `sd3.5 large controlnet canny` beside it is SL
-with 35, where two letters alone drew SD and S5. The tab is the tile's own pair
-inverted (ink fill, tile-coloured digits and edge), a fixed 15px with
-`--text-2xs` digits, hanging 6px past the corner; a picture or a set's icon in
-the square hides it. A tab sized as a share of the tile was 11px high at 24px,
-too small to read. The member rows of a model set draw through `ModelMark` too,
-so no surface copies the mark into a square of its own.
+corner: an `x.y` version keeps its dot, anything else is cut to two digits.
+`Stable Diffusion 3.5 Large` is SD with a 3.5 tab, and the ControlNet
+`sd3.5 large controlnet canny` beside it is SL with 3.5, where two letters alone
+drew SD and S5. The tab is the tile's own pair inverted (ink fill, tile-coloured
+digits and edge), a fixed 15px with `--text-2xs` digits, hanging 6px past the
+corner; a picture or a set's icon in the square hides it. A tab sized as a share
+of the tile was 11px high at 24px, too small to read. **A surface that clips
+must leave the tab its 6px**: the workflow card's strip pads and gives it back
+with a negative margin, and a row with no assignment ring keeps 8px between the
+mark and its text. The letters are 55% of the tile, so they fill it at every
+size; that is the most WW or MW take without touching the edges. The member rows
+of a model set draw through `ModelMark` too, so no surface copies the mark into
+a square of its own.
 
 Keyed on the **folded** base model, so every spelling of FLUX.2 lands on one
 colour instead of scattering across the palette — which is what the folding

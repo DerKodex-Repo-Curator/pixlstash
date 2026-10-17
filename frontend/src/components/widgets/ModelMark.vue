@@ -244,16 +244,22 @@ const ringClass = computed(() =>
    inline because `generatedMark` hands them out together - the tile is
    renormalised to a pinned lightness precisely so the ink can stay constant,
    and splitting the pair across inline style and a stylesheet is what would
-   let one of them change without the other. */
+   let one of them change without the other.
+
+   The letters are a share of the tile rather than a step of the type ramp, so
+   they fill it at every size the mark is drawn at: 55% is the most two wide
+   letters (WW, MW) take without touching the edges. The ComfyUI pack's
+   `paintMark` uses the same share. */
 .mmark-initials {
   display: flex;
   align-items: center;
   justify-content: center;
   width: 100%;
   height: 100%;
-  font-size: var(--text-xs);
+  font-size: calc(var(--entity-thumb) * 0.55);
   font-weight: var(--weight-medium);
-  letter-spacing: 0.02em;
+  letter-spacing: -0.02em;
+  line-height: 1;
 }
 
 /* The version tab (the mark design round's D2): the tile's own pair inverted,
