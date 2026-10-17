@@ -3260,6 +3260,12 @@ node or what is picked in it.
 from ComfyUI sends the editor document its graph was converted from (`editor`
 on `PUT …/graph`); one is kept per workflow, of either kind, replaced by the
 next, and a graph that only moved nodes is `unchanged` and still replaces it.
+**Until one is kept, a manual workflow imported from an editor file opens with
+that file** (`_imported_layout`), by the same rules (a person's LoRA in the
+graph keeps none) and only over the wiring of the conversion stored beside it,
+until a save from ComfyUI replaces it: without it the first open went through
+`app.loadApiJson`, which flattens every subgraph, and a save from that canvas
+then kept the flattened layout for good.
 
 - **Two checks stand between a layout and a canvas, and the second is the one
   that binds.** `_keep_layout` stores `workflow_run_service.graph_structure`
@@ -3273,7 +3279,13 @@ next, and a graph that only moved nodes is `unchanged` and still replaces it.
   when it is looked for: which of the two a graph holds follows the shelf,
   the library and the pins on the day, and a layout dropped each time that
   changed would rarely be there. ComfyUI-PixlStash replaces the node on the
-  canvas (`open_workflow.js::swapNodes`) before the check below. A layout
+  canvas (`open_workflow.js::swapNodes`) before the check below, inside a
+  subgraph too: a node `75:3` is replaced in the subgraph node 75 is an
+  instance of and wired to its inputs and outputs, so the subgraph stays one
+  (a dropped layout opens through `app.loadApiJson`, which flattens every
+  subgraph). A value is written where ComfyUI reads it, on the subgraph
+  node's promoted widget where the inner input is wired to the subgraph's
+  input, and a toast names a subgraph whose nodes were replaced. A layout
   kept before this was matched on the classes as they stood, so
   `_layout_for` also reads the graph as it was before the swap. That is cheap and keeps a
   stale layout off the wire, but **the two documents arrive side by side on

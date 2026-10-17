@@ -265,7 +265,7 @@ from pixlstash.services.workflow_inputs import (
     card_input_modes,
     resolve_fills,
 )
-from pixlstash.services.comfyui_ui_graph import convert_ui_graph_to_api
+from pixlstash.services.comfyui_ui_graph import convert_ui_graph_to_api, is_ui_graph
 from pixlstash.services.workflow_io import (
     api_graph,
     with_converted_graph,
@@ -2316,8 +2316,10 @@ class WorkflowRunnableGraph(BaseModel):
             "with: its layout (positions, groups, notes). Sent only while "
             "`workflow` is still wired as it was then, so it differs from "
             "`workflow` in widget values at most; `workflow` holds the values "
-            "to open with. Null for a workflow never saved from ComfyUI, or "
-            "rewired since: that one opens from `workflow`, auto-arranged."
+            "to open with. With none kept, a manual workflow whose stored "
+            "document is still the editor file it was imported as sends that "
+            "file. Null otherwise, or once `workflow` is rewired: that one "
+            "opens from `workflow`, auto-arranged."
         ),
     )
     people_loader: PeopleLoaderPlace | None = Field(
@@ -7965,26 +7967,32 @@ def create_router(server) -> APIRouter:
         the shelf and the library hold that day, and the node that opens the
         layout replaces one with the other on the canvas
         (``open_workflow.js``). *own_nodes* is the graph before that swap,
-        which is what layouts were matched on before they were kept this way. **Never an error**, as when it is kept: this read answered
-        before there were layouts, so a graph or a row that will not compare
-        opens auto-arranged, and says so in the log.
+        which is what layouts were matched on before they were kept this way.
+        Without a kept layout, a workflow imported from an editor file opens
+        with that file (:func:`_imported_layout`). **Never an error**, as when
+        it is kept: this read answered before there were layouts, so a graph
+        or a row that will not compare opens auto-arranged, and says so in the
+        log.
         """
         try:
-            return workflow_versions.layout_for(
-                hub,
-                workflow_id,
-                {
-                    run_service.graph_structure(graph, SWAPPED_CLASSES),
-                    run_service.graph_structure(graph),
-                    run_service.graph_structure(own_nodes or graph),
-                },
-            )
+            structures = {
+                run_service.graph_structure(graph, SWAPPED_CLASSES),
+                run_service.graph_structure(graph),
+                run_service.graph_structure(own_nodes or graph),
+            }
+            kept = workflow_versions.layout_for(hub, workflow_id, structures)
+            if kept is not None or not workflow_id.startswith(MANUAL_PREFIX):
+                return kept
+            return _imported_layout(hub, workflow_id, structures)
         except (
+            AttributeError,
+            HTTPException,
             RecursionError,
             LookupError,
             TypeError,
             ValueError,
             sqlite3.Error,
+            SQLAlchemyError,
         ) as exc:
             logger.warning(
                 "[workflows] Workflow %s opens without its ComfyUI layout: it "
@@ -7994,6 +8002,36 @@ def create_router(server) -> APIRouter:
                 exc,
             )
             return None
+
+    def _imported_layout(hub, workflow_id: str, structures: set[str]) -> dict | None:
+        """The editor file manual workflow *workflow_id* holds, as its layout.
+
+        A layout is kept only by a save from ComfyUI, so a workflow imported
+        from an editor file had none, and opened through ComfyUI's API loader,
+        which flattens every subgraph; a save from that canvas then kept the
+        flattened one. The file is the layout until a save from ComfyUI
+        replaces it, by the rules a saved one is kept by
+        (:func:`_layout_to_keep`, with the people's LoRAs the graph loads), and
+        only over the wiring of the conversion stored beside it. ``None`` for a
+        document that is a graph rather than an editor file, or not converted.
+        """
+        row = hub.fetchone(
+            "SELECT document, api_document FROM workflow_document "
+            "WHERE workflow_id = ?",
+            (workflow_id,),
+        )
+        if row is None or not row["api_document"]:
+            return None
+        editor = json.loads(row["document"])
+        if not is_ui_graph(editor):
+            return None
+        graph = api_graph(json.loads(row["api_document"]))
+        if graph is None:
+            return None
+        # What a save of this graph would leave out, as `PUT …/graph` reads it.
+        people = people_loras_in(hub, server.vault, graph)
+        kept = _layout_to_keep(workflow_id, editor, graph, people)
+        return kept[0] if kept is not None and kept[1] in structures else None
 
     def _who_fits(hub, workflow_id: str) -> dict | None:
         """``people_who_fit`` for *workflow_id*'s checkpoint; ``None`` for no
@@ -11650,7 +11688,9 @@ def create_router(server) -> APIRouter:
         * a person's LoRA by file name has no empty value, so a document
           naming one in any node's widgets is not kept at all, and neither
           is one whose graph loaded one in an ordinary loader;
-        * a credential the graph holds is blanked on the node that holds it.
+        * a credential the graph holds is blanked on the node that holds it
+          and, inside a subgraph, on every instance on the way to it, which
+          holds the value as a promoted widget.
 
         ponytail: a credential on a node the graph does not run (bypassed) is
         not in the graph to be found, and stays, as it does in a stored graph;
@@ -11672,15 +11712,15 @@ def create_router(server) -> APIRouter:
             return None
         people = set(lora_owners(server.vault))
         by_name = adapter_digest_index(hub)[0] if people else {}
-        # A node inside a subgraph runs as "<instance>:<id>".
+        # A node inside a subgraph runs as "<instance>:<id>", nested ones as
+        # "<outer>:<inner>:<id>": each id on that path may hold the value.
         secrets: dict[str, set[str]] = {}
         for node_id, node in graph.items():
             inputs = node.get("inputs") if isinstance(node, dict) else None
             for name, value in (inputs if isinstance(inputs, dict) else {}).items():
                 if isinstance(value, str) and value and SECRET_FIELD_RE.search(name):
-                    secrets.setdefault(str(node_id).rsplit(":", 1)[-1], set()).add(
-                        value
-                    )
+                    for part in str(node_id).split(":"):
+                        secrets.setdefault(part, set()).add(value)
 
         editor = deepcopy(editor)
         for node in _layout_nodes(editor):
