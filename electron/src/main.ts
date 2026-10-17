@@ -6,6 +6,7 @@ import {
   ipcMain,
   Menu,
   nativeImage,
+  screen,
   shell,
   session,
   dialog,
@@ -22,6 +23,7 @@ import { randomUUID } from 'node:crypto';
 import { detectHardware, gpuUpgrades, Hardware } from './backend/HardwareDetector';
 import { BackendManager, OVERLAY_ACCELS, launchWithOverlayFallback } from './backend/BackendManager';
 import { uniqueDownloadPath } from './downloads';
+import { restoredWindowSize } from './windowState';
 import { ipcBytes, pngClipboardPayload, safeMediaFilename } from './mediaIpc';
 import {
   comfyuiOpenTarget,
@@ -229,10 +231,36 @@ function bundledAccel(): Accel {
   return runtime?.accel ?? 'cpu';
 }
 
+/** Where the main window's last size is kept between launches. */
+function windowStatePath(): string {
+  return join(app.getPath('userData'), 'window-state.json');
+}
+
+/** Remember the window's size so the next launch reopens at it. */
+function saveWindowState(win: BrowserWindow): void {
+  // Normal bounds, so a maximized window still remembers the size it restores to.
+  const { width, height } = win.getNormalBounds();
+  try {
+    mkdirSync(dirname(windowStatePath()), { recursive: true });
+    writeFileSync(
+      windowStatePath(),
+      JSON.stringify({ width, height, maximized: win.isMaximized() }, null, 2),
+    );
+  } catch (e) {
+    console.warn(`[window-state] could not save the window size to ${windowStatePath()}:`, e);
+  }
+}
+
 function createMainWindow(): void {
+  const size = restoredWindowSize(
+    existsSync(windowStatePath()) ? readJsonFile(windowStatePath()) : null,
+    screen.getPrimaryDisplay().workAreaSize,
+    { width: 800, height: 600 },
+    { width: 1280, height: 860 },
+  );
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 860,
+    width: size.width,
+    height: size.height,
     minWidth: 800,
     minHeight: 600,
     backgroundColor: '#1b1f24',
@@ -256,11 +284,13 @@ function createMainWindow(): void {
   if (process.platform !== 'darwin' && !APP_ICON.isEmpty()) {
     mainWindow.setIcon(APP_ICON);
   }
+  if (size.maximized) mainWindow.maximize();
   mainWindow.loadFile(join(__dirname, 'renderer', 'index.html'));
   // With a tray available, closing the window hides it instead of quitting so
   // the backend (and any remote server) keeps running. A real quit goes through
   // `quitting` (tray Quit / app before-quit), which lets the close proceed.
   mainWindow.on('close', (e) => {
+    if (mainWindow) saveWindowState(mainWindow);
     if (!quitting && tray && hideToTrayOnClose) {
       e.preventDefault();
       mainWindow?.hide();
