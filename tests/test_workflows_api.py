@@ -20776,6 +20776,36 @@ def test_a_run_loads_a_checkpoint_comfyui_lacks_off_the_shelf(id_loaders):
     assert env.submitted[-1]["graph"]["1"] == CHAIN_DOCUMENT["1"]
 
 
+def test_an_original_open_names_a_shelf_checkpoint_without_making_the_shelf_id(
+    id_loaders,
+):
+    """ComfyUI on this computer lacks the checkpoint the shelf holds: named.
+    Wrong if asking makes the shelf's id, which a read must not."""
+    env = id_loaders
+    info = json.loads(
+        json.dumps({**CHAIN_OBJECT_INFO, **PACK_OBJECT_INFO, **ID_LOADER_OBJECT_INFO})
+    )
+    info["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"] = [
+        ["something-else.safetensors"],
+        {},
+    ]
+    env.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url, **_: (info, None)
+    )
+    env.monkeypatch.setattr(
+        workflows_routes,
+        "shelf_uuid",
+        lambda hub: pytest.fail("an original open asked for the shelf's id"),
+    )
+    workflow = workflows_routes.store_manual_workflow(
+        env.server.hub,
+        "Shelf checkpoint, original",
+        json.loads(json.dumps(CHAIN_DOCUMENT)),
+        "import",
+    )
+    assert _opened(env, workflow)["shelf_only"] == [_SHELF_FILENAME]
+
+
 def test_a_run_loads_a_diffusion_model_comfyui_lacks_off_the_shelf(id_loaders):
     """The same for Load Diffusion Model, alone in missing its file. Wrong if
     `missing_models` names it, or the run submits the stock loader."""
@@ -20913,6 +20943,35 @@ def test_a_controlnet_on_the_shelf_opens_in_the_pack_loader(controlnets):
         )
     graph = _opened(env, env.workflow, pixlstash_nodes="true")["workflow"]
     assert graph["9"]["class_type"] == "ControlNetLoader"
+
+
+def test_an_original_open_names_the_files_only_the_shelf_holds(controlnets):
+    """*Open original*: ComfyUI does not list the ControlNet, the shelf holds
+    it. Wrong if it is not named, if the graph itself changes, if the
+    adapted open names it (that one loads it off the shelf), or if a file the
+    shelf has no copy of is named."""
+    env = controlnets
+    opened = _opened(env, env.workflow)
+    assert opened["shelf_only"] == [_CONTROLNET_FILENAME]
+    assert opened["workflow"]["9"]["class_type"] == "ControlNetLoader"
+    assert _opened(env, env.workflow, pixlstash_nodes="true")["shelf_only"] == []
+
+    # Missing from the shelf too: nothing would load it, so it is not named.
+    with env.server.hub.transaction() as conn:
+        conn.execute(
+            "UPDATE model_file SET state = 'missing' WHERE model_id = ?", (env.model,)
+        )
+    assert _opened(env, env.workflow)["shelf_only"] == []
+
+
+def test_an_original_open_names_nothing_where_comfyui_lists_every_file(
+    controlnets,
+):
+    """The shelf holds the ControlNet, and so does ComfyUI: no notice."""
+    env = controlnets
+    listed = env.info["ControlNetLoader"]["input"]["required"]["control_net_name"]
+    listed[0] = [_CONTROLNET_FILENAME]
+    assert _opened(env, env.workflow)["shelf_only"] == []
 
 
 def test_a_run_loads_a_controlnet_comfyui_lacks_off_the_shelf(controlnets):

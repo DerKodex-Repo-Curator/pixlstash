@@ -2316,6 +2316,14 @@ class WorkflowRunnableGraph(BaseModel):
         0,
         description="How many model names the library could no longer name.",
     )
+    shelf_only: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The model files the graph names that this ComfyUI does not list "
+            "and an open with `pixlstash_nodes` would load off the shelf. "
+            "Empty with `pixlstash_nodes`, and where ComfyUI could not be asked."
+        ),
+    )
     version: int | None = Field(
         None,
         description=(
@@ -8239,6 +8247,7 @@ def create_router(server) -> APIRouter:
         bindings: list | None,
         object_info: dict | None,
         filled: dict[str, int] | None = None,
+        trial: bool = False,
     ) -> list[dict]:
         """Swap ComfyUI-PixlStash nodes into *graph* for opening in ComfyUI.
 
@@ -8260,6 +8269,9 @@ def create_router(server) -> APIRouter:
         held for ComfyUI filled itself (``POST /workflows/run/opening``):
         that picture is the one loaded there, over a pin the run's own pick
         took the place of.
+
+        *trial* swaps only to see which nodes would be (:func:`_shelf_only`),
+        so a stand-in names the shelf: a read must not make its id.
         """
         if not object_info:
             return []
@@ -8293,7 +8305,7 @@ def create_router(server) -> APIRouter:
             else None,
             library_uuid=_library_uuid(),
             checkpoint_id=_shelf_checkpoint(hub) if by_row else None,
-            shelf_uuid=shelf_uuid(hub) if by_row else None,
+            shelf_uuid=("trial" if trial else shelf_uuid(hub)) if by_row else None,
             controlnet_digest=_shelf_digest(hub, FILE_CONTROLNET),
             upscaler_digest=_shelf_digest(hub, FILE_UPSCALER),
         )
@@ -8314,6 +8326,37 @@ def create_router(server) -> APIRouter:
                     {"node_id": str(node_id), "was": was, "now": plan["class_type"]}
                 )
         return swapped
+
+    def _shelf_only(
+        request: Request,
+        workflow_id: str,
+        graph: dict,
+        bindings: list | None,
+        object_info: dict | None,
+    ) -> list[str]:
+        """The files *graph* names that this ComfyUI does not list and
+        :func:`_with_pack_nodes` would load off the shelf, for an *Open
+        original* to say why ComfyUI cannot find them. Tried on a copy, with
+        no Load Image, whose picture is no model and would be fetched."""
+        if not object_info:
+            return []
+        missing: dict[str, set[str]] = {}
+        for item in detect_model_targets(graph, object_info):
+            if item and isinstance(item.get("value"), str):
+                missing.setdefault(str(item.get("node_id")), set()).add(item["value"])
+        if not missing:
+            return []
+        trial = {
+            node_id: deepcopy(node)
+            for node_id, node in graph.items()
+            if not (isinstance(node, dict) and node.get("class_type") == "LoadImage")
+        }
+        swapped = _with_pack_nodes(
+            request, workflow_id, trial, bindings, object_info, trial=True
+        )
+        return sorted(
+            {name for swap in swapped for name in missing.get(swap["node_id"], ())}
+        )
 
     def _swap_in_shelf_loaders(
         request: Request, card_key: str, graph: dict, object_info: dict
@@ -8618,7 +8661,10 @@ def create_router(server) -> APIRouter:
             "uploaded) becomes the PixlStash Picture Loader on that picture; "
             "and, where ComfyUI is on this computer, a Load Checkpoint whose "
             "file the shelf holds one copy of becomes the PixlStash "
-            "Checkpoint Loader. The ComfyUI-PixlStash node "
+            "Checkpoint Loader. Without it, `shelf_only` names the files "
+            "this ComfyUI does not list that such an open would load off the "
+            "shelf, so *Open original* can say why ComfyUI misses them. "
+            "The ComfyUI-PixlStash node "
             "reads it when ComfyUI is opened with "
             "`?pixlstash_workflow=<workflow_id>`. Export instead to give it "
             "away."
@@ -8708,12 +8754,18 @@ def create_router(server) -> APIRouter:
                     workflow.workflow_id,
                     [(s["node_id"], s["now"]) for s in swapped],
                 )
+            shelf_only = []
+        else:
+            shelf_only = _shelf_only(
+                request, workflow.workflow_id, graph, source.bindings, object_info
+            )
         return WorkflowRunnableGraph(
             name=_file_stem(card, workflow.name),
             workflow=graph,
             source=source.origin,
             seedless=False,
             forgotten=source.forgotten,
+            shelf_only=shelf_only,
             version=source.workflow_version,
             waiting_applied=waiting_applied,
             editor=_layout_for(hub, workflow.workflow_id, graph, own_nodes),
