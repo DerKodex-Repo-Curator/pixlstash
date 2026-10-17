@@ -8122,8 +8122,9 @@ def create_router(server) -> APIRouter:
         which is the picture a run loads there whatever the graph names.
         Otherwise the graph names a file a run of PixlStash uploaded, which
         carries the picture's content (`_upload_files`), or a file in
-        ComfyUI's input folder whose content the library holds. Each way the
-        oldest kept picture with that content, as a pin resolves.
+        ComfyUI's input, output or temp folder whose content the library
+        holds. Each way the oldest kept picture with that content, as a pin
+        resolves.
         """
         wanted: dict[str, str] = {}
         for node_id, node in graph.items():
@@ -8158,21 +8159,29 @@ def create_router(server) -> APIRouter:
         }
 
     def _input_file_sha(comfyui_url: str, name: str) -> str | None:
-        """The content hash of *name* in ComfyUI's input folder, as a
+        """The content hash of the file a Load Image names *name*, as a
         picture's ``pixel_sha`` is taken, or ``None`` where it cannot be read.
+        From ComfyUI's input folder, or the folder the name is annotated with
+        (``x.png [output]``), as ComfyUI reads it.
         """
         # ponytail: fetched on every open and save; cache by name if it shows.
-        subfolder, _, filename = name.removesuffix(" [input]").rpartition("/")
+        folder = "input"
+        for kind in ("input", "output", "temp"):
+            if name.endswith(f" [{kind}]"):
+                name, folder = name.removesuffix(f" [{kind}]"), kind
+        subfolder, _, filename = name.rpartition("/")
         try:
             data, _ext = _download_comfyui_image(
                 comfyui_url,
-                {"filename": filename, "subfolder": subfolder, "type": "input"},
+                {"filename": filename, "subfolder": subfolder, "type": folder},
             )
         except HTTPException as exc:
             logger.info(
-                "[workflows] Load Image's %s stays a Load Image: ComfyUI did "
-                "not hand over the file (%s).",
+                "[workflows] Load Image's %s (%s) is not matched to a library "
+                "picture by its content: ComfyUI did not hand over the file "
+                "(%s).",
                 name,
+                folder,
                 exc.detail,
             )
             return None
@@ -8204,16 +8213,15 @@ def create_router(server) -> APIRouter:
         :func:`swap_in_pack_nodes`, each swap only where what it needs is
         here: a LoRA, a VAE, a CLIP or a ControlNet by digest where the shelf
         holds a copy of the file for the pack's loader to fetch; a picture by
-        id where the library is known to hold it (:func:`_known_pictures`), or
-        none where ComfyUI's input folder lacks the file; a
-        checkpoint or a diffusion model by shelf row where the shelf holds one
-        copy of it and ComfyUI is on this computer, since that loader cannot
-        fetch its file. Nothing is swapped when ComfyUI did not say which
-        nodes it has.
+        id where the library is known to hold it (:func:`_known_pictures`),
+        else none, for the owner to browse for; a checkpoint or a diffusion
+        model by shelf row where the shelf holds one copy of it and ComfyUI is
+        on this computer, since that loader cannot fetch its file. Nothing is
+        swapped when ComfyUI did not say which nodes it has.
 
         Asked of the same graph, it answers the same until the shelf, the
-        library, a pin or a file in ComfyUI's input folder changes: ``PUT …/graph`` runs it again to know a
-        graph saved untouched.
+        library, a pin or a file a Load Image names in ComfyUI changes:
+        ``PUT …/graph`` runs it again to know a graph saved untouched.
 
         *filled* is ``{node_id: picture id}`` for the picture inputs a run
         held for ComfyUI filled itself (``POST /workflows/run/opening``):

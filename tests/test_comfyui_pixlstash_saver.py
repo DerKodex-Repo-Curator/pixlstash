@@ -456,10 +456,9 @@ class TestOpeningWithPackNodes:
 
     def test_an_id_loader_is_never_swapped_in_without_what_it_needs(self):
         stock = self._stock()
-        # Nothing known about the picture or the file: an empty picture
-        # loader would pick pictures by its own sort.
+        # Not asked to swap either, or with no library or shelf to say whose
+        # an id is.
         for known in (
-            {"pictures": {}, "checkpoint_id": {}.get},
             {"pictures": None, "checkpoint_id": None},
             {"library_uuid": None, "shelf_uuid": None},
             {"library_uuid": "", "shelf_uuid": ""},
@@ -481,35 +480,41 @@ class TestOpeningWithPackNodes:
             assert self._swap_ids(graph, info=info) == []
             assert graph == stock
 
-    def test_a_load_image_comfyui_has_no_file_for_opens_empty(self):
-        """A Load Image naming a file ComfyUI's input folder lacks could not
-        run as it is: it opens as an empty Picture Loader to browse in. One
-        whose file ComfyUI lists keeps it."""
+    def test_a_load_image_the_library_holds_no_picture_of_opens_empty(self):
+        """A Load Image whose picture the library is not known to hold opens
+        as an empty Picture Loader to browse in, whether or not ComfyUI holds
+        its file. Wrong if it stays a Load Image."""
         info = json.loads(json.dumps({**self.INFO, **self.ID_LOADERS}))
-        info["LoadImage"]["input"] = {"required": {"image": [["b.png"], {}]}}
-        graph = self._stock()
-        assert self._swap_ids(graph, info=info, pictures={})[1] == {
-            "node_id": "2",
-            "was": "LoadImage",
-            "now": "PixlStashPictureLoader",
-        }
-        assert graph["2"]["inputs"] == {"picture_ids": "", "library": "lib-here"}
-        # ComfyUI reads one annotated with another folder from there.
-        for annotated in ("a.png [output]", "a.png [temp]"):
-            graph = self._stock()
-            graph["2"]["inputs"]["image"] = annotated
-            assert len(self._swap_ids(graph, info=info, pictures={})) == 1
-            assert graph["2"]["class_type"] == "LoadImage"
-        info["LoadImage"]["input"]["required"]["image"] = [["a.png"], {}]
-        for listed in (info, {**info, "LoadImage": {}}):
-            graph = self._stock()
-            assert len(self._swap_ids(graph, info=listed, pictures={})) == 1
-            assert graph["2"] == self._stock()["2"]
+        for listed in ([["a.png"], {}], [["b.png"], {}], None):
+            if listed is None:
+                info["LoadImage"].pop("input", None)
+            else:
+                info["LoadImage"]["input"] = {"required": {"image": listed}}
+            for image in ("a.png", "a.png [output]", "a.png [temp]"):
+                graph = self._stock()
+                graph["2"]["inputs"]["image"] = image
+                assert self._swap_ids(graph, info=info, pictures={})[1] == {
+                    "node_id": "2",
+                    "was": "LoadImage",
+                    "now": "PixlStashPictureLoader",
+                }, (listed, image)
+                assert graph["2"]["inputs"] == {
+                    "picture_ids": "",
+                    "library": "lib-here",
+                }
         # Not asked to swap pictures at all: no Load Image is.
-        info["LoadImage"]["input"]["required"]["image"] = [["b.png"], {}]
         graph = self._stock()
         assert len(self._swap_ids(graph, info=info, pictures=None)) == 1
         assert graph["2"] == self._stock()["2"]
+        # A file name wired in from another node would be dropped: it stays,
+        # unless the library's picture is known.
+        wired = self._stock()
+        wired["2"]["inputs"]["image"] = ["9", 0]
+        graph = json.loads(json.dumps(wired))
+        assert len(self._swap_ids(graph, info=info, pictures={})) == 1
+        assert graph["2"] == wired["2"]
+        self._swap_ids(graph, info=info)
+        assert graph["2"]["inputs"]["picture_ids"] == "41"
 
     def test_every_swap_reads_as_the_stock_node_for_a_layout(self):
         # A layout is matched on the stock classes, so which of a pair the
