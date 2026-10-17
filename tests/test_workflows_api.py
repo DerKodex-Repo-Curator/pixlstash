@@ -22259,6 +22259,28 @@ def test_a_layout_holds_no_credential_the_graph_holds(saving):
     assert opened["editor"] is not None
     assert "example-key" not in json.dumps(opened)
 
+    # A key promoted out of a subgraph sits on the instance node, 20, which no
+    # graph id names: kept from ComfyUI, or the file a workflow was imported as.
+    # A name the credential pattern also reads (`tokenizer`) blanks its value
+    # there, not the same word on a node off that path.
+    graph["20:8"] = graph.pop("20:21:8")
+    graph["20:8"]["inputs"]["tokenizer"] = "default"
+    instance = {"id": 20, "type": "a-subgraph", "widgets_values": ["example-key"]}
+    other = {"id": 31, "type": "KSampler", "widgets_values": ["default"]}
+    inner = {"id": "a-subgraph", "nodes": [{"id": 8, "type": "HostedCaption"}]}
+    promoted = _editor(nodes=[instance, other], definitions={"subgraphs": [inner]})
+    r = _put_graph(saving, saving.manual, graph, editor=promoted)
+    assert r.status_code == 200 and r.json()["version"] == 4, r.text
+    imported = workflows_routes.store_manual_workflow(
+        saving.server.hub, "Imported", promoted, "import"
+    )
+    workflow_group_writes.set_manual_api_document(saving.server.hub, [imported], graph)
+    for workflow_id in (saving.manual, imported):
+        opened = _opened(saving, workflow_id, all_stages="true")
+        assert opened["editor"]["nodes"][1]["widgets_values"] == [""]
+        assert opened["editor"]["nodes"][2]["widgets_values"] == ["default"]
+        assert "example-key" not in json.dumps(opened)
+
 
 def test_open_says_where_the_people_loader_goes(a_persons_lora):
     """Where a run splices a person's LoRA: straight after the model source.

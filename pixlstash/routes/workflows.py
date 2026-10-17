@@ -11688,7 +11688,9 @@ def create_router(server) -> APIRouter:
         * a person's LoRA by file name has no empty value, so a document
           naming one in any node's widgets is not kept at all, and neither
           is one whose graph loaded one in an ordinary loader;
-        * a credential the graph holds is blanked on the node that holds it.
+        * a credential the graph holds is blanked on the node that holds it
+          and, inside a subgraph, on every instance on the way to it, which
+          holds the value as a promoted widget.
 
         ponytail: a credential on a node the graph does not run (bypassed) is
         not in the graph to be found, and stays, as it does in a stored graph;
@@ -11710,15 +11712,15 @@ def create_router(server) -> APIRouter:
             return None
         people = set(lora_owners(server.vault))
         by_name = adapter_digest_index(hub)[0] if people else {}
-        # A node inside a subgraph runs as "<instance>:<id>".
+        # A node inside a subgraph runs as "<instance>:<id>", nested ones as
+        # "<outer>:<inner>:<id>": each id on that path may hold the value.
         secrets: dict[str, set[str]] = {}
         for node_id, node in graph.items():
             inputs = node.get("inputs") if isinstance(node, dict) else None
             for name, value in (inputs if isinstance(inputs, dict) else {}).items():
                 if isinstance(value, str) and value and SECRET_FIELD_RE.search(name):
-                    secrets.setdefault(str(node_id).rsplit(":", 1)[-1], set()).add(
-                        value
-                    )
+                    for part in str(node_id).split(":"):
+                        secrets.setdefault(part, set()).add(value)
 
         editor = deepcopy(editor)
         for node in _layout_nodes(editor):
