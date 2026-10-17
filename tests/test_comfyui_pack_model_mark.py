@@ -52,6 +52,10 @@ ROWS = [
         "base_model_canonical": "Z-Image",
     },
     {"filename": "x.safetensors", "base_model": "flux1", "base_model_folded": "a"},
+    # Letters outside the BMP, on each branch: two words, one word, no letter.
+    {"display_name": "\U0001d400pple \U0001d401anana"},
+    {"display_name": "\U0001d400\U0001d401\U0001d402"},
+    {"display_name": "1\U0001f600"},
     {},
 ]
 # Every quant spelling, the modifiers alone and beside one, GGUF tails, and
