@@ -2144,11 +2144,14 @@ SWAPPED_CLASSES = {
 def _names_no_input_file(object_info: dict, image: Any) -> bool:
     """Whether a ``LoadImage``'s *image* is a file ComfyUI's input folder
     does not hold, by the options its ``object_info`` lists. ``False`` where
-    that list does not say (:func:`_combo_options`)."""
+    that list does not say (:func:`_combo_options`), and for a name ComfyUI
+    reads out of its output or temp folder (``x.png [output]``), which the
+    list never holds."""
     options = _combo_options(object_info.get("LoadImage"), "image")
     return (
         isinstance(image, str)
         and options is not None
+        and not image.endswith((" [output]", " [temp]"))
         and image.removesuffix(" [input]") not in options
     )
 

@@ -494,6 +494,12 @@ class TestOpeningWithPackNodes:
             "now": "PixlStashPictureLoader",
         }
         assert graph["2"]["inputs"] == {"picture_ids": "", "library": "lib-here"}
+        # ComfyUI reads one annotated with another folder from there.
+        for annotated in ("a.png [output]", "a.png [temp]"):
+            graph = self._stock()
+            graph["2"]["inputs"]["image"] = annotated
+            assert len(self._swap_ids(graph, info=info, pictures={})) == 1
+            assert graph["2"]["class_type"] == "LoadImage"
         info["LoadImage"]["input"]["required"]["image"] = [["a.png"], {}]
         for listed in (info, {**info, "LoadImage": {}}):
             graph = self._stock()
