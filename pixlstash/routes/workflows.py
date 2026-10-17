@@ -8166,7 +8166,8 @@ def create_router(server) -> APIRouter:
         :func:`swap_in_pack_nodes`, each swap only where what it needs is
         here: a LoRA, a VAE, a CLIP or a ControlNet by digest where the shelf
         holds a copy of the file for the pack's loader to fetch; a picture by
-        id where the library is known to hold it (:func:`_known_pictures`); a
+        id where the library is known to hold it (:func:`_known_pictures`), or
+        none where ComfyUI's input folder lacks the file; a
         checkpoint or a diffusion model by shelf row where the shelf holds one
         copy of it and ComfyUI is on this computer, since that loader cannot
         fetch its file. Nothing is swapped when ComfyUI did not say which

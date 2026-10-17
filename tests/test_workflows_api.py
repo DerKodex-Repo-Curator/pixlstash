@@ -20463,9 +20463,21 @@ def test_a_picture_in_comfyuis_input_folder_opens_as_the_library_picture(
 ):
     """A Load Image naming a file in ComfyUI's input folder whose content the
     library holds opens as the pack's Picture Loader on that picture. Wrong if
-    it stays a Load Image, or if a file the library does not hold, or one
-    ComfyUI cannot hand over, becomes a loader on some other picture."""
+    it stays a Load Image, or if a file the library does not hold becomes a
+    loader on some other picture. One naming a file ComfyUI does not list
+    could not run as it is, and opens as an empty Picture Loader to browse in.
+    """
     env = id_loaders
+    info = json.loads(
+        json.dumps({**CHAIN_OBJECT_INFO, **PACK_OBJECT_INFO, **ID_LOADER_OBJECT_INFO})
+    )
+    info["LoadImage"]["input"]["required"]["image"] = [
+        ["in-input.png", "sub/other.png"],
+        {},
+    ]
+    env.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url, **_: (info, None)
+    )
     held = b"\x89PNG test-picture-in-the-input-folder"
     picture = _add_picture(
         env.server,
@@ -20499,12 +20511,15 @@ def test_a_picture_in_comfyuis_input_folder_opens_as_the_library_picture(
         },
     }
     assert {"filename": "in-input.png", "subfolder": "", "type": "input"} in fetched
-    for image in ("sub/other.png", "gone.png"):
-        assert opened(image) == {
-            "class_type": "LoadImage",
-            "inputs": {"image": image},
-        }
+    assert opened("sub/other.png") == {
+        "class_type": "LoadImage",
+        "inputs": {"image": "sub/other.png"},
+    }
     assert {"filename": "other.png", "subfolder": "sub", "type": "input"} in fetched
+    assert opened("gone.png") == {
+        "class_type": "PixlStashPictureLoader",
+        "inputs": {"picture_ids": "", "library": env.server.vault.library_uuid},
+    }
 
 
 def test_a_diffusion_model_a_vae_and_a_clip_open_as_the_shelfs_loaders(id_loaders):
@@ -20993,9 +21008,20 @@ def test_the_picture_loader_goes_in_only_on_a_picture_the_library_holds(id_loade
     """A pin (Fixed) or a file a run uploaded says which picture. A file the
     owner put in ComfyUI's input folder is no picture of the library.
 
-    Wrong if the loader goes in empty: it would pick pictures by its own sort.
+    Wrong if the loader goes in empty on a file ComfyUI has: it would pick
+    pictures by its own sort over one that loads.
     """
     env = id_loaders
+    # ComfyUI holds the file the run uploaded, as it does after a real run.
+    info = json.loads(
+        json.dumps({**CHAIN_OBJECT_INFO, **PACK_OBJECT_INFO, **ID_LOADER_OBJECT_INFO})
+    )
+    info["LoadImage"]["input"]["required"]["image"][0].append(
+        _upload_name(env.server, env.picture, _h("pixels-held.png"))
+    )
+    env.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url, **_: (info, None)
+    )
     document = _picture_document("subject.png")
     own_file = workflows_routes.store_manual_workflow(
         env.server.hub, "Own file", document, "import"
