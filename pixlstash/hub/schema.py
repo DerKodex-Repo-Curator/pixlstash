@@ -33,6 +33,8 @@ from pixlstash.utils.adapter_header import (
     FILE_CHECKPOINT,
     FILE_CONTROLNET,
     FILE_UNKNOWN,
+    has_controlnet_markers,
+    read_safetensors_header,
     role_from_folder,
 )
 from pixlstash.utils.known_base_models import SOURCE_DECLARED, identify
@@ -64,7 +66,7 @@ CURRENT_SCHEMA_VERSION = 2
 # reasoning the model-shelf tables were amended into v2 for. ``user_version`` is
 # free (nothing in PixlStash has ever written it), costs no DDL, and an older
 # build ignores it entirely.
-CURRENT_DATA_VERSION = 16
+CURRENT_DATA_VERSION = 17
 
 # `model_file.state` for a copy the last scan actually looked at, spelled out
 # rather than imported from `services.model_folder_scanner`. That module imports
@@ -2160,6 +2162,56 @@ def _backfill_component_roles(
     return refiled
 
 
+def _refile_controlnets_by_tensors(conn: sqlite3.Connection) -> int:
+    """Re-file the ``checkpoint`` and ``unknown`` rows whose tensors are a
+    ControlNet's (:func:`has_controlnet_markers`).
+
+    Unlike :func:`_backfill_component_roles` this reads bytes: one
+    ``.safetensors`` header per row, off its first present copy. A row with no
+    present copy, or one whose header will not read, keeps its kind. A scan
+    never rewrites ``file_kind``, so without this a ControlNet shelved under
+    ``diffusion_models/`` stays a checkpoint wherever it is moved to, and the
+    ComfyUI-PixlStash ControlNet Loader is never swapped in for it.
+
+    Runs exactly once per hub (see :data:`CURRENT_DATA_VERSION`).
+
+    Args:
+        conn: An open hub connection, inside the caller's transaction.
+
+    Returns:
+        How many rows were re-filed.
+    """
+    rows = conn.execute(
+        "SELECT m.id, f.path, mf.relpath FROM model m "
+        "JOIN model_file mf ON mf.model_id = m.id "
+        "JOIN model_folder f ON f.id = mf.model_folder_id "
+        "WHERE m.file_kind IN (?, ?) AND mf.state = ? "
+        "AND lower(mf.relpath) LIKE '%.safetensors' "
+        "ORDER BY m.id, f.path, mf.relpath",
+        (FILE_CHECKPOINT, FILE_UNKNOWN, _BACKFILL_LIVE_STATE),
+    ).fetchall()
+    first_copy: dict[int, str] = {}
+    for model_id, folder_path, relpath in rows:
+        first_copy.setdefault(model_id, f"{folder_path}/{relpath}")
+
+    refiled = 0
+    for model_id, path in first_copy.items():
+        header = read_safetensors_header(path)
+        if header is None or not has_controlnet_markers(header):
+            continue
+        refiled += conn.execute(
+            "UPDATE model SET file_kind = ? WHERE id = ?",
+            (FILE_CONTROLNET, model_id),
+        ).rowcount
+    if refiled:
+        logger.info(
+            "Re-filed %d model rows as ControlNets from their tensors; they "
+            "were registered before a ControlNet was told by them.",
+            refiled,
+        )
+    return refiled
+
+
 class HubSchemaTooNewError(RuntimeError):
     """The hub file was written by a newer PixlStash than this build.
 
@@ -2475,6 +2527,10 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
                     # one clears the threshold) or `unknown`, as pass 1 found
                     # VAEs and text encoders.
                     _backfill_component_roles(conn, only_role=FILE_CONTROLNET)
+                if data_version < 17:
+                    # A ControlNet is told by its tensors too, wherever it
+                    # sits: one under `diffusion_models/` was a `checkpoint`.
+                    _refile_controlnets_by_tensors(conn)
                 if data_version < CURRENT_DATA_VERSION:
                     # No placeholder: PRAGMA takes no parameters, and the value
                     # is this module's own constant, nothing from outside.

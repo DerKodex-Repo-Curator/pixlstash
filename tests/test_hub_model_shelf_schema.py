@@ -17,8 +17,10 @@ Two rules under test throughout:
    could not do.
 """
 
+import json
 import re
 import sqlite3
+import struct
 import threading
 import time
 
@@ -948,6 +950,49 @@ class TestComponentRoleBackfill:
             "controlnet",
             "adapter",
             "unknown",
+        ]
+        assert hub.execute("PRAGMA user_version").fetchone()[0] == CURRENT_DATA_VERSION
+
+    def test_a_data_v16_hub_refiles_a_controlnet_by_its_tensors(self, hub, tmp_path):
+        # Data version 17: a ControlNet a launcher filed under
+        # `diffusion_models/` was a `checkpoint`, and a scan never rewrites
+        # `file_kind`, so it stayed one wherever it was moved. Its header says
+        # what it is. A real checkpoint, an adapter, a copy that is gone and a
+        # GGUF are left as they are.
+        apply_migrations(hub)
+        hub.execute("PRAGMA user_version = 16")
+        folder_id = add_folder(hub, str(tmp_path))
+        (tmp_path / "DiffusionModels").mkdir()
+
+        def shelved(name, tensor, file_kind="checkpoint", state="present"):
+            blob = json.dumps({tensor: {"dtype": "F16", "shape": [1]}}).encode()
+            (tmp_path / "DiffusionModels" / name).write_bytes(
+                struct.pack("<Q", len(blob)) + blob
+            )
+            model_id = add_model(hub, file_kind=file_kind, sha256=name, kind=None)
+            add_file(hub, model_id, folder_id, f"DiffusionModels/{name}", state)
+            return model_id
+
+        controlnet = shelved("cn.safetensors", "controlnet_blocks.0.weight")
+        unknown = shelved(
+            "sd15.safetensors", "control_model.input_hint_block.0.weight", "unknown"
+        )
+        checkpoint = shelved("ckpt.safetensors", "transformer_blocks.0.attn.weight")
+        gone = shelved(
+            "gone.safetensors", "controlnet_blocks.0.weight", state="missing"
+        )
+        gguf = shelved("cn.gguf", "controlnet_blocks.0.weight")
+        hub.commit()
+
+        apply_migrations(hub)
+
+        kinds = dict(hub.execute("SELECT id, file_kind FROM model").fetchall())
+        assert [kinds[i] for i in (controlnet, unknown, checkpoint, gone, gguf)] == [
+            "controlnet",
+            "controlnet",
+            "checkpoint",
+            "checkpoint",
+            "checkpoint",
         ]
         assert hub.execute("PRAGMA user_version").fetchone()[0] == CURRENT_DATA_VERSION
 

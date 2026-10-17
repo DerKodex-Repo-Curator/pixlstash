@@ -10588,7 +10588,13 @@ answer:
   because an SDXL or SD3.5 ControlNet clears the checkpoint threshold and the
   hash routes (`GET /adapters/{sha256}[/file]`) refuse a checkpoint, which the
   ComfyUI-PixlStash ControlNet Loader fetches through; hub data version 16
-  re-files the `checkpoint` and `unknown` rows already shelved there. A GGUF outside a role folder is `unknown`, which the
+  re-files the `checkpoint` and `unknown` rows already shelved there. A
+  `.safetensors` ControlNet is also told by its tensors
+  (`has_controlnet_markers`: diffusers' `controlnet_*` blocks, the original
+  layout's `input_hint_block` / `zero_convs`), which outrank the folder, so one
+  under `diffusion_models/` is a ControlNet too; hub data version 17 reads the
+  header of each `checkpoint` and `unknown` row's present copy once to re-file
+  those. A GGUF outside a role folder is `unknown`, which the
   shelf shows and the owner can correct; it is never guessed into `checkpoint`.
 
 Everything else (`family`, `weights_id`, `kind`, `param_count`, the trainer

@@ -28,6 +28,7 @@ from pixlstash.utils.adapter_header import (
     count_parameters,
     describe_adapter,
     has_adapter_markers,
+    has_controlnet_markers,
 )
 from pixlstash.utils.model_utils import (
     canonical_quant,
@@ -121,6 +122,36 @@ class TestFileClassification:
 
     def test_an_empty_file_is_unknown(self):
         assert classify_model_file([], param_count=0) == FILE_UNKNOWN
+
+    @pytest.mark.parametrize(
+        "tensor",
+        [
+            "controlnet_blocks.0.weight",  # SD3.5, Flux
+            "controlnet_x_embedder.weight",  # Flux
+            "controlnet_down_blocks.0.weight",  # diffusers SD, SDXL
+            "controlnet_cond_embedding.conv_in.weight",
+            "control_model.input_hint_block.0.weight",  # the original layout
+            "control_model.zero_convs.0.0.weight",
+        ],
+    )
+    def test_controlnet_tensors_beat_the_folder(self, tensor):
+        # Launchers file the big ones under `diffusion_models/`, which names a
+        # checkpoint; the tensors say what the file is.
+        assert (
+            classify_model_file(
+                [tensor], 2_200_000_000, "/home/me/DiffusionModels/cn.safetensors"
+            )
+            == FILE_CONTROLNET
+        )
+
+    def test_a_checkpoint_is_not_a_controlnet(self):
+        names = [
+            "model.diffusion_model.input_blocks.0.0.weight",
+            "model.diffusion_model.joint_blocks.0.x_block.attn.qkv.weight",
+            "transformer_blocks.0.attn.to_q.weight",
+        ]
+        assert not has_controlnet_markers(names)
+        assert classify_model_file(names, 2_600_000_000) == FILE_CHECKPOINT
 
 
 class TestTheFolderNamesTheRole:

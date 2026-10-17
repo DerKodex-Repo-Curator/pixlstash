@@ -106,6 +106,15 @@ FILE_TEXT_ENCODER = "text_encoder"
 # hash routes refuse, so it needs a name of its own to be fetched by digest.
 FILE_CONTROLNET = "controlnet"
 
+# Tensors only a ControlNet carries: diffusers' (SD, SDXL, SD3.5, Flux) and the
+# original `control_model.` layout's. Positive evidence as an adapter marker is:
+# a ControlNet kept under `diffusion_models/` (where launchers put the big ones)
+# is still one, and the folder would otherwise file it as a checkpoint.
+_CONTROLNET_RE = re.compile(
+    r"(?:^|\.)(?:controlnet_(?:blocks|single_blocks|down_blocks|mid_block|"
+    r"cond_embedding|x_embedder)|input_hint_block|zero_convs)\."
+)
+
 # What a directory NAMES the files inside it, normalised by `_normalise_folder`.
 #
 # ComfyUI files models by role (`models/vae`, `models/text_encoders`,
@@ -365,6 +374,13 @@ def has_adapter_markers(tensor_names) -> bool:
     return False
 
 
+def has_controlnet_markers(tensor_names) -> bool:
+    """Return whether *tensor_names* contain a tensor only a ControlNet has."""
+    return any(
+        isinstance(name, str) and _CONTROLNET_RE.search(name) for name in tensor_names
+    )
+
+
 def count_parameters(header: dict) -> int:
     """Return the total parameter count implied by a safetensors *header*.
 
@@ -560,7 +576,8 @@ def classify_model_file(tensor_names, param_count: int, path: str = "") -> str:
        the file cannot strip without breaking, so nothing overrides them - not
        a parameter count and not a directory. This is what keeps an all-in-one
        checkpoint dropped in someone's ``Lora/`` folder from being filed as a
-       LoRA.
+       LoRA. ControlNet markers (:func:`has_controlnet_markers`) come next, on
+       the same footing: a ControlNet in ``diffusion_models/`` is a ControlNet.
     2. **The directory**, when it names a role. A VAE and a text encoder carry
        no marker to find, so the layout the user (or their launcher) already
        maintains is the best evidence there is. It outranks the parameter count
@@ -590,6 +607,8 @@ def classify_model_file(tensor_names, param_count: int, path: str = "") -> str:
     """
     if has_adapter_markers(tensor_names):
         return FILE_ADAPTER
+    if has_controlnet_markers(tensor_names):
+        return FILE_CONTROLNET
     role = role_from_folder(path) if path else None
     if role is not None:
         return role
