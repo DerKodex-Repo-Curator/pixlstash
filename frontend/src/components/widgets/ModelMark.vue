@@ -74,7 +74,7 @@
          speed LoRA's step count. Drawn over a family icon too. -->
     <span
       v-if="showTab"
-      class="mmark-version"
+      class="mmark-version mmark-tab"
       aria-hidden="true"
       :style="{
         backgroundColor: mark.ink,
@@ -420,6 +420,12 @@ const ringClass = computed(() =>
   font-size: var(--text-2xs);
   font-weight: var(--weight-bold);
   line-height: 1;
+}
+
+/* A named tile's tab, a step down: its widest word, BASE, is 29.4px at 10px
+   in DejaVu Sans (32.3px at 11px), inside the card's 30px tile. */
+.mmark-tab {
+  font-size: var(--text-3xs);
 }
 
 /* ── The assignment ring ───────────────────────────────────────────────────

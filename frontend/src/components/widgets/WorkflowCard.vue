@@ -227,7 +227,7 @@ import ModelMark from "./ModelMark.vue";
 import Tooltip from "./Tooltip.vue";
 
 // How much row 2 draws before it counts the rest (#1485), in mark-widths: a
-// mark is one slot, a mark with its "×N" two. Five --wf-mark (28px) marks, the
+// mark is one slot, a mark with its "×N" two. Five --wf-mark (30px) marks, the
 // hairline, "+N" and their gaps fit the row of a card at the grid's 240px
 // column floor; `overflow: hidden` would otherwise clip the "+N" rather than a
 // mark. `WorkflowCard.test.js` sums this against the tokens.

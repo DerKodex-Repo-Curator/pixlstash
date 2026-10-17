@@ -7,7 +7,9 @@
 // one in `KNOWN_BASE_MODELS` and `KNOWN_FINE_TUNES` is rendered here, in the
 // tile's face in Chromium, where jsdom cannot measure text at all. CI's
 // `system-ui` is DejaVu Sans, the widest face measured, which is the point. A
-// tab's role word is held to the tile the same way.
+// tab's role word is held to the tile: the tab hangs as far past the tile's
+// right edge as its padding and border take, so a word wider than the tile
+// pushes the tab past its left edge.
 
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
@@ -26,11 +28,11 @@ const LINE_PX = TILE_PX - 2 * 2
 
 const READ_NAMES = `
 import json
-from pixlstash.utils.known_base_models import KNOWN_BASE_MODELS, KNOWN_FINE_TUNES
+from pixlstash.utils.known_base_models import KNOWN_BASE_MODELS, KNOWN_FINE_TUNES, ROLE_WORDS
 tiles = [*KNOWN_BASE_MODELS.values(), *KNOWN_FINE_TUNES.values()]
 print(json.dumps({
     "lines": sorted({line for t in tiles for line in t.get("mark", [])}),
-    "roles": sorted({t["role"] for t in tiles if t.get("role")}),
+    "roles": sorted({t["role"] for t in tiles if t.get("role")} | set(ROLE_WORDS.values())),
 }))
 `
 
@@ -69,9 +71,9 @@ test('every known name fits the tile at the smallest size it may take', async ({
             letterSpacing: '-0.02em',
           }),
         ),
-        // `.mmark-version`: the type ramp's 2xs, bold.
+        // `.mmark-tab`: the type ramp's 3xs, bold.
         roles: roles.map((role) =>
-          measure(role, { fontSize: 'var(--text-2xs)', fontWeight: '700' }),
+          measure(role, { fontSize: 'var(--text-3xs)', fontWeight: '700' }),
         ),
       }
     },
