@@ -288,6 +288,18 @@
              about a selection the reader just made - they are about a list that
              is not in front of them. -->
         <template v-if="isShelfTab">
+          <!-- The name filter's toolbar copy, bound to the same text as the
+               field at the top of Show. The first thing the ladder folds (rung
+               0); the Show menu's field is always there. Absent on the set
+               grid for Sort's reason below: Show does not narrow the grid. -->
+          <NameFilterField
+            v-if="!isSetGrid"
+            ref="nameFieldRef"
+            class="shelf-name-bar"
+            :model-value="store.filters.name"
+            label="Filter models by name"
+            @update:model-value="(name) => store.setFilters({ name })"
+          />
           <v-menu
             v-model="groupMenuOpen"
             :close-on-content-click="false"
@@ -396,7 +408,10 @@
                 :tooltip="showButtonTitle"
               />
             </template>
-            <ShelfShowPanel :open="showMenuOpen" />
+            <ShelfShowPanel
+              :open="showMenuOpen"
+              :focus-name-request="nameFocusRequest"
+            />
           </v-menu>
         </template>
 
@@ -1663,6 +1678,7 @@ import {
 } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import ShelfShowPanel from "../panels/ShelfShowPanel.vue";
+import NameFilterField from "../widgets/NameFilterField.vue";
 import ShelfSortPanel from "../panels/ShelfSortPanel.vue";
 import ShelfSelectionBar from "../panels/ShelfSelectionBar.vue";
 import WorkflowSetRenameDialog from "../panels/WorkflowSetRenameDialog.vue";
@@ -1718,6 +1734,7 @@ import { useModelFolderGates } from "../../composables/useModelFolderGates";
 import { useNoticeStore } from "../../stores/useNoticeStore";
 import { useOperationStore } from "../../stores/useOperationStore";
 import { useReviewSessionsStore } from "../../stores/useReviewSessionsStore";
+import { useSearchStore } from "../../stores/useSearchStore";
 import { useSidebarStore } from "../../stores/useSidebarStore";
 import { useUserPrefsStore } from "../../stores/useUserPrefsStore";
 import { errorDetail } from "../../utils/apiError";
@@ -1846,6 +1863,22 @@ watch(
 const userPrefs = useUserPrefsStore();
 const rootEl = ref(null);
 const showMenuOpen = ref(false);
+const nameFocusRequest = ref(0);
+const nameFieldRef = ref(null);
+// The app's search key (F) finds by name here: the toolbar's field when the bar
+// has room for it, else the one at the top of Show.
+watch(
+  () => useSearchStore().searchFocusToken,
+  () => {
+    if (!isShelfTab.value) return;
+    if (nameFieldRef.value?.isShown()) {
+      nameFieldRef.value.focus();
+      return;
+    }
+    showMenuOpen.value = true;
+    nameFocusRequest.value += 1;
+  },
+);
 const sortMenuOpen = ref(false);
 const folderMenuOpen = ref(false);
 const folderMenuAt = ref([0, 0]);
@@ -5021,6 +5054,21 @@ watch(
 
 .shelf-overflow {
   display: none;
+}
+
+/* The toolbar's name field. A fixed width, so typing never moves the bar. */
+.shelf-name-bar {
+  width: 180px;
+  flex: none;
+}
+
+/* Rung 0. The name field, before anything the bar had without it: it is a
+   shortcut to the field at the top of Show, so it is only drawn where there is
+   room for it on top of the full bar - 1071px plus its 180px and one gap. */
+@container shelfbar (max-width: 1238px) {
+  .shelf-name-bar {
+    display: none;
+  }
 }
 
 /* Rung 1. The two things on the bar that REPORT rather than control: the

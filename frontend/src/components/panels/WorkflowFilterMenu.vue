@@ -22,6 +22,19 @@
         </button>
       </div>
 
+      <!-- First, above the kinds: the field the toolbar copy hands over to
+           when it folds. -->
+      <div class="tbm-section">
+        <NameFilterField
+          ref="nameRef"
+          :model-value="store.filters.name"
+          placeholder="Filter workflows by name…"
+          label="Filter workflows by name"
+          @update:model-value="(name) => store.setFilters({ name })"
+          @keydown.down.prevent="rowRefs[ROW_ORDER[0]]?.focus()"
+        />
+      </div>
+
       <div v-for="section in SECTIONS" :key="section.label" class="tbm-section">
         <span class="tbm-label">{{ section.label }}</span>
         <button
@@ -141,7 +154,7 @@
  * this menu and the filter button's badge all read `filterChips`, so the
  * three cannot disagree about which filters are on.
  */
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { VIcon } from "vuetify/components";
 
 import {
@@ -150,11 +163,14 @@ import {
 } from "../../stores/useWorkflowsStore";
 import { useCascadeMenu } from "../../composables/useCascadeMenu";
 import OptionRows from "../widgets/OptionRows.vue";
+import NameFilterField from "../widgets/NameFilterField.vue";
 
 const props = defineProps({
   // The v-menu keeps its content mounted, so a closed menu says so here and
   // reopens on the root alone.
   open: { type: Boolean, default: false },
+  // Bumped by the view to put focus in the name field.
+  focusNameRequest: { type: Number, default: 0 },
 });
 
 const store = useWorkflowsStore();
@@ -198,6 +214,14 @@ const { sub, subTop, rootRef, subRef, rowRefs, openKind, toggle, onLeft } =
     },
   );
 const submenuId = "wff-submenu";
+const nameRef = ref(null);
+// The view's search key asks for the name field. Immediate, because the first
+// ask is what opens the menu, and the menu renders this panel only then.
+watch(
+  () => props.focusNameRequest,
+  (n) => n && nextTick(() => nameRef.value?.focus()),
+  { immediate: true },
+);
 const checkpointQuery = ref("");
 
 const checkpointHits = computed(() => {

@@ -66,6 +66,7 @@ import {
   PICK_ORDERS,
   railListed,
   rowBaseModel,
+  rowMatches,
   setCard,
   setCheckpoint,
   setGroups,
@@ -745,6 +746,11 @@ function defaultFilters() {
     // again. Not restored on startup either, for the same reason: it is how a
     // hide is taken back, not a way to keep the shelf.
     showHidden: false,
+    // The name filter's text, matched as the Models rail's picker matches: the
+    // name the row shows or its filename. Not restored on startup either: a
+    // search is a question, and a shelf that opened still narrowed by
+    // yesterday's would read as missing models.
+    name: "",
   };
 }
 
@@ -1461,6 +1467,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     const kinds = filters.adapterKinds;
     const bases = filters.baseModels;
     const capabilities = filters.capabilities;
+    const needle = filters.name.trim().toLowerCase();
     const shown = offeredRows.value
       .filter((row) => {
         // The type checkboxes narrow here as well as choosing what to fetch:
@@ -1504,6 +1511,9 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
         if (filters.duplicatesOnly && presentCopies(row.locations) < 2) {
           return false;
         }
+        // Per file, before the fold below, so a run whose cover's name does
+        // not match is still found by the step that does.
+        if (!rowMatches(row, needle)) return false;
         return true;
       })
       .map(displayRow);
@@ -3364,6 +3374,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     if (filters.capabilities.length) n += 1;
     if (filters.duplicatesOnly) n += 1;
     if (filters.showHidden) n += 1;
+    if (filters.name.trim()) n += 1;
     return n;
   });
 

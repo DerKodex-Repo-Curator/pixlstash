@@ -227,6 +227,20 @@ describe("ShelfShowPanel", () => {
     }
   });
 
+  it("narrows by name from the field above the kinds, and counts it", async () => {
+    const { wrapper, store } = await mountPanel([
+      adapter({ id: 1, display_name: "Cyanwood Style" }),
+      adapter({ id: 2, display_name: "Other" }),
+    ]);
+    await wrapper
+      .find('input[aria-label="Filter models by name"]')
+      .setValue("cyan");
+    expect(store.filters.name).toBe("cyan");
+    // Distinct, because the mock answers every block's fetch with these rows.
+    expect([...new Set(store.visibleRows.map((r) => r.id))]).toEqual([1]);
+    expect(store.activeCount).toBe(1);
+  });
+
   it("wires Only duplicates to the filter the store actually reads", async () => {
     const { wrapper, store } = await mountPanel([adapter()]);
     const sub = await openSub(wrapper, "copies");

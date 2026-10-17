@@ -340,6 +340,26 @@ describe("the Checkpoint filter", () => {
   });
 });
 
+describe("the Name filter", () => {
+  it("keeps the cards whose name contains the text, and says so on a chip", async () => {
+    listWorkflowCards.mockResolvedValue({
+      cards: [
+        { id: "a", name: "Flux Portrait" },
+        { id: "b", name: "SDXL Upscale" },
+      ],
+    });
+    const store = useWorkflowsStore();
+    await store.fetchCards();
+    store.setFilters({ name: " flux PORT" });
+    expect(store.filteredCards.map((card) => card.id)).toEqual(["a"]);
+    const chip = store.filterChips.find((c) => c.key === "name");
+    expect(chip).toMatchObject({ kind: "Name", value: "flux PORT" });
+    chip.remove();
+    expect(store.filters.name).toBe("");
+    expect(store.filteredCards.length).toBe(2);
+  });
+});
+
 describe("the Checkpoint filter's labels", () => {
   it("filters by file and names the option as the shelf does", async () => {
     listWorkflowCards.mockResolvedValue({

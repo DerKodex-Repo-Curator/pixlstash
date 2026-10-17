@@ -2494,6 +2494,34 @@ describe("duplicate copies", () => {
     expect(useModelShelfStore().filters.duplicatesOnly).toBe(false);
   });
 
+  it("narrows by the shown name or the filename, ignoring case", async () => {
+    listAdapters.mockResolvedValue([
+      adapter({ id: 1 }),
+      adapter({
+        id: 2,
+        display_name: null,
+        filename: "Other_Thing_v2.safetensors",
+      }),
+    ]);
+    const store = useModelShelfStore();
+    await store.fetchRows();
+
+    await store.setFilters({ name: "  CYANwood " });
+    expect(store.visibleRows.map((r) => r.id)).toEqual([1]);
+    expect(store.activeCount).toBe(1);
+    // The filename, for someone typing what is on disk.
+    await store.setFilters({ name: "other_thing_V2" });
+    expect(store.visibleRows.map((r) => r.id)).toEqual([2]);
+
+    // A search is not remembered across a reload.
+    setActivePinia(createPinia());
+    expect(useModelShelfStore().filters.name).toBe("");
+
+    await store.resetFilters();
+    expect(store.filters.name).toBe("");
+    expect(store.visibleRows.length).toBe(2);
+  });
+
   it("keeps the count when the folder axis narrows a draw to one copy", async () => {
     listAdapters.mockResolvedValue([
       adapter({

@@ -2046,7 +2046,12 @@ filtered by.
   one list that grows with the library, has a find field over its radios
   and scrolls after six rows. Each pick-one list leads with its off row
   (`All` for Type, `Any` for the rest, counting every card) and has no Clear
-  of its own. Keys follow the grid's: ↑/↓ move through the root rows, → or
+  of its own. Above the kinds sits a **name field** (`NameFilterField.vue`,
+  `filters.name`, a case-blind substring of the card's name, chipped as
+  *Name*); the toolbar carries a second copy of it after Filters, bound to the
+  same value and folded by a container query when the bar is narrow. The
+  app's `F` key (`searchStore.searchFocusToken`) focuses the toolbar copy, or
+  opens Filters on the menu's copy when the toolbar's is folded. Keys follow the grid's: ↑/↓ move through the root rows, → or
   Enter opens a submenu on its chosen radio (or the Checkpoint field), ←
   returns to the row, caught in the capture phase because the radiogroup
   would otherwise take it as "previous". Which side applies which filter is in the
@@ -4269,7 +4274,9 @@ follow, so a shared control mounted here degrades by the same scoped rules.
 Nothing queries `toolbar` on this bar (dropping `UndoControl` took the one
 control that did); `shelfbar` carries the bar's own three-rung ladder, measured
 and recorded as **Amendment #6** in
-`docs/design/toolbar-responsive-decisions.md`: the full bar wants 1071px, so at
+`docs/design/toolbar-responsive-decisions.md`: the full bar wants 1071px. A
+rung 0 sits above it for the name field, which is drawn only at **≥1263px**
+(the full bar plus the field and one gap) and is the first thing to go. At
 **≤1070px** the title and the count go (both report, neither controls), at
 **≤840px** `Group` and `Sort` drop their value and keep glyph + chevron (the
 value stays in `title` and in the accessible name), and at **≤680px** `Add ▾`
@@ -4686,6 +4693,16 @@ drawn, and a root row says whether its filter is on: nothing at rest, a count
 when narrowed, and `4 of 5` for Type, whose rest state is every block on. That
 rest state is also why the header keeps **Reset** where the other two menus say
 Clear all: clearing every box here would empty the shelf.
+
+Above the kinds sits the **name field** (`NameFilterField.vue`, shared with the
+Workflows menu), writing `filters.name`. It narrows `visibleRows` per file with
+the Models rail picker's `rowMatches` (the name the row shows, or its filename,
+case-blind), before stacks are folded, and counts as one active filter. Like
+`duplicatesOnly` it is not restored on startup. The toolbar holds a second copy
+bound to the same value, ahead of Group, as **rung 0** of the bar's ladder: it
+is drawn only where the full bar plus the field fits, and is absent on the set
+grid, which Show does not narrow. The app's `F` key focuses the toolbar copy,
+or opens Show on the menu's copy when the toolbar's is folded.
 
 The menu hangs from the **end** of its button, so the submenu opens on the
 root's **left** (`flex-direction: row-reverse`; DOM order is still root, then

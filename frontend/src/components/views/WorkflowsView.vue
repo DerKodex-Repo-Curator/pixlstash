@@ -63,8 +63,21 @@
             >Filters</AppBarButton
           >
         </template>
-        <WorkflowFilterMenu :open="filterMenuOpen" />
+        <WorkflowFilterMenu
+          :open="filterMenuOpen"
+          :focus-name-request="nameFocusRequest"
+        />
       </v-menu>
+
+      <!-- The name filter's toolbar copy, bound to the same text as the field
+           at the top of Filters, which is always there when this one folds. -->
+      <NameFilterField
+        ref="nameFieldRef"
+        class="wfv-name-bar"
+        :model-value="store.filters.name"
+        label="Filter workflows by name"
+        @update:model-value="(name) => store.setFilters({ name })"
+      />
 
       <!-- "Add" is today's workflow import, unchanged: the file lands through
            `POST /comfyui/workflows/import`, the route the retired shelf's own
@@ -375,6 +388,7 @@ import { useWorkflowPictures } from "../../composables/useWorkflowPictures";
 import { useFilterStore } from "../../stores/useFilterStore";
 import { useNoticeStore } from "../../stores/useNoticeStore";
 import { useRunDialogStore } from "../../stores/useRunDialogStore";
+import { useSearchStore } from "../../stores/useSearchStore";
 import { useSidebarStore } from "../../stores/useSidebarStore";
 import {
   SORT_KEYS,
@@ -394,6 +408,7 @@ import AppButton from "../widgets/AppButton.vue";
 import AppDialog from "../widgets/AppDialog.vue";
 import AppInput from "../widgets/AppInput.vue";
 import InspectorEdgeTab from "../widgets/InspectorEdgeTab.vue";
+import NameFilterField from "../widgets/NameFilterField.vue";
 import OptionRows from "../widgets/OptionRows.vue";
 import WorkflowCard from "../widgets/WorkflowCard.vue";
 
@@ -435,6 +450,21 @@ const selBarRef = ref(null);
 const scrollEl = ref(null);
 const sortMenuOpen = ref(false);
 const filterMenuOpen = ref(false);
+const nameFocusRequest = ref(0);
+const nameFieldRef = ref(null);
+// The app's search key (F) finds by name here: the toolbar's field when the bar
+// has room for it, else the one at the top of Filters.
+watch(
+  () => useSearchStore().searchFocusToken,
+  () => {
+    if (nameFieldRef.value?.isShown()) {
+      nameFieldRef.value.focus();
+      return;
+    }
+    filterMenuOpen.value = true;
+    nameFocusRequest.value += 1;
+  },
+);
 const renameOpen = ref(false);
 const renameDraft = ref("");
 const columns = ref(1);
@@ -1519,6 +1549,18 @@ async function filesChosen(event) {
 
 .wfv-spacer {
   flex: 1;
+}
+
+/* The toolbar's name field. A fixed width, so typing never moves the bar, and
+   folded on a narrow bar, where the Filters menu's own field takes over. */
+.wfv-name-bar {
+  width: 180px;
+  flex: none;
+}
+@container shelfbar (max-width: 720px) {
+  .wfv-name-bar {
+    display: none;
+  }
 }
 
 /* The app-wide tail's own gap: this bar spaces its controls at --space-4, and

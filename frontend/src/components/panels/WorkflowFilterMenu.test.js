@@ -172,6 +172,23 @@ describe("the Workflows filter menu", () => {
     expect(wrapper.find(".fm-sub").exists()).toBe(false);
   });
 
+  it("narrows the grid by name from the field at the top", async () => {
+    const { wrapper, store } = await mountMenu();
+    const field = wrapper.find('input[aria-label="Filter workflows by name"]');
+    await field.setValue("upscale");
+    expect(store.filters.name).toBe("upscale");
+    expect(store.filteredCards.map((c) => c.name)).toEqual(["Upscale 2×"]);
+    // Escape clears the text, and stops there rather than closing the menu.
+    const esc = new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true,
+    });
+    field.element.dispatchEvent(esc);
+    expect(store.filters.name).toBe("");
+    expect(esc.defaultPrevented).toBe(true);
+  });
+
   it("says on the root row only whether its filter is on", async () => {
     const { wrapper, store } = await mountMenu();
     for (const kind of ["type", "hideOneOffs", "showHidden", "minRating"]) {

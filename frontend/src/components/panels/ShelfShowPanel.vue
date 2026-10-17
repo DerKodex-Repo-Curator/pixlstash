@@ -23,6 +23,19 @@
         </button>
       </div>
 
+      <!-- First, above the kinds: a name is what most people come here to
+           find, and the field the toolbar copy hands over to when it folds. -->
+      <div class="tbm-section">
+        <NameFilterField
+          ref="nameRef"
+          :model-value="filters.name"
+          placeholder="Filter models by name…"
+          label="Filter models by name"
+          @update:model-value="(name) => store.setFilters({ name })"
+          @keydown.down.prevent="rowRefs[rowOrder[0]]?.focus()"
+        />
+      </div>
+
       <div
         v-for="section in sections"
         :key="section.kinds[0]"
@@ -212,12 +225,13 @@
  * root's left: opening it on the right would widen the menu away from its
  * anchor and slide the root out from under the pointer.
  */
-import { computed, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { VIcon } from "vuetify/components";
 
 import Tooltip from "../widgets/Tooltip.vue";
 import OptionRows from "../widgets/OptionRows.vue";
 import FilterChecklistMenu from "./FilterChecklistMenu.vue";
+import NameFilterField from "../widgets/NameFilterField.vue";
 import { BASE_MODEL_UNASSIGNED } from "../../api/modelShelf";
 import { useCascadeMenu } from "../../composables/useCascadeMenu";
 import { adapterKindLabel, capabilityLabel } from "../../utils/modelShelf";
@@ -227,6 +241,8 @@ const props = defineProps({
   // The v-menu keeps its content mounted, so a closed menu says so here and
   // reopens on the root alone.
   open: { type: Boolean, default: false },
+  // Bumped by the view to put focus in the name field.
+  focusNameRequest: { type: Number, default: 0 },
 });
 
 const store = useModelShelfStore();
@@ -352,6 +368,14 @@ const { sub, subTop, rootRef, subRef, rowRefs, openKind, toggle, onLeft } =
       )?.focus(),
   );
 const submenuId = "shelf-show-submenu";
+const nameRef = ref(null);
+// The view's search key asks for the name field. Immediate, because the first
+// ask is what opens the menu, and the menu renders this panel only then.
+watch(
+  () => props.focusNameRequest,
+  (n) => n && nextTick(() => nameRef.value?.focus()),
+  { immediate: true },
+);
 
 // A refetch can empty a list while its submenu is open; the row goes, and the
 // submenu must not outlive it.

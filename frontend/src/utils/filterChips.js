@@ -199,6 +199,9 @@ export function workflowFilterChips(filters, cards, setFilters) {
       minRating: null,
     });
   }
+  if (filters.name?.trim()) {
+    push("name", "Name", filters.name.trim(), { name: "" });
+  }
   return chips;
 }
 
