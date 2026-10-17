@@ -1866,11 +1866,12 @@ const showMenuOpen = ref(false);
 const nameFocusRequest = ref(0);
 const nameFieldRef = ref(null);
 // The app's search key (F) finds by name here: the toolbar's field when the bar
-// has room for it, else the one at the top of Show.
+// has room for it, else the one at the top of Show. Not on the set grid, which
+// Show does not narrow.
 watch(
   () => useSearchStore().searchFocusToken,
   () => {
-    if (!isShelfTab.value) return;
+    if (!isShelfTab.value || isSetGrid.value) return;
     if (nameFieldRef.value?.isShown()) {
       nameFieldRef.value.focus();
       return;
@@ -5064,7 +5065,8 @@ watch(
 
 /* Rung 0. The name field, before anything the bar had without it: it is a
    shortcut to the field at the top of Show, so it is only drawn where there is
-   room for it on top of the full bar - 1071px plus its 180px and one gap. */
+   room for it on top of the full bar: 1071 + 180 + a 12px gap = a 1263px bar,
+   queried 24px under like the other rungs. */
 @container shelfbar (max-width: 1238px) {
   .shelf-name-bar {
     display: none;

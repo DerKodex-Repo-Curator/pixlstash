@@ -1103,7 +1103,10 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
   let epoch = 0;
 
   function remember() {
-    writeStored(FILTERS_KEY, { v: FILTERS_SCHEMA_VERSION, ...filters });
+    // The name text is left out: it is never restored, so writing it on every
+    // keystroke would only leave a search lying in storage.
+    const { name: _name, ...kept } = filters;
+    writeStored(FILTERS_KEY, { v: FILTERS_SCHEMA_VERSION, ...kept });
   }
 
   /** Persist the view axes and the collapsed sets as one versioned blob. */

@@ -350,6 +350,10 @@ describe("the Name filter", () => {
     });
     const store = useWorkflowsStore();
     await store.fetchCards();
+    // Blank is no filter: no chip, nothing hidden.
+    store.setFilters({ name: "   " });
+    expect(store.filterChips).toEqual([]);
+    expect(store.filteredCards.length).toBe(2);
     store.setFilters({ name: " flux PORT" });
     expect(store.filteredCards.map((card) => card.id)).toEqual(["a"]);
     const chip = store.filterChips.find((c) => c.key === "name");

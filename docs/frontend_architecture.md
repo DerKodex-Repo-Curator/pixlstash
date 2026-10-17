@@ -2051,8 +2051,8 @@ filtered by.
   *Name*); the toolbar carries a second copy of it after Filters, bound to the
   same value and folded by a container query when the bar is narrow. The
   app's `F` key (`searchStore.searchFocusToken`) focuses the toolbar copy, or
-  opens Filters on the menu's copy when the toolbar's is folded. Keys follow the grid's: ↑/↓ move through the root rows, → or
-  Enter opens a submenu on its chosen radio (or the Checkpoint field), ←
+  opens Filters on the menu's copy when the toolbar's is folded. Keys follow
+  the grid's: ↑/↓ move through the root rows, → or Enter opens a submenu on its chosen radio (or the Checkpoint field), ←
   returns to the row, caught in the capture phase because the radiogroup
   would otherwise take it as "previous". Which side applies which filter is in the
   `useWorkflowsStore` row of §3. The funnel's badge and the strip both count
@@ -4702,7 +4702,8 @@ case-blind), before stacks are folded, and counts as one active filter. Like
 bound to the same value, ahead of Group, as **rung 0** of the bar's ladder: it
 is drawn only where the full bar plus the field fits, and is absent on the set
 grid, which Show does not narrow. The app's `F` key focuses the toolbar copy,
-or opens Show on the menu's copy when the toolbar's is folded.
+or opens Show on the menu's copy when the toolbar's is folded, and does nothing
+on the set grid.
 
 The menu hangs from the **end** of its button, so the submenu opens on the
 root's **left** (`flex-direction: row-reverse`; DOM order is still root, then

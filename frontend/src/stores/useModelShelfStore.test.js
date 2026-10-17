@@ -2506,6 +2506,9 @@ describe("duplicate copies", () => {
     const store = useModelShelfStore();
     await store.fetchRows();
 
+    await store.setFilters({ name: "   " });
+    expect(store.activeCount).toBe(0);
+    expect(store.visibleRows.length).toBe(2);
     await store.setFilters({ name: "  CYANwood " });
     expect(store.visibleRows.map((r) => r.id)).toEqual([1]);
     expect(store.activeCount).toBe(1);
