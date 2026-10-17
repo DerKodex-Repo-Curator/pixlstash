@@ -1,14 +1,13 @@
-// The Keep-cover-only menu item, in both places it appears: the grid's context
-// menu and the selection pill's overflow. The two are separate components with
-// separate templates, so the same rules are asserted against both: a rule
-// enforced in one menu and forgotten in the other is the shape of bug this
-// covers.
+// The Edit stack ▸ submenu, in both menus that carry it: the grid's context
+// menu and the selection pill's overflow. Both mount the same EditStackMenu, so
+// these tests are about what each menu hands it and what comes back out; a menu
+// that forgets to pass a prop or forward an event is the shape of bug covered.
 //
-// What the rules are (docs/design/keep-cover-only.md):
+// Keep cover only lives in the submenu now, and its rules still hold
+// (docs/design/keep-cover-only.md):
 //   * the label counts STACKS, because the action ignores loose pictures;
 //   * partial eligibility is stated in the label, not discovered afterwards;
-//   * it wears the shipped `.ctx-item--danger` and sits in the trailing danger
-//     group, ordered by escalating severity before Delete;
+//   * it wears the shipped `.ctx-item--danger`;
 //   * it is disabled with the lock reason only when EVERY named stack is
 //     locked, because a locked set refuses the whole stack, never one member.
 
@@ -53,9 +52,17 @@ function tip(wrapper) {
 
 const globalStubs = {
   global: {
-    stubs: { "v-icon": true, Tooltip: TooltipStub, teleport: true, AddToEntityControl: true },
+    stubs: {
+      "v-icon": true,
+      Tooltip: TooltipStub,
+      teleport: true,
+      AddToEntityControl: true,
+    },
   },
 };
+
+const SEVERAL_STACKS = { kind: "stacks", stacks: 3 };
+const SECOND_OF_FOUR = { kind: "member", count: 4, position: 1 };
 
 beforeEach(() => {
   setActivePinia(createPinia());
@@ -71,6 +78,7 @@ function mountContextMenu(props = {}) {
       visible: true,
       selectedCharacter: "ALL",
       selectedImageIds: ["10", "11", "12"],
+      stackEdit: SEVERAL_STACKS,
       keepCoverOnlyStackCount: 3,
       ...props,
     },
@@ -87,6 +95,7 @@ function mountSelectionMenu(props = {}) {
       isScrapheapView: false,
       selectedImageIds: ["10", "11", "12"],
       selectedCount: 3,
+      stackEdit: SEVERAL_STACKS,
       keepCoverOnlyStackCount: 3,
       ...props,
     },
@@ -94,39 +103,32 @@ function mountSelectionMenu(props = {}) {
   });
 }
 
-/** The menu's Keep-cover-only button, or undefined when it is not offered. */
-function keepCoverItem(wrapper) {
+/** The Edit stack row's wrapper, or undefined when the menu has none. */
+function editStackWrap(wrapper) {
   return wrapper
-    .findAll("button.ctx-item")
-    .find((b) => b.text().startsWith("Keep cover only"));
+    .findAll(".ctx-submenu-wrap")
+    .find((w) => w.find("button.ctx-item").text().startsWith("Edit stack"));
+}
+
+/** Open the Edit stack submenu and answer its rows. */
+async function submenuItems(wrapper) {
+  const wrap = editStackWrap(wrapper);
+  await wrap.trigger("mouseenter");
+  return wrap.findAll(".ctx-submenu button.ctx-item");
+}
+
+async function submenuItem(wrapper, label) {
+  return (await submenuItems(wrapper)).find((b) => b.text().startsWith(label));
 }
 
 const MENUS = [
-  ["ImageGridContextMenu", mountContextMenu, "keep-cover-only"],
-  ["SelectionMenu", mountSelectionMenu, "keep-cover-only"],
+  ["ImageGridContextMenu", mountContextMenu],
+  ["SelectionMenu", mountSelectionMenu],
 ];
 
-describe.each(MENUS)("%s: the Keep cover only item", (_name, mountMenu, event) => {
-  it("counts stacks in its label, not the tiles that were clicked", () => {
-    const item = keepCoverItem(mountMenu());
-    expect(item.text()).toContain("Keep cover only (3 stacks)");
-  });
-
-  // Ignoring loose pictures is only honest if the label says how many of the
-  // selection the action will actually touch.
-  it("reports partial eligibility when the selection is mixed", () => {
-    const item = keepCoverItem(
-      mountMenu({
-        selectedImageIds: Array.from({ length: 20 }, (_, i) => String(i)),
-        selectedCount: 20,
-        keepCoverOnlyStackCount: 12,
-      }),
-    );
-    expect(item.text()).toContain("Keep cover only (12 of 20)");
-  });
-
+describe.each(MENUS)("%s: the Edit stack row", (_name, mountMenu) => {
   it("is not offered when the selection names no stack", () => {
-    expect(keepCoverItem(mountMenu({ keepCoverOnlyStackCount: 0 }))).toBeUndefined();
+    expect(editStackWrap(mountMenu({ stackEdit: null }))).toBeUndefined();
   });
 
   it("is not offered in the Scrapheap view", () => {
@@ -134,180 +136,226 @@ describe.each(MENUS)("%s: the Keep cover only item", (_name, mountMenu, event) =
       isScrapheapView: true,
       selectedCharacter: "SCRAPHEAP",
     });
-    expect(keepCoverItem(wrapper)).toBeUndefined();
+    expect(editStackWrap(wrapper)).toBeUndefined();
   });
 
-  it("wears the shipped danger treatment", () => {
-    expect(keepCoverItem(mountMenu()).classes()).toContain("ctx-item--danger");
-  });
-
-  // Escalating severity: Keep cover only (recoverable, stacks only) before
-  // Delete (the whole selection to the Scrapheap).
-  it("sits before Delete in the trailing danger group", () => {
-    const danger = mountMenu()
-      .findAll("button.ctx-item--danger")
+  // The three rows it replaces must not survive at the top level.
+  it("replaces the top-level Unstack and Keep rows", () => {
+    const topLevel = mountMenu()
+      .findAll("button.ctx-item")
+      .filter((b) => !b.element.closest(".ctx-submenu"))
       .map((b) => b.text());
-    const keep = danger.findIndex((t) => t.startsWith("Keep cover only"));
-    const del = danger.findIndex((t) => t.includes("Delete"));
-    expect(keep).toBeGreaterThanOrEqual(0);
-    expect(del).toBeGreaterThan(keep);
+    expect(topLevel.some((t) => t.startsWith("Unstack"))).toBe(false);
+    expect(topLevel.some((t) => t.startsWith("Keep"))).toBe(false);
+    expect(topLevel.some((t) => t.startsWith("Edit stack"))).toBe(true);
+  });
+
+  it("says where the picture sits, and offers the order first", async () => {
+    const wrapper = mountMenu({
+      selectedImageIds: ["11"],
+      selectedCount: 1,
+      stackEdit: SECOND_OF_FOUR,
+      keepCoverOnlyStackCount: 1,
+    });
+    const labels = (await submenuItems(wrapper)).map((b) => b.text());
+    const head = editStackWrap(wrapper).find(".edit-stack-head").text();
+    expect(head).toContain("Stack of 4");
+    expect(head).toContain("this is 2nd");
+    expect(labels.slice(0, 3).map((t) => t.split(/Ctrl|⌘/)[0])).toEqual([
+      "Make cover",
+      "Move earlier",
+      "Move later",
+    ]);
+    expect(labels.some((t) => t.startsWith("Take out of stack"))).toBe(true);
+    expect(labels).toContain("Unstack all 4");
+  });
+
+  it.each([
+    ["Make cover", "cover"],
+    ["Move earlier", "earlier"],
+    ["Move later", "later"],
+  ])("%s asks for the %s move", async (label, where) => {
+    const wrapper = mountMenu({
+      selectedImageIds: ["11"],
+      selectedCount: 1,
+      stackEdit: SECOND_OF_FOUR,
+    });
+    await (await submenuItem(wrapper, label)).trigger("click");
+    expect(wrapper.emitted("stack-move")).toEqual([[where]]);
+  });
+
+  it("cannot move the cover earlier or the last picture later", async () => {
+    const cover = mountMenu({
+      stackEdit: { kind: "member", count: 4, position: 0 },
+    });
+    expect(
+      (await submenuItem(cover, "Make cover")).attributes("disabled"),
+    ).toBeDefined();
+    expect(
+      (await submenuItem(cover, "Move earlier")).attributes("disabled"),
+    ).toBeDefined();
+    expect(
+      (await submenuItem(cover, "Move later")).attributes("disabled"),
+    ).toBeUndefined();
+    const last = mountMenu({
+      stackEdit: { kind: "member", count: 4, position: 3 },
+    });
+    expect(
+      (await submenuItem(last, "Move later")).attributes("disabled"),
+    ).toBeDefined();
+  });
+
+  // One word used to mean two things; now each has its own row.
+  it("takes one picture out apart from unstacking the lot", async () => {
+    const wrapper = mountMenu({ stackEdit: SECOND_OF_FOUR });
+    await (await submenuItem(wrapper, "Take out of stack")).trigger("click");
+    expect(wrapper.emitted("remove-from-stack")).toHaveLength(1);
+    const again = mountMenu({ stackEdit: SECOND_OF_FOUR });
+    await (await submenuItem(again, "Unstack all 4")).trigger("click");
+    expect(again.emitted("dissolve-stacks")).toHaveLength(1);
+  });
+
+  it("offers to open a collapsed stack instead of moves", async () => {
+    const wrapper = mountMenu({ stackEdit: { kind: "collapsed", count: 5 } });
+    const labels = (await submenuItems(wrapper)).map((b) => b.text());
+    expect(labels.some((t) => t.startsWith("Move"))).toBe(false);
+    await (await submenuItem(wrapper, "Open stack")).trigger("click");
+    expect(wrapper.emitted("open-stack")).toHaveLength(1);
+  });
+
+  // "Make cover" means nothing across three stacks, and a greyed row would
+  // only add length.
+  it("leaves the order rows out for several stacks", async () => {
+    const labels = (await submenuItems(mountMenu())).map((b) => b.text());
+    expect(labels.some((t) => t.startsWith("Make cover"))).toBe(false);
+    expect(labels).toContain("Unstack 3 stacks");
+  });
+});
+
+describe.each(MENUS)("%s: Keep cover only", (_name, mountMenu) => {
+  it("counts stacks in its label, not the tiles that were clicked", async () => {
+    const item = await submenuItem(mountMenu(), "Keep cover only");
+    expect(item.text()).toContain("Keep cover only (3 stacks)");
+    expect(item.text()).toContain("Every picture but the 3 covers");
+  });
+
+  // Ignoring loose pictures is only honest if the label says how many of the
+  // selection the action will actually touch.
+  it("reports partial eligibility when the selection is mixed", async () => {
+    const item = await submenuItem(
+      mountMenu({
+        selectedImageIds: Array.from({ length: 20 }, (_, i) => String(i)),
+        selectedCount: 20,
+        stackEdit: { kind: "stacks", stacks: 12 },
+        keepCoverOnlyStackCount: 12,
+      }),
+      "Keep cover only",
+    );
+    expect(item.text()).toContain("Keep cover only (12 of 20)");
+  });
+
+  it("says what moves for a single stack", async () => {
+    const item = await submenuItem(
+      mountMenu({ stackEdit: SECOND_OF_FOUR, keepCoverOnlyStackCount: 1 }),
+      "Keep cover only",
+    );
+    expect(item.text()).toContain("The other 3 move to the Scrapheap.");
+  });
+
+  it("is not offered when no named stack can collapse", async () => {
+    const item = await submenuItem(
+      mountMenu({ keepCoverOnlyStackCount: 0 }),
+      "Keep cover only",
+    );
+    expect(item).toBeUndefined();
+  });
+
+  it("wears the shipped danger treatment", async () => {
+    const item = await submenuItem(mountMenu(), "Keep cover only");
+    expect(item.classes()).toContain("ctx-item--danger");
   });
 
   it("emits its intent when clicked", async () => {
     const wrapper = mountMenu();
-    await keepCoverItem(wrapper).trigger("click");
-    expect(wrapper.emitted(event)).toHaveLength(1);
+    await (await submenuItem(wrapper, "Keep cover only")).trigger("click");
+    expect(wrapper.emitted("keep-cover-only")).toEqual([[]]);
   });
 
   // A locked set refuses the WHOLE stack, so a selection in which every stack
   // is locked provably cannot do anything: say why instead of failing quietly.
-  it("is disabled with the lock reason when every named stack is locked", () => {
+  it("is disabled with the lock reason when every named stack is locked", async () => {
     const reason = "Locked: every selected stack is held by the locked set 'X'.";
-    const item = keepCoverItem(mountMenu({ keepCoverOnlyLockReason: reason }));
+    const item = await submenuItem(
+      mountMenu({ keepCoverOnlyLockReason: reason }),
+      "Keep cover only",
+    );
     expect(item.attributes("disabled")).toBeDefined();
     expect(tip(item)).toBe(reason);
   });
 
-  // A mixed selection stays live and the dialog reports the skips, which is the
-  // same rule the shipped Delete item follows.
-  it("stays enabled when only some stacks are locked", () => {
-    const item = keepCoverItem(mountMenu({ keepCoverOnlyLockReason: null }));
+  it("stays enabled when only some stacks are locked", async () => {
+    const item = await submenuItem(
+      mountMenu({ keepCoverOnlyLockReason: null }),
+      "Keep cover only",
+    );
     expect(item.attributes("disabled")).toBeUndefined();
   });
 
-});
-
-// Keep recipes only (#1315) rides the same event with a payload, so the grid
-// opens the same dialog in its narrower mode. Same gating as its sibling.
-describe.each(MENUS)("%s: the Keep recipes only item", (_name, mountMenu, event) => {
-  const recipesItem = (wrapper) =>
-    wrapper
-      .findAll("button.ctx-item")
-      .find((b) => b.text().startsWith("Keep recipes only"));
-
-  // It moves a strict subset of what Keep cover only moves, so escalating
-  // severity puts it first, and the cheapest slot in the group is the safer
-  // of the two (`lead-designer` / `ui-ux-expert`, 2026-09-16).
-  it("counts stacks and leads the danger group, before Keep cover only", () => {
-    const danger = mountMenu()
-      .findAll("button.ctx-item--danger")
-      .map((b) => b.text());
-    const cover = danger.findIndex((t) => t.startsWith("Keep cover only"));
-    const recipes = danger.findIndex((t) => t.startsWith("Keep recipes only"));
-    const del = danger.findIndex((t) => t.includes("Delete"));
-    expect(danger[recipes]).toContain("Keep recipes only (3 stacks)");
-    expect(cover).toBe(recipes + 1);
-    expect(del).toBeGreaterThan(cover);
-  });
-
-  it("emits keep-cover-only asking for recipes", async () => {
+  // Taken out until it has a design of its own.
+  it("has no Keep recipes only beside it", async () => {
     const wrapper = mountMenu();
-    await recipesItem(wrapper).trigger("click");
-    expect(wrapper.emitted(event)).toEqual([[{ keepRecipes: true }]]);
-  });
-
-  it("is not offered when the selection names no stack", () => {
-    expect(recipesItem(mountMenu({ keepCoverOnlyStackCount: 0 }))).toBeUndefined();
-  });
-
-  it("is disabled with the lock reason when every named stack is locked", () => {
-    const reason = "Locked: every selected stack is held by the locked set 'X'.";
-    const item = recipesItem(mountMenu({ keepCoverOnlyLockReason: reason }));
-    expect(item.attributes("disabled")).toBeDefined();
-    expect(tip(item)).toBe(reason);
-  });
-});
-
-// One word apart in a danger group is not a distinction, so the glyph carries
-// it. The shared stub swallows slot content, so these two mount with one that
-// renders it.
-describe("the two Keep items are told apart by their glyph", () => {
-  const GLYPH_STUBS = {
-    global: {
-      stubs: {
-        ...globalStubs.global.stubs,
-        "v-icon": { template: "<i class='glyph'><slot /></i>" },
-      },
-    },
-  };
-  const glyphOf = (wrapper, label) =>
-    wrapper
-      .findAll("button.ctx-item")
-      .find((b) => b.text().includes(label))
-      .find(".glyph")
-      .text();
-
-  it.each([
-    [
-      "ImageGridContextMenu",
-      () =>
-        mount(ImageGridContextMenu, {
-          props: {
-            allPicturesId: "ALL",
-            unassignedPicturesId: "UNASSIGNED",
-            scrapheapPicturesId: "SCRAPHEAP",
-            backendUrl: "http://x",
-            visible: true,
-            selectedCharacter: "ALL",
-            selectedImageIds: ["10", "11", "12"],
-            keepCoverOnlyStackCount: 3,
-          },
-          ...GLYPH_STUBS,
-        }),
-    ],
-    [
-      "SelectionMenu",
-      () =>
-        mount(SelectionMenu, {
-          props: {
-            open: true,
-            backendUrl: "http://x",
-            isReadOnly: false,
-            isScrapheapView: false,
-            selectedImageIds: ["10", "11", "12"],
-            selectedCount: 3,
-            keepCoverOnlyStackCount: 3,
-          },
-          ...GLYPH_STUBS,
-        }),
-    ],
-  ])("%s", (_name, mountMenu) => {
-    const wrapper = mountMenu();
-    expect(glyphOf(wrapper, "Keep recipes only")).toBe("mdi-image-refresh");
-    expect(glyphOf(wrapper, "Keep cover only")).toBe("mdi-layers-minus");
+    const labels = (await submenuItems(wrapper)).map((b) => b.text());
+    expect(labels.some((t) => t.startsWith("Keep recipes only"))).toBe(false);
+    expect(wrapper.text()).not.toContain("Keep recipes only");
   });
 });
 
 // Read-only is read from two different places by the two menus (the grid menu
 // takes the session ref straight from apiClient; the pill's menu is handed a
 // prop by SelectionBar), so it is asserted once per menu rather than shared.
-describe("Keep cover only in a read-only session", () => {
+describe("Edit stack in a read-only session", () => {
   it("is disabled in the grid's context menu", async () => {
     isReadOnly.value = true;
     try {
-      expect(keepCoverItem(mountContextMenu()).attributes("disabled")).toBeDefined();
+      const wrapper = mountContextMenu({ stackEdit: SECOND_OF_FOUR });
+      const items = await submenuItems(wrapper);
+      expect(items.length).toBeGreaterThanOrEqual(5);
+      for (const item of items) {
+        expect(item.attributes("disabled")).toBeDefined();
+      }
     } finally {
       isReadOnly.value = false;
     }
   });
 
-  it("is disabled in the selection pill's overflow", () => {
-    expect(
-      keepCoverItem(mountSelectionMenu({ isReadOnly: true })).attributes(
-        "disabled",
-      ),
-    ).toBeDefined();
+  it("is disabled in the selection pill's overflow", async () => {
+    const wrapper = mountSelectionMenu({
+      isReadOnly: true,
+      stackEdit: SECOND_OF_FOUR,
+    });
+    const items = await submenuItems(wrapper);
+    expect(items.length).toBeGreaterThanOrEqual(5);
+    for (const item of items) {
+      expect(item.attributes("disabled")).toBeDefined();
+    }
   });
 });
 
-describe("the selection pill keeps it in the overflow only", () => {
-  // A floating pill over a photo grid is the wrong place for an error-filled
-  // control, and this is periodic cleanup rather than a high-frequency verb.
-  it("offers no top-level Keep cover only button", () => {
-    const wrapper = mountSelectionMenu();
-    const items = wrapper.findAll("button.ctx-item");
-    expect(
-      items.filter((b) => b.text().startsWith("Keep cover only")),
-    ).toHaveLength(1);
+// The lightbox menu offers the order alone: taking a stack apart there would
+// rebuild the filmstrip under the picture being looked at.
+describe("the lightbox menu", () => {
+  it("offers the order rows and nothing that takes the stack apart", async () => {
+    const wrapper = mountContextMenu({
+      overlayMode: true,
+      selectedImageIds: ["11"],
+      contextImage: { id: "11" },
+      stackEdit: SECOND_OF_FOUR,
+    });
+    const labels = (await submenuItems(wrapper)).map(
+      (b) => b.text().split(/Ctrl|⌘/)[0],
+    );
+    expect(labels).toEqual(["Make cover", "Move earlier", "Move later"]);
+    await (await submenuItem(wrapper, "Move later")).trigger("click");
+    expect(wrapper.emitted("stack-move")).toEqual([["later"]]);
   });
 });

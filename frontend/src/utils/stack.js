@@ -145,3 +145,34 @@ export function applyStackOrderToList(source, stackId, orderedMembers) {
   }
   return result;
 }
+
+/**
+ * A stack's order after one step of Make cover / Move earlier / Move later.
+ *
+ * @param {Array<string>} orderedIds - the stack's members, cover first.
+ * @param {string} id - the picture to move.
+ * @param {"cover"|"earlier"|"later"} where
+ * @returns {Array<string>|null} the new order, or null when the step is a no-op
+ *   (the cover made cover, the first moved earlier, the last moved later) or
+ *   the picture is not in the stack.
+ */
+export function moveStackMemberInOrder(orderedIds, id, where) {
+  const ids = Array.isArray(orderedIds) ? orderedIds.map(String) : [];
+  const key = String(id);
+  const from = ids.indexOf(key);
+  if (from === -1) return null;
+  const to = where === 'cover' ? 0 : where === 'earlier' ? from - 1 : from + 1;
+  if (to === from || to < 0 || to >= ids.length) return null;
+  ids.splice(from, 1);
+  ids.splice(to, 0, key);
+  return ids;
+}
+
+/** "1st", "2nd", "3rd", "11th", "22nd": where a picture sits in its stack. */
+export function stackOrdinal(n) {
+  const value = Number(n);
+  const tens = value % 100;
+  if (tens >= 11 && tens <= 13) return `${value}th`;
+  const suffix = { 1: 'st', 2: 'nd', 3: 'rd' }[value % 10] || 'th';
+  return `${value}${suffix}`;
+}

@@ -16,9 +16,6 @@ import {
   keepCoverOnlySkipReasons,
   keepCoverOnlySkippedCount,
   keepCoverOnlyTitle,
-  keepRecipesOnlyLede,
-  keepRecipesOnlyStayingCount,
-  keepRecipesOnlyStayingReasons,
 } from "./keepCoverOnly";
 
 /** A collapsed stack leader tile: one row standing for `count` pictures. */
@@ -295,12 +292,6 @@ describe("keepCoverOnlySkipNote", () => {
 });
 
 describe("Keep recipes only copy", () => {
-  it("titles by what it keeps, without a number until one is known", () => {
-    expect(keepCoverOnlyTitle(null, true)).toBe("Keep recipes only");
-    expect(keepCoverOnlyTitle(1, true)).toBe("Keep recipes only in 1 stack");
-    expect(keepCoverOnlyTitle(3, true)).toBe("Keep recipes only in 3 stacks");
-  });
-
   it("counts a stack with nothing reproducible as one that won't change", () => {
     const preview = {
       stacks_skipped_locked: 1,
@@ -311,45 +302,6 @@ describe("Keep recipes only copy", () => {
       "nothing_reproducible",
       "locked",
     ]);
-  });
-
-  it("names each staying reason once and sums them", () => {
-    const preview = {
-      pictures_staying_no_recipe: 1,
-      pictures_staying_model_missing: 0,
-      pictures_staying_no_thumbnail: 3,
-      pictures_staying_ghost_not_kept: 2,
-    };
-    expect(keepRecipesOnlyStayingReasons(preview).map((r) => r.key)).toEqual([
-      "no_recipe",
-      "no_thumbnail",
-      "ghost_not_kept",
-    ]);
-    expect(keepRecipesOnlyStayingCount(preview)).toBe(6);
-    expect(keepRecipesOnlyStayingReasons(null)).toEqual([]);
-  });
-
-  // Under `covered` what takes the recipe away later is deleting the COVER,
-  // which no reader derives from "your ghost setting".
-  it("names the cover as what keeps a recipe alive, under While matched", () => {
-    expect(keepRecipesOnlyLede("covered")).toContain(
-      "for as long as its cover stays",
-    );
-    expect(keepRecipesOnlyLede("on")).not.toContain("cover stays");
-    expect(keepRecipesOnlyLede("on")).toContain(
-      "each leaves its thumbnail and recipe behind",
-    );
-    // Unknown yet: never the covered promise, which would be the wrong half to
-    // guess at.
-    expect(keepRecipesOnlyLede(null)).not.toContain("cover stays");
-  });
-
-  it("does not describe While matched when the ghost setting is Never", () => {
-    const [row] = keepRecipesOnlyStayingReasons({
-      ghost_retention: "off",
-      pictures_staying_ghost_not_kept: 2,
-    });
-    expect(row.text).toBe("2 would keep nothing, because Keep picture ghosts is set to Never.");
   });
 
   it("names unchanged stacks on the receipt", () => {

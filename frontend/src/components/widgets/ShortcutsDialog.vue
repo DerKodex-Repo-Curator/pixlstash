@@ -87,6 +87,14 @@ const open = computed(() => props.modelValue);
           <td><kbd>Ctrl</kbd>+<kbd>Arrow</kbd></td>
           <td>Move cursor without changing selection</td>
         </tr>
+        <tr :class="{ 'shortcut-disabled': isReadOnly }">
+          <td><kbd>Ctrl</kbd>+<kbd>←</kbd> <kbd>→</kbd></td>
+          <td>In an open stack: move the picture earlier or later</td>
+        </tr>
+        <tr :class="{ 'shortcut-disabled': isReadOnly }">
+          <td><kbd>Ctrl</kbd>+<kbd>Home</kbd></td>
+          <td>In an open stack: make the picture the cover</td>
+        </tr>
         <tr>
           <td><kbd>Space</kbd></td>
           <td>Toggle selection of cursor image</td>

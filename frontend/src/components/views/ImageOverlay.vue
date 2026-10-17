@@ -51,6 +51,33 @@
           </span>
         </div>
         <div class="overlay-top-actions">
+          <!-- Where this picture sits in its stack, and the one-click way to
+               make it the cover without a trip to the filmstrip. -->
+          <div
+            v-if="image && overlayStackPlace"
+            class="overlay-stack-chip"
+            :class="{ hidden: chromeHidden }"
+          >
+            <v-icon size="16">mdi-layers-outline</v-icon>
+            <span
+              >{{ overlayStackPlace.position + 1 }} of
+              {{ overlayStackPlace.count }} in this stack</span
+            >
+            <button
+              v-if="!isReadOnly && overlayStackPlace.position > 0"
+              type="button"
+              class="overlay-stack-chip-btn"
+              @click.stop="moveStackMember(image.id, 'cover')"
+            >
+              <Tooltip
+                text="Make this the cover of its stack"
+                activator="parent"
+                :describe="false"
+              />
+              <v-icon size="14">mdi-star-outline</v-icon>
+              Make cover
+            </button>
+          </div>
           <Tooltip
             v-if="image && isCurrentLocked"
             location="bottom"
@@ -677,10 +704,12 @@
           :items="filmstripCanvasWindow"
           :canvas-style="filmstripCanvasStyle"
           :hidden="chromeHidden"
+          :read-only="isReadOnly"
           @select="selectImageByIndex"
           @toggle-expand="toggleFilmstripStackExpand"
           @prefetch="prefetchFilmstripStackMembers"
           @navigate="onFilmstripNavigate"
+          @stack-move="(item, where) => moveStackMember(item.id, where)"
         />
 
         <!-- The shared inspector (shell contract rule 8), in its lightbox
@@ -918,7 +947,7 @@ import {
   addCharacterFacesByFaceId,
   removeCharacterFacesByFaceId,
 } from "../../api/characters";
-import { listStackPictures } from "../../api/stacks";
+import { listStackPictures, setStackOrder } from "../../api/stacks";
 import { getPictureRecipe } from "../../api/comfyui";
 import { listProjects } from "../../api/projects";
 import { useGenStackPrefsStore } from "../../stores/useGenStackPrefsStore";
@@ -954,6 +983,7 @@ import { isEditableElement, isTypingTarget } from "../../utils/dom.js";
 import {
   getPictureStackId,
   getStackPositionValue,
+  moveStackMemberInOrder,
   sortStackMembers,
 } from "../../utils/stack.js";
 import { dedupeTagList, getTagList } from "../../utils/tags.js";
@@ -2147,6 +2177,116 @@ function prefetchFilmstripStackMembers(item) {
   void ensureOverlayStackMembersLoaded(stackId, item);
 }
 
+// ── Make cover / Move earlier / Move later ──────────────────────────────────
+// The lightbox keeps its own copy of each stack (the filmstrip is frozen while
+// it is open), so it reorders that copy itself and tells the grid, which
+// refetches on close like any other stack change made here.
+
+/** A stack's members in order, cover first, as the filmstrip draws them. */
+function getOverlayStackOrder(stackId) {
+  if (!stackId) return [];
+  return buildOverlayExpandedStackImages(stackId, null, 0).map((img) =>
+    String(img.id),
+  );
+}
+
+/**
+ * Where a picture sits in its stack, or null while that is not known: a
+ * position read off part of a stack would be a wrong number, not a rough one.
+ */
+function getOverlayStackPlace(item) {
+  const stackId = getPictureStackId(item);
+  if (!stackId || item?.id == null) return null;
+  const count = getOverlayStackCount(item);
+  if (count < 2) return null;
+  const ids = getOverlayStackOrder(stackId);
+  if (ids.length !== count) return null;
+  const position = ids.indexOf(String(item.id));
+  return position === -1 ? null : { position, count };
+}
+
+const overlayStackPlace = computed(() => getOverlayStackPlace(image.value));
+
+// The header chip and the menu need the order of the picture on screen even
+// when its stack is folded in the filmstrip.
+watch(
+  () => getPictureStackId(image.value),
+  (stackId) => {
+    if (stackId && getOverlayStackCount(image.value) > 1) {
+      void ensureOverlayStackMembersLoaded(stackId, image.value);
+    }
+  },
+  { immediate: true },
+);
+
+function applyOverlayStackOrder(stackId, orderedIds) {
+  const positions = new Map(orderedIds.map((id, idx) => [String(id), idx]));
+  const reposition = (img) =>
+    img?.id != null &&
+    getPictureStackId(img) === stackId &&
+    positions.has(String(img.id))
+      ? { ...img, stack_position: positions.get(String(img.id)) }
+      : img;
+  const entry = overlayExpandedStackMembers.value.get(stackId);
+  if (entry) {
+    const nextMembers = new Map(overlayExpandedStackMembers.value);
+    nextMembers.set(stackId, {
+      ids: orderedIds.slice(),
+      images: (entry.images || []).map(reposition),
+    });
+    overlayExpandedStackMembers.value = nextMembers;
+  }
+  if (Array.isArray(frozenAllImages.value)) {
+    frozenAllImages.value = frozenAllImages.value.map(reposition);
+  }
+  if (image.value) image.value = reposition(image.value);
+}
+
+const overlayOrderSaves = new Map();
+
+/**
+ * One step of reordering the stack a picture is in, saved straight away. The
+ * lightbox stays on the same picture; only its place changes.
+ *
+ * @param {string|number} pictureId
+ * @param {"cover"|"earlier"|"later"} where
+ */
+async function moveStackMember(pictureId, where) {
+  if (isReadOnly.value || pictureId == null) return;
+  const item =
+    String(image.value?.id) === String(pictureId)
+      ? image.value
+      : filmstripImages.value.find((img) => String(img?.id) === String(pictureId));
+  const stackId = getPictureStackId(item);
+  if (!stackId) return;
+  await ensureOverlayStackMembersLoaded(stackId, item);
+  if (!getOverlayStackPlace(item)) return;
+  const currentIds = getOverlayStackOrder(stackId);
+  const nextIds = moveStackMemberInOrder(currentIds, pictureId, where);
+  if (!nextIds) return;
+  applyOverlayStackOrder(stackId, nextIds);
+  // Only the latest save may roll back; see useStackOrdering's persistStackOrder.
+  const token = (overlayOrderSaves.get(stackId) || 0) + 1;
+  overlayOrderSaves.set(stackId, token);
+  try {
+    await setStackOrder(stackId, nextIds.map(Number));
+    emit("overlay-change", {
+      imageId: image.value?.id ?? null,
+      fields: { stack: true },
+      stackId,
+    });
+  } catch (err) {
+    console.error(`Failed to save the order of stack ${stackId}`, err);
+    if (overlayOrderSaves.get(stackId) === token) {
+      applyOverlayStackOrder(stackId, currentIds);
+    }
+    noticeStore.error(
+      `Couldn't save the stack order. ${errorDetail(err) || "The previous order was restored."}`,
+      { key: "stack-order-save" },
+    );
+  }
+}
+
 const filmstripImages = computed(() => {
   return collapseOverlayStackImages(overlayImages.value);
 });
@@ -2663,6 +2803,7 @@ function buildContextMenuImage() {
     format: getOverlayFormat(image.value),
     faces: Array.isArray(faceBboxes.value) ? faceBboxes.value : [],
     mediaKind: video ? "video" : "picture",
+    stackPlace: overlayStackPlace.value,
     copyAvailable: copy.available,
     copyUnavailableReason: copy.reason,
   };
@@ -2996,6 +3137,9 @@ const filmstripCanvasData = computed(() => {
       isVideo: isSupportedVideoFile(getOverlayFormat(item)),
       stackBadgeVisible: getOverlayStackCount(item) > 1,
       isStackLead: stackId !== prevStackId,
+      // Only in a stack opened in the filmstrip: the move handles need the
+      // neighbours on screen.
+      stackPlace: isStackExpanded ? getOverlayStackPlace(item) : null,
       stackBadgeTitle: (() => {
         const count = getOverlayStackCount(item);
         return count <= 1 ? "" : `Stack of ${count} images`;
@@ -4674,6 +4818,12 @@ function canvasToBlob(canvas, type) {
   });
 }
 
-defineExpose({ saveMedia, saveMediaAs, copyMedia, showRunResult });
+defineExpose({
+  saveMedia,
+  saveMediaAs,
+  copyMedia,
+  showRunResult,
+  moveStackMember,
+});
 </script>
 <style scoped src="./ImageOverlay.css"></style>

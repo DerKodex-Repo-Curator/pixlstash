@@ -58,6 +58,8 @@ export function useGridKeyboardNav(
     selectionBarRef,
     applyScoresForSelection,
     setScore,
+    moveStackMember = () => false,
+    getOpenStackPlace = () => null,
   },
 ) {
   const searchStore = useSearchStore();
@@ -112,7 +114,43 @@ export function useGridKeyboardNav(
     return layout && layout.rowHeights.length > 0 ? layout : null;
   }
 
-  function onGlobalKeyPress(key, _event) {
+  /**
+   * Make cover / Move earlier / Move later on the cursor's picture, when it is
+   * in an open stack. The cursor follows the picture to its new place.
+   *
+   * @returns {boolean} whether the key was used for that. On a picture of an
+   *   open stack it always is, even when the step is a no-op (the cover moved
+   *   earlier): falling through would scroll or move the cursor instead.
+   */
+  function moveCursorStackMember(where) {
+    if (isReadOnly.value || cursorIdx.value === null) return false;
+    if (overlayOpen.value || reviewOverlayOpen?.value) return false;
+    const img = allGridImages.value[cursorIdx.value];
+    if (!img?.id || !getOpenStackPlace(img)) return false;
+    if (!moveStackMember(img.id, where)) return true;
+    const newIdx = allGridImages.value.findIndex(
+      (item) => getPictureId(item?.id) === getPictureId(img.id),
+    );
+    if (newIdx >= 0) {
+      cursorIdx.value = newIdx;
+      scrollCursorIntoView(newIdx);
+      focusCursor(newIdx);
+    }
+    return true;
+  }
+
+  function onGlobalKeyPress(key, event) {
+    // Ctrl+Home on a picture of an open stack makes it the cover; anywhere
+    // else Home keeps scrolling to the top.
+    if (
+      key === "Home" &&
+      (event?.ctrlKey || event?.metaKey) &&
+      !event?.shiftKey &&
+      !event?.altKey &&
+      moveCursorStackMember("cover")
+    ) {
+      return;
+    }
     if (scrollWrapper.value) {
       let newScrollTop = scrollWrapper.value.scrollTop;
       const total = allGridImages.value.length;
@@ -214,6 +252,16 @@ export function useGridKeyboardNav(
         cursorIdx.value = null;
         clearFaceSelection();
       }
+    } else if (
+      (event.key === "ArrowLeft" || event.key === "ArrowRight") &&
+      (event.ctrlKey || event.metaKey) &&
+      !event.shiftKey &&
+      !event.altKey &&
+      moveCursorStackMember(event.key === "ArrowLeft" ? "earlier" : "later")
+    ) {
+      // Ctrl+←/→ on a picture of an open stack moves it within the stack;
+      // anywhere else it falls through to moving the cursor alone, below.
+      event.preventDefault();
     } else if (
       ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)
     ) {

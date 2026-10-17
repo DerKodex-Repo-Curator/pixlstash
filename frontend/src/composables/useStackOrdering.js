@@ -5,6 +5,7 @@ import {
   buildStackReorderedMembers,
   getStackBadgeCount,
   getPictureStackId,
+  moveStackMemberInOrder,
   normalizeStackIdValue,
   sortStackMembers,
 } from "../utils/stack.js";
@@ -979,8 +980,15 @@ export function useStackOrdering(
     lastFetchedGridImages.value = nextFetched;
   }
 
+  // The latest save per stack. A failed save only puts its previous order back
+  // when nothing newer was sent: a later move was made on top of this one, and
+  // its own save is what decides the stack's order now.
+  const latestOrderSave = new Map();
+
   async function persistStackOrder(stackId, orderedIds, previousIds) {
     if (!stackId || !orderedIds.length) return;
+    const token = (latestOrderSave.get(stackId) || 0) + 1;
+    latestOrderSave.set(stackId, token);
     try {
       await setStackOrder(
         stackId,
@@ -992,7 +1000,11 @@ export function useStackOrdering(
         `Couldn't save the stack order. ${errorDetail(err) || err?.message || "The previous order was restored."}`,
         { key: "stack-order-save" },
       );
-      if (Array.isArray(previousIds) && previousIds.length) {
+      if (
+        latestOrderSave.get(stackId) === token &&
+        Array.isArray(previousIds) &&
+        previousIds.length
+      ) {
         applyStackOrderLocal(stackId, previousIds);
       }
     }
@@ -1038,6 +1050,73 @@ export function useStackOrdering(
 
     applyStackOrderLocal(stackId, nextIds);
     void persistStackOrder(stackId, nextIds, currentIds);
+  }
+
+  // ── Make cover / Move earlier / Move later ────────────────────────────────
+  // The order of every OPEN stack, cover first, keyed by stack id. Sorted on
+  // the stored position rather than read off the screen, so the numbers on the
+  // tiles agree with the Cover flag under any sort; a move then lays the stack
+  // out in that order (`applyStackOrderLocal`), as a drag does.
+  const openStackOrder = computed(() => {
+    const result = new Map();
+    if (!expandedStackIds.value.size) return result;
+    const byStack = new Map();
+    for (const img of allGridImages.value) {
+      const stackId = getPictureStackId(img);
+      if (!stackId || img?.id == null) continue;
+      if (!expandedStackIds.value.has(stackId)) continue;
+      if (!byStack.has(stackId)) byStack.set(stackId, []);
+      byStack.get(stackId).push(img);
+    }
+    for (const [stackId, members] of byStack) {
+      if (members.length < 2) continue;
+      // The order route needs every member, so a stack only partly on screen
+      // has no order to offer: a move from it would be refused.
+      const expected = Math.max(...members.map(getStackBadgeCount));
+      if (members.length < expected) continue;
+      result.set(
+        stackId,
+        sortStackMembers(members).map((img) => String(img.id)),
+      );
+    }
+    return result;
+  });
+
+  /**
+   * Where a picture sits in its open stack, or null when its stack is not open.
+   *
+   * @param {Object} img
+   * @returns {{stackId: string, position: number, count: number}|null}
+   *   `position` is 0 for the cover.
+   */
+  function getOpenStackPlace(img) {
+    const stackId = getPictureStackId(img);
+    if (!stackId || img?.id == null) return null;
+    const ids = openStackOrder.value.get(stackId);
+    const position = ids ? ids.indexOf(String(img.id)) : -1;
+    if (position === -1) return null;
+    return { stackId, position, count: ids.length };
+  }
+
+  /**
+   * One step of reordering an open stack, saved straight away.
+   *
+   * @param {string|number} pictureId
+   * @param {"cover"|"earlier"|"later"} where
+   * @returns {boolean} whether anything moved.
+   */
+  function moveStackMember(pictureId, where) {
+    const img = allGridImages.value.find(
+      (item) => item?.id != null && String(item.id) === String(pictureId),
+    );
+    const place = getOpenStackPlace(img);
+    if (!place) return false;
+    const currentIds = openStackOrder.value.get(place.stackId);
+    const nextIds = moveStackMemberInOrder(currentIds, pictureId, where);
+    if (!nextIds) return false;
+    applyStackOrderLocal(place.stackId, nextIds);
+    void persistStackOrder(place.stackId, nextIds, currentIds);
+    return true;
   }
 
   // ── Stack CRUD actions ────────────────────────────────────────────────────
@@ -1407,6 +1486,9 @@ export function useStackOrdering(
     handleStackReorderDragOver,
     handleStackReorderDragLeave,
     handleStackReorderDrop,
+    // Make cover / Move earlier / Move later
+    getOpenStackPlace,
+    moveStackMember,
     // Stack CRUD
     createStackFromSelection,
     dissolveSelectedStacks,

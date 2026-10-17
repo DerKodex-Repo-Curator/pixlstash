@@ -118,8 +118,7 @@
       :selected-sort="sortStore.selectedSort"
       :scrapheap-pictures-id="String(SCRAPHEAP_PICTURES_ID)"
       :comfyui-configured="filterStore.comfyuiConfigured"
-      :show-remove-from-stack="showRemoveFromStack"
-      :selected-multiple-stack-ids="selectedMultipleStackIds"
+      :stack-edit="stackEdit"
       :keep-cover-only-stack-count="keepCoverOnlyStackCount"
       :keep-cover-only-lock-reason="keepCoverOnlyLockReason"
       :grouping-lock-reason="partialStackGroupingReason"
@@ -142,6 +141,8 @@
       @set-project="handleSetProjectForSelected"
       @remove-from-stack="removeSelectedFromStack"
       @dissolve-stacks="dissolveSelectedStacks"
+      @stack-move="moveSelectedStackMember"
+      @open-stack="openSelectedStack"
       @create-stack="createStackFromSelection"
       @create-stacks-from-groups="createStacksFromSelectedGroups"
       @remove-from-group="removeFromGroup"
@@ -179,8 +180,10 @@
       :scrapheap-pictures-id="String(SCRAPHEAP_PICTURES_ID)"
       :lock-reason="overlayCtxLockReason"
       :context-image="overlayCtxImage"
+      :stack-edit="overlayCtxStackEdit"
       :comfyui-configured="filterStore.comfyuiConfigured"
       @close="overlayCtxVisible = false"
+      @stack-move="moveOverlayStackMember"
       @save-picture="handleOverlaySave"
       @save-picture-as="handleOverlaySaveAs"
       @copy-picture="handleOverlayCopy"
@@ -299,11 +302,8 @@
       :loading="keepCoverOnlyLoading"
       :preview-failed="keepCoverOnlyPreviewFailed"
       :busy="keepCoverOnlyBusy"
-      :keep-recipes="keepCoverOnlyRecipes"
-      :keep-every-ghost="keepEveryGhost"
       @close="closeKeepCoverOnly"
       @confirm="runKeepCoverOnly"
-      @update:keep-every-ghost="setKeepEveryGhost"
     />
     <div
       v-if="isMultiCharacterView || isSetOverlapView"
@@ -606,13 +606,32 @@
                 v-if="
                   isThumbnailReady(img.id) &&
                   img.thumbnail &&
-                  ((gridStore.showProblemIcon && hasPenalisedTags(img)) ||
+                  (getOpenStackPlace(img) ||
+                    (gridStore.showProblemIcon && hasPenalisedTags(img)) ||
                     img.reference_folder_id ||
                     lockedSetsStore.isLocked(img.id) ||
                     (!isReadOnly && sharedPictureIds.has(img.id)))
                 "
                 class="thumbnail-top-left-badges"
               >
+                <!-- Every picture of an open stack carries its place, so the
+                     order is visible before anyone hovers: the signal that the
+                     order exists and can be changed. -->
+                <span
+                  v-if="getOpenStackPlace(img)"
+                  class="stack-position-chip"
+                  :class="{
+                    'stack-position-chip--cover':
+                      getOpenStackPlace(img).position === 0,
+                  }"
+                  ><Tooltip
+                    :text="`${stackOrdinal(getOpenStackPlace(img).position + 1)} of ${getOpenStackPlace(img).count} in this stack`"
+                    activator="parent" /><v-icon
+                    v-if="getOpenStackPlace(img).position === 0"
+                    class="stack-position-chip__star"
+                    >mdi-star</v-icon
+                  >{{ getOpenStackPlace(img).position + 1 }}</span
+                >
                 <div
                   v-if="gridStore.showProblemIcon && hasPenalisedTags(img)"
                   class="penalised-tag-indicator thumbnail-badge"
@@ -913,6 +932,67 @@
                   activator="parent"
                 />Cover</span
               >
+              <!-- Move earlier / Make cover / Move later, on the hovered or
+                   focused picture of an open stack only. Not tab stops: the
+                   keys on each tooltip do the same from the keyboard. -->
+              <div
+                v-if="!isReadOnly && getOpenStackPlace(img)"
+                class="stack-order-bar"
+                @click.stop
+                @dblclick.stop
+              >
+                <div
+                  class="stack-order-track"
+                  role="group"
+                  aria-label="Stack order"
+                >
+                <button
+                  type="button"
+                  class="stack-order-btn"
+                  tabindex="-1"
+                  aria-label="Move earlier"
+                  :disabled="getOpenStackPlace(img).position === 0"
+                  @click="moveStackMember(img.id, 'earlier')"
+                >
+                  <Tooltip
+                    :text="`Move earlier (${stackKeyHints.earlier})`"
+                    activator="parent"
+                  />
+                  <v-icon>mdi-arrow-left</v-icon>
+                </button>
+                <button
+                  v-if="getOpenStackPlace(img).position > 0"
+                  type="button"
+                  class="stack-order-btn stack-order-btn--cover"
+                  tabindex="-1"
+                  @click="moveStackMember(img.id, 'cover')"
+                >
+                  <Tooltip
+                    :text="`Make this the cover (${stackKeyHints.cover})`"
+                    activator="parent"
+                  />
+                  <v-icon>mdi-star-outline</v-icon>
+                  <span class="stack-order-btn__label">Make cover</span>
+                </button>
+                <button
+                  type="button"
+                  class="stack-order-btn"
+                  tabindex="-1"
+                  aria-label="Move later"
+                  :disabled="
+                    getOpenStackPlace(img).position >=
+                    getOpenStackPlace(img).count - 1
+                  "
+                  @click="moveStackMember(img.id, 'later')"
+                >
+                  <Tooltip
+                    :text="`Move later (${stackKeyHints.later})`"
+                    activator="parent"
+                  />
+                  <v-icon>mdi-arrow-right</v-icon>
+                </button>
+                </div>
+              </div>
               <!-- Top-right badge column - the shared home for corner
                    indicators (stack count in the corner, hover-only stars
                    below it, right-aligned, 2px gap). The stack count is
@@ -1087,8 +1167,7 @@
           :selected-image-ids="selectedImageIds"
           :selected-media-support="selectedMediaSupport"
           :comfyui-configured="filterStore.comfyuiConfigured"
-          :show-remove-from-stack="showRemoveFromStack"
-          :selected-multiple-stack-ids="selectedMultipleStackIds"
+          :stack-edit="stackEdit"
           :keep-cover-only-stack-count="keepCoverOnlyStackCount"
           :keep-cover-only-lock-reason="keepCoverOnlyLockReason"
           :grouping-lock-reason="partialStackGroupingReason"
@@ -1113,6 +1192,8 @@
           @create-stack="createStackFromSelection"
           @remove-from-stack="removeSelectedFromStack"
           @dissolve-stacks="dissolveSelectedStacks"
+          @stack-move="moveSelectedStackMember"
+          @open-stack="openSelectedStack"
           @create-stacks-from-groups="createStacksFromSelectedGroups"
           @run-plugin="handlePluginRunRequest"
           @tags-applied="handleTagsApplied"
@@ -1288,6 +1369,7 @@ import {
   rotateBlockReason as buildRotateBlockReason,
   rotateSkipNote,
 } from "../../utils/rotate";
+import { isApplePlatform } from "../../utils/shortcutHints.js";
 import {
   getCharacter,
   listCharacters,
@@ -1337,6 +1419,7 @@ import {
 } from "../../utils/tags.js";
 import {
   getStackBadgeCount,
+  stackOrdinal,
   getPictureStackId,
   getStackPositionValue,
   selectNewestStackMember,
@@ -1656,6 +1739,16 @@ const badgeCssVars = computed(() => {
 function isExpandedStackCover(img) {
   return isStackExpandedForImage(img) && getStackPositionValue(img) === 0;
 }
+
+/** The reorder keys, as the handle tooltips name them. */
+const stackKeyHints = computed(() => {
+  const mod = isApplePlatform() ? "⌘" : "Ctrl+";
+  return {
+    cover: `${mod}Home`,
+    earlier: `${mod}←`,
+    later: `${mod}→`,
+  };
+});
 
 const badgeIconSizes = computed(() => {
   const t = badgeSizeT.value;
@@ -4152,7 +4245,6 @@ async function deleteSelected(idsOverride = null, moveTo = null) {
 
 /** The dotted op type the backend records, so the receipt note can match it. */
 const KEEP_COVER_ONLY_OP_TYPE = "stack.keep_cover_only";
-const KEEP_RECIPES_ONLY_OP_TYPE = "stack.keep_recipes_only";
 
 const keepCoverOnlyOpen = ref(false);
 const keepCoverOnlyPreview = ref(null);
@@ -4168,30 +4260,18 @@ const keepCoverOnlyBusy = ref(false);
  * agreed to.
  */
 const keepCoverOnlyTargetStackIds = ref([]);
-/** Keep recipes only (#1315): the same dialog and routes, narrower moves. */
-const keepCoverOnlyRecipes = ref(false);
-/** The dialog's keep-every-ghost box; re-previews when it changes. */
-const keepEveryGhost = ref(false);
 // Guards a preview that lands after its dialog was closed or reopened.
 let keepCoverOnlyRunToken = 0;
 
-async function openKeepCoverOnly(options) {
+async function openKeepCoverOnly() {
   if (isReadOnly.value || keepCoverOnlyBusy.value) return;
   const stackIds = keepCoverOnlyStacks.value
     .map((stack) => Number(stack.id))
     .filter((id) => Number.isFinite(id));
   if (!stackIds.length) return;
   keepCoverOnlyTargetStackIds.value = stackIds;
-  keepCoverOnlyRecipes.value = !!options?.keepRecipes;
-  keepEveryGhost.value = false;
   keepCoverOnlyOpen.value = true;
   await loadKeepCoverOnlyPreview();
-}
-
-function setKeepEveryGhost(value) {
-  if (keepCoverOnlyBusy.value) return;
-  keepEveryGhost.value = !!value;
-  loadKeepCoverOnlyPreview();
 }
 
 async function loadKeepCoverOnlyPreview() {
@@ -4201,11 +4281,7 @@ async function loadKeepCoverOnlyPreview() {
   keepCoverOnlyLoading.value = true;
   const token = ++keepCoverOnlyRunToken;
   try {
-    const report = await previewKeepCoverOnly({
-      stackIds,
-      keepRecipes: keepCoverOnlyRecipes.value,
-      keepEveryGhost: keepEveryGhost.value,
-    });
+    const report = await previewKeepCoverOnly({ stackIds });
     if (token !== keepCoverOnlyRunToken) return;
     keepCoverOnlyPreview.value = report;
   } catch (err) {
@@ -4232,28 +4308,14 @@ function closeKeepCoverOnly() {
   keepCoverOnlyLoading.value = false;
   keepCoverOnlyPreviewFailed.value = false;
   keepCoverOnlyTargetStackIds.value = [];
-  keepCoverOnlyRecipes.value = false;
-  keepEveryGhost.value = false;
 }
 
 async function runKeepCoverOnly() {
   const stackIds = keepCoverOnlyTargetStackIds.value;
   if (!stackIds.length || keepCoverOnlyBusy.value) return;
   keepCoverOnlyBusy.value = true;
-  const keepRecipes = keepCoverOnlyRecipes.value;
   try {
-    const result = await keepCoverOnly({
-      stackIds,
-      keepRecipes,
-      keepEveryGhost: keepEveryGhost.value,
-      // What the button's figure was computed from. Keep recipes only is the
-      // first mode whose inputs move while the dialog is open (a background
-      // finder writes a thumbnail, an import covers an instance hash), so the
-      // server refuses with a 409 rather than move more than was confirmed.
-      expectedPictureIds: keepRecipes
-        ? keepCoverOnlyPreview.value?.picture_ids_moving
-        : undefined,
-    });
+    const result = await keepCoverOnly({ stackIds });
     const movedIds = Array.isArray(result?.picture_ids_moved)
       ? result.picture_ids_moved
       : [];
@@ -4269,7 +4331,7 @@ async function runKeepCoverOnly() {
     // What the run deliberately left alone rides the SAME pill as what it did,
     // as a second sentence, rather than a notice competing with it.
     operationStore.noteNextReceipt(
-      keepRecipes ? KEEP_RECIPES_ONLY_OP_TYPE : KEEP_COVER_ONLY_OP_TYPE,
+      KEEP_COVER_ONLY_OP_TYPE,
       keepCoverOnlySkipNote(result),
     );
     // Raises "Kept the cover of N stacks · M pictures to the Scrapheap · Undo".
@@ -4287,23 +4349,7 @@ async function runKeepCoverOnly() {
     keepCoverOnlyOpen.value = false;
     keepCoverOnlyPreview.value = null;
     keepCoverOnlyTargetStackIds.value = [];
-    keepCoverOnlyRecipes.value = false;
-    keepEveryGhost.value = false;
   } catch (err) {
-    if (err?.response?.status === 409) {
-      // More pictures qualified while the dialog was open. Nothing was moved:
-      // re-run the preview so the user confirms the figure that is now true.
-      console.warn(
-        `Keep recipes only: the plan grew for stacks [${stackIds.join(", ")}]`,
-        err,
-      );
-      noticeStore.warning(
-        "More pictures can be made again than when this was opened, so nothing was moved. Check the new count and confirm again.",
-        { key: "keep-cover-only" },
-      );
-      await loadKeepCoverOnlyPreview();
-      return;
-    }
     console.error(
       `Keep cover only failed for stacks [${stackIds.join(", ")}]`,
       err,
@@ -5105,6 +5151,61 @@ const keepCoverOnlyLockReason = computed(() =>
     lockedSetNames: (id) => lockedSetsStore.lockedSetNames(id),
   }),
 );
+
+// ── Edit stack ▸ ─────────────────────────────────────────────────────────────
+// What the selection is as far as stacks go, for the Edit stack submenu in the
+// picture menu and the selection pill (see EditStackMenu's `target`).
+const stackEdit = computed(() => {
+  const stackIds = selectedMultipleStackIds.value;
+  if (!stackIds.length) return null;
+  const stackId = selectedStackId.value;
+  if (!stackId) return { kind: "stacks", stacks: stackIds.length };
+  const ids = selectedImageIds.value;
+  const first = allGridImages.value.find(
+    (img) => img?.id != null && String(img.id) === String(ids[0]),
+  );
+  if (!expandedStackIds.value.has(stackId)) {
+    return { kind: "collapsed", count: getStackBadgeCount(first) };
+  }
+  const place = getOpenStackPlace(first);
+  if (ids.length === 1 && place) {
+    return { kind: "member", count: place.count, position: place.position };
+  }
+  return {
+    kind: "members",
+    count: place?.count ?? getStackBadgeCount(first),
+    selected: ids.length,
+  };
+});
+
+function moveSelectedStackMember(where) {
+  if (isReadOnly.value || selectedImageIds.value.length !== 1) return;
+  moveStackMember(selectedImageIds.value[0], where);
+}
+
+function openSelectedStack() {
+  const id = selectedImageIds.value[0];
+  const img = allGridImages.value.find(
+    (item) => item?.id != null && String(item.id) === String(id),
+  );
+  if (img && !isStackExpandedForImage(img)) void toggleStackExpand(img);
+}
+
+// The lightbox picture's own place in its stack, which the lightbox works out
+// from its filmstrip (it may differ from what the grid has open).
+const overlayCtxStackEdit = computed(() => {
+  const place = overlayCtxImage.value?.stackPlace;
+  if (!place || place.count < 2) return null;
+  return { kind: "member", count: place.count, position: place.position };
+});
+
+function moveOverlayStackMember(where) {
+  if (isReadOnly.value) return;
+  void imageOverlayRef.value?.moveStackMember?.(
+    overlayCtxImage.value?.id,
+    where,
+  );
+}
 
 const selectedExpandedCount = computed(() => {
   const selectedSet = new Set(selectedPictureIds());
@@ -6383,8 +6484,8 @@ const {
   expandedStackIds,
   expandedStackMembers,
   expandedStackLoading,
+  selectedStackId,
   selectedMultipleStackIds,
-  showRemoveFromStack,
   mapGridImages,
   getStackCardStyle,
   getStackBandStyle,
@@ -6402,6 +6503,8 @@ const {
   handleStackReorderDragOver,
   handleStackReorderDragLeave,
   handleStackReorderDrop,
+  getOpenStackPlace,
+  moveStackMember,
   createStackFromSelection,
   dissolveSelectedStacks,
   removeSelectedFromStack,
@@ -6577,6 +6680,8 @@ const { onGlobalKeyPress, handleKeyDown } = useGridKeyboardNav(
     selectionBarRef,
     applyScoresForSelection,
     setScore,
+    moveStackMember,
+    getOpenStackPlace,
   },
 );
 

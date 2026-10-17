@@ -167,6 +167,40 @@
   line-height: var(--leading-snug);
 }
 
+/* "2 of 4 in this stack · Make cover": the lock chip's shape, with one
+   action riding inside it. */
+.overlay-stack-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--control-h-bar);
+  padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3);
+  border-radius: var(--radius-pill);
+  background: rgba(var(--v-theme-shadow), 0.4);
+  color: rgb(var(--v-theme-on-dark-surface));
+  font-size: var(--text-2xs);
+  line-height: var(--leading-snug);
+  white-space: nowrap;
+}
+
+.overlay-stack-chip-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--control-h-sm);
+  padding: 0 var(--space-3) 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: rgba(var(--v-theme-dark-surface-accent), 0.22);
+  color: rgb(var(--v-theme-on-dark-surface));
+  font: inherit;
+  cursor: pointer;
+}
+
+.overlay-stack-chip-btn:hover {
+  background: rgba(var(--v-theme-dark-surface-accent), 0.34);
+}
+
 .overlay-top-actions .star-overlay {
   position: static;
   top: auto;
