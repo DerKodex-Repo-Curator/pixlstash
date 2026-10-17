@@ -2393,8 +2393,8 @@ describe("a default's provenance and reset", () => {
     expect(lockOf(wrapper, "sampler_name").attributes("aria-pressed")).toBe("true");
     expect(lockOf(wrapper, "steps").attributes("aria-pressed")).toBe("false");
     expect(textOf(wrapper)).toContain("Set each run");
-    expect(textOf(wrapper)).toContain("Fixed · 1");
-    expect(textOf(wrapper)).toContain("Fixed values are used by every run.");
+    expect(textOf(wrapper)).toContain("Pinned 1");
+    expect(textOf(wrapper)).toContain("Pinned values are used by every run.");
     expect(textOf(wrapper)).not.toContain("parameters");
   });
 
@@ -2414,7 +2414,7 @@ describe("a default's provenance and reset", () => {
     getWorkflowCard.mockResolvedValue(detail({ card: { defaults: [STEPS] } }));
     const { wrapper } = await mountWith([KEY]);
     expect(wrapper.find("[data-testid='wftab-fixed-group']").exists()).toBe(false);
-    expect(textOf(wrapper)).not.toContain("Fixed values are used by every run.");
+    expect(textOf(wrapper)).not.toContain("Pinned values are used by every run.");
   });
 
   it("folds more than three fixed rows behind their count", async () => {
@@ -2428,7 +2428,7 @@ describe("a default's provenance and reset", () => {
     );
     const { wrapper } = await mountWith([KEY]);
     const group = wrapper.find("[data-testid='wftab-fixed-group'] details");
-    expect(group.find("summary").text().replace(/\s+/g, " ")).toBe("Fixed · 4");
+    expect(group.find("summary").text().replace(/\s+/g, " ")).toBe("Pinned 4");
     expect(rowNamed(wrapper, "seed").element.closest("details")).toBe(group.element);
     expect(rowNamed(wrapper, "steps").element.closest("details")).toBeNull();
   });

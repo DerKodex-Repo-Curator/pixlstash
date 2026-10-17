@@ -1370,7 +1370,7 @@ describe("a workflow's fixed parameters", () => {
     expect(fixed).toEqual(["steps", "width", "height", "ckpt_name", "denoise"]);
     const list = wrapper.find("[data-testid='rund-fixed-params']");
     expect(list.find("summary").text().replace(/\s+/g, " ")).toBe(
-      "Fixed for this workflow · 5",
+      "Pinned for this workflow 5",
     );
     expect(list.text()).toContain("Steps");
     // Fixed is "every run uses the workflow's value": still in the body.

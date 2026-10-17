@@ -787,7 +787,7 @@
               @keydown.stop
             />
           </details>
-          <!-- Fixed for this workflow: every run uses its value, so it is not
+          <!-- Pinned for this workflow: every run uses its value, so it is not
                a field here. Read-only, each with the way to free it, which
                writes the workflow's own choice; there is no one-off override
                of a fixed value. -->
@@ -797,8 +797,8 @@
             data-testid="rund-fixed-params"
           >
             <summary ref="fixedSummary">
-              Fixed for this workflow
-              <span class="rund-quiet">· {{ fixedFields.length }}</span>
+              Pinned for this workflow
+              <span class="rund-count">{{ fixedFields.length }}</span>
             </summary>
             <div
               v-for="field in fixedFields"
@@ -5275,6 +5275,14 @@ button.rund-in-tile.rund-in-tile--off {
   font-size: var(--text-sm);
   font-variant-numeric: tabular-nums;
   color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
+}
+
+/* The Pinned count, set apart by colour and weight rather than a separator. */
+.rund-count {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+  color: var(--selected-ink);
 }
 
 .rund-quiet,
