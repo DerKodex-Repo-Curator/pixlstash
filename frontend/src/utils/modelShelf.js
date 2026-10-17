@@ -2139,6 +2139,10 @@ export function markForeground() {
  * they genuinely are one group, and the shelf already treats "not set" as a
  * value rather than an absence.
  *
+ * **The ComfyUI pack ports this** (`web/js/model_mark.js`), so a loader node
+ * draws the same mark; `tests/test_comfyui_pack_model_mark.py` fails when the
+ * two disagree, so change them together.
+ *
  * @param {Object} row - a shelf row.
  * @returns {{color: string, ink: string, initials: string}} `color` is an
  *   `hsl()` string, not a hex, because it is renormalised rather than taken

@@ -5868,6 +5868,13 @@ group, and the shelf already treats "not set" as a value rather than an absence.
 The mark is `aria-hidden`: the row's accessible name already says which model it
 is, and a mark announcing "FL" would be the same fact twice, less usefully.
 
+**The ComfyUI pack draws the same mark.** Its loader nodes and Browse picker
+cannot import this code, so `web/js/model_mark.js` in the pack is a port of
+`generatedMark` and its name chain. `tests/test_comfyui_pack_model_mark.py` runs
+both in Node over the same rows and fails on any difference: change the two
+together. The pack has no Material Design Icons font, so a picture set's `set_icon`
+(step 2 of `ModelMark`'s face chain) is not drawn there.
+
 **Both set and clear are bulk.** Set was originally gated to a selection of one,
 on the argument that giving forty rows one mark removes the only thing telling
 them apart; in practice the owner's common case is the opposite — a base model's
