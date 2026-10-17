@@ -855,42 +855,6 @@
           defaults to start from.
         </p>
       </section>
-
-      <div class="inspector-section">
-        <!-- The box is drawn only once THIS card's notes have arrived.
-             `notesDraft` holds the last card read, so a box shown while the
-             read is out is the previous workflow's text, and blurring it
-             writes that text onto this one. -->
-        <details class="wftab-disclose">
-          <summary>Notes</summary>
-          <textarea
-            v-if="detail"
-            v-model="notesDraft"
-            class="wftab-notes"
-            rows="4"
-            aria-label="Notes about this workflow"
-            @blur="saveNotes"
-          ></textarea>
-          <p v-else class="wftab-note wftab-quiet">
-            {{
-              detailFailed
-                ? "Could not read this workflow's notes just now."
-                : "Reading its notes…"
-            }}
-          </p>
-        </details>
-        <details class="wftab-disclose">
-          <summary>
-            Node names <span class="wftab-quiet">for ComfyUI users</span>
-          </summary>
-          <dl class="inspector-kv">
-            <div v-for="slot in nodeNames" :key="slot.id">
-              <dt>{{ slot.kind }}</dt>
-              <dd class="wftab-mono">{{ slot.label || "—" }}</dd>
-            </div>
-          </dl>
-        </details>
-      </div>
     </template>
 
     <!-- The inspector's footer slot sits below the scrolling body, so Run…
@@ -1411,7 +1375,6 @@ const detailFailed = ref(false);
 /** One write at a time, named so only the control that fired it shows it. */
 const busy = ref("");
 const menuOpen = ref(false);
-const notesDraft = ref("");
 
 /** Several workflows selected. */
 const multiple = computed(() => store.selectedKeys.length > 1);
@@ -2606,17 +2569,6 @@ watch(
   { immediate: true },
 );
 
-/** Every slot the card names, for the ComfyUI-users disclosure. */
-const nodeNames = computed(() =>
-  [...(card.value?.models ?? []), ...(card.value?.loras ?? [])].map(
-    (slot, index) => ({
-      id: slot.slot_label || `slot-${index}`,
-      kind: slot.kind,
-      label: slot.slot_label,
-    }),
-  ),
-);
-
 /**
  * The workflow's defaults, each with whether it is set each run (`pinned`,
  * the stored pin list's shape): the default recipe's featured values (#1623).
@@ -2714,16 +2666,9 @@ async function loadDetail(key, { quiet = false } = {}) {
     const before = detail.value;
     detail.value = body;
     detailFailed.value = false;
-    if (quiet && before) {
-      // The notes box may be mid-sentence: only a draft that is still the
-      // text last read is replaced. The parameter rows keep their groups.
-      if (notesDraft.value === (before.notes ?? "")) {
-        notesDraft.value = body.notes ?? "";
-      }
-      return;
-    }
+    // The parameter rows keep their groups on a quiet read.
+    if (quiet && before) return;
     openedPins.value = body.pins ?? null;
-    notesDraft.value = body.notes ?? "";
   } catch (err) {
     console.warn(`[workflows] could not read the card ${key}`, err);
     if (selectedKey.value !== key) return;
@@ -3311,7 +3256,7 @@ let refreshing = Promise.resolve();
 
 /**
  * Read again everything the rail reads off the graph, in place: nothing is
- * blanked, a notes draft being typed is kept, and the rows keep their groups.
+ * blanked, and the rows keep their groups.
  *
  * Only for the workflow on screen. Each of these reads keeps the newest ask,
  * so one made for a workflow the rail has left would retire the reads of the
@@ -3712,12 +3657,10 @@ async function dismissVersionError() {
 /**
  * Run a write after whichever is already out, never beside it.
  *
- * `defaults`, `pins`, the notes and the card all come back on one `detail`,
- * so two writes in flight means the slower answer discards the faster one's
- * change. **Queued rather than refused**, because the gesture that starts
- * the second write is routinely the one that ends the first: clicking a pin
- * is what blurs the notes box, so a refusal would drop that click and leave
- * the pin looking dead.
+ * `defaults`, `pins` and the card all come back on one `detail`, so two
+ * writes in flight means the slower answer discards the faster one's change.
+ * **Queued rather than refused**, so a second click made while the first
+ * write is out is not dropped, leaving its control looking dead.
  *
  * The chain is never broken by a failure — each link catches its own — and
  * `busy` names only the link that is running, so the control that fired it
@@ -3826,10 +3769,9 @@ function queueWrite(token, work) {
 /**
  * Whether a write that has come back still belongs on screen.
  *
- * Every handler awaits, and the selection can move while it does — clicking
- * another card is exactly what blurs the notes box and fires its save. An
- * answer for the card that has gone must not be written into the rail
- * showing the one that arrived.
+ * Every handler awaits, and the selection can move while it does. An answer
+ * for the card that has gone must not be written into the rail showing the
+ * one that arrived.
  */
 function stillOn(key) {
   return selectedKey.value === key;
@@ -4003,40 +3945,6 @@ function togglePin(row) {
       }
     } catch (err) {
       fail(err, "Could not change that pin.");
-    }
-  });
-}
-
-/**
- * Save the notes, on blur.
- *
- * Queued like every other write, and it has to be: this PATCH answers with
- * the whole detail, pins included, so landing beside a pin write puts the
- * pre-toggle pins back on screen while the server holds the new ones. Blur
- * is exactly when that happens — clicking the pin is what blurs this box.
- *
- * The draft is compared at QUEUE time, not at run time: the comparison is
- * "did the person change anything", and by the time an earlier write has
- * finished `detail` may already carry what they typed.
- */
-function saveNotes() {
-  const key = selectedKey.value;
-  // `detail` null is a card whose notes have not arrived; the box is not
-  // drawn then, and the draft belongs to whatever was read last.
-  if (
-    !key ||
-    !detail.value ||
-    notesDraft.value === (detail.value.notes ?? "")
-  ) {
-    return;
-  }
-  const notes = notesDraft.value || null;
-  return queueWrite("notes", async () => {
-    try {
-      const body = await patchWorkflowCard(key, { notes });
-      if (stillOn(key)) detail.value = body;
-    } catch (err) {
-      fail(err, "Could not save those notes.");
     }
   });
 }
@@ -4596,24 +4504,6 @@ async function checkInstalled(key, { quiet = false } = {}) {
 .wftab-disclose > summary.wftab-sublabel {
   padding-top: 0;
   font-size: var(--text-xs);
-}
-
-.wftab-notes {
-  width: 100%;
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid rgb(var(--v-theme-divider));
-  border-radius: var(--radius-sm);
-  background: rgba(var(--v-theme-on-surface), 0.06);
-  color: inherit;
-  font: inherit;
-  font-size: var(--text-sm);
-  resize: vertical;
-}
-
-.wftab-mono {
-  font-family: var(--font-mono);
-  font-size: var(--text-2xs);
-  overflow-wrap: anywhere;
 }
 
 .wftab-foot {

@@ -2994,112 +2994,85 @@ describe("Open in ComfyUI", () => {
 });
 
 describe("a write that comes back after the selection moved", () => {
-  it("does not write card A's notes onto card B", async () => {
-    // Blur is exactly when the selection moves: clicking another card blurs
-    // the textarea. A's PATCH must not land in a rail showing B.
+  it("does not write card A's answer onto card B", async () => {
+    // A's reset must not land in a rail showing B.
     getWorkflowCard.mockImplementation(async (key) =>
-      detail({
-        card: { key, defaults: [key === KEY ? STEPS : SAMPLER] },
-        notes: null,
-      }),
+      detail({ card: { key, defaults: [key === KEY ? CFG : SAMPLER] } }),
     );
     let settle;
-    patchWorkflowCard.mockReturnValue(
+    setWorkflowDefaults.mockReturnValue(
       new Promise((resolve) => {
-        settle = () =>
-          resolve(detail({ card: { id: KEY, defaults: [STEPS] } }));
+        settle = () => resolve(detail({ card: { id: KEY, defaults: [CFG] } }));
       }),
     );
     const { wrapper, store } = await mountWith(
       [KEY],
       [card({ name: "Card A" }), card({ id: OTHER, name: "Card B" })],
     );
-    await wrapper.find("textarea").setValue("a note for A");
-    await wrapper.find("textarea").trigger("blur");
+    await rowNamed(wrapper, "cfg").find(".wfdef-reset").trigger("click");
     store.selectedKeys = [OTHER];
     await flush(wrapper);
     settle();
     await flush(wrapper);
     expect(textOf(wrapper)).toContain("Card B");
     expect(textOf(wrapper)).not.toContain("Card A");
-    // The detail carries the DEFAULTS as well as the notes, so A's answer
-    // landing here puts A's parameters under B's name. The header comes from
-    // the grid and would keep saying B either way.
-    expect(() => rowNamed(wrapper, "steps")).toThrow();
+    // The detail carries the DEFAULTS, so A's answer landing here puts A's
+    // parameters under B's name. The header comes from the grid and would
+    // keep saying B either way.
+    expect(() => rowNamed(wrapper, "cfg")).toThrow();
     expect(rowNamed(wrapper, "sampler_name").exists()).toBe(true);
-    expect(wrapper.find("textarea").element.value).toBe("");
   });
 
-  it("does not offer the notes box before this card's notes have arrived", async () => {
-    let settle;
-    getWorkflowCard.mockReturnValue(
-      new Promise((resolve) => {
-        settle = () => resolve(detail({ notes: "the real notes" }));
-      }),
-    );
-    const { wrapper } = await mountWith([KEY]);
-    // No box, so there is no stale draft to blur onto this card.
-    expect(wrapper.find("textarea").exists()).toBe(false);
-    settle();
-    await flush(wrapper);
-    expect(wrapper.find("textarea").element.value).toBe("the real notes");
-  });
-
-  it("does not let a notes save put the pre-toggle pins back", async () => {
-    // The sequence is one gesture: clicking a pin is what blurs the notes
-    // box, so the PATCH and the PUT are started by the same click. The PATCH
-    // answers with the WHOLE detail, pins included, so landing second it
-    // puts the pin back while the server holds the new value.
+  it("does not let a hide's answer put the pre-toggle pins back", async () => {
+    // The hide PATCH answers with the WHOLE detail, pins included, so landing
+    // after a pin write it would put the pin back while the server holds the
+    // new value.
     getWorkflowCard.mockResolvedValue(
       detail({ card: { defaults: [STEPS, SAMPLER] } }),
     );
     // A hub that answers with the pins it holds AT THAT MOMENT. The PATCH is
-    // the slow one, which is the reviewer's case: blur queues it first, so
-    // run beside the pin write it answers last, carrying `pins: null`.
-    let held = null;
-    let settleNotes;
+    // the slow one: queued first, run beside the pin write it would answer
+    // last, carrying `pins: null`.
+    let pinned = null;
+    let settleHide;
     setWorkflowPins.mockImplementation(async (_key, pins) => {
-      held = pins;
+      pinned = pins;
       return { pins };
     });
     patchWorkflowCard.mockImplementation(
       () =>
         new Promise((resolve) => {
-          const answer = { pins: held };
-          settleNotes = () =>
+          const answer = { pins: pinned };
+          settleHide = () =>
             resolve(
               detail({
                 card: { defaults: [STEPS, SAMPLER] },
-                notes: "a note",
+                hidden: true,
                 ...answer,
               }),
             );
         }),
     );
     const { wrapper } = await mountWith([KEY]);
-    await wrapper.find("textarea").setValue("a note");
-    await wrapper.find("textarea").trigger("blur");
+    await wrapper.findAll("button").find((b) => b.text() === "Hide").trigger("click");
     await rowNamed(wrapper, "sampler_name").find("button").trigger("click");
     await flush(wrapper);
 
-    // Blur runs before the click, so the notes PATCH is the one in flight
-    // and the pin write waits behind it rather than racing it.
-    expect(patchWorkflowCard).toHaveBeenCalledWith(KEY, { notes: "a note" });
+    // The hide is in flight and the pin write waits behind it rather than
+    // racing it.
+    expect(patchWorkflowCard).toHaveBeenCalledWith(KEY, { hidden: true });
     expect(setWorkflowPins).not.toHaveBeenCalled();
-    settleNotes();
+    settleHide();
     await flush(wrapper);
 
-    // Both ran, and the pin stuck. Fired together, the PATCH's answer lands
-    // last carrying the pins from before the toggle, the default set applies
-    // again and `sampler_name` drops back inside the fold while the hub
-    // holds it pinned.
+    // Both ran, and the pin stuck.
     expect(setWorkflowPins).toHaveBeenCalledTimes(1);
     expect(lockOf(wrapper, "sampler_name").attributes("aria-pressed")).toBe("false");
   });
 
   it("drops a whole-set write queued behind another when the selection moves", async () => {
     // The pins PUT is whole-set, built from `defaults` when it RUNS, which is
-    // after the notes save it waited behind. By then those are card B's, and
+    // after the hide it waited behind. By then those are card B's, and
     // sending them to A would replace A's own choice with B's.
     getWorkflowCard.mockImplementation(async (key) =>
       detail({ card: { id: key, defaults: key === KEY ? [CFG] : [WIDTH] } }),
@@ -3114,14 +3087,13 @@ describe("a write that comes back after the selection moved", () => {
       [KEY],
       [card({ name: "Card A" }), card({ id: OTHER, name: "Card B" })],
     );
-    await wrapper.find("textarea").setValue("a note");
-    await wrapper.find("textarea").trigger("blur");
+    await wrapper.findAll("button").find((b) => b.text() === "Hide").trigger("click");
     await rowNamed(wrapper, "cfg").find("button").trigger("click");
     store.selectedKeys = [OTHER];
     await flush(wrapper);
     settle();
     await flush(wrapper);
-    expect(patchWorkflowCard).toHaveBeenCalledWith(KEY, { notes: "a note" });
+    expect(patchWorkflowCard).toHaveBeenCalledWith(KEY, { hidden: true });
     expect(setWorkflowPins).not.toHaveBeenCalled();
   });
 
@@ -3883,8 +3855,8 @@ describe("the selected workflow's failed run", () => {
 // What can silently invert here: an edit written straight to the workflow
 // instead of joining the one set of unsaved changes; a row put back to its
 // saved value kept in the set as a change; the first of two quick edits
-// drawing over the second; and a rail that goes blank, or loses a notes draft,
-// when the workflow is saved from somewhere else.
+// drawing over the second; and a rail that goes blank when the workflow is
+// saved from somewhere else.
 
 describe("the tab as the editor (#1850)", () => {
   const ADDRESS = "core:m1/ckpt_name";
@@ -5311,19 +5283,17 @@ describe("the tab as the editor (#1850)", () => {
       );
       const { wrapper, store } = await mountEditor(cards);
       await settle(wrapper);
-      // A write the save has to wait behind: the notes, still on the wire.
-      const notes = held();
-      patchWorkflowCard.mockImplementation(() => notes.promise);
-      const box = wrapper.find("textarea.wftab-notes");
-      await box.setValue("a note");
-      await box.trigger("blur");
+      // A write the save has to wait behind: the hide, still on the wire.
+      const hiding = held();
+      patchWorkflowCard.mockImplementation(() => hiding.promise);
+      await wrapper.findAll("button").find((b) => b.text() === "Hide").trigger("click");
       await save(wrapper).trigger("click");
 
       // The rail moves on, and the next workflow's changes are read.
       store.selectedKeys = [OTHER];
       await flush(wrapper);
       expect(saveWorkflow).not.toHaveBeenCalled();
-      notes.release(detail({ card: plain(), notes: "a note" }));
+      hiding.release(detail({ card: plain(), hidden: true }));
       await flush(wrapper);
       // Version 3, as read at the press: not the null of the workflow shown.
       expect(saveWorkflow).toHaveBeenCalledWith(KEY, { version: 3 });
@@ -5518,18 +5488,16 @@ describe("the tab as the editor (#1850)", () => {
   });
 
   describe("a workflow changed from somewhere else", () => {
-    it("reads its rows again in place when the card's version moves, keeping a notes draft", async () => {
+    it("reads its rows again in place when the card's version moves", async () => {
       const before = versioned(3);
-      getWorkflowCard.mockResolvedValue(detail({ card: before, notes: "as read" }));
+      getWorkflowCard.mockResolvedValue(detail({ card: before }));
       const { wrapper, store } = await mountEditor([before]);
       await settle(wrapper);
-      const notes = wrapper.find("textarea.wftab-notes");
-      await notes.setValue("half a sentence");
 
       // A save from the Run popup, the Tasks tab or ComfyUI: announced, the
       // grid re-read, and the card now says version 4.
       const after = versioned(4);
-      const moved = detail({ card: after, notes: "as read" });
+      const moved = detail({ card: after });
       moved.card.default_recipe.models[0].filename = "SDXL/juggernautXL_v9.safetensors";
       const slow = held();
       getWorkflowCard.mockClear().mockReturnValue(slow.promise);
@@ -5543,7 +5511,6 @@ describe("the tab as the editor (#1850)", () => {
       expect(getWorkflowChanges).toHaveBeenCalledWith(KEY);
       // Not blanked while the read is out.
       expect(textOf(wrapper)).not.toContain("Reading its default recipe");
-      expect(textOf(wrapper)).not.toContain("Reading its notes");
       expect(
         wrapper.find('[data-testid="wftab-row-checkpoint"]').text(),
       ).toContain("realvisXL_v5");
@@ -5553,10 +5520,6 @@ describe("the tab as the editor (#1850)", () => {
       expect(
         wrapper.find('[data-testid="wftab-row-checkpoint"]').text(),
       ).toContain("juggernautXL_v9");
-      // The draft the owner was typing is theirs.
-      expect(wrapper.find("textarea.wftab-notes").element.value).toBe(
-        "half a sentence",
-      );
     });
 
     it("keeps the LoRA rows on screen while their chain is read again", async () => {
@@ -5646,20 +5609,6 @@ describe("the tab as the editor (#1850)", () => {
       expect(focused).toHaveBeenCalledTimes(1);
       expect(document.activeElement).toBe(field().element);
       expect(setWorkflowChanges).not.toHaveBeenCalled();
-    });
-
-    it("takes notes written elsewhere when nothing was being typed", async () => {
-      const before = versioned(3);
-      getWorkflowCard.mockResolvedValue(detail({ card: before, notes: "as read" }));
-      const { wrapper, store } = await mountEditor([before]);
-      await settle(wrapper);
-      const after = versioned(4);
-      getWorkflowCard.mockResolvedValue(detail({ card: after, notes: "written elsewhere" }));
-      store.cards = [after];
-      await flush(wrapper);
-      expect(wrapper.find("textarea.wftab-notes").element.value).toBe(
-        "written elsewhere",
-      );
     });
 
     it("drops its bar when the changes were saved or discarded elsewhere", async () => {

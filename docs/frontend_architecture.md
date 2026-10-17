@@ -2511,8 +2511,8 @@ can no longer see.
   string node id and the field named outright, which is what the rows find
   their entry by). `withLoraStrength` clears a slot's removal when it pushes a
   strength, since the server takes a slot as set or removed, never both.
-  Parameters, pins, name and notes are not in it: they still save as they
-  are typed.
+  Parameters, pins and name are not in it: they still save as they are
+  typed.
   - **A set has one writer at a time** (`edit`, `settle`). **A row edit**
     builds the next whole set from what waits, draws it at once (`intent`),
     `PUT`s it, and draws the answer. **One write on the wire, the last intent
@@ -2771,8 +2771,7 @@ can no longer see.
     `version` or `unsaved_changes` moves. On `version` the rows off the graph
     are read again **quietly** (`refreshGraph`: detail, chain and form inputs,
     then the pre-flight), for the shown workflow only, with nothing blanked,
-    the parameter groups kept, and a notes draft that is no longer the text
-    last read left alone. The same quiet read follows this tab's own save, a
+    and the parameter groups kept. The same quiet read follows this tab's own save, a
     go-back, an Edit LoRAs… save and a save from the Run popup or the Tasks
     tab. **A quiet read that fails keeps what is drawn**: the parameter
     choices, the detail rows and the LoRA chain rows stay as they were, and
@@ -2833,16 +2832,14 @@ can no longer see.
   before it is used.** `detail` carries the card, its defaults and its pins
   together, so two writes in flight means the slower answer discards the
   faster one's change; `queueWrite()` runs them in turn. **Queued, not
-  refused**: the gesture that starts the second write is routinely the one
-  that ends the first — clicking a pin is what blurs the notes box — so
-  refusing would drop that click and leave the pin looking dead. The multi-
-  select Hide loops one card at a time for a second reason: there is no bulk
-  route, and each PATCH runs a whole `read_grid()` inside `_read_detail`.
-  And the selection moves while a write is out — clicking another card is exactly what blurs the
-  notes box and fires its save — so `stillOn()` drops an answer for a card
-  that has gone. The notes box is drawn only once *this* card's detail has
-  arrived, because the draft otherwise holds the last card's text and blurring
-  it writes that onto this one.
+  refused**: refusing would drop a second click made while the first write
+  is out and leave its control looking dead. The multi-select Hide loops one
+  card at a time for a second reason: there is no bulk route, and each PATCH
+  runs a whole `read_grid()` inside `_read_detail`. And the selection moves
+  while a write is out, so `stillOn()` drops an answer for a card that has
+  gone. The tab has no notes box or node-name list: the workflow's `notes`
+  stay on the API (`PATCH /workflows/{id}`) but nothing on the tab reads or
+  writes them.
 - **What is drawn but not writable yet, and why.** The checkpoint and VAE are
   fields rather than selects: no route changes a card's model file. A LoRA's
   strength is **not drawn at all** — `_describe_slots` reads `asset_names`,

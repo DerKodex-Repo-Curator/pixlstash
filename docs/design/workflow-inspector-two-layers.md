@@ -91,7 +91,7 @@ counts and "Show N" links, never as structure.
   **PARAMETERS**. Pins and "All N parameters" keep working as today.
 - Section order, top to bottom: head, **DEFAULT RECIPE** (Checkpoint, other
   models, LoRAs, Stages), **ALSO USED** (pile, shown only if non-empty),
-  **PARAMETERS**, Notes, Node names, footer. Models before parameters because
+  **PARAMETERS**, footer. Models before parameters because
   that is the order the owner reasons in ("which model, which LoRAs, then
   numbers"), and because the missing-checkpoint fix is the most urgent thing on
   the tab.
@@ -131,7 +131,6 @@ counts and "Show N" links, never as structure.
  │ Steps       30              📌       │
  │ CFG         6.5   Yours ↺   📌       │
  │ ▸ All 14 parameters                  │
- │ ▸ Notes   ▸ Node names               │
  │──────────────────────────────────────│
  │ [ Run… ]  ⧉  ⋯                       │
  └──────────────────────────────────────┘
