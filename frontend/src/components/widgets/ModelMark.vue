@@ -366,6 +366,9 @@ const ringClass = computed(() =>
   font-size: calc(
     (var(--entity-thumb) - 2 * var(--space-1)) * var(--mmark-name)
   );
+  /* The face `namedTile` measures, named rather than inherited: the card sits
+     inside Vuetify's application font, which is not the one measured. */
+  font-family: var(--font-ui);
   font-weight: var(--weight-semibold);
   letter-spacing: -0.02em;
   line-height: 0.9;

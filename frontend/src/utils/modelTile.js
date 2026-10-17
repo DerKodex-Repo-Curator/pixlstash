@@ -43,7 +43,11 @@ const FALLBACK_EM = 0.62;
 let context;
 const widths = new Map();
 
-/** The width of *text* at 1px, semibold, in the app's own face, tracked. */
+/**
+ * The width of *text* at 1px, semibold, tracked, in `--font-ui`: the face
+ * `.mmark-name` sets. A system font stack, so nothing loads late and a width
+ * once measured stays true.
+ */
 function widthEm(text) {
   if (!widths.has(text)) {
     if (context === undefined) {
@@ -55,7 +59,10 @@ function widthEm(text) {
     const chars = [...text].length;
     let em = FALLBACK_EM * chars;
     if (context) {
-      context.font = `600 100px ${getComputedStyle(document.body).fontFamily}`;
+      const face = getComputedStyle(document.documentElement)
+        .getPropertyValue("--font-ui")
+        .trim();
+      context.font = `600 100px ${face || "system-ui"}`;
       em = context.measureText(text).width / 100 + TRACKING * chars;
     }
     widths.set(text, em);

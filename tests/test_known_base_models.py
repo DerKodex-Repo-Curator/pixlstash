@@ -536,3 +536,5 @@ def test_a_card_slot_the_shelf_does_not_hold_is_named_from_its_filename():
         _mark_fields(None, "z_image_turbo_bf16.safetensors", "vae")["mark_tab"] is None
     )
     assert "mark" not in _mark_fields(None, "add_detail.safetensors", "lora")
+    # A slot whose name was never recorded names no tile, and does not fail.
+    assert _mark_fields(None, None, "unet") == {"quant": None}

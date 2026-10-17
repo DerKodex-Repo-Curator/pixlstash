@@ -53,7 +53,12 @@ test('every known name fits the tile at the smallest size it may take', async ({
       return {
         // `.mmark-name`: semibold, tracked -0.02em, at the floor.
         lines: lines.map((line) =>
-          measure(line, { fontSize: '8.25px', fontWeight: '600', letterSpacing: '-0.02em' }),
+          measure(line, {
+            fontFamily: 'var(--font-ui)',
+            fontSize: '8.25px',
+            fontWeight: '600',
+            letterSpacing: '-0.02em',
+          }),
         ),
         // `.mmark-version`: the type ramp's 2xs, bold.
         roles: roles.map((role) =>
