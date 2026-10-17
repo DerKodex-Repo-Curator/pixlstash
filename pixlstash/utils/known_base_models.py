@@ -97,8 +97,8 @@ from pixlstash.utils.model_utils import derive_model_name
 # REFI, EDIT, RAW, HD); ``few_step`` puts a bolt on the tab instead;
 # ``file_version`` takes the second line from the filename (Qwen 2511);
 # ``maker`` picks the tile colour from :data:`MAKERS` and ``icon`` a family
-# icon from :data:`FAMILY_ICONS`. Every ``mark`` line must fit the 28px tile's
-# 24px line at 8.25px, which ``frontend/e2e/specs/model-tile-names.spec.js``
+# icon from :data:`FAMILY_ICONS`. Every ``mark`` line must fit the card's 30px
+# tile's 26px line at 8.25px, which ``frontend/e2e/specs/model-tile-names.spec.js``
 # measures in Chromium; a fine-tune's own second line is not measured.
 # Closed models carry none: they never exist as files.
 KNOWN_BASE_MODELS: dict[str, dict] = {

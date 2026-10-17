@@ -24,17 +24,17 @@ const FAMILY_ICONS = {
 /** What the server's tab sends for a few-step model; drawn as a bolt icon. */
 export const FEW_STEP_TAB = "⚡";
 
-// The name's size, as a share of the tile's line (the tile less its padding,
-// 24px of the card's 28): it grows until its widest line fills the line, up
-// to 15.4px for one line (today's initials) and 11.4px for two, so they stay
-// clear of the tab; 9px in an icon's band, which holds one line over the
-// picture; and it never shrinks below 8.25px. Every known name fits at the
-// floor, which `frontend/e2e/specs/model-tile-names.spec.js` measures.
-const LINE_PX = 24;
-const ONE_LINE = 15.4 / LINE_PX;
-const TWO_LINES = 11.4 / LINE_PX;
-const BAND = 9 / LINE_PX;
-export const NAME_FLOOR = 8.25 / LINE_PX;
+// The name's size, as a share of the tile's line (the tile less its padding):
+// it grows until its widest line fills the line, up to 0.64 of it for one
+// line (today's initials) and 0.475 for two, so they stay clear of the tab,
+// and 0.375 in an icon's band, which holds one line over the picture. The
+// shares were measured on a 24px line (15.4px, 11.4px, 9px) and scale with
+// the tile. The 8.25px floor is fixed, not a share, and lives in
+// `.mmark-name`'s CSS; every known name fits the card's line at it, which
+// `frontend/e2e/specs/model-tile-names.spec.js` measures.
+const ONE_LINE = 15.4 / 24;
+const TWO_LINES = 11.4 / 24;
+const BAND = 9 / 24;
 // The tile's tracking, `letter-spacing: -0.02em`, which canvas does not apply.
 const TRACKING = -0.02;
 // What a character measures where nothing can be measured (jsdom), in em.
@@ -72,12 +72,12 @@ function widthEm(text) {
 
 /**
  * The name's font size as a share of the tile's line: the cap for its shape,
- * shrunk until its widest line fits, never below {@link NAME_FLOOR}.
+ * shrunk until its widest line fits. The CSS holds it at its 8.25px floor.
  */
 export function nameScale(lines, band = false) {
   const cap = band ? BAND : lines.length > 1 ? TWO_LINES : ONE_LINE;
   const widest = Math.max(...lines.map(widthEm));
-  return Math.max(NAME_FLOOR, Math.min(cap, 1 / widest));
+  return Math.min(cap, 1 / widest);
 }
 
 /**

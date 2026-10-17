@@ -10367,9 +10367,10 @@ Quality before provenance: an exact filename beats a fuzzy declaration. A
   (`lightning`, `hyper`, `lcm`, `dmd2`, `turbo`) gives `⚡` and a step count.
   `KNOWN_FINE_TUNES` names a fine-tune checkpoint with a mark of its own
   (Juggernaut: J on its logo's purple) whatever base it was identified as.
-  Every table `mark` line is held to the tile's 24px line at 8.25px, and
-  every `role` to 28px, by `frontend/e2e/specs/model-tile-names.spec.js`; a
-  fine-tune's own second line is not.
+  Every table `mark` line is held to the card tile's 26px line at 8.25px,
+  and every `role` to its 30px, by
+  `frontend/e2e/specs/model-tile-names.spec.js`; a fine-tune's own second
+  line is not.
 
 `quant` is **two sources folded into one vocabulary**, and the fold happens on
 the way out rather than on the way in. The column holds whichever source wrote

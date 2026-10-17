@@ -332,7 +332,7 @@ const ringClass = computed(() =>
 }
 
 /* Two lines of two, packed into the top-start corner so the version tab over
-   the bottom-end one covers no letter: 0.36 of the card's 28px mark is 10px,
+   the bottom-end one covers no letter: 0.36 of the card's 30px mark is 11px,
    and two lines of it at 0.9 end 2px above the tab. Semibold, because 10px
    at the single line's medium weight thins out on the tile. Measured in a
    browser against the widest pair (WM beside a two-digit tab). */
@@ -349,7 +349,10 @@ const ringClass = computed(() =>
 /* The named tile (#1951). The name is packed into the top-start corner like
    the two-line initials, so the tab over the bottom-end one covers none of
    it, and sized by `namedTile` as a share of the tile's line (the tile less
-   its padding), so it fills the line at whatever size the mark is drawn. */
+   its padding), so it fills the line at whatever size the mark is drawn.
+   Never below 8.25px, a FIXED floor and the design's own value rather than a
+   step of the type ramp: the smallest a name stays legible on the tile.
+   `model-tile-names.spec.js` holds every known name to it. */
 .mmark-named {
   position: relative;
   display: flex;
@@ -363,8 +366,9 @@ const ringClass = computed(() =>
   align-items: flex-start;
   box-sizing: border-box;
   padding: var(--space-1) 0 0 var(--space-1);
-  font-size: calc(
-    (var(--entity-thumb) - 2 * var(--space-1)) * var(--mmark-name)
+  font-size: max(
+    8.25px,
+    calc((var(--entity-thumb) - 2 * var(--space-1)) * var(--mmark-name))
   );
   /* The face `namedTile` measures, named rather than inherited: the card sits
      inside Vuetify's application font, which is not the one measured. */
@@ -385,7 +389,7 @@ const ringClass = computed(() =>
 }
 
 /* Over a busy picture, a solid band: a gradient left the name illegible over
-   the eye's stripes at 28px. */
+   the eye's stripes on the card. */
 .mmark-name--band {
   background: var(--scrim-photo-strong);
 }

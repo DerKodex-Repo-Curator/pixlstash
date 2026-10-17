@@ -1,19 +1,28 @@
 // Every name a workflow card's tile can print fits it (#1951).
 //
 // A known model's tile carries the short name people write for it, sized to
-// fill the tile's 24px line and shrunk for a long one, but never below 8.25px
-// (`NAME_FLOOR` in `src/utils/modelTile.js`). A name that would need less
-// overflows the tile, so each one in `KNOWN_BASE_MODELS` and
-// `KNOWN_FINE_TUNES` is rendered here, in the app's own face in Chromium,
-// where jsdom cannot measure text at all. A tab's role word is held to the
-// 28px tile the same way.
+// fill the tile's line (the card's `--wf-mark` less 2px padding a side) and
+// shrunk for a long one, but never below 8.25px (`.mmark-name` in
+// `ModelMark.vue`). A name that would need less overflows the tile, so each
+// one in `KNOWN_BASE_MODELS` and `KNOWN_FINE_TUNES` is rendered here, in the
+// tile's face in Chromium, where jsdom cannot measure text at all. CI's
+// `system-ui` is DejaVu Sans, the widest face measured, which is the point. A
+// tab's role word is held to the tile the same way.
 
 import { execFileSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test, expect } from '../fixtures/test.js'
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
+// The card's mark size, read off the card so this follows it.
+const TILE_PX = Number(
+  readFileSync(resolve(REPO_ROOT, 'frontend/src/components/widgets/WorkflowCard.vue'), 'utf8').match(
+    /--wf-mark: (\d+)px;/,
+  )[1],
+)
+const LINE_PX = TILE_PX - 2 * 2
 
 const READ_NAMES = `
 import json
@@ -71,6 +80,8 @@ test('every known name fits the tile at the smallest size it may take', async ({
 
   const tooWide = (measured, budget) =>
     measured.filter(([, width]) => width > budget).map(([text, width]) => `${text} ${width}px`)
-  expect(tooWide(widths.lines, 24), 'names wider than the 24px line at 8.25px').toEqual([])
-  expect(tooWide(widths.roles, 28), 'tab words wider than the 28px tile').toEqual([])
+  expect(tooWide(widths.lines, LINE_PX), `names wider than the ${LINE_PX}px line at 8.25px`).toEqual(
+    [],
+  )
+  expect(tooWide(widths.roles, TILE_PX), `tab words wider than the ${TILE_PX}px tile`).toEqual([])
 })

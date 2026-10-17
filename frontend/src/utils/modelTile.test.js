@@ -1,6 +1,7 @@
+import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 
-import { NAME_FLOOR, nameScale, namedTile } from "./modelTile";
+import { nameScale, namedTile } from "./modelTile";
 
 describe("namedTile", () => {
   it("is null for a row the server named nothing for", () => {
@@ -43,8 +44,22 @@ describe("nameScale", () => {
     expect(two).toBeGreaterThan(band);
   });
 
-  it("shrinks a long name, never below the floor", () => {
-    expect(nameScale(["WWWWWWWWWW"])).toBe(NAME_FLOOR);
+  it("shrinks a long name to fit its line", () => {
+    // The 8.25px floor is the CSS's, so the share itself is not clamped.
+    expect(nameScale(["WWWWWWWWWW"])).toBeCloseTo(1 / (10 * 0.62), 5);
     expect(nameScale(["WWW"])).toBeLessThan(nameScale(["W"]));
+  });
+});
+
+describe("the name's floor", () => {
+  it("is a fixed 8.25px in the tile's CSS, whatever the tile's size", () => {
+    // From the frontend root, as the suite runs: this file's own URL is not a
+    // `file:` one under this module's environment.
+    const css = readFileSync(
+      `${process.cwd()}/src/components/widgets/ModelMark.vue`,
+      "utf8",
+    );
+    const rule = css.match(/\.mmark-name \{[^}]*\}/)[0];
+    expect(rule.replace(/\s+/g, " ")).toContain("font-size: max( 8.25px, calc(");
   });
 });

@@ -247,7 +247,7 @@ describe("WorkflowCard height", () => {
       2 * px(meta.padding) +
       rows.reduce((sum, track) => sum + px(track, t), 0) +
       3 * px(meta["row-gap"]);
-    expect(t["--wf-meta-h"]).toBe(134);
+    expect(t["--wf-meta-h"]).toBe(136);
     expect(total).toBe(t["--wf-meta-h"]);
   });
 
