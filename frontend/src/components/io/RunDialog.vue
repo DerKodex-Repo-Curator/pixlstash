@@ -2642,7 +2642,7 @@ const personFits = computed(() =>
         [...adapters.value, ...unknownLoras.value].filter((row) => !row.hidden),
         entityLists.characters,
       )
-    : { people: [], clash: 0, unknown: 0, family: null },
+    : { people: [], clash: 0, unknown: 0, family: null, baseModel: null },
 );
 /** The people picked for this run, in the order picked; never the fixed one. */
 const personIds = ref([]);
@@ -2667,18 +2667,19 @@ const showPerson = computed(
 );
 const personNote = computed(() => {
   if (fixedPerson.value) return "";
-  const { people, clash, unknown, family } = personFits.value;
+  const { people, clash, unknown, family, baseModel } = personFits.value;
+  if (!family && baseModel) {
+    return `PixlStash cannot match LoRAs to ${baseModel}.`;
+  }
   if (!family) {
     return "This workflow's base model is not known, so no person's LoRA can be matched to it.";
   }
+  if (!people.length) return "PixlStash has no LoRAs for this model.";
   const parts = [];
   if (clash) parts.push(`${clash} whose LoRA is for another base model`);
   if (unknown) parts.push(`${unknown} whose LoRA has no base model recorded`);
-  const left = parts.length ? `Not listed: ${parts.join(", ")}.` : "";
   // The tiles say who can be picked; only who was left out needs words.
-  return people.length
-    ? left
-    : `No person has a LoRA for this workflow's base model, so it runs with no one's. ${left}`.trim();
+  return parts.length ? `Not listed: ${parts.join(", ")}.` : "";
 });
 
 function personName(id) {

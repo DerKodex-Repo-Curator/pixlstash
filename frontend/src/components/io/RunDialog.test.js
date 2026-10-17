@@ -3489,8 +3489,7 @@ describe("the person a workflow run alone is of", () => {
     const wrapper = await mountRun(fromCard);
     expect(tile(wrapper, 8).exists()).toBe(false);
     expect(wrapper.find('[data-testid="rund-person"] .rund-note').text()).toBe(
-      "No person has a LoRA for this workflow's base model, so it runs with " +
-        "no one's. Not listed: 1 whose LoRA is for another base model.",
+      "PixlStash has no LoRAs for this model.",
     );
   });
 
@@ -3499,6 +3498,25 @@ describe("the person a workflow run alone is of", () => {
     const wrapper = await mountRun(fromCard);
     expect(wrapper.find('[role="checkbox"]').exists()).toBe(false);
     expect(wrapper.text()).toContain("This workflow's base model is not known");
+  });
+
+  it("names a base model it cannot match LoRAs to, never calls it unknown", async () => {
+    getWorkflowCard.mockResolvedValue({
+      card: card({
+        models: [
+          {
+            kind: "unet",
+            name: "example",
+            base_model: "Example Base",
+            base_model_family: null,
+          },
+        ],
+      }),
+    });
+    const wrapper = await mountRun(fromCard);
+    expect(wrapper.find('[data-testid="rund-person"] .rund-note').text()).toBe(
+      "PixlStash cannot match LoRAs to Example Base.",
+    );
   });
 
   describe("the trigger word of the person's LoRA", () => {

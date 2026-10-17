@@ -22206,6 +22206,7 @@ def test_the_people_a_workflow_offers_are_those_with_a_lora_for_its_base_model(
     assert (fits["clash"], fits["unknown"]) == (0, 0)
     other = people_who_fit(env.server.hub, env.server.vault, "flux1")
     assert (other["people"], other["clash"], other["unknown"]) == ([], 1, 0)
+    assert other["note"] == "PixlStash has no LoRAs for this model."
     nobody_knows = people_who_fit(env.server.hub, env.server.vault, None)
     assert (nobody_knows["people"], nobody_knows["unknown"]) == ([], 1)
     # A LoRA this library hides is not offered, so it vouches for nobody: the
@@ -22564,6 +22565,24 @@ def test_open_says_where_the_people_loader_goes(a_persons_lora):
     ]
     note = env.owner.get(f"{API}/workflows/{env.manual}/people").json()["note"]
     assert note.startswith("This workflow's base model is not known")
+    # A base model the shelf names but no family table knows is named, never
+    # called unknown.
+    hub = env.server.hub
+    with hub.transaction() as conn:
+        stated = conn.execute(
+            "UPDATE model SET base_model = 'Example Base' WHERE filename = ?",
+            ("realvisxl.safetensors",),
+        ).rowcount
+    try:
+        assert stated == 1
+        note = env.owner.get(f"{API}/workflows/{env.manual}/people").json()["note"]
+        assert note == "PixlStash cannot match LoRAs to Example Base."
+    finally:
+        with hub.transaction() as conn:
+            conn.execute(
+                "UPDATE model SET base_model = NULL WHERE filename = ?",
+                ("realvisxl.safetensors",),
+            )
 
 
 def test_open_places_a_people_loader_after_every_copy_of_the_model(

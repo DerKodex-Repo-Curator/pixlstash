@@ -1992,7 +1992,9 @@ def lora_owners(vault) -> dict[str, set[int]]:
     return owners
 
 
-def people_who_fit(hub, vault, family: Optional[str]) -> dict:
+def people_who_fit(
+    hub, vault, family: Optional[str], base_model: Optional[str] = None
+) -> dict:
     """The people a run of a workflow can be of, for a checkpoint of *family*.
 
     **The one answer to "who fits this workflow"** (rule 4 of #1846), read by
@@ -2005,6 +2007,9 @@ def people_who_fit(hub, vault, family: Optional[str]) -> dict:
     workflow's, was never identified) is counted in ``unknown``, and one whose
     every LoRA is for another base model in ``clash``. A workflow that starts
     from a picture still takes a person, so its type is not asked.
+    *base_model* is the checkpoint's base-model label, which only the note
+    reads: a label of no family the table knows is named rather than called
+    unknown.
 
     Returns:
         ``{"family", "people": [{"id", "name", "loras": [{"sha256",
@@ -2065,31 +2070,24 @@ def people_who_fit(hub, vault, family: Optional[str]) -> dict:
         "people": people,
         "clash": clash,
         "unknown": unknown,
-        "note": _nobody_fits_note(family, clash, unknown) if not people else None,
+        "note": _nobody_fits_note(family, base_model) if not people else None,
     }
 
 
-def _nobody_fits_note(family: Optional[str], clash: int, unknown: int) -> str:
+def _nobody_fits_note(family: Optional[str], base_model: Optional[str]) -> str:
     """Why a workflow offers nobody, as the Run popup says it.
 
     The words of ``personNote`` in ``frontend/src/components/io/RunDialog.vue``,
     which the people loader in ComfyUI shows too: change both together.
     """
+    if not family and base_model:
+        return f"PixlStash cannot match LoRAs to {base_model}."
     if not family:
         return (
             "This workflow's base model is not known, so no person's LoRA can "
             "be matched to it."
         )
-    parts = []
-    if clash:
-        parts.append(f"{clash} whose LoRA is for another base model")
-    if unknown:
-        parts.append(f"{unknown} whose LoRA has no base model recorded")
-    left = f" Not listed: {', '.join(parts)}." if parts else ""
-    return (
-        "No person has a LoRA for this workflow's base model, so it runs with "
-        f"no one's.{left}"
-    )
+    return "PixlStash has no LoRAs for this model."
 
 
 def replace_attachments(
