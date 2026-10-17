@@ -162,7 +162,12 @@
 // A card row names the BASE MODEL only (checkpoint, or the unet a Flux or SD3
 // graph carries instead); ⓘ lists every model.
 
-import { generatedMark, modelName, quantBadge } from "./modelShelf.js";
+import {
+  generatedMark,
+  initialsOf,
+  modelName,
+  quantBadge,
+} from "./modelShelf.js";
 import { cropImgStyle } from "./squareCrop.js";
 
 /**
@@ -309,19 +314,20 @@ export function loraGroups(card) {
 }
 
 /**
- * The rows a card's strip hands `ModelMark`, renamed where two would draw the
- * same generated mark.
+ * A second line of letters for each of a card's marks that would otherwise
+ * draw the same tile, else null: one entry per row.
  *
  * A mark with no icon is the name's first two initials, its first number and
  * its base model's colour, so a family of files named alike - a Qwen Image
  * Edit 2511 checkpoint and two LoRAs for it, an SDXL 1.0 base and refiner -
  * draws one tile several times. The shelf prints a name beside each mark; the
- * card prints none, so here the words such marks' names share are dropped and
- * each is drawn from what is left (`Lightning 4steps V1.0`, `Refiner`). A name
- * with nothing left keeps its own. Only the mark changes: tooltips and the
- * accessible name still say the whole name.
+ * card prints none, so such a tile keeps its family's initials on top and
+ * takes a second line from the words its name does not share with the others
+ * (`Lightning 4steps V1.0` is LI, `Refiner` RE). A name with nothing left takes
+ * it from the words after its initials (`qwen image edit 2511` is ED). Only the
+ * tile changes: tooltips and the accessible name still say the whole name.
  */
-export function distinctMarkRows(rows) {
+export function markDetails(rows) {
   const lookalikes = new Map();
   rows.forEach((row, i) => {
     if (row.icon_sha256) return;
@@ -329,7 +335,7 @@ export function distinctMarkRows(rows) {
     const key = `${color}|${initials}|${version}`;
     lookalikes.set(key, [...(lookalikes.get(key) ?? []), i]);
   });
-  const renamed = [...rows];
+  const details = rows.map(() => null);
   for (const members of lookalikes.values()) {
     if (members.length < 2) continue;
     // Not on "." - it would split a `1.0` the remainder may need to keep.
@@ -347,11 +353,12 @@ export function distinctMarkRows(rows) {
       shared += 1;
     }
     members.forEach((i, j) => {
-      const rest = words[j].slice(shared).join(" ");
-      if (rest) renamed[i] = { ...rows[i], display_name: rest };
+      const rest = words[j].slice(shared);
+      const letters = initialsOf((rest.length ? rest : words[j].slice(2)).join(" "));
+      if (letters !== "?") details[i] = letters;
     });
   }
-  return renamed;
+  return details;
 }
 
 /**

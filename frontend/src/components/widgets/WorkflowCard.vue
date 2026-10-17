@@ -86,7 +86,7 @@
                 activator="parent"
                 :describe="false"
               />
-              <ModelMark :row="mark.row" />
+              <ModelMark :row="mark.row" :detail="mark.detail" />
               <span v-if="mark.count > 1" class="wf-card__mark-count"
                 >×{{ mark.count }}</span
               >
@@ -208,7 +208,7 @@ import { quantBadge } from "../../utils/modelShelf";
 import {
   cardAccessibleName,
   baseModels,
-  distinctMarkRows,
+  markDetails,
   baseModelText,
   coverCellStyle,
   factChips,
@@ -401,8 +401,8 @@ const shownMarks = computed(() => {
 // Told apart among the marks actually drawn: a look-alike clipped into "+N" is
 // not on screen to be confused with.
 const stripMarks = computed(() => {
-  const rows = distinctMarkRows(shownMarks.value.map((mark) => mark.row));
-  return shownMarks.value.map((mark, i) => ({ ...mark, row: rows[i] }));
+  const details = markDetails(shownMarks.value.map((mark) => mark.row));
+  return shownMarks.value.map((mark, i) => ({ ...mark, detail: details[i] }));
 });
 // Counts the models left off, each as many times as it is loaded, so the
 // marks, their "×N" and the "+N" add up to the loaders the card has.

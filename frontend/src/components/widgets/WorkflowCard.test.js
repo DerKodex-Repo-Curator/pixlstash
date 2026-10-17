@@ -493,13 +493,17 @@ describe("WorkflowCard", () => {
     expect(wrapper.find(".wf-card__lora-count").text()).toBe("17 LoRAs");
   });
 
-  it("tells apart marks whose names share their leading words", () => {
-    // Each pair below would draw one tile twice: the initials are the name's
-    // first two words, the tab its first number, the colour its base model.
+  it("gives look-alike marks a second line of letters", () => {
+    // Each set below would draw one tile several times: the initials are the
+    // name's first two words, the tab its first number, the colour its base
+    // model. The tab stays.
     const tiles = (card) =>
       mountCard(card)
-        .findAll(".wf-card__strip .wf-card__mark")
-        .map((mark) => mark.find(".mmark").text());
+        .findAll(".wf-card__strip .wf-card__mark .mmark")
+        .map((mark) => [
+          mark.findAll(".mmark-initials > span").map((line) => line.text()),
+          mark.find(".mmark-version").exists(),
+        ]);
     const qwen = { base_model_folded: "Qwen-Image-Edit", quant: "bf16" };
     expect(
       tiles({
@@ -525,7 +529,11 @@ describe("WorkflowCard", () => {
           },
         ],
       }),
-    ).toEqual(["QI25", "LV4", "MA"]);
+    ).toEqual([
+      [["QI", "ED"], true],
+      [["QI", "LI"], true],
+      [["QI", "MA"], true],
+    ]);
     const sdxl = { base_model_folded: "SDXL 1.0", kind: "checkpoint" };
     expect(
       tiles({
@@ -545,7 +553,21 @@ describe("WorkflowCard", () => {
           },
         ],
       }),
-    ).toEqual(["BA", "RE"]);
+    ).toEqual([
+      [["SD", "BA"], true],
+      [["SD", "RE"], true],
+    ]);
+    // A mark nothing else looks like keeps one line and its tab.
+    expect(
+      tiles({
+        ...BARE,
+        models: [{ ...sdxl, name: "sd xl base 1.0", title: "SDXL Base 1.0" }],
+        loras: [{ name: "add detail xl 2" }],
+      }),
+    ).toEqual([
+      [["SB"], true],
+      [["AD"], true],
+    ]);
   });
 
   it("counts every loader of a model the strip left off in its +N", () => {
