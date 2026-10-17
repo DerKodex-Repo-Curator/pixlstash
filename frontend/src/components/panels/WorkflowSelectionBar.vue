@@ -673,7 +673,13 @@ const VerbMenu = () => {
         onMouseenter: (event) => {
           if (!disabled) openComfyuiSub(event.currentTarget);
         },
-        onMouseleave: () => (comfyuiSubOpen.value = false),
+        // Not while a row in it holds focus: a pointer crossing the row after
+        // the keyboard opened it would take the focused row away with it.
+        onMouseleave: (event) => {
+          if (!event.currentTarget.contains(document.activeElement)) {
+            comfyuiSubOpen.value = false;
+          }
+        },
         onFocusout: (event) => {
           if (!event.currentTarget.contains(event.relatedTarget)) {
             comfyuiSubOpen.value = false;

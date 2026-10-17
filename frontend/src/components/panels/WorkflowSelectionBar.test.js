@@ -583,6 +583,12 @@ describe("Open in ComfyUI", () => {
     await rows[0].trigger("keydown", { key: "ArrowDown" });
     expect(document.activeElement).toBe(rows[1].element);
 
+    // A pointer passing over and off the row leaves a focused submenu open.
+    await row.element.parentElement.dispatchEvent(new MouseEvent("mouseleave"));
+    await flushPromises();
+    expect(document.activeElement).toBe(rows[1].element);
+    expect(wrapper.find(".ctx-submenu").exists()).toBe(true);
+
     await rows[1].trigger("keydown", { key: "ArrowLeft" });
     expect(document.activeElement).toBe(row.element);
     expect(wrapper.find(".ctx-submenu").exists()).toBe(false);
