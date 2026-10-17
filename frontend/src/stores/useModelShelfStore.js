@@ -4225,7 +4225,9 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
    */
   function setFilters(patch, { refetch = false } = {}) {
     Object.assign(filters, patch);
-    remember();
+    // The name text is never stored, so a keystroke in the name field writes
+    // nothing.
+    if (Object.keys(patch).some((key) => key !== "name")) remember();
     return refetch ? fetchRows() : Promise.resolve();
   }
 

@@ -2516,7 +2516,12 @@ describe("duplicate copies", () => {
     await store.setFilters({ name: "other_thing_V2" });
     expect(store.visibleRows.map((r) => r.id)).toEqual([2]);
 
-    // A search is not remembered across a reload.
+    // A search is not remembered across a reload, and typing one writes
+    // nothing to storage.
+    const writes = vi.spyOn(Storage.prototype, "setItem");
+    await store.setFilters({ name: "cyan" });
+    expect(writes).not.toHaveBeenCalled();
+    writes.mockRestore();
     setActivePinia(createPinia());
     expect(useModelShelfStore().filters.name).toBe("");
 
