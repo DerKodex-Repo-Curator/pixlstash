@@ -6,6 +6,23 @@
       <span class="wfv-title">Workflows</span>
       <span class="wfv-sub num">{{ subtitle }}</span>
 
+      <!-- "Add" is today's workflow import, unchanged: the file lands through
+           `POST /comfyui/workflows/import`, the route the retired shelf's own
+           drop target posted to. The gesture went with the shelf; this screen
+           has no drop handler, so `useWindowFileImport` no longer stands
+           aside for it. -->
+      <AppBarButton icon="plus" @click="fileInput?.click()">Add…</AppBarButton>
+      <input
+        ref="fileInput"
+        class="wfv-file-input"
+        type="file"
+        accept=".json,application/json"
+        multiple
+        tabindex="-1"
+        aria-hidden="true"
+        @change="filesChosen"
+      />
+
       <v-menu
         v-model="sortMenuOpen"
         location="bottom start"
@@ -68,23 +85,6 @@
           :focus-name-request="nameFocusRequest"
         />
       </v-menu>
-
-      <!-- "Add" is today's workflow import, unchanged: the file lands through
-           `POST /comfyui/workflows/import`, the route the retired shelf's own
-           drop target posted to. The gesture went with the shelf; this screen
-           has no drop handler, so `useWindowFileImport` no longer stands
-           aside for it. -->
-      <AppBarButton icon="plus" @click="fileInput?.click()">Add…</AppBarButton>
-      <input
-        ref="fileInput"
-        class="wfv-file-input"
-        type="file"
-        accept=".json,application/json"
-        multiple
-        tabindex="-1"
-        aria-hidden="true"
-        @change="filesChosen"
-      />
 
       <!-- The name filter's toolbar copy, bound to the same text as the field
            at the top of Filters, which is always there when this one folds. -->

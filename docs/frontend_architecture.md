@@ -2023,10 +2023,11 @@ the core rule groups workflows instead (there is no merge or split), and a check
 LoRA that used to be a member is a recipe value the workflow's pictures are
 filtered by.
 
-- **Toolbar**: Sort (Your ratings / Recently used / Recently changed /
-  Recently created / Picture count / Name) in the
-  shipped `.tbm` popover, *Add…*, which is today's workflow import
-  (`POST /comfyui/workflows/import`) rather than anything new, and then the
+- **Toolbar**: *Add…* first, which is today's workflow import
+  (`POST /comfyui/workflows/import`) rather than anything new; then Sort (Your
+  ratings / Recently used / Recently changed / Recently created / Picture
+  count / Name) in the shipped `.tbm` popover, Filters and the name field
+  (below); and then the
   app-wide tail — `[separator] [TbGlobalActions]` in its own `--space-3`
   cluster, `rail-name="inspector"`. Replacing the grid replaces the grid's
   toolbar, so without the tail nothing on this screen opens Settings or the
@@ -2048,7 +2049,7 @@ filtered by.
   (`All` for Type, `Any` for the rest, counting every card) and has no Clear
   of its own. Above the kinds sits a **name field** (`NameFilterField.vue`,
   `filters.name`, a case-blind substring of the card's name, chipped as
-  *Name*); the toolbar carries a second copy of it after *Add…*, bound to the
+  *Name*); the toolbar carries a second copy of it after Filters, bound to the
   same value and folded by a container query when the bar is narrow. The
   app's `F` key (`searchStore.searchFocusToken`) focuses the toolbar copy, or
   opens Filters on the menu's copy when the toolbar's is folded. Keys follow
