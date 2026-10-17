@@ -835,7 +835,8 @@ def _pack_digest(value):
     if not isinstance(value, str):
         return None
     lowered = value.lower()
-    return lowered if DIGEST_PREFIX_RE.match(lowered) else None
+    # `fullmatch`: the pattern's `$` also matches before a trailing newline.
+    return lowered if DIGEST_PREFIX_RE.fullmatch(lowered) else None
 
 
 def _shelf_id_text(widget: str, value):

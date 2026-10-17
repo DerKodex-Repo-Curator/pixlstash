@@ -264,6 +264,9 @@ def test_loaded_model_widgets_reads_the_pack_loaders_digests() -> None:
     # Only a digest names a model there, as the structural hash reads it.
     api["1"]["inputs"]["control_net_sha256"] = "canny.safetensors"
     assert loaded_model_widgets(api) == expected[1:]
+    api["1"]["inputs"]["control_net_sha256"] = cn + "\n"
+    assert loaded_model_widgets(api) == expected[1:]
+    api["1"]["inputs"]["control_net_sha256"] = cn
     # An editor file that declares no inputs: the digest is the loader's only
     # widget, so it is slot 0.
     for node in ui["nodes"]:
