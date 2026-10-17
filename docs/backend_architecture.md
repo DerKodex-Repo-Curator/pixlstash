@@ -3273,7 +3273,13 @@ next, and a graph that only moved nodes is `unchanged` and still replaces it.
   when it is looked for: which of the two a graph holds follows the shelf,
   the library and the pins on the day, and a layout dropped each time that
   changed would rarely be there. ComfyUI-PixlStash replaces the node on the
-  canvas (`open_workflow.js::swapNodes`) before the check below. A layout
+  canvas (`open_workflow.js::swapNodes`) before the check below, inside a
+  subgraph too: a node `75:3` is replaced in the subgraph node 75 is an
+  instance of and wired to its inputs and outputs, so the subgraph stays one
+  (a dropped layout opens through `app.loadApiJson`, which flattens every
+  subgraph). A value is written where ComfyUI reads it, on the subgraph
+  node's promoted widget where the inner input is wired to the subgraph's
+  input, and a toast names a subgraph whose nodes were replaced. A layout
   kept before this was matched on the classes as they stood, so
   `_layout_for` also reads the graph as it was before the swap. That is cheap and keeps a
   stale layout off the wire, but **the two documents arrive side by side on
