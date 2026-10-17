@@ -3567,11 +3567,13 @@ describe("expose a parameter", () => {
     expect(dialog(wrapper).exists()).toBe(false);
     expect(lockOf(wrapper, "scale_by").attributes("aria-pressed")).toBe("false");
     expect(inFixedGroup(wrapper, "scale_by")).toBe(false);
-    // Named after its setting alone, so the row says which node's it is; a
+    // Named after its setting alone, so its tip says which node's it is; a
     // parameter the pictures vote on needs no telling, though its node is
     // in the same read.
-    expect(rowNamed(wrapper, "scale_by").find(".wfdef-node").text()).toBe("Final upscale");
-    expect(rowNamed(wrapper, "sampler_name").find(".wfdef-node").exists()).toBe(false);
+    const tip = (name) =>
+      rowNamed(wrapper, name).find(".wfdef-name").findComponent({ name: "Tooltip" });
+    expect(tip("scale_by").props("text")).toBe("Final upscale · scale_by");
+    expect(tip("sampler_name").exists()).toBe(false);
     // Its ↺ would have nothing to go back to: the button removes the row.
     expect(
       rowNamed(wrapper, "scale_by").find("[data-testid='wfdef-reset']").attributes("aria-label"),

@@ -30,6 +30,16 @@ export function parameterAddress(row) {
 }
 
 /**
+ * A parameter's name as a row shows it: the setting alone. ComfyUI names an
+ * option of a dynamic combo after the combo too (`resize_type.multiplier`),
+ * which does not fit a row, so the row says `multiplier` and its tooltip the
+ * whole name.
+ */
+export function parameterName(label) {
+  return String(label).split(".").pop();
+}
+
+/**
  * `{address: [option]}` for every drop-down `GET …/form-inputs` lists: what
  * ComfyUI offers for each parameter that is a choice there.
  */

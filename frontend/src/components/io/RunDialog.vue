@@ -525,7 +525,12 @@
           class="rund-f rund-f--2"
         >
           <span class="rund-l">
-            {{ field.label }}
+            {{ parameterName(field.label) }}
+            <Tooltip
+              v-if="parameterName(field.label) !== field.label"
+              :text="field.label"
+              activator="parent"
+            />
             <!-- A parameter the owner added is named after its setting alone:
                  the node says which of two "text"s this is. -->
             <span v-if="field.exposed && formNodeNames[address(field)]">
@@ -808,7 +813,12 @@
               <!-- A value kept from another workflow or a saved recipe still
                    overrides a fixed one for this run, so it keeps its ↺. -->
               <span class="rund-l">
-                {{ field.label }}
+                {{ parameterName(field.label) }}
+                <Tooltip
+                  v-if="parameterName(field.label) !== field.label"
+                  :text="field.label"
+                  activator="parent"
+                />
                 <RunResetChip
                   v-if="isEdited(field)"
                   :value="baseOf(field)"
@@ -1180,6 +1190,7 @@ import {
   choicesFor,
   nodesByAddress,
   optionsByAddress,
+  parameterName,
   setEachRun,
 } from "../../utils/workflowPins";
 import {
