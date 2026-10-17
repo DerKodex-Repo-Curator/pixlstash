@@ -3489,8 +3489,7 @@ describe("the person a workflow run alone is of", () => {
     const wrapper = await mountRun(fromCard);
     expect(tile(wrapper, 8).exists()).toBe(false);
     expect(wrapper.find('[data-testid="rund-person"] .rund-note').text()).toBe(
-      "No person has a LoRA for this workflow's base model, so it runs with " +
-        "no one's. Not listed: 1 whose LoRA is for another base model.",
+      "PixlStash has no LoRAs for this model.",
     );
   });
 
@@ -3516,8 +3515,7 @@ describe("the person a workflow run alone is of", () => {
     });
     const wrapper = await mountRun(fromCard);
     expect(wrapper.find('[data-testid="rund-person"] .rund-note').text()).toBe(
-      "PixlStash cannot tell which LoRAs fit Example Base, this workflow's " +
-        "base model, so no person's LoRA can be matched to it.",
+      "PixlStash cannot match LoRAs to Example Base.",
     );
   });
 

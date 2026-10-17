@@ -22111,6 +22111,7 @@ def test_the_people_a_workflow_offers_are_those_with_a_lora_for_its_base_model(
     assert (fits["clash"], fits["unknown"]) == (0, 0)
     other = people_who_fit(env.server.hub, env.server.vault, "flux1")
     assert (other["people"], other["clash"], other["unknown"]) == ([], 1, 0)
+    assert other["note"] == "PixlStash has no LoRAs for this model."
     nobody_knows = people_who_fit(env.server.hub, env.server.vault, None)
     assert (nobody_knows["people"], nobody_knows["unknown"]) == ([], 1)
     # A LoRA this library hides is not offered, so it vouches for nobody: the
@@ -22480,10 +22481,7 @@ def test_open_says_where_the_people_loader_goes(a_persons_lora):
     try:
         assert stated == 1
         note = env.owner.get(f"{API}/workflows/{env.manual}/people").json()["note"]
-        assert note == (
-            "PixlStash cannot tell which LoRAs fit Example Base, this workflow's "
-            "base model, so no person's LoRA can be matched to it."
-        )
+        assert note == "PixlStash cannot match LoRAs to Example Base."
     finally:
         with hub.transaction() as conn:
             conn.execute(

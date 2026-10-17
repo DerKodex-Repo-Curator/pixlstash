@@ -2070,42 +2070,24 @@ def people_who_fit(
         "people": people,
         "clash": clash,
         "unknown": unknown,
-        "note": (
-            _nobody_fits_note(family, clash, unknown, base_model)
-            if not people
-            else None
-        ),
+        "note": _nobody_fits_note(family, base_model) if not people else None,
     }
 
 
-def _nobody_fits_note(
-    family: Optional[str], clash: int, unknown: int, base_model: Optional[str]
-) -> str:
+def _nobody_fits_note(family: Optional[str], base_model: Optional[str]) -> str:
     """Why a workflow offers nobody, as the Run popup says it.
 
     The words of ``personNote`` in ``frontend/src/components/io/RunDialog.vue``,
     which the people loader in ComfyUI shows too: change both together.
     """
     if not family and base_model:
-        return (
-            f"PixlStash cannot tell which LoRAs fit {base_model}, this "
-            "workflow's base model, so no person's LoRA can be matched to it."
-        )
+        return f"PixlStash cannot match LoRAs to {base_model}."
     if not family:
         return (
             "This workflow's base model is not known, so no person's LoRA can "
             "be matched to it."
         )
-    parts = []
-    if clash:
-        parts.append(f"{clash} whose LoRA is for another base model")
-    if unknown:
-        parts.append(f"{unknown} whose LoRA has no base model recorded")
-    left = f" Not listed: {', '.join(parts)}." if parts else ""
-    return (
-        "No person has a LoRA for this workflow's base model, so it runs with "
-        f"no one's.{left}"
-    )
+    return "PixlStash has no LoRAs for this model."
 
 
 def replace_attachments(
