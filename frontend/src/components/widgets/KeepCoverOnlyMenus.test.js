@@ -372,3 +372,15 @@ describe("the Edit stack submenu and the keyboard", () => {
     expect(wrap.find(".ctx-submenu").exists()).toBe(false);
   });
 });
+
+describe("the lightbox menu with nothing to order", () => {
+  it("has no Edit stack row rather than an empty submenu", () => {
+    const wrapper = mountContextMenu({
+      overlayMode: true,
+      selectedImageIds: ["11"],
+      contextImage: { id: "11" },
+      stackEdit: { kind: "collapsed", count: 4 },
+    });
+    expect(editStackWrap(wrapper)).toBeUndefined();
+  });
+});

@@ -1071,9 +1071,15 @@ export function useStackOrdering(
     for (const [stackId, members] of byStack) {
       if (members.length < 2) continue;
       // The order route needs every member, so a stack only partly on screen
-      // has no order to offer: a move from it would be refused.
-      const expected = Math.max(...members.map(getStackBadgeCount));
-      if (members.length < expected) continue;
+      // has no order to offer: a move from it would be refused. The size comes
+      // from the members list fetched on expand as well as the badge, and a
+      // stack whose size nobody knows (stale rows carrying no count) offers no
+      // order either, rather than trusting what happens to be on screen.
+      const expected = Math.max(
+        expandedStackMembers.value.get(stackId)?.ids?.length || 0,
+        ...members.map(getStackBadgeCount),
+      );
+      if (expected < 2 || members.length < expected) continue;
       result.set(
         stackId,
         sortStackMembers(members).map((img) => String(img.id)),

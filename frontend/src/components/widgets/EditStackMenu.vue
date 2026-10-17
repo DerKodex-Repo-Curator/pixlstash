@@ -4,7 +4,7 @@
        Keep cover only. Shared by the picture menu, the lightbox menu and the
        selection pill's menu, so the three cannot drift apart. -->
   <div
-    v-if="target"
+    v-if="target && (!orderOnly || target.kind === 'member')"
     class="ctx-submenu-wrap"
     @mouseenter="open = true"
     @mouseleave="open = false"
@@ -153,7 +153,9 @@ const props = defineProps({
   target: { type: Object, default: null },
   readOnly: { type: Boolean, default: false },
   // The lightbox offers only the order: taking a stack apart there would
-  // rebuild the filmstrip under the picture being looked at.
+  // rebuild the filmstrip under the picture being looked at. With nothing to
+  // order (anything but one picture of a stack) there is no row at all, rather
+  // than a submenu holding only its heading.
   orderOnly: { type: Boolean, default: false },
   keepCoverOnlyStackCount: { type: Number, default: 0 },
   keepCoverOnlyLockReason: { type: String, default: null },
