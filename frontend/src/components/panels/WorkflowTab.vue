@@ -4403,12 +4403,24 @@ async function checkInstalled(key, { quiet = false } = {}) {
   color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
 }
 
-/* A group's count, set apart by colour and weight rather than a separator. */
+/* A group's count: a raspberry pill, the charts' hue. As text the raspberry
+   reads 2.3:1 on the dark panel, so it is the fill and on-secondary the label
+   (4.91:1 in both themes). */
 .wftab-count {
-  margin-left: var(--space-1);
+  margin-left: var(--space-3);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--badge-size);
+  height: var(--badge-size);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  background: rgb(var(--v-theme-secondary));
+  color: rgb(var(--v-theme-on-secondary));
+  font-size: var(--text-2xs);
   font-weight: var(--weight-semibold);
   font-variant-numeric: tabular-nums;
-  color: var(--selected-ink);
+  line-height: 1;
 }
 
 .wftab-rows {

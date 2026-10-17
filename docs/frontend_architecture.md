@@ -2369,7 +2369,7 @@ can no longer see.
   change waits on it (below). A parameter row's reset writes, because
   `PUT …/defaults` takes parameters only; a model or strength row's reset
   only takes its change back out of the waiting set.
-  **Parameters** groups rows as *Set each run* and *Pinned N* (the count in `--selected-ink`, no separator) (folded behind
+  **Parameters** groups rows as *Set each run* and *Pinned N* (the count a `secondary` raspberry pill, no separator) (folded behind
   a disclosure past three), by the pins as they were when the workflow was
   opened (`openedPins`), so a toggled row stays under the pointer. Each row
   (`WorkflowDefaultRow.vue`: name, value, lock on `1fr 1fr --control-h-sm`)
