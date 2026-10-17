@@ -22085,6 +22085,55 @@ def test_a_layout_saved_from_comfyui_opens_again_and_is_never_a_version(saving):
     assert _opened(saving, saving.manual, all_stages="true")["editor"] is None
 
 
+def test_an_imported_editor_file_opens_as_its_own_layout(saving):
+    """A layout is kept only by a save from ComfyUI, so until one is, a
+    workflow imported from an editor file opens with that file: its subgraphs
+    and positions as they were, over its own wiring only.
+
+    Wrong if it opens auto-arranged (``editor`` None), which ComfyUI's API
+    loader does by flattening every subgraph, or if the file opens over a
+    graph rewired since.
+    """
+    hub = saving.server.hub
+    editor = _editor(definitions={"subgraphs": [{"id": "a-subgraph", "nodes": []}]})
+    imported = workflows_routes.store_manual_workflow(hub, "Imported", editor, "import")
+    # ComfyUI's conversion, stored beside the file as an export stores it.
+    workflow_group_writes.set_manual_api_document(
+        hub, [imported], json.loads(json.dumps(CHAIN_DOCUMENT))
+    )
+    opened = _opened(saving, imported, all_stages="true")["editor"]
+    assert (opened["nodes"], opened["definitions"]) == (
+        editor["nodes"],
+        editor["definitions"],
+    )
+
+    # A loader skipped and not yet saved rewires what opens: not the file's.
+    _put_changes(saving, imported, **SKIP_FIVE)
+    opened = _opened(saving, imported, waiting="true", all_stages="true")
+    assert opened["waiting_applied"] is True
+    assert opened["editor"] is None
+
+
+def test_an_imported_file_with_a_persons_lora_opens_with_no_layout(a_persons_lora):
+    """Rule 4 for an imported file too: one whose graph loads a person's LoRA
+    in an ordinary loader opens with no layout, as a save of it keeps none,
+    though no widget of the file names the LoRA. Held twice: the loader is
+    taken out of the graph that opens, so the file's wiring no longer fits
+    either.
+
+    Wrong if ``editor`` is the file.
+    """
+    env = a_persons_lora
+    hub = env.server.hub
+    imported = workflows_routes.store_manual_workflow(
+        hub, "Imported", _editor(), "import"
+    )
+    workflow_group_writes.set_manual_api_document(
+        hub, [imported], json.loads(json.dumps(CHAIN_DOCUMENT))
+    )
+    assert _opened(env, imported, all_stages="true")["editor"] is None
+
+
 def test_a_layout_never_holds_what_a_workflow_may_not(a_persons_lora):
     """Rule 4 for the layout too: the people picked in the loader are not in
     it, and a canvas with a person's LoRA in an ordinary loader keeps none.

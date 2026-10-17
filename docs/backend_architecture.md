@@ -3260,6 +3260,12 @@ node or what is picked in it.
 from ComfyUI sends the editor document its graph was converted from (`editor`
 on `PUT …/graph`); one is kept per workflow, of either kind, replaced by the
 next, and a graph that only moved nodes is `unchanged` and still replaces it.
+**Until one is kept, a manual workflow imported from an editor file opens with
+that file** (`_imported_layout`), by the same rules (a person's LoRA in the
+graph keeps none) and only over the wiring of the conversion stored beside it,
+until a save from ComfyUI replaces it: without it the first open went through
+`app.loadApiJson`, which flattens every subgraph, and a save from that canvas
+then kept the flattened layout for good.
 
 - **Two checks stand between a layout and a canvas, and the second is the one
   that binds.** `_keep_layout` stores `workflow_run_service.graph_structure`
