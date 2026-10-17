@@ -17,6 +17,18 @@ Formatting and lint; a route with no `ROUTE_POLICIES` entry; a test file not
 gated in CI; private IP literals; unpinned action references; changelog
 fragment format.
 
+## Public by design, do not report
+
+- **The demo token** `o75qQ-w0fy_FraPb2sdxcGOVTBoKFmmZwStycljomSs` is a
+  READ-scope share token for the public demo library at
+  `https://demo.pixlstash.dev`. It is meant to be seen: it sits in the "Try
+  demo" links (`README.md`, `website/index.html`, `website/features.html`,
+  `website/nav.js`) and is prefilled in every published API reference
+  (`website/api/v*/index.html`, written by `scripts/generate_openapi_docs.py`)
+  so its requests run live. Do not ask to remove or rotate it. A finding is
+  any other token string in those places, or this one given more than READ
+  scope.
+
 ## Backend rules to check
 
 - **Authorization.** Object access is enforced centrally from
