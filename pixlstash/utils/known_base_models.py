@@ -408,7 +408,7 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
         "mark": ["Pony"],
         "version": "V7",
         "icon": "pony",
-        "aliases": ["ponyv7"],
+        "aliases": ["ponyv7", "pony diffusion v7"],
     },
     "Illustrious XL": {
         "family": "sdxl",
@@ -816,7 +816,8 @@ def identify(
     match on a filename token beats a fuzzy match on a declared value:
 
     1. a declared value folds exactly - ``declared``;
-    2. the whole stem, or one token of it, folds exactly - ``filename``;
+    2. the whole stem, or a run of whole tokens in it, folds exactly, the
+       longest run winning - ``filename``;
     3. a declared value is within edit distance of an alias -
        ``declared_fuzzy``;
     4. an alias of at least :data:`_MIN_CONTAINED_ALIAS` characters occurs in a
@@ -841,13 +842,19 @@ def identify(
         if _local(label):
             return label, SOURCE_DECLARED
     for stem in stems:
-        if _local(fold(stem)):
-            return fold(stem), SOURCE_FILENAME
-        # The longest token that names a base model, not the first: in
-        # `sdxl_illustrious_char` the specific base is the one that says more.
-        tokens = [t for t in _FILENAME_SEPARATORS_RE.split(stem) if _local(fold(t))]
-        if tokens:
-            return fold(max(tokens, key=lambda t: len(_norm(t)))), SOURCE_FILENAME
+        # The longest run of whole tokens that names a base model, not the
+        # first token: in `sdxl_illustrious_char` the specific base is the one
+        # that says more, and `qwen_image_edit` is Qwen-Image-Edit, not the
+        # `qwen` it starts with. The whole stem is the longest run.
+        tokens = [t for t in _FILENAME_SEPARATORS_RE.split(stem) if t]
+        runs = [
+            "".join(tokens[start:end])
+            for start in range(len(tokens))
+            for end in range(start + 1, len(tokens) + 1)
+        ]
+        runs = [r for r in runs if _local(fold(r))]
+        if runs:
+            return fold(max(runs, key=lambda r: len(_norm(r)))), SOURCE_FILENAME
     for value in values:
         key = _norm(value)
         hits = [h for h in _scored(key, _DECLARED_FUZZY_CUTOFF) if _local(h[1])]

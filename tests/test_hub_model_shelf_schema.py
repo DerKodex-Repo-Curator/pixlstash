@@ -33,6 +33,7 @@ from pixlstash.hub.schema import (
     _V2_MODEL,
     _V2_MODEL_FILE,
     _backfill_base_model_canonical,
+    _forget_stale_filename_guesses,
     apply_migrations,
     read_schema_version,
 )
@@ -729,6 +730,56 @@ class TestBaseModelCanonicalBackfill:
         apply_migrations(hub)
 
         assert self._identified(hub) == {"x.safetensors": ("SDXL 1.0", "declared")}
+
+
+class TestStaleFilenameGuesses:
+    """Data step 22: filename answers the token-run matcher reads differently."""
+
+    def test_it_clears_only_filename_answers_that_now_differ(self, hub):
+        apply_migrations(hub)
+        rows = {
+            # The #1959 cases: the old single-token answers.
+            "qwen_image_edit_2511_bf16.safetensors": ("Qwen-Image", "filename"),
+            "pony_v7_mystyle.safetensors": ("Pony Diffusion V6 XL", "filename"),
+            # Still what the matcher says: left alone.
+            "qwen_image_2512.safetensors": ("Qwen-Image", "filename"),
+            "myflux2lora.safetensors": ("FLUX.2", "filename_fuzzy"),
+            # A person's or a declaration's answer is never re-guessed.
+            "pony_v7_user.safetensors": ("Pony Diffusion V6 XL", "user"),
+            "pony_v7_declared.safetensors": ("Pony Diffusion V6 XL", "declared"),
+        }
+        for n, (filename, (canonical, source)) in enumerate(rows.items()):
+            add_model(
+                hub,
+                sha256=str(n),
+                filename=filename,
+                base_model_canonical=canonical,
+                base_model_source=source,
+            )
+        expected = dict(rows)
+        expected["qwen_image_edit_2511_bf16.safetensors"] = (None, None)
+        expected["pony_v7_mystyle.safetensors"] = (None, None)
+
+        assert _forget_stale_filename_guesses(hub) == 2
+        assert TestBaseModelCanonicalBackfill._identified(hub) == expected
+        assert _forget_stale_filename_guesses(hub) == 0
+
+    def test_apply_migrations_runs_it_on_a_data_v21_hub(self, hub):
+        apply_migrations(hub)
+        add_model(
+            hub,
+            filename="pony_diffusion_v7.safetensors",
+            base_model_canonical="Pony Diffusion V6 XL",
+            base_model_source="filename",
+        )
+        hub.execute("PRAGMA user_version = 21")
+        hub.commit()
+
+        apply_migrations(hub)
+
+        assert TestBaseModelCanonicalBackfill._identified(hub) == {
+            "pony_diffusion_v7.safetensors": (None, None)
+        }
 
 
 class TestComponentRoleBackfill:

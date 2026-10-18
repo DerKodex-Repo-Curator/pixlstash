@@ -118,6 +118,28 @@ def test_the_longest_base_model_token_wins_whatever_its_position():
         assert identify([], [name]) == ("Illustrious XL", SOURCE_FILENAME), name
 
 
+def test_a_base_model_spelled_across_tokens_beats_one_token_of_it():
+    # `qwen` and `pony` fold on their own; the longer name the tokens spell
+    # together is the base model (#1959). Pony V7 is AuraFlow, not SDXL.
+    for name, label in (
+        ("qwen_image_edit_2511_bf16.safetensors", "Qwen-Image-Edit"),
+        ("Qwen-Image-Edit-Rapid-AIO-v10.safetensors", "Qwen-Image-Edit"),
+        ("pony_v7_mystyle.safetensors", "Pony V7"),
+        ("pony_diffusion_v7.safetensors", "Pony V7"),
+        ("ponyV7_base.safetensors", "Pony V7"),
+    ):
+        assert identify([], [name]) == (label, SOURCE_FILENAME), name
+    # A run that spells nothing longer leaves the single token's answer.
+    assert identify([], ["qwen_image_2512.safetensors"]) == (
+        "Qwen-Image",
+        SOURCE_FILENAME,
+    )
+    assert identify([], ["pony_v6_style.safetensors"]) == (
+        "Pony Diffusion V6 XL",
+        SOURCE_FILENAME,
+    )
+
+
 def test_edit_distance_is_never_applied_to_a_filename():
     # `ilustrius` would be a fuzzy match as a declared value; as a filename it
     # contains no alias, so it matches nothing.

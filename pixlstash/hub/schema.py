@@ -43,7 +43,12 @@ from pixlstash.utils.adapter_header import (
     read_safetensors_header,
     role_from_folder,
 )
-from pixlstash.utils.known_base_models import SOURCE_DECLARED, identify
+from pixlstash.utils.known_base_models import (
+    SOURCE_DECLARED,
+    SOURCE_FILENAME,
+    SOURCE_FILENAME_FUZZY,
+    identify,
+)
 
 logger = get_logger(__name__)
 
@@ -72,7 +77,7 @@ CURRENT_SCHEMA_VERSION = 2
 # reasoning the model-shelf tables were amended into v2 for. ``user_version`` is
 # free (nothing in PixlStash has ever written it), costs no DDL, and an older
 # build ignores it entirely.
-CURRENT_DATA_VERSION = 21
+CURRENT_DATA_VERSION = 22
 
 # `model_file.state` for a copy the last scan actually looked at, spelled out
 # rather than imported from `services.model_folder_scanner`. That module imports
@@ -2336,6 +2341,50 @@ def _backfill_base_model_canonical(conn: sqlite3.Connection) -> int:
     return len(updates)
 
 
+def _forget_stale_filename_guesses(conn: sqlite3.Connection) -> int:
+    """Clear a filename identification today's matcher would not repeat.
+
+    A filename now matches across tokens (#1959): ``qwen_image_edit_2511`` is
+    Qwen-Image-Edit, not the ``qwen`` it starts with. A row identified from its
+    filename keeps the old answer for good, the scanner replacing only a source
+    it outranks, so a row whose own filename now reads differently is cleared
+    to NULL instead. The next scan re-reads its header, never its bytes, and
+    identifies it from all of its evidence. ``user`` and ``declared`` rows are
+    never touched.
+
+    Runs exactly once per hub (see :data:`CURRENT_DATA_VERSION`).
+
+    Args:
+        conn: An open hub connection, inside the caller's transaction.
+
+    Returns:
+        How many rows were cleared.
+    """
+    rows = conn.execute(
+        "SELECT id, filename, base_model_canonical FROM model "
+        "WHERE base_model_source IN (?, ?) AND filename IS NOT NULL",
+        (SOURCE_FILENAME, SOURCE_FILENAME_FUZZY),
+    ).fetchall()
+    stale = [
+        (model_id,)
+        for model_id, filename, canonical in rows
+        if identify([], [filename])[0] != canonical
+    ]
+    conn.executemany(
+        "UPDATE model SET base_model_canonical = NULL, base_model_source = NULL "
+        "WHERE id = ?",
+        stale,
+    )
+    if stale:
+        logger.info(
+            "Hub data v22: %d of %d filename-identified shelf row(s) will be "
+            "identified again on the next scan.",
+            len(stale),
+            len(rows),
+        )
+    return len(stale)
+
+
 def _has_old_cores(conn: sqlite3.Connection, rule: str = "v1") -> bool:
     """Whether a filed topology's core is cached under core rule *rule*.
 
@@ -2601,6 +2650,10 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
                     _refile_by_tensors(
                         conn, FILE_TEXT_ENCODER, has_text_encoder_markers
                     )
+                if data_version < 22:
+                    # A filename matches across tokens (#1959), so a row it
+                    # identified may now read as another base model.
+                    _forget_stale_filename_guesses(conn)
                 if data_version < CURRENT_DATA_VERSION:
                     # No placeholder: PRAGMA takes no parameters, and the value
                     # is this module's own constant, nothing from outside.
