@@ -15983,6 +15983,151 @@ def test_a_replacement_the_loader_cannot_load_is_offered_through_our_loader(
             _unshelve(conn, [digest for _kind, digest in digests.values()])
 
 
+def test_a_shelf_checkpoint_comfyui_does_not_list_is_offered_and_run_off_the_shelf(
+    cloneable,
+):
+    """A checkpoint only on the shelf (PixlStash's own models folder) is
+    offered in place of a missing one, through the pack's checkpoint loader,
+    and the run loads it there by shelf row.
+
+    Only as a run would load it: with the pack's loader in ComfyUI and ComfyUI
+    on this computer, since that loader reads the file and cannot fetch it.
+    Wrong if the run submits the stock loader still naming the original.
+    """
+    unlisted, digest = "test-chroma-unlisted.safetensors", _h("chroma-unlisted")
+    with cloneable.server.hub.transaction() as conn:
+        _shelve_with_copy(conn, "checkpoint", unlisted, digest)
+        row_id = conn.execute(
+            "SELECT id FROM model WHERE sha256 = ?", (digest,)
+        ).fetchone()[0]
+    info = json.loads(json.dumps(RUN_OBJECT_INFO))
+    info["CheckpointLoaderSimple"]["output"] = ["MODEL", "CLIP", "VAE"]
+    info["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"][0].append(
+        CLONE_CHECKPOINT
+    )
+    # The rest of the picture's graph, so only the checkpoint can refuse it.
+    info["CLIPTextEncode"] = {"input": {"required": {}}}
+    info["LoadImage"] = {
+        "input": {
+            "required": {"image": [[cloneable.graph["7"]["inputs"]["image"]], {}]}
+        }
+    }
+    cloneable.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url, **_: (info, None)
+    )
+
+    def offered():
+        r = cloneable.owner.get(
+            f"{API}/workflows/{RUN_WF}/model-swap",
+            params={"replacing": _SHELF_FILENAME},
+        )
+        assert r.status_code == 200, r.text
+        return {c["filename"]: c["loader"] for c in r.json()["replacements"]}
+
+    try:
+        # Without the pack's loader nothing can load it.
+        assert offered() == {CLONE_CHECKPOINT: None}
+        info["PixlStashCheckpointLoader"] = ID_LOADER_OBJECT_INFO[
+            "PixlStashCheckpointLoader"
+        ]
+        assert offered() == {
+            CLONE_CHECKPOINT: None,
+            unlisted: "PixlStashCheckpointLoader",
+        }
+        # A ComfyUI elsewhere cannot read the shelf's copy.
+        with cloneable.monkeypatch.context() as m:
+            m.setattr(workflows_routes, "locate", lambda url: (None, None))
+            assert offered() == {CLONE_CHECKPOINT: None}
+
+        r = cloneable.owner.put(
+            f"{API}/workflows/{RUN_WF}/model-fix",
+            json={"was": _SHELF_FILENAME, "now": unlisted},
+        )
+        assert r.status_code == 200, r.text
+
+        def run():
+            r = cloneable.owner.post(
+                f"{API}/workflows/run", json={"workflow_id": RUN_WF}
+            )
+            assert r.json()["status"] == "success", r.json()
+            return cloneable.submitted[-1]["graph"]["1"]
+
+        # Where it was not offered, the fix is not written: the loader keeps
+        # the original (which this ComfyUI happens to list).
+        with cloneable.monkeypatch.context() as m:
+            m.setattr(workflows_routes, "locate", lambda url: (None, None))
+            assert run() == {
+                "class_type": "CheckpointLoaderSimple",
+                "inputs": {"ckpt_name": _SHELF_FILENAME},
+            }
+        payload = _preflight(cloneable.owner, workflow_id=RUN_WF)
+        assert _reasons(payload) == set(), payload
+        loader = run()
+        assert loader["class_type"] == "PixlStashCheckpointLoader", loader
+        assert loader["inputs"]["checkpoint_id"] == str(row_id), loader
+    finally:
+        with cloneable.server.hub.transaction() as conn:
+            conn.execute("DELETE FROM workflow_model_fix")
+            _unshelve(conn, [digest])
+
+
+def test_a_shelf_checkpoint_fix_skips_a_twin_loader_the_pack_cannot_stand_in_for(
+    runnable, monkeypatch
+):
+    """Two loaders name the fixed file; one casts its weights (fp8), which
+    the pack's checkpoint loader cannot. Only the other loads the shelf's
+    replacement. Wrong if the casting one is left naming the replacement,
+    which this ComfyUI does not list.
+    """
+    unlisted, digest = "test-chroma-unlisted.safetensors", _h("chroma-unlisted")
+    embedded = json.loads(json.dumps(RUN_DOCUMENT))
+    embedded["1"]["inputs"]["ckpt_name"] = _SHELF_FILENAME
+    embedded["2"]["inputs"]["lora_name"] = "add_detail.safetensors"
+    embedded["3"]["inputs"].update({"steps": 20, "cfg": 7.0, "seed": 1})
+    twin = {
+        "class_type": "UNETLoader",
+        "inputs": {"unet_name": _SHELF_FILENAME, "weight_dtype": "fp8_e4m3fn"},
+    }
+    embedded["9"] = twin
+    monkeypatch.setattr(
+        workflows_routes,
+        "_load_embedded_api_prompt",
+        lambda server, picture_id, object_info=None: (
+            json.loads(json.dumps(embedded)),
+            [],
+        ),
+    )
+    info = json.loads(json.dumps(RUN_OBJECT_INFO))
+    info["UNETLoader"] = {
+        "input": {"required": {"unet_name": [[_SHELF_FILENAME], {}]}},
+        "output": ["MODEL"],
+    }
+    info["PixlStashCheckpointLoader"] = ID_LOADER_OBJECT_INFO[
+        "PixlStashCheckpointLoader"
+    ]
+    runnable.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url: (info, None)
+    )
+    with runnable.server.hub.transaction() as conn:
+        _shelve_with_copy(conn, "checkpoint", unlisted, digest)
+        conn.execute(
+            "INSERT INTO workflow_model_fix (topology_hash, slot_label, was_norm, "
+            "now_norm, was_name, now_name, slot_kind) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'checkpoint')",
+            (RUN_TOPOLOGY, "l", _SHELF_FILENAME, unlisted, _SHELF_FILENAME, unlisted),
+        )
+    try:
+        r = runnable.owner.post(f"{API}/workflows/run", json={"workflow_id": RUN_WF})
+        assert r.json()["status"] == "success", r.json()
+        submitted = runnable.submitted[-1]["graph"]
+        assert submitted["1"]["class_type"] == "PixlStashCheckpointLoader"
+        assert submitted["9"] == twin
+    finally:
+        with runnable.server.hub.transaction() as conn:
+            conn.execute("DELETE FROM workflow_model_fix")
+            _unshelve(conn, [digest])
+
+
 def test_a_missing_checkpoint_is_offered_its_own_base_model_first(cloneable):
     """A replacement of another base model would not match the LoRAs around it.
 
@@ -18728,6 +18873,57 @@ def test_replacing_a_checkpoint_that_is_not_installed_is_a_repair(saving):
         "models",
         "krea.safetensors",
     )
+
+
+def test_a_shelf_checkpoint_comfyui_does_not_list_is_saved_and_run_off_the_shelf(
+    saving,
+):
+    """A pick of a checkpoint only the shelf holds (PixlStash's own models
+    folder) is saved as picked, where a run loads it through the pack's
+    checkpoint loader: the rule `?replacing=` offers it by.
+
+    Wrong if the save is refused as `not_on_comfyui`, or if it is saved
+    with ComfyUI elsewhere, where that loader cannot read the file.
+    """
+    unlisted, digest = "test-chroma-unlisted.safetensors", _h("chroma-unlisted")
+    with saving.server.hub.transaction() as conn:
+        _shelve_with_copy(conn, "checkpoint", unlisted, digest)
+        row_id = conn.execute(
+            "SELECT id FROM model WHERE sha256 = ?", (digest,)
+        ).fetchone()[0]
+    address = _model_address(saving, saving.manual)
+    info = _listing("krea.safetensors")
+    info["PixlStashCheckpointLoader"] = ID_LOADER_OBJECT_INFO[
+        "PixlStashCheckpointLoader"
+    ]
+    saving.monkeypatch.setattr(
+        workflows_routes,
+        "_read_object_info",
+        lambda url, **_: (json.loads(json.dumps(info)), None),
+    )
+    changes = {"models": [{"address": address, "filename": unlisted}]}
+    try:
+        with saving.monkeypatch.context() as m:
+            m.setattr(workflows_routes, "locate", lambda url: (None, None))
+            r = _save(saving, saving.manual, changes=changes)
+            assert r.status_code == 409, r.text
+            assert "not_on_comfyui" in r.json()["detail"], r.text
+
+        r = _save(saving, saving.manual, changes=changes)
+        assert r.status_code == 200, r.text
+        last = _versions_of(saving, saving.manual)[-1]
+        assert last[2]["1"]["inputs"]["ckpt_name"] == unlisted
+
+        r = saving.owner.post(
+            f"{API}/workflows/run", json={"workflow_id": saving.manual}
+        )
+        assert r.json()["status"] == "success", r.json()
+        loader = saving.submitted[-1]["graph"]["1"]
+        assert loader["class_type"] == "PixlStashCheckpointLoader", loader
+        assert loader["inputs"]["checkpoint_id"] == str(row_id), loader
+    finally:
+        with saving.server.hub.transaction() as conn:
+            _unshelve(conn, [digest])
 
 
 def test_changes_made_before_another_version_are_save_as_new_only(saving):
