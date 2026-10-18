@@ -4024,24 +4024,13 @@ def create_router(server) -> APIRouter:
                 for miss in kind_missed
                 if miss["reason"] == "not_on_comfyui"
             }
-            if (
-                kind == FILE_CHECKPOINT
-                and unlisted
-                and request is not None
-                and _comfyui_is_here(request)
-            ):
-                # A checkpoint ComfyUI does not list is written all the same
-                # where the pack's checkpoint loader would load it off the
-                # shelf, the rule `?replacing=` offers it by: the run then
-                # swaps that loader in (`_swap_in_shelf_loaders`).
-                row_of = _shelf_checkpoint(_hub())
+            if kind == FILE_CHECKPOINT and unlisted:
                 held = {
                     value: unlisted[value]
-                    for node_id, cls, widget, value in iter_model_fields_api(graph)
+                    for node_id, _cls, widget, value in iter_model_fields_api(graph)
                     if value in unlisted
-                    and model_fix_kind(cls, widget) == FILE_CHECKPOINT
-                    and _checkpoint_off_the_shelf(
-                        graph, node_id, widget, unlisted[value], object_info, row_of
+                    and _loads_off_the_shelf(
+                        request, graph, node_id, widget, unlisted[value], object_info
                     )
                 }
                 if held:
@@ -5275,7 +5264,11 @@ def create_router(server) -> APIRouter:
         return labels, core
 
     def _apply_models(
-        hub, graph: dict, models: list[RunModel], object_info: dict | None
+        hub,
+        graph: dict,
+        models: list[RunModel],
+        object_info: dict | None,
+        request: Request | None = None,
     ) -> list[dict]:
         """Load each asked-for model at its loader address; return the flags.
 
@@ -5284,7 +5277,9 @@ def create_router(server) -> APIRouter:
         replaces is flagged ``family_mismatch`` and still loaded (#1620 Q3): a
         family table not knowing a base model is no reason to refuse a run. One
         ComfyUI cannot load is flagged ``model_not_applied`` and the loader
-        keeps its file, which ``judge`` then checks like any other.
+        keeps its file, which ``judge`` then checks like any other, unless it
+        is a checkpoint the run loads off the shelf (:func:`_loads_off_the_shelf`,
+        given *request*): that one is written unlisted.
         """
         if not models:
             return []
@@ -5364,14 +5359,24 @@ def create_router(server) -> APIRouter:
                 was = graph[node_id]["inputs"][widget]
                 if normalized_filename(was) == normalized_filename(now):
                     continue
+
                 # Only this loader: another naming the same file (a refiner, a
                 # stage's) is another address.
-                done, missed = apply_filename_swap(
-                    {node_id: graph[node_id]},
-                    {was: now},
-                    object_info,
-                    fields=lambda _cls, field, widget=widget: field == widget,
-                )
+                def swap(info, widget=widget):
+                    return apply_filename_swap(
+                        {node_id: graph[node_id]},
+                        {was: now},
+                        info,
+                        fields=lambda _cls, field: field == widget,
+                    )
+
+                done, missed = swap(object_info)
+                unlisted = [m["reason"] for m in missed] == ["not_on_comfyui"]
+                if unlisted and _loads_off_the_shelf(
+                    request, graph, node_id, widget, now, object_info
+                ):
+                    # Written unlisted: the run loads it off the shelf.
+                    done, missed = swap(None)
                 for entry in missed:
                     logger.warning(
                         "[workflows] %s cannot be loaded at %s (%s), so the "
@@ -6755,7 +6760,7 @@ def create_router(server) -> APIRouter:
                     pinned,
                     body.count,
                 )
-            group.flags = _apply_models(hub, graph, body.models, object_info)
+            group.flags = _apply_models(hub, graph, body.models, object_info, request)
             placed = run_service.apply_prompts(graph, body.prompt, body.negative)
             group.prompt = RunPrompt(
                 positive_settable=placed["positive_settable"],
@@ -8303,6 +8308,40 @@ def create_router(server) -> APIRouter:
             )
             return None
         return ImageUtils.calculate_hash_from_bytes(data) if data else None
+
+    def _loads_off_the_shelf(
+        request: Request | None,
+        graph: dict,
+        node_id: str,
+        widget: str,
+        filename: str,
+        object_info: dict | None,
+    ) -> bool:
+        """Whether a run loads checkpoint *filename* at *node_id* off the shelf.
+
+        For a file ComfyUI does not list: written in all the same, the run
+        swaps the pack's checkpoint loader in for it
+        (:func:`_swap_in_shelf_loaders`), the rule ``?replacing=`` offers
+        such a checkpoint by. Only with ComfyUI on this computer, since that
+        loader reads the file and cannot fetch one.
+        """
+        node = graph.get(node_id)
+        return (
+            request is not None
+            and object_info is not None
+            and isinstance(node, dict)
+            and model_fix_kind(node.get("class_type", ""), widget) == FILE_CHECKPOINT
+            and _comfyui_is_here(request)
+            and _checkpoint_off_the_shelf(
+                graph,
+                node_id,
+                widget,
+                filename,
+                object_info,
+                _shelf_checkpoint(_hub()),
+            )
+            is not None
+        )
 
     def _comfyui_is_here(request: Request) -> bool:
         """Whether the owner's ComfyUI runs on this computer, where it reads

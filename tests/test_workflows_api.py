@@ -18796,6 +18796,57 @@ def test_replacing_a_checkpoint_that_is_not_installed_is_a_repair(saving):
     )
 
 
+def test_a_shelf_checkpoint_comfyui_does_not_list_is_saved_and_run_off_the_shelf(
+    saving,
+):
+    """A pick of a checkpoint only the shelf holds (PixlStash's own models
+    folder) is saved as picked, where a run loads it through the pack's
+    checkpoint loader: the rule `?replacing=` offers it by.
+
+    Wrong if the save is refused as `not_on_comfyui`, or if it is saved
+    with ComfyUI elsewhere, where that loader cannot read the file.
+    """
+    unlisted, digest = "test-chroma-unlisted.safetensors", _h("chroma-unlisted")
+    with saving.server.hub.transaction() as conn:
+        _shelve_with_copy(conn, "checkpoint", unlisted, digest)
+        row_id = conn.execute(
+            "SELECT id FROM model WHERE sha256 = ?", (digest,)
+        ).fetchone()[0]
+    address = _model_address(saving, saving.manual)
+    info = _listing("krea.safetensors")
+    info["PixlStashCheckpointLoader"] = ID_LOADER_OBJECT_INFO[
+        "PixlStashCheckpointLoader"
+    ]
+    saving.monkeypatch.setattr(
+        workflows_routes,
+        "_read_object_info",
+        lambda url, **_: (json.loads(json.dumps(info)), None),
+    )
+    changes = {"models": [{"address": address, "filename": unlisted}]}
+    try:
+        with saving.monkeypatch.context() as m:
+            m.setattr(workflows_routes, "locate", lambda url: (None, None))
+            r = _save(saving, saving.manual, changes=changes)
+            assert r.status_code == 409, r.text
+            assert "not_on_comfyui" in r.json()["detail"], r.text
+
+        r = _save(saving, saving.manual, changes=changes)
+        assert r.status_code == 200, r.text
+        last = _versions_of(saving, saving.manual)[-1]
+        assert last[2]["1"]["inputs"]["ckpt_name"] == unlisted
+
+        r = saving.owner.post(
+            f"{API}/workflows/run", json={"workflow_id": saving.manual}
+        )
+        assert r.json()["status"] == "success", r.json()
+        loader = saving.submitted[-1]["graph"]["1"]
+        assert loader["class_type"] == "PixlStashCheckpointLoader", loader
+        assert loader["inputs"]["checkpoint_id"] == str(row_id), loader
+    finally:
+        with saving.server.hub.transaction() as conn:
+            _unshelve(conn, [digest])
+
+
 def test_changes_made_before_another_version_are_save_as_new_only(saving):
     """A set applied to a graph it was not made against gives a graph nobody chose."""
     _put_changes(saving, saving.manual, **SKIP_FIVE)
