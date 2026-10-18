@@ -77,7 +77,7 @@
       <!-- Row 2, the strip: the base model's mark, a hairline, then one mark
            per LoRA of the workflow's own (#1485). Names are in each mark's
            tooltip, and the card's accessible name reads them all. -->
-      <div class="wf-card__row">
+      <div class="wf-card__row wf-card__row--strip">
         <ul v-if="stripMarks.length" class="wf-card__strip" aria-hidden="true">
           <template v-for="mark in stripMarks" :key="mark.key">
             <li class="wf-card__mark">
@@ -456,8 +456,8 @@ const accessibleName = computed(() =>
 
 <style scoped src="./cardCover.css"></style>
 <style scoped>
-/* 138 = 8 + 36 + 32 + 2 × 24 + 3 × 2 + 8: the meta block - the name's
-   two-line --wf-name-h, row 2 at --wf-mark and two --control-h-sm rows. The
+/* 142 = 8 + 36 + 36 + 2 × 24 + 3 × 2 + 8: the meta block - the name's
+   two-line --wf-name-h, row 2 at --wf-strip-h and two --control-h-sm rows. The
    block is fixed whatever the card holds and is `flex: none`, so a change to
    that sum shows as a wrong height rather than being absorbed. Local on purpose (approved as
    component-local, not global).
@@ -469,15 +469,17 @@ const accessibleName = computed(() =>
    Pictures here are mostly portrait or square (832×1216, 1024×1024), so that
    shape threw away most of every cover. */
 .wf-card {
-  --wf-meta-h: 138px;
+  --wf-meta-h: 142px;
   /* Row 1 is always two lines tall, a one-line name included, so the rows
      below it line up across every card. Two 18px lines of --text-sm. */
   --wf-name-h: 36px;
   /* Row 2's marks, a step up from the shared --entity-thumb (24px) so the
      models a card is made of stand out on it. Local, like --wf-meta-h. 32
-     so a release's band holds Chroma, its widest name, at 7px with its
-     padding, and its glyph and version sit side by side below it (#1951). */
+     so a release's centred glyph clears its version and role pills (#1951). */
   --wf-mark: 32px;
+  /* Row 2: a mark and 4px of room above it, where a release's version pill
+     hangs (7px, the rest of it in the row gap). */
+  --wf-strip-h: 36px;
 
   position: relative;
   display: flex;
@@ -627,15 +629,17 @@ const accessibleName = computed(() =>
 
   display: flex;
   align-items: center;
-  /* Wide enough that a mark's version tab, which hangs 6px past its corner,
-     clears the next mark. */
+  /* Wide enough that a mark's tab and version pill, which hang 6-7px past
+     its corners, clear the next mark. */
   gap: var(--space-3);
   min-width: 0;
-  /* Room for that tab below and after each mark: `overflow: hidden` clips at
-     the padding edge, and the negative margin hands the room back, so the
-     card's rows do not move. */
-  margin: 0 calc(-1 * var(--space-3)) calc(-1 * var(--space-3)) 0;
-  padding: 0 var(--space-3) var(--space-3) 0;
+  /* Room for those pills above, below and after each mark: `overflow:
+     hidden` clips at the padding edge, and the negative margin hands the
+     room back, so the card's rows do not move. */
+  margin: calc(-1 * var(--space-3));
+  margin-left: 0;
+  padding: var(--space-3);
+  padding-left: 0;
   overflow: hidden;
   list-style: none;
 }
@@ -700,7 +704,7 @@ const accessibleName = computed(() =>
   flex: none;
   display: grid;
   grid-template-rows:
-    var(--wf-name-h) var(--wf-mark) var(--control-h-sm)
+    var(--wf-name-h) var(--wf-strip-h) var(--control-h-sm)
     var(--control-h-sm);
   row-gap: var(--space-1);
   padding: var(--space-3);
@@ -709,6 +713,12 @@ const accessibleName = computed(() =>
 /* Row 4 shares the bottom-right corner with ⓘ, so it keeps that square free. */
 .wf-card__row--facts {
   padding-right: calc(var(--control-h-sm) + var(--space-3));
+}
+
+/* The marks sit at the foot of their row, under the room their version pills
+   hang into. */
+.wf-card__row--strip {
+  align-items: flex-end;
 }
 
 /* A short name sits on the first line, not centred in the two. */

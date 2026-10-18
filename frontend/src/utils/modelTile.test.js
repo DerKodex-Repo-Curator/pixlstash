@@ -24,13 +24,15 @@ describe("namedTile", () => {
     expect(tile.tab).toBeNull();
   });
 
-  it("lays a release out as its name, its maker's glyph and its version", () => {
+  it("lays a release out as its maker's glyph and its version", () => {
     const { release, lines } = namedTile(
       { mark: ["Klein", "2"], mark_icon: "flux", mark_band: true },
       "x",
     );
     expect(lines).toBeUndefined();
-    expect(release).toMatchObject({ name: "Klein", version: "2", small: false });
+    // The name is the card's to print, not the tile's.
+    expect(Object.keys(release).sort()).toEqual(["glyph", "letters", "version"]);
+    expect(release.version).toBe("2");
     expect(release.glyph.kind).toBe("glyph");
     // Inlined by Vite as a data URI: the glyph's own <title> names it.
     expect(release.glyph.url).toContain("title%3eFlux");
@@ -59,15 +61,6 @@ describe("namedTile", () => {
         .glyph,
     ).toBeNull();
   });
-
-  it("sets a version too wide for the room beside a smaller glyph", () => {
-    const small = (version) =>
-      namedTile({ mark: ["Qwen", version], mark_icon: "qwen", mark_band: true }, "x")
-        .release.small;
-    // jsdom measures 0.62em a character: four do not fit 11/32 at 7.5/32.
-    expect(small("2511")).toBe(true);
-    expect(small("2")).toBe(false);
-  });
 });
 
 describe("nameScale", () => {
@@ -92,10 +85,11 @@ describe("the name's floor", () => {
     );
     const rule = css.match(/\.mmark-name \{[^}]*\}/)[0];
     expect(rule.replace(/\s+/g, " ")).toContain("font-size: max( 8.25px, calc(");
-    // A release's band is one size, regular, which the e2e spec measures
-    // Chroma at.
-    const band = css.match(/\.mmark-band \{[^}]*\}/)[0];
-    expect(band).toContain("font-size: calc(var(--entity-thumb) * 7 / 32)");
-    expect(band).toContain("font-weight: var(--weight-regular)");
+    // The pills are the sizes the e2e spec measures every known version and
+    // role word at.
+    const pill = (name) =>
+      css.match(new RegExp(`\\.${name} \\{[^}]*\\}`))[0];
+    expect(pill("mmark-release-version")).toContain("font-size: var(--text-xs)");
+    expect(pill("mmark-tab")).toContain("font-size: var(--text-3xs)");
   });
 });
