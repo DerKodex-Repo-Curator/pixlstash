@@ -2547,16 +2547,15 @@ reported, after the import event. **One person** goes through
 a picture with no faces yet, which face extraction turns into its largest face
 and drops when it finds none, or the largest unassigned face of one already
 extracted. **Two or more** are matched to the faces by likeness
-(`scoring.match_faces_to_characters`): each person is scored against every
-face nobody names by their reference faces
-(`select_reference_faces_for_character`), and the pairing taken is the one
-whose likenesses sum highest (`scipy.optimize.linear_sum_assignment`), one
-face per person and none below `MIN_MATCH_LIKENESS`, so a person the run
-loaded but did not draw is not handed a stranger; a face already naming
-somebody, and that somebody, are left out. A person with no reference faces cannot be told apart: one such person
-left over gets the largest face nobody took, two or more get none. A picture
-already extracted is matched at once; one not yet extracted gets a
-`picture_pending_person` row per person (`PicturePendingPerson`, a vault
+(`scoring.match_faces_to_characters`), liberally, since the run loaded
+them: each person is scored against every face nobody names by their
+reference faces (`select_reference_faces_for_character`), the strongest pair
+is taken first, then the strongest of what is left, one face per person, with
+no floor. Whoever is left without a face (no reference faces to score, or no
+scored face left) takes the largest face nobody took, in turn, until the
+people or the faces run out. A face already naming somebody, and that
+somebody, are left out. A picture already extracted is matched at once;
+one not yet extracted gets a `picture_pending_person` row per person (`PicturePendingPerson`, a vault
 table cascading from both `picture` and `character`), which
 `Vault._process_pending_character_assignments` matches and deletes when
 `FaceExtractionTask` completes. A duplicate keeps the people it has, as it

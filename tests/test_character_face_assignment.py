@@ -570,9 +570,9 @@ def test_two_peoples_faces_are_matched_by_likeness_not_size(library):
     }
 
 
-def test_the_pairing_is_the_best_overall_not_the_best_pair_first(library):
-    """f1 is most like a (0.83), but a can have f2 (0.64) and b has only f1
-    (0.77 against 0.00): taking the best pair first would give b a stranger."""
+def test_the_strongest_pair_is_taken_first(library):
+    """f1 is most like a (0.83), so a gets it, and b takes f2 though it is
+    unlike them (0.00): b is in the run, so b gets the face left."""
     a = _person(library, "a", _vec(-0.293, 0.035, -0.956))
     b = _person(library, "b", _vec(-0.174, -0.918, -0.356))
     f1, f2 = _group(
@@ -585,20 +585,21 @@ def test_the_pairing_is_the_best_overall_not_the_best_pair_first(library):
     )
     assert likeness[f1.id] > likeness[f2.id]
     assert match_faces_to_characters(library, [f1, f2], [a, b]) == {
-        f1.id: b,
-        f2.id: a,
+        f1.id: a,
+        f2.id: b,
     }
 
 
-def test_a_person_not_in_the_picture_is_not_handed_a_stranger(library):
-    """Both people's LoRAs ran, but only a's face and a bystander's came out."""
+def test_the_less_obvious_person_still_gets_the_face_left(library):
+    """b's face came out unlike b, but a takes the obvious one and b the rest."""
     a = _person(library, "a", ALONG_X)
     b = _person(library, "b", ALONG_Y)
     like_a, stranger = _group(
         library, (NEAR_X, SMALL_BBOX), (_vec(0, 0, 1, 0, 0, 0, 0, 0), LARGE_BBOX)
     )
     assert match_faces_to_characters(library, [like_a, stranger], [a, b]) == {
-        like_a.id: a
+        like_a.id: a,
+        stranger.id: b,
     }
 
 
@@ -623,9 +624,12 @@ def test_one_person_with_no_references_gets_the_largest_face_left(library):
     ) == {like_a.id: a, large.id: newcomer}
 
 
-def test_two_people_with_no_references_get_no_face(library):
-    """Which face is whose would be a guess, wrong half the time."""
+def test_people_with_no_references_take_the_largest_faces_in_turn(library):
+    """Nothing to score them by, so in order, until the faces run out."""
     first = _person(library, "first")
     second = _person(library, "second")
-    faces = _group(library, (ALONG_X, LARGE_BBOX), (ALONG_Y, SMALL_BBOX))
-    assert match_faces_to_characters(library, faces, [first, second]) == {}
+    third = _person(library, "third")
+    small, large = _group(library, (ALONG_X, SMALL_BBOX), (ALONG_Y, LARGE_BBOX))
+    assert match_faces_to_characters(
+        library, [small, large], [first, second, third]
+    ) == {large.id: first, small.id: second}

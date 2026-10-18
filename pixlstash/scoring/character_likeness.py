@@ -32,13 +32,6 @@ from pixlstash.pixl_logging import get_logger
 
 logger = get_logger(__name__)
 
-# The least likeness at which ``match_faces_to_characters`` takes a face for
-# a person: below it the face is somebody else's, and a person loaded into a
-# run but not drawn would otherwise be handed a stranger.
-# ponytail: a judgement on ArcFace cosines (another identity sits near 0, the
-# same one well above), not measured on generated faces; tune it here.
-MIN_MATCH_LIKENESS = 0.4
-
 
 def select_reference_faces_for_character(
     session: Session,
@@ -275,18 +268,17 @@ def match_faces_to_characters(
 ) -> dict[int, int]:
     """Say which of one picture's *faces* is which of *character_ids*.
 
-    Each person is scored against every face that names nobody yet, by
-    likeness to their reference faces, and the pairing taken is the one whose
-    likenesses sum highest: two people who look alike are not both handed the
-    face that looks most like either. A person gets at most one face, a face
-    at most one person, and a person some face already names is left out.
-    No face is taken below ``MIN_MATCH_LIKENESS``: a person who is not in the
-    picture is not handed whoever is.
+    Liberal on purpose: the run loaded these people, so they are in it. Each
+    person is scored against every face that names nobody yet, by likeness to
+    their reference faces, and the strongest pair is taken first, then the
+    strongest of what is left, and so on: the obvious face settles its person
+    and the less obvious ones take what remains. A person gets at most one
+    face, a face at most one person, and a person some face already names is
+    left out.
 
-    A person with no reference faces cannot be told apart by likeness. When
-    exactly one is left over they get the largest face nobody took, the rule
-    a run of one person uses; with two or more, which face is whose would be
-    a guess, so they get none.
+    Whoever is still without a face (no reference faces to score, or no face
+    with features left) takes the largest face nobody took, in turn, until
+    the people or the faces run out.
 
     Args:
         session: Database session to read reference faces with.
@@ -300,44 +292,29 @@ def match_faces_to_characters(
     people = [cid for cid in dict.fromkeys(character_ids) if cid not in named]
     free = [face for face in faces if face.character_id is None]
     candidates = [face for face in free if face.features]
-    scored_people: list[int] = []
-    rows: list[list[float]] = []
+    scored = []
     for character_id in people:
         likeness = compute_character_likeness_for_faces(
             select_reference_faces_for_character(session, character_id),
             candidates,
         )
-        if likeness:
-            scored_people.append(character_id)
-            rows.append([likeness.get(face.id, -1.0) for face in candidates])
+        scored.extend(
+            (score, character_id, face_id) for face_id, score in likeness.items()
+        )
 
     pairs: dict[int, int] = {}
-    if rows:
-        # Local import: scipy.optimize costs ~0.35 s to load, and only a
-        # picture of several people ever needs it.
-        from scipy.optimize import linear_sum_assignment
+    for _score, character_id, face_id in sorted(scored, reverse=True):
+        if face_id not in pairs and character_id not in pairs.values():
+            pairs[face_id] = character_id
 
-        scores = np.array(rows)
-        # Too unlike to count is never worth a pairing, so it cannot pull the
-        # optimum away from the pairs that are.
-        allowed = np.where(scores >= MIN_MATCH_LIKENESS, scores, -1.0e3)
-        person_idx, face_idx = linear_sum_assignment(allowed, maximize=True)
-        for p, f in zip(person_idx, face_idx, strict=True):
-            if scores[p, f] >= MIN_MATCH_LIKENESS:
-                pairs[candidates[f].id] = scored_people[p]
-
-    unscored = [cid for cid in people if cid not in scored_people]
-    left = [face for face in free if face.id not in pairs]
-    if len(unscored) == 1 and left:
-        largest = max(left, key=lambda face: (face.width or 0) * (face.height or 0))
-        pairs[largest.id] = unscored[0]
-    elif len(unscored) > 1:
-        logger.info(
-            "People %s have no reference faces to tell them apart by, so none "
-            "of them is matched to a face of picture %s.",
-            unscored,
-            faces[0].picture_id if faces else None,
-        )
+    left_people = [cid for cid in people if cid not in pairs.values()]
+    left_faces = sorted(
+        (face for face in free if face.id not in pairs),
+        key=lambda face: (face.width or 0) * (face.height or 0),
+        reverse=True,
+    )
+    for character_id, face in zip(left_people, left_faces):
+        pairs[face.id] = character_id
     return pairs
 
 
