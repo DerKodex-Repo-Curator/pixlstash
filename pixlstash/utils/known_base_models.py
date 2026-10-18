@@ -975,16 +975,23 @@ def _vocabulary(canonical: str) -> frozenset[str]:
     ) | {_norm(name) for name in names}
 
 
-@functools.cache
-def _vocabulary_pattern(vocabulary: frozenset[str]) -> re.Pattern:
-    """Any run of *vocabulary* words and digits, longest word tried first."""
-    words = sorted(vocabulary, key=len, reverse=True)
-    return re.compile("(?:" + "|".join(map(re.escape, words)) + r"|\d+)*")
-
-
 def _leftover_is(text: str, vocabulary: frozenset[str]) -> bool:
-    """Whether *text* (normalised) is nothing but *vocabulary* words and digits."""
-    return _vocabulary_pattern(vocabulary).fullmatch(text) is not None
+    """Whether *text* (normalised) is nothing but *vocabulary* words and digits.
+
+    A word break over the positions *text* can be split at, not a regex: a
+    ``*`` over overlapping words and digit runs backtracks exponentially on a
+    filename's long run of digits.
+    """
+    reached = [True] + [False] * len(text)
+    for start in range(len(text)):
+        if not reached[start]:
+            continue
+        if text[start].isdigit():
+            reached[start + 1] = True
+        for word in vocabulary:
+            if word and text.startswith(word, start):
+                reached[start + len(word)] = True
+    return reached[-1]
 
 
 def _is_release(canonical: str, tokens: list[str], vocabulary: frozenset[str]) -> bool:

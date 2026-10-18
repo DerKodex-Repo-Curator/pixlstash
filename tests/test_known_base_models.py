@@ -7,6 +7,7 @@ lost or duplicated in tab-completion.
 """
 
 import re
+import time
 
 import pytest
 
@@ -527,6 +528,18 @@ def test_a_model_is_drawn_with_the_name_people_write(
         "mark_colors": colours,
         "mark_icon": icon,
     }
+
+
+def test_a_long_run_of_digits_in_a_name_is_read_in_linear_time():
+    """A regex over overlapping words took 1.6 s for 18 digits, x7 per two more."""
+    started = time.perf_counter()
+    tile = model_tile("SDXL 1.0", f"sdxl{'1' * 22}z.safetensors", checkpoint=True)
+    assert time.perf_counter() - started < 0.5
+    assert tile["mark"][0] == "SDXL"
+    assert model_tile("SDXL 1.0", "sdxl_1.0.safetensors", checkpoint=True)["mark"] == [
+        "SDXL",
+        "1.0",
+    ]
 
 
 def test_an_unknown_or_closed_base_model_keeps_the_generated_mark():
