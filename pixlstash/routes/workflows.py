@@ -1652,9 +1652,9 @@ class RunRequest(BaseModel):
     seed: int | None = Field(None, ge=0, le=MAX_SEED_64)
     destination: RunDestination | None = None
     # Who the run's pictures are of, where its LoRAs do not say: a graph
-    # loading exactly one person's LoRA names that person itself
-    # (`_lora_person`) and this is not read for it. Bounded as every id here
-    # is: `MAX_PICTURE_ID` is SQLite's INTEGER ceiling, not a count of pictures.
+    # loading people's LoRAs names them itself (`_lora_people`) and this is
+    # not read for it. Bounded as every id here is: `MAX_PICTURE_ID` is
+    # SQLite's INTEGER ceiling, not a count of pictures.
     character_id: int | None = Field(None, ge=1, le=MAX_PICTURE_ID)
     # What fills each picture input of the workflow (#1457), first answer wins:
     # an entry here, a `fixed` pin whose picture is still kept, a stored
@@ -5970,8 +5970,8 @@ def create_router(server) -> APIRouter:
                 held,
             )
 
-    def _lora_person(graph: dict, object_info: dict | None) -> int | None:
-        """The one person the LoRAs *graph* loads are attached to, else ``None``.
+    def _lora_people(graph: dict, object_info: dict | None) -> list[int]:
+        """The people the LoRAs *graph* loads are attached to, in id order.
 
         Read off the graph as it is submitted, so it answers the same for a
         LoRA a recipe placed, one the Run popup added and one the workflow
@@ -5984,21 +5984,9 @@ def create_router(server) -> APIRouter:
             if (slot.get("strengths") or {}).get("model") != 0
         ]
         if not slots:
-            return None
+            return []
         digests = _slot_digests(slots, adapter_digest_index(_hub())).values()
-        people = lora_people(server.vault, digests)
-        if len(people) > 1:
-            # ponytail: a picture holds one pending person, so a run loading
-            # two people's LoRAs names neither. Match each face to its person
-            # by likeness once group runs are common enough to matter.
-            logger.info(
-                "[workflows] The run loads LoRAs of %d people (%s), so its "
-                "pictures are linked to none of them.",
-                len(people),
-                sorted(people),
-            )
-            return None
-        return next(iter(people), None)
+        return sorted(lora_people(server.vault, digests))
 
     def _card_inputs(
         hub,
@@ -7728,7 +7716,9 @@ def create_router(server) -> APIRouter:
                 else None
             )
             run_workflow_version = group.workflow_version if run_workflow_id else None
-            lora_character_id = _lora_person(graph, object_info) or body.character_id
+            lora_character_ids = _lora_people(graph, object_info) or (
+                [body.character_id] if body.character_id is not None else []
+            )
             # A selection feeding an input is the run's repeat axis: one pass
             # per picture, each its own source and, with `stack`, its own
             # stack. Otherwise one pass, and the group's first picture is the
@@ -7839,7 +7829,7 @@ def create_router(server) -> APIRouter:
                                 "run_workflow_version": run_workflow_version,
                                 "rejected": rejected,
                                 "workflow_id": group.workflow_id,
-                                "lora_character_id": lora_character_id,
+                                "lora_character_ids": lora_character_ids,
                             },
                             daemon=True,
                         ).start()

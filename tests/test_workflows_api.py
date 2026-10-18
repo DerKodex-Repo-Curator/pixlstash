@@ -46,6 +46,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import requests
 from cryptography import x509
@@ -63,7 +64,14 @@ from pixlstash.authz.policy import AccessPolicy
 from pixlstash.authz.registry import ROUTE_POLICIES
 from pixlstash.database import DBPriority
 from pixlstash.route_inventory import iter_api_route_contexts
-from pixlstash.db_models import Face, Picture, Project, ReferenceFolder, UserToken
+from pixlstash.db_models import (
+    Face,
+    Picture,
+    PicturePendingPerson,
+    Project,
+    ReferenceFolder,
+    UserToken,
+)
 from pixlstash.db_models.saved_recipe import SavedRecipe
 from pixlstash.event_types import EventType
 from pixlstash.hub.workflow_card_reads import (
@@ -16809,13 +16817,13 @@ def test_a_person_picked_for_a_workflow_run_keeps_their_own_loader(
     assert graph["2"]["inputs"]["strength_model"] == 0.7
 
 
-def _whose_lora(runnable, **body) -> int | None:
-    """Run *body* once; the person its import was told the pictures are of."""
+def _whose_lora(runnable, **body) -> list[int]:
+    """Run *body* once; the people its import was told the pictures are of."""
     handed: list = []
     runnable.monkeypatch.setattr(
         workflows_routes,
         "_process_comfyui_outputs",
-        lambda *args, **kwargs: handed.append(kwargs["lora_character_id"]),
+        lambda *args, **kwargs: handed.append(kwargs["lora_character_ids"]),
     )
     r = runnable.owner.post(f"{API}/workflows/run", json=body)
     assert r.status_code == 200, r.text
@@ -16832,38 +16840,31 @@ def test_a_run_loading_a_persons_lora_says_its_pictures_are_of_them(
     runnable, person_lora
 ):
     """However the LoRA got into the graph: a recipe's, or the popup's pick."""
-    assert (
-        _whose_lora(runnable, picture_ids=[runnable.picture_id], target=RUN_WF)
-        == person_lora
-    )
+    assert _whose_lora(runnable, picture_ids=[runnable.picture_id], target=RUN_WF) == [
+        person_lora
+    ]
     runnable.submitted.clear()
-    assert (
-        _whose_lora(
-            runnable, workflow_id=RUN_WF, add_loras=[{"sha256": PERSON_LORA_DIGEST}]
-        )
-        == person_lora
-    )
+    assert _whose_lora(
+        runnable, workflow_id=RUN_WF, add_loras=[{"sha256": PERSON_LORA_DIGEST}]
+    ) == [person_lora]
 
 
 def test_a_run_that_leaves_the_persons_lora_out_names_nobody(runnable, person_lora):
     """The workflow by itself bypasses the loader, so nobody is in the picture."""
-    assert _whose_lora(runnable, workflow_id=RUN_WF) is None
+    assert _whose_lora(runnable, workflow_id=RUN_WF) == []
 
 
 def test_a_run_names_the_person_asked_for_where_no_lora_does(runnable, person_lora):
     """`character_id` is the Run popup's "Assign to person"; a LoRA still wins."""
     asked = person_lora + 1
-    assert _whose_lora(runnable, workflow_id=RUN_WF, character_id=asked) == asked
+    assert _whose_lora(runnable, workflow_id=RUN_WF, character_id=asked) == [asked]
     runnable.submitted.clear()
-    assert (
-        _whose_lora(
-            runnable,
-            workflow_id=RUN_WF,
-            add_loras=[{"sha256": PERSON_LORA_DIGEST}],
-            character_id=asked,
-        )
-        == person_lora
-    )
+    assert _whose_lora(
+        runnable,
+        workflow_id=RUN_WF,
+        add_loras=[{"sha256": PERSON_LORA_DIGEST}],
+        character_id=asked,
+    ) == [person_lora]
 
 
 def test_a_persons_lora_at_strength_zero_names_nobody(runnable, person_lora):
@@ -16876,11 +16877,11 @@ def test_a_persons_lora_at_strength_zero_names_nobody(runnable, person_lora):
     )
     inputs = runnable.submitted[0]["graph"]["2"]["inputs"]
     assert (inputs["strength_model"], inputs["strength_clip"]) == (0, 0)
-    assert whose is None
+    assert whose == []
 
 
-def test_loras_of_two_people_name_neither(runnable, person_lora):
-    """A picture holds one pending person, and a guess would be wrong half the time."""
+def test_loras_of_two_people_name_both(runnable, person_lora):
+    """Which face is whose is matched by likeness once the faces are read."""
     vault = runnable.server.vault
     created = runnable.owner.post(f"{API}/characters", json={"name": "Someone"})
     assert created.status_code == 200, created.text
@@ -16891,10 +16892,9 @@ def test_loras_of_two_people_name_neither(runnable, person_lora):
             PERSON_LORA_DIGEST,
             [("character", person_lora), ("character", other)],
         )
-        assert (
-            _whose_lora(runnable, picture_ids=[runnable.picture_id], target=RUN_WF)
-            is None
-        )
+        assert _whose_lora(
+            runnable, picture_ids=[runnable.picture_id], target=RUN_WF
+        ) == sorted([person_lora, other])
     finally:
         runnable.owner.delete(f"{API}/characters/{other}")
 
@@ -16959,16 +16959,16 @@ def test_the_runs_pictures_are_linked_to_the_person(runnable, person_lora):
 
     _faces, _pending, project_before = server.vault.db.run_task(facts)
     try:
-        comfyui_service._assign_outputs_to_lora_person(
-            server, person_lora, [picture_id]
+        comfyui_service._assign_outputs_to_lora_people(
+            server, [person_lora], [picture_id]
         )
         assert server.vault.db.run_task(pending) == person_lora
         # Face extraction announces a deferred one, when it names the face.
         assert announced == []
 
         server.vault.db.run_task(seed_faces)
-        comfyui_service._assign_outputs_to_lora_person(
-            server, person_lora, [picture_id]
+        comfyui_service._assign_outputs_to_lora_people(
+            server, [person_lora], [picture_id]
         )
         # Where the picture is filed is the run's destination's, not the person's.
         assert server.vault.db.run_task(facts) == (
@@ -16989,7 +16989,7 @@ def test_a_deleted_person_keeps_no_lora_and_no_pending_picture(runnable, person_
     def pending(session):
         return session.get(Picture, picture_id).pending_character_id
 
-    comfyui_service._assign_outputs_to_lora_person(server, person_lora, [picture_id])
+    comfyui_service._assign_outputs_to_lora_people(server, [person_lora], [picture_id])
     assert server.vault.db.run_task(pending) == person_lora
     attached = model_shelf_service.fetch_attachments(
         server.vault, sha256=PERSON_LORA_DIGEST
@@ -17006,8 +17006,116 @@ def test_a_deleted_person_keeps_no_lora_and_no_pending_picture(runnable, person_
         == {}
     )
     # Gone before the run finished: nothing is linked, and nothing raises.
-    comfyui_service._assign_outputs_to_lora_person(server, person_lora, [picture_id])
+    comfyui_service._assign_outputs_to_lora_people(server, [person_lora], [picture_id])
     assert server.vault.db.run_task(pending) is None
+
+
+def test_a_picture_of_two_people_has_its_faces_matched_to_them(runnable, person_lora):
+    """By likeness to each person's reference faces, never by size: when face
+    extraction reads them, or at once where it already has."""
+    server, picture_id = runnable.server, runnable.picture_id
+    created = runnable.owner.post(f"{API}/characters", json={"name": "Someone"})
+    assert created.status_code == 200, created.text
+    other = created.json()["character"]["id"]
+    along_x = np.asarray([1, 0, 0, 0], dtype=np.float32).tobytes()
+    along_y = np.asarray([0, 1, 0, 0], dtype=np.float32).tobytes()
+    near_x = np.asarray([0.9, 0.436, 0, 0], dtype=np.float32).tobytes()
+    references: list[int] = []
+
+    def seed_references(session):
+        for character_id, features in ((person_lora, along_x), (other, along_y)):
+            reference = Picture(file_path=f"ref_{character_id}.png", deleted=False)
+            session.add(reference)
+            session.commit()
+            session.add(
+                Face(
+                    picture_id=reference.id,
+                    face_index=0,
+                    character_id=character_id,
+                    bbox=[0, 0, 40, 40],
+                    features=features,
+                )
+            )
+            references.append(reference.id)
+        session.commit()
+
+    def pending(session):
+        return sorted(
+            (row.picture_id, row.character_id)
+            for row in session.exec(select(PicturePendingPerson)).all()
+        )
+
+    def seed_faces(session):
+        # The person's own face is the smaller one.
+        session.add(
+            Face(
+                picture_id=picture_id,
+                face_index=0,
+                bbox=[0, 0, 400, 400],
+                features=along_y,
+            )
+        )
+        session.add(
+            Face(
+                picture_id=picture_id,
+                face_index=1,
+                bbox=[0, 0, 40, 40],
+                features=near_x,
+            )
+        )
+        session.commit()
+
+    def faces(session):
+        return {
+            face.face_index: face.character_id
+            for face in session.exec(
+                select(Face).where(Face.picture_id == picture_id)
+            ).all()
+        }
+
+    def unname(session):
+        for face in session.exec(select(Face).where(Face.picture_id == picture_id)):
+            face.character_id = None
+            session.add(face)
+        session.commit()
+
+    def clear(session):
+        ids = [picture_id, *references]
+        session.exec(delete(Face).where(Face.picture_id.in_(ids)))
+        session.exec(delete(PicturePendingPerson))
+        session.exec(delete(Picture).where(Picture.id.in_(references)))
+        session.commit()
+
+    both = [person_lora, other]
+    try:
+        server.vault.db.run_task(seed_references)
+        comfyui_service._assign_outputs_to_lora_people(server, both, [picture_id])
+        assert server.vault.db.run_task(pending) == [
+            (picture_id, person_lora),
+            (picture_id, other),
+        ]
+
+        server.vault.db.run_task(seed_faces)
+        server.vault._process_pending_character_assignments([picture_id])
+        assert server.vault.db.run_task(faces) == {0: other, 1: person_lora}
+        assert server.vault.db.run_task(pending) == []
+
+        server.vault.db.run_task(unname)
+        comfyui_service._assign_outputs_to_lora_people(server, both, [picture_id])
+        assert server.vault.db.run_task(faces) == {0: other, 1: person_lora}
+        assert server.vault.db.run_task(pending) == []
+
+        # A person deleted before the faces are read is owed nothing: the id
+        # goes to the next person created.
+        server.vault.db.run_task(clear)
+        references.clear()
+        comfyui_service._assign_outputs_to_lora_people(server, both, [picture_id])
+        deleted = runnable.owner.delete(f"{API}/characters/{other}")
+        assert deleted.status_code == 200, deleted.text
+        assert server.vault.db.run_task(pending) == [(picture_id, person_lora)]
+    finally:
+        server.vault.db.run_task(clear)
+        runnable.owner.delete(f"{API}/characters/{other}")
 
 
 def test_an_added_lora_the_graph_already_loads_is_not_added_twice(runnable):

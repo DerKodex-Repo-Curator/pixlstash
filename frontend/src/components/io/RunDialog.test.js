@@ -975,6 +975,42 @@ describe("the LoRAs a graph already loads", () => {
     expect(assign().props("modelValue")).toBe("");
   });
 
+  it("names everybody whose LoRAs a recipe runs, and offers nobody", async () => {
+    listCharacters.mockResolvedValue([
+      { id: 7, name: "Mira" },
+      { id: 8, name: "Noor" },
+    ]);
+    listAdapters.mockImplementation(async ({ fileKind } = {}) =>
+      fileKind
+        ? []
+        : [
+            {
+              sha256: "s".repeat(64),
+              filename: "mira_v2.safetensors",
+              attachments: [
+                { entity_type: "character", entity_id: 8 },
+                { entity_type: "character", entity_id: 7 },
+              ],
+            },
+          ],
+    );
+    getPictureRecipe.mockResolvedValue({
+      available: true,
+      workflow_id: KEY,
+      settings: {},
+      lora_slots: [filenameSlot("mira_v2.safetensors")],
+    });
+    const wrapper = await mountRun();
+    expect(wrapper.find('[data-testid="rund-of"]').text()).toBe(
+      "Mira and Noor, by their LoRAs",
+    );
+    expect(
+      wrapper
+        .findAllComponents({ name: "AppSelect" })
+        .find((select) => select.props("label") === "Assign to person"),
+    ).toBeUndefined();
+  });
+
   it("shows the ordinary filename slots, which are all of them in practice", async () => {
     // `by: "digest"` is only PixlStash's own loader node. Filtering on it
     // meant every stock workflow opened the popup with no LoRAs at all.

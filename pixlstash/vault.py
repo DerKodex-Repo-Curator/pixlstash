@@ -22,6 +22,7 @@ from .db_models import (
     Character,
     Face,
     Picture,
+    PicturePendingPerson,
     PictureSet,
     Snapshot,
     Tag,
@@ -32,6 +33,7 @@ from .db_models import (
     make_description_sentinel,
 )
 from .pixl_logging import get_logger
+from .scoring import match_faces_to_characters
 from pixlstash.startup_permissions import mkdir_private
 from pixlstash.inference.engine import InferenceEngine
 from .utils.image_processing.image_utils import ImageUtils
@@ -1400,6 +1402,10 @@ class Vault:
         Picture.pending_character_id.  This method is called after
         FaceExtractionTask completes and assigns the largest detected face for
         each such picture to the stored character, then clears the field.
+
+        A picture of several people (a run loading their LoRAs) waits in
+        ``PicturePendingPerson`` rows instead; its faces are matched to them
+        by likeness (``match_faces_to_characters``) and the rows deleted.
         """
 
         def _assign_if_pending(session: Session) -> bool:
@@ -1428,6 +1434,31 @@ class Vault:
                     best_face.character_id = character_id
                     session.add(best_face)
                     assigned_any = True
+            people_by_picture: dict[int, list[int]] = {}
+            for row in session.exec(
+                select(PicturePendingPerson).where(
+                    PicturePendingPerson.picture_id.in_(picture_ids)
+                )
+            ).all():
+                people_by_picture.setdefault(row.picture_id, []).append(
+                    row.character_id
+                )
+                session.delete(row)
+            session.flush()
+            for picture_id, people in people_by_picture.items():
+                faces = Face.find(session, picture_id=picture_id)
+                by_id = {face.id: face for face in faces}
+                pairs = match_faces_to_characters(session, faces, sorted(people))
+                for face_id, character_id in pairs.items():
+                    by_id[face_id].character_id = character_id
+                    session.add(by_id[face_id])
+                    assigned_any = True
+                logger.info(
+                    "Picture %s of people %s: faces %s matched to them by likeness.",
+                    picture_id,
+                    sorted(people),
+                    pairs,
+                )
             session.commit()
             return assigned_any
 

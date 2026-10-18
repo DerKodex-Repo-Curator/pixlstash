@@ -261,6 +261,63 @@ def compute_character_likeness_for_faces(
     }
 
 
+def match_faces_to_characters(
+    session: Session,
+    faces: list[Face],
+    character_ids: list[int],
+) -> dict[int, int]:
+    """Say which of one picture's *faces* is which of *character_ids*.
+
+    Liberal on purpose: the run loaded these people, so they are in it. Each
+    person is scored against every face that names nobody yet, by likeness to
+    their reference faces, and the strongest pair is taken first, then the
+    strongest of what is left, and so on: the obvious face settles its person
+    and the less obvious ones take what remains. A person gets at most one
+    face, a face at most one person, and a person some face already names is
+    left out.
+
+    Whoever is still without a face (no reference faces to score, or no face
+    with features left) takes the largest face nobody took, in turn, until
+    the people or the faces run out.
+
+    Args:
+        session: Database session to read reference faces with.
+        faces: The picture's real faces (no ``face_index == -1`` sentinel).
+        character_ids: The people the picture is of.
+
+    Returns:
+        face id -> character id, for the faces to assign.
+    """
+    named = {face.character_id for face in faces if face.character_id is not None}
+    people = [cid for cid in dict.fromkeys(character_ids) if cid not in named]
+    free = [face for face in faces if face.character_id is None]
+    candidates = [face for face in free if face.features]
+    scored = []
+    for character_id in people:
+        likeness = compute_character_likeness_for_faces(
+            select_reference_faces_for_character(session, character_id),
+            candidates,
+        )
+        scored.extend(
+            (score, character_id, face_id) for face_id, score in likeness.items()
+        )
+
+    pairs: dict[int, int] = {}
+    for _score, character_id, face_id in sorted(scored, reverse=True):
+        if face_id not in pairs and character_id not in pairs.values():
+            pairs[face_id] = character_id
+
+    left_people = [cid for cid in people if cid not in pairs.values()]
+    left_faces = sorted(
+        (face for face in free if face.id not in pairs),
+        key=lambda face: (face.width or 0) * (face.height or 0),
+        reverse=True,
+    )
+    for character_id, face in zip(left_people, left_faces):
+        pairs[face.id] = character_id
+    return pairs
+
+
 def find_pictures_by_character_likeness(
     server,
     character_id,

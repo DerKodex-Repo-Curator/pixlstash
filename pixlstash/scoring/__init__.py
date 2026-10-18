@@ -14,6 +14,7 @@ from pixlstash.scoring.character_likeness import (
     count_pictures_by_character_likeness,
     find_pictures_by_character_likeness,
     find_pictures_by_character_likeness_sql,
+    match_faces_to_characters,
     pack_reference_blobs,
     select_reference_faces_for_character,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "find_pictures_by_character_likeness_sql",
     "find_pictures_by_smart_score",
     "get_smart_score_penalised_tags_from_request",
+    "match_faces_to_characters",
     "pack_reference_blobs",
     "prepare_smart_score_inputs",
     "resolve_penalised_tag_weights",
