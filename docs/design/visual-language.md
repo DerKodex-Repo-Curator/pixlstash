@@ -56,6 +56,11 @@ motif. Use it on a clear background; give it clear space equal to the height of 
 padlock "stud" on every side. Do not recolor it, add a drop shadow, or sit it on a
 busy photo without a solid backing.
 
+The one sanctioned exception is an ink silhouette: the padlock as a mask over
+`currentColor`, at the size of the text beside it, where it marks something as
+PixlStash's own in working chrome (the Tasks panel's resource-usage heading).
+It is never tinted any other way.
+
 ### Wordmark
 The word **PixlStash** set in Tiny5, rendered by `WordmarkLogo.vue`. Two-tone: "Pixl"
 in `currentColor`, "Stash" in `var(--wordmark-accent)` (which falls back to

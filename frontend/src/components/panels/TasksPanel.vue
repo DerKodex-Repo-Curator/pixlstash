@@ -1043,6 +1043,7 @@ const tmSystemItems = computed(() => {
   height: 1.2em;
   flex-shrink: 0;
   background-color: currentColor;
+  -webkit-mask: url("/Logo.png") center / contain no-repeat;
   mask: url("/Logo.png") center / contain no-repeat;
 }
 
