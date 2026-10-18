@@ -10312,8 +10312,10 @@ declarations (`ss_base_model_version`, and the SAI `modelspec.architecture`
 with its `/lora`-style suffix dropped) and the filenames (the file's own, and
 kohya's `ss_sd_model_name`, the checkpoint it was trained against). Sources,
 strongest first: `user` (set only by `update_models`), `declared` and
-`filename` (an exact fold of a declared value, or of the filename stem or one of
-its tokens), `declared_fuzzy` (`difflib`, cutoff 0.88) and `filename_fuzzy`
+`filename` (an exact fold of a declared value, or of the filename stem or a run
+of its whole tokens, the longest run winning, so `qwen_image_edit_2511` is
+Qwen-Image-Edit and `pony_v7_style` Pony V7, not the `qwen` or `pony` they
+start with), `declared_fuzzy` (`difflib`, cutoff 0.88) and `filename_fuzzy`
 (containment, longest alias first, never an alias under four characters
 nor one that is an ordinary word, `pony`, `sana`, `lumina`, `krea`, `chroma`,
 which count only as a whole filename token).
@@ -10340,7 +10342,13 @@ Quality before provenance: an exact filename beats a fuzzy declaration. A
   a stored answer stops the header being re-read, so a filename guess made
   from the columns would never be checked against the header's
   `modelspec.architecture`. Every other row is identified from all its
-  evidence on its next scan. The columns themselves are amended
+  evidence on its next scan. Backfill v22
+  (`schema._reidentify_filename_guesses`, #1959) rewrites a `filename` or
+  `filename_fuzzy` answer where the row's own filename now folds exactly to
+  another label, since an equal-rank rescan could never replace it. A variant
+  whose family was already known keeps it (families are frozen per variant), so
+  its workflow does not move; one whose family was unknown is moved by
+  `reidentify_families` as for any newly identified file. The columns themselves are amended
   into schema v2 like the header facts, not a v3, which an older build would
   refuse.
 - The shelf **sorts and filters** on `COALESCE(base_model_canonical,
