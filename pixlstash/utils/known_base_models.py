@@ -96,12 +96,18 @@ from pixlstash.utils.model_utils import derive_model_name
 # title case; ``role`` is the tab that tells same-named releases apart (BASE,
 # REFI, EDIT, RAW, HD); ``few_step`` puts a bolt on the tab instead;
 # ``file_version`` takes the second line from the filename (Qwen 2511);
-# ``maker`` picks the tile colour from :data:`MAKERS` and ``icon`` a family
-# icon from :data:`FAMILY_ICONS`, under its name on one line (:func:`icon_line`:
-# ``icon_name``, else the mark's lines joined). Every ``mark`` line must fit
-# the card's 34px tile's 30px line at 8.25px, and every icon line its 32px band
-# in regular weight, which ``frontend/e2e/specs/model-tile-names.spec.js``
-# measures in Chromium; a fine-tune's own second line is not measured.
+# ``maker`` picks the tile colour from :data:`MAKERS` and its glyph from
+# :data:`MAKER_GLYPHS`, or ``icon`` one of the owner's from
+# :data:`FAMILY_ICONS`. A release prints ``band`` (else the mark's first line)
+# across a band and ``version`` (else the mark's second line, or with
+# ``file_version`` the filename's) beside the glyph (:func:`release_lines`). A
+# LoRA's or fine-tune's tile prints the mark's first line over its own
+# initials. A release with no glyph wears ``letters`` in its place, else
+# its name's first two capitals or first two letters (:func:`glyph_letters`).
+# Every ``mark`` line must fit the card's 32px tile's 28px line at
+# 8.25px, and no band be wider than "Chroma", which
+# ``frontend/e2e/specs/model-tile-names.spec.js`` measures in Chromium; a
+# fine-tune's own second line is not measured.
 # Closed models carry none: they never exist as files.
 KNOWN_BASE_MODELS: dict[str, dict] = {
     # --- Stable Diffusion line ---------------------------------------------
@@ -168,6 +174,8 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
         "family": "flux1",
         "modality": "image",
         "mark": ["F1D"],
+        "version": "1",
+        "band": "Dev",
         "maker": "Black Forest Labs",
         "aliases": [
             "flux1d",
@@ -181,6 +189,8 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
         "family": "flux1",
         "modality": "image",
         "mark": ["F1S"],
+        "version": "1",
+        "band": "Schnell",
         "few_step": True,
         "maker": "Black Forest Labs",
         "aliases": [
@@ -209,6 +219,8 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
         "family": "flux2",
         "modality": "image",
         "mark": ["Flux", "Klein"],
+        "version": "2",
+        "band": "Klein",
         "few_step": True,
         "maker": "Black Forest Labs",
         "aliases": [
@@ -221,9 +233,9 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
         "family": "chroma",
         "modality": "image",
         "mark": ["CHRO"],
+        "band": "Chroma",
         "role": "HD",
         "icon": "chroma",
-        "icon_name": "Chroma",
         "aliases": [
             "chroma",
             "chroma1",
@@ -236,17 +248,17 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
         "family": "chroma",
         "modality": "image",
         "mark": ["CHRO"],
+        "band": "Chroma",
         "role": "BASE",
         "icon": "chroma",
-        "icon_name": "Chroma",
         "aliases": ["chroma1base", "lodestones/Chroma1-Base"],
     },
     "Chroma1 Radiance": {
         "family": "chroma",
         "modality": "image",
         "mark": ["CHRO"],
+        "band": "Chroma",
         "icon": "chroma",
-        "icon_name": "Chroma",
         "aliases": ["chroma radiance", "lodestones/Chroma1-Radiance"],
     },
     # --- Alibaba ------------------------------------------------------------
@@ -254,6 +266,7 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
         "family": "zimage",
         "modality": "image",
         "mark": ["ZIT"],
+        "letters": "Z",
         "few_step": True,
         "maker": "Alibaba",
         # `zit`: the community's short name, matched only as a whole filename
@@ -267,6 +280,7 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
         "family": "zimage",
         "modality": "image",
         "mark": ["ZIB"],
+        "letters": "Z",
         "maker": "Alibaba",
         "aliases": ["zimagebase", "zimage", "zib", "Tongyi-MAI/Z-Image-Base"],
     },
@@ -274,6 +288,7 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
         "family": "zimage",
         "modality": "image",
         "mark": ["ZI"],
+        "letters": "Z",
         "role": "EDIT",
         "maker": "Alibaba",
         "aliases": ["zimageedit", "Tongyi-MAI/Z-Image-Edit"],
@@ -322,7 +337,6 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
         "mark": ["Krea", "2"],
         "role": "RAW",
         "maker": "Krea",
-        "icon": "krea2",
         "aliases": ["krea2raw", "krea raw"],
     },
     "Krea 2 Turbo": {
@@ -331,7 +345,6 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
         "mark": ["Krea", "2"],
         "few_step": True,
         "maker": "Krea",
-        "icon": "krea2",
         "aliases": ["krea2turbo", "krea turbo"],
     },
     "Krea 2": {
@@ -339,7 +352,6 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
         "modality": "image",
         "mark": ["Krea", "2"],
         "maker": "Krea",
-        "icon": "krea2",
         "aliases": ["krea2", "krea"],
     },
     # --- Tencent --------------------------------------------------------------
@@ -377,6 +389,7 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
         "family": "minimax_h3",
         "modality": "video",
         "mark": ["MINI", "H3"],
+        "maker": "MiniMax",
         "aliases": [],
     },
     # --- SDXL-architecture community bases ------------------------------------
@@ -393,7 +406,7 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
         "family": "auraflow",
         "modality": "image",
         "mark": ["Pony"],
-        "role": "V7",
+        "version": "V7",
         "icon": "pony",
         "aliases": ["ponyv7"],
     },
@@ -441,12 +454,14 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
         "family": "lumina",
         "modality": "image",
         "mark": ["LUMI", "2.0"],
+        "band": "Lumina",
         "aliases": ["lumina", "luminaimage"],
     },
     "Kolors": {
         "family": "kolors",
         "modality": "image",
         "mark": ["KOLO"],
+        "band": "Kolors",
         "maker": "Kuaishou Kolors",
         "aliases": ["kolors", "kwai kolors"],
     },
@@ -454,6 +469,7 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
         "family": "pixart",
         "modality": "image",
         "mark": ["PIXA"],
+        "band": "PixArt",
         "aliases": ["pixart", "pixartsigma"],
     },
     # ByteDance's video and image restoration model, loaded by its own nodes
@@ -462,6 +478,9 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
         "family": "seedvr2",
         "modality": "video",
         "mark": ["Seed", "VR2"],
+        "version": "2",
+        "band": "SeedVR",
+        "maker": "ByteDance",
         "aliases": [
             "seedvr2",
             "ByteDance-Seed/SeedVR2-3B",
@@ -904,23 +923,44 @@ MAKERS: dict[str, list[str]] = {
     "Alibaba": ["#dc5100"],
     "Tencent Hunyuan": ["#0053e0"],
     "Lightricks": [_GRAPHITE],
-    "Krea": [_GRAPHITE],
+    "Krea": ["#d55551", "#ac53a1", "#6b49e4"],
     "Kuaishou Kolors": ["#6c8700", "#418e07"],
     "NVIDIA": ["#598d15"],
     "fal": ["#ec0648"],
     "Ideogram": [_GRAPHITE],
+    "MiniMax": ["#e2167e", "#da5132"],
+    "ByteDance": ["#325ab4"],
 }
 
-# The owner's family icons (``frontend/src/assets/model-families/``) -> the
-# field they are drawn on. Only the base checkpoint wears the icon; its LoRAs
-# and fine-tunes are text tiles in this colour, or every Chroma LoRA would
-# draw one identical eye. Illustrious's is a step lighter than its picture's
-# near-black field, so a LoRA tile keeps its edge on the dark theme.
+# Maker -> its glyph on a release's tile: the mono icon of that name from
+# @lobehub/icons-static-svg 1.95.1 (MIT), in ``frontend/src/assets/lobehub/``.
+# Alibaba has none here: its company logo is not Wan's or Z-Image's, and the
+# set has no icon for either, so they wear their letters.
+MAKER_GLYPHS: dict[str, str] = {
+    "Stability AI": "stability",
+    "Black Forest Labs": "flux",
+    "Qwen": "qwen",
+    "Tencent Hunyuan": "hunyuan",
+    "Lightricks": "lightricks",
+    "Krea": "krea",
+    "Kuaishou Kolors": "kolors",
+    "NVIDIA": "nvidia",
+    "fal": "fal",
+    "Ideogram": "ideogram",
+    "MiniMax": "minimax",
+    "ByteDance": "bytedance",
+}
+
+# The owner's family icons (``frontend/src/assets/model-families/``), in
+# place of a maker's glyph -> the field they are drawn on. Only the base
+# checkpoint wears the icon; its LoRAs and fine-tunes are text tiles in this
+# colour, or every Chroma LoRA would draw one identical eye. Illustrious's is
+# a step lighter than its picture's near-black field, so a LoRA tile keeps its
+# edge on the dark theme.
 FAMILY_ICONS: dict[str, str] = {
     "chroma": "#7a3b12",
     "pony": "#4b2373",
     "illustrious": "#0c183e",
-    "krea2": "#aa54a3",
 }
 
 # Fine-tunes with a mark of their own, by how their name starts (normalised)
@@ -1114,13 +1154,35 @@ def _own_line(name: str, vocabulary: frozenset[str]) -> Optional[str]:
     return letters + (version[:2] if version and version != "1" else "")
 
 
-def icon_line(entry: dict) -> str:
-    """The one line a family icon's band prints: Chroma, Krea 2.
+def glyph_letters(entry: dict) -> str:
+    """What a release with no glyph wears in its place: Z, HI, PA, No, Lu.
 
-    Wider than a plain tile's line (``CHRO``, ``Krea`` over ``2``), because
-    the band runs to the tile's edge and sets it in regular weight.
+    ``letters``, else its band name's first two capitals (HI for HIDR, PA for
+    PixArt), else that name's first two letters (No for Noob, Lu for Lumina).
     """
-    return entry.get("icon_name") or " ".join(entry["mark"])
+    if entry.get("letters"):
+        return entry["letters"]
+    name = entry.get("band") or entry["mark"][0]
+    capitals = re.findall(r"[A-Z]", name)
+    return (
+        "".join(capitals[:2])
+        if len(capitals) > 1
+        else re.sub(r"[^A-Za-z]", "", name)[:2]
+    )
+
+
+def release_lines(entry: dict, file_version: Optional[str] = None) -> list[str]:
+    """A release's name and version: SDXL and 1.0, Klein and 2, Chroma alone.
+
+    The name is ``band``, else the mark's first line; the version is
+    *file_version* (``file_version`` entries: Qwen 2511), else ``version``,
+    else the mark's second line.
+    """
+    name = entry.get("band") or entry["mark"][0]
+    version = (
+        file_version or entry.get("version") or next(iter(entry["mark"][1:]), None)
+    )
+    return [name, version] if version else [name]
 
 
 def model_tile(
@@ -1135,13 +1197,18 @@ def model_tile(
     shelf's own name for it (else its filename's), and *checkpoint* whether it
     is one; a LoRA never wears its base model's role or icon.
 
-    Returns ``{"mark", "mark_tab", "mark_colors", "mark_icon"}``: the one or
-    two lines of the name; the tab (a role, or :data:`FEW_STEP_TAB` with a
-    speed LoRA's step count), or ``None``; the colour stops, or ``None`` for
-    the client's hashed hue; and the family icon a base checkpoint wears.
+    Returns ``{"mark", "mark_tab", "mark_colors", "mark_icon",
+    "mark_letters", "mark_band"}``: the one or two lines of the name; the tab
+    (a role, or :data:`FEW_STEP_TAB` with a speed LoRA's step count), or
+    ``None``; the colour stops, or ``None`` for the client's hashed hue; the
+    glyph or family icon a release wears, else the letters it wears instead
+    (:func:`glyph_letters`), both ``None`` off a release; and whether the tile
+    is a release's, drawn as a band.
 
-    * **The base model's own release** shows its ``mark`` (SDXL over 1.0),
-      the role word in its filename or else its entry's ``role`` on the tab.
+    * **The base model's own release** sends :func:`release_lines` (Klein
+      and 2), its name printed across a band over its maker's glyph and its
+      version beside the glyph, and the role word in its filename or else its
+      entry's ``role`` on the tab.
     * **A fine-tune or LoRA** shows the base's first line over its own
       initials and version (SDXL over JU9), or its own mark where
       :data:`KNOWN_FINE_TUNES` has one. It is none of the base's releases, so
@@ -1172,19 +1239,16 @@ def model_tile(
     if fine_tune:
         mark = list(fine_tune["mark"])
         colors = fine_tune["colors"]
-    elif release and icon:
-        mark = [icon_line(entry)]
     elif release:
-        mark = list(entry["mark"])
-        if entry.get("file_version"):
-            version = next(
-                (t for t in tokens if re.fullmatch(r"\d{4}|\d+\.\d+", t)), None
-            )
-            mark += [version] if version else []
+        version = entry.get("file_version") and next(
+            (t for t in tokens if re.fullmatch(r"\d{4}|\d+\.\d+", t)), None
+        )
+        mark = release_lines(entry, version)
     else:
         own = _own_line(own_name, vocabulary)
         mark = [entry["mark"][0]] + ([own] if own else [])
 
+    glyph = (icon or MAKER_GLYPHS.get(entry.get("maker", ""))) if release else None
     tab = None
     own_words = {_norm(t) for t in tokens} | set(words)
     if checkpoint:
@@ -1210,5 +1274,7 @@ def model_tile(
         "mark": mark,
         "mark_tab": tab,
         "mark_colors": list(colors) if colors else None,
-        "mark_icon": icon if release else None,
+        "mark_icon": glyph,
+        "mark_letters": glyph_letters(entry) if release and not glyph else None,
+        "mark_band": release,
     }

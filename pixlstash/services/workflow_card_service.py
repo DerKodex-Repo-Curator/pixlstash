@@ -253,12 +253,15 @@ class SlotModel:
     base_model_family: Optional[str] = None
     # The tile a model with no icon is drawn with
     # (:func:`~pixlstash.utils.known_base_models.model_tile`): its name's one
-    # or two lines, the tab, the colour stops and the family icon. All
-    # ``None`` for a model of no known base model, which keeps the initials.
+    # or two lines, the tab, the colour stops, the glyph or the letters in its
+    # place, and whether it is a release's band tile. ``None`` for a model of no known base model, which
+    # keeps the initials.
     mark: Optional[list[str]] = None
     mark_tab: Optional[str] = None
     mark_colors: Optional[list[str]] = None
     mark_icon: Optional[str] = None
+    mark_letters: Optional[str] = None
+    mark_band: bool = False
     # The value the recipe recorded, as ``default_recipe.models[].filename``
     # spells it (a shelf loader's id included), so a client can tell which
     # slot a recipe model is by identity rather than by a derived name.

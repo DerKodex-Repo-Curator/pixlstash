@@ -364,18 +364,50 @@ describe("ModelMark, named", () => {
     expect(tab.text()).toBe("mdi-lightning-bolt4");
   });
 
-  it("lays a family icon under one line of the name, and the tab over it", () => {
+  it("draws a release as a band, its maker's glyph and its version", () => {
     const wrapper = mountNamed({
-      mark: ["CHRO"],
+      mark: ["Klein", "2"],
+      mark_tab: "⚡",
+      mark_colors: ["#484c53"],
+      mark_icon: "flux",
+      mark_band: true,
+    });
+    expect(wrapper.find(".mmark-band").text()).toBe("Klein");
+    expect(wrapper.find(".mmark-glyph").attributes("src")).toContain("title%3eFlux");
+    expect(wrapper.find(".mmark-glyph").classes()).toContain(
+      "mmark-glyph--shadowed",
+    );
+    expect(wrapper.find(".mmark-release-version").text()).toBe("2");
+    expect(wrapper.find(".mmark-name").exists()).toBe(false);
+    // The tab is a plain pill: no outline in the tile's own colour.
+    expect(wrapper.find(".mmark-version").attributes("style")).not.toContain(
+      "border-color",
+    );
+  });
+
+  it("fills a Chroma release with its eye, and puts letters where no glyph is", () => {
+    const chroma = mountNamed({
+      mark: ["Chroma"],
       mark_tab: "HD",
       mark_colors: ["#7a3b12"],
       mark_icon: "chroma",
+      mark_band: true,
     });
-    expect(wrapper.find(".mmark-named img").attributes("src")).toContain(
+    expect(chroma.find(".mmark-named > .mmark-img").attributes("src")).toContain(
       "chroma",
     );
-    expect(wrapper.find(".mmark-name--band").text()).toBe("CHRO");
-    expect(wrapper.find(".mmark-version").text()).toBe("HD");
+    expect(chroma.find(".mmark-band").text()).toBe("Chroma");
+    expect(chroma.find(".mmark-version").text()).toBe("HD");
+    const zit = mountNamed({
+      mark: ["ZIT"],
+      mark_tab: "⚡",
+      mark_colors: ["#dc5100"],
+      mark_icon: null,
+      mark_letters: "Z",
+      mark_band: true,
+    });
+    expect(zit.find(".mmark-letters").text()).toBe("Z");
+    expect(zit.find(".mmark-release-version").exists()).toBe(false);
   });
 
   it("lets the owner's own picture of the model win, tab and all", () => {

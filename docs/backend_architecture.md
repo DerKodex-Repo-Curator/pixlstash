@@ -10350,27 +10350,29 @@ Quality before provenance: an exact filename beats a fuzzy declaration. A
   label for a checkpoint whose derived filename folds exactly to its own
   non-guessed canonical label (`flux1-dev.safetensors`), never for an adapter.
 - **The row carries the tile a workflow card draws it with** (#1951):
-  `mark`, `mark_tab`, `mark_colors`, `mark_icon` from
+  `mark`, `mark_tab`, `mark_colors`, `mark_icon`, `mark_letters`, `mark_band` from
   `known_base_models.model_tile(canonical, filename, display_name,
   checkpoint=...)`, guesses included, on `GET /checkpoints`, `GET /adapters`
   and every card slot (`ShelfMark.tile`; a slot the shelf does not hold is
   named from its filename alone, through `identify`, `_mark_fields`). Each table entry carries the short
   name people write for it (`mark`, one or two lines), an optional `role`,
-  `few_step`, `file_version` (Qwen's 2511 comes from the file), and a `maker`
-  (`MAKERS`, brand colours darkened to 4:1) or a family `icon`
-  (`FAMILY_ICONS`). A checkpoint whose name opens with one of its base's
-  aliases and carries nothing else but roles, versions and packaging is the
-  **release**: the entry's mark, the entry's role or else a `ROLE_WORDS` word
-  from the filename on the tab, the icon. Anything else is a fine-tune or
+  `few_step`, `file_version` (Qwen's 2511 comes from the file), a `band`
+  name and `version` where they differ from the mark's lines, `letters`, and
+  a `maker` (`MAKERS`, brand colours darkened to 4:1, and `MAKER_GLYPHS`, its
+  LobeHub icon) or a family `icon` (`FAMILY_ICONS`). A checkpoint whose name
+  opens with one of its base's aliases and carries nothing else but roles,
+  versions and packaging is the **release** (`mark_band`): `release_lines`
+  (its band name and version: Klein and 2), the maker's glyph or the owner's
+  icon, else `glyph_letters` (Z, HI, Lu), and the entry's role or else a
+  `ROLE_WORDS` word from the filename on the tab. Anything else is a fine-tune or
   LoRA: the base's first line over its own initials and version (`SDXL JU9`),
   never the base's role or icon; a few-step base (`few_step`) or a speed word
   (`lightning`, `hyper`, `lcm`, `dmd2`, `turbo`) gives `⚡` and a step count.
   `KNOWN_FINE_TUNES` names a fine-tune checkpoint with a mark of its own
   (Juggernaut: J on its logo's purple) whatever base it was identified as.
-  An icon release's name is one line, `icon_line` (`icon_name`, else the
-  mark's lines joined: Chroma, Krea 2). Every table `mark` line is held to
-  the card tile's 30px line at 8.25px, every icon line to its 32px band in
-  regular weight, and every `role` to its 34px, by
+  Every table `mark` line is held to the card tile's 28px line at 8.25px,
+  every release name to the width of "Chroma" on its band, every version to
+  the room beside the glyph, and every `role` to the 32px tile, by
   `frontend/e2e/specs/model-tile-names.spec.js`; a fine-tune's own second
   line is not.
 

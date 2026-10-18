@@ -198,7 +198,18 @@ GRAPHITE = ["#484c53"]
 
 
 @pytest.mark.parametrize(
-    ("canonical", "filename", "name", "checkpoint", "mark", "tab", "colours", "icon"),
+    (
+        "canonical",
+        "filename",
+        "name",
+        "checkpoint",
+        "mark",
+        "tab",
+        "colours",
+        "icon",
+        "letters",
+        "band",
+    ),
     [
         # The release, told from its refiner by the role word in its filename.
         (
@@ -209,7 +220,9 @@ GRAPHITE = ["#484c53"]
             ["SDXL", "1.0"],
             "BASE",
             SDXL,
+            "stability",
             None,
+            True,
         ),
         (
             "SDXL 1.0",
@@ -219,7 +232,9 @@ GRAPHITE = ["#484c53"]
             ["SDXL", "1.0"],
             "REFI",
             SDXL,
+            "stability",
             None,
+            True,
         ),
         # A fine-tune run together with its base's name is still a fine-tune.
         (
@@ -231,6 +246,8 @@ GRAPHITE = ["#484c53"]
             None,
             SDXL,
             None,
+            None,
+            False,
         ),
         # Juggernaut XL has a mark of its own, base model identified or not;
         # a LoRA of that name is only named like it.
@@ -243,6 +260,8 @@ GRAPHITE = ["#484c53"]
             None,
             ["#6b46c1"],
             None,
+            None,
+            False,
         ),
         (
             None,
@@ -253,6 +272,8 @@ GRAPHITE = ["#484c53"]
             None,
             ["#6b46c1"],
             None,
+            None,
+            False,
         ),
         (
             "SDXL 1.0",
@@ -263,6 +284,8 @@ GRAPHITE = ["#484c53"]
             None,
             SDXL,
             None,
+            None,
+            False,
         ),
         # The version comes from the file; the role from the entry.
         (
@@ -273,7 +296,9 @@ GRAPHITE = ["#484c53"]
             ["Qwen", "2511"],
             "EDIT",
             ["#615ced"],
+            "qwen",
             None,
+            True,
         ),
         # A speed LoRA: its own initials, and its step count beside the bolt.
         (
@@ -285,6 +310,8 @@ GRAPHITE = ["#484c53"]
             "⚡4",
             ["#615ced"],
             None,
+            None,
+            False,
         ),
         (
             "Qwen-Image-Edit",
@@ -295,26 +322,32 @@ GRAPHITE = ["#484c53"]
             None,
             ["#615ced"],
             None,
+            None,
+            False,
         ),
         (
             "FLUX.1 dev",
             "flux1-dev-fp8.safetensors",
             None,
             True,
-            ["F1D"],
+            ["Dev", "1"],
             None,
             GRAPHITE,
+            "flux",
             None,
+            True,
         ),
         (
             "FLUX.1 schnell",
             "flux1-schnell.safetensors",
             None,
             True,
-            ["F1S"],
+            ["Schnell", "1"],
             "⚡",
             GRAPHITE,
+            "flux",
             None,
+            True,
         ),
         (
             "Z-Image Turbo",
@@ -325,6 +358,8 @@ GRAPHITE = ["#484c53"]
             "⚡",
             ["#dc5100"],
             None,
+            "Z",
+            True,
         ),
         # The base's own words, across the family, are not the LoRA's name;
         # nor does its base being few-step make a LoRA one.
@@ -337,6 +372,8 @@ GRAPHITE = ["#484c53"]
             None,
             ["#dc5100"],
             None,
+            None,
+            False,
         ),
         # A role word that is the base model's own name is no tab.
         (
@@ -348,16 +385,20 @@ GRAPHITE = ["#484c53"]
             None,
             ["#dc5100"],
             None,
+            "Z",
+            True,
         ),
         (
             "Krea 2 Raw",
             "krea2_raw.safetensors",
             None,
             True,
-            ["Krea 2"],
+            ["Krea", "2"],
             "RAW",
-            ["#aa54a3"],
-            "krea2",
+            ["#d55551", "#ac53a1", "#6b49e4"],
+            "krea",
+            None,
+            True,
         ),
         (
             "Wan 2.2",
@@ -368,6 +409,8 @@ GRAPHITE = ["#484c53"]
             None,
             ["#dc5100"],
             None,
+            "Wa",
+            True,
         ),
         # Only the base checkpoint wears the family icon, under its name on
         # one line; its LoRA is a text tile in the icon's colour.
@@ -380,6 +423,8 @@ GRAPHITE = ["#484c53"]
             "HD",
             ["#7a3b12"],
             "chroma",
+            None,
+            True,
         ),
         (
             "Chroma1 HD",
@@ -390,6 +435,8 @@ GRAPHITE = ["#484c53"]
             None,
             ["#7a3b12"],
             None,
+            None,
+            False,
         ),
         # A fine-tune checkpoint is not one of the base's releases, so the
         # role that tells those apart is not its tab.
@@ -402,6 +449,8 @@ GRAPHITE = ["#484c53"]
             None,
             ["#7a3b12"],
             None,
+            None,
+            False,
         ),
         (
             "Pony Diffusion V6 XL",
@@ -412,16 +461,20 @@ GRAPHITE = ["#484c53"]
             None,
             ["#4b2373"],
             "pony",
+            None,
+            True,
         ),
         (
             "Pony V7",
             "pony_v7_base.safetensors",
             None,
             True,
-            ["Pony"],
-            "V7",
+            ["Pony", "V7"],
+            "BASE",
             ["#4b2373"],
             "pony",
+            None,
+            True,
         ),
         # Krea 2's LoRA is a text tile in its icon's colour.
         (
@@ -431,8 +484,10 @@ GRAPHITE = ["#484c53"]
             False,
             ["Krea", "IW"],
             None,
-            ["#aa54a3"],
+            ["#d55551", "#ac53a1", "#6b49e4"],
             None,
+            None,
+            False,
         ),
         (
             "Illustrious XL",
@@ -443,6 +498,8 @@ GRAPHITE = ["#484c53"]
             None,
             ["#0c183e"],
             None,
+            None,
+            False,
         ),
         # Packaging and file-kind words are nobody's initials.
         (
@@ -454,6 +511,8 @@ GRAPHITE = ["#484c53"]
             None,
             ["#dc5100"],
             None,
+            None,
+            False,
         ),
         (
             "SDXL 1.0",
@@ -464,6 +523,8 @@ GRAPHITE = ["#484c53"]
             None,
             SDXL,
             None,
+            None,
+            False,
         ),
         # A family with no maker colour keeps the client's hashed hue.
         (
@@ -475,6 +536,8 @@ GRAPHITE = ["#484c53"]
             None,
             None,
             None,
+            None,
+            False,
         ),
         # A precision mid-name is packaging too.
         (
@@ -482,10 +545,12 @@ GRAPHITE = ["#484c53"]
             "seedvr2_7b_int8_convrot.safetensors",
             None,
             True,
-            ["Seed", "VR2"],
+            ["SeedVR", "2"],
             None,
+            ["#325ab4"],
+            "bytedance",
             None,
-            None,
+            True,
         ),
         # Klein's distilled build is few-step; its base says so on the tab.
         (
@@ -493,30 +558,36 @@ GRAPHITE = ["#484c53"]
             "flux-2-klein-9b-fp8.safetensors",
             None,
             True,
-            ["Flux", "Klein"],
+            ["Klein", "2"],
             "\u26a1",
             GRAPHITE,
+            "flux",
             None,
+            True,
         ),
         (
             "FLUX.2 Klein",
             "flux-2-klein-base-9b.safetensors",
             None,
             True,
-            ["Flux", "Klein"],
+            ["Klein", "2"],
             "BASE",
             GRAPHITE,
+            "flux",
             None,
+            True,
         ),
         (
             "SeedVR2",
             "seedvr2_ema_7b_fp16.safetensors",
             None,
             True,
-            ["Seed", "VR2"],
+            ["SeedVR", "2"],
             None,
+            ["#325ab4"],
+            "bytedance",
             None,
-            None,
+            True,
         ),
         (
             "Ideogram 4",
@@ -526,18 +597,22 @@ GRAPHITE = ["#484c53"]
             ["IDEO", "4"],
             None,
             GRAPHITE,
+            "ideogram",
             None,
+            True,
         ),
     ],
 )
 def test_a_model_is_drawn_with_the_name_people_write(
-    canonical, filename, name, checkpoint, mark, tab, colours, icon
+    canonical, filename, name, checkpoint, mark, tab, colours, icon, letters, band
 ):
     assert model_tile(canonical, filename, name, checkpoint=checkpoint) == {
         "mark": mark,
         "mark_tab": tab,
         "mark_colors": colours,
         "mark_icon": icon,
+        "mark_letters": letters,
+        "mark_band": band,
     }
 
 
@@ -562,7 +637,11 @@ def test_an_unknown_or_closed_base_model_keeps_the_generated_mark():
 def test_a_card_slot_the_shelf_does_not_hold_is_named_from_its_filename():
     """A workflow's file outside the shelf's folders still draws its tile."""
     fields = _mark_fields(None, "flux1-dev.sft", "unet")
-    assert (fields["mark"], fields["mark_colors"]) == (["F1D"], ["#484c53"])
+    assert (fields["mark"], fields["mark_icon"], fields["mark_band"]) == (
+        ["Dev", "1"],
+        "flux",
+        True,
+    )
     assert (
         _mark_fields(None, "z_image_turbo_bf16.safetensors", "unet")["mark_tab"]
         == "\u26a1"

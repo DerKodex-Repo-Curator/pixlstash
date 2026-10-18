@@ -35,9 +35,42 @@
         :color="ring.iconHue || undefined"
         >{{ ring.icon }}</v-icon
       >
-      <!-- The named tile (#1951): a family icon fills it and carries the
-           name across its top; otherwise the name sits on the maker's
-           colour. -->
+      <!-- The named tile (#1951). A release: its name across a band, its
+           maker's glyph (or the letters in its place) and its version beside
+           it, on the maker's colour; Chroma's eye fills the tile. A LoRA or
+           fine-tune: its base's name over its own initials. -->
+      <span
+        v-else-if="tile?.release"
+        class="mmark-named"
+        :style="{ background: tile.background, color: mark.ink }"
+      >
+        <img
+          v-if="tile.release.glyph?.kind === 'full'"
+          class="mmark-img"
+          :src="tile.release.glyph.url"
+          alt=""
+        />
+        <img
+          v-else-if="tile.release.glyph"
+          class="mmark-glyph"
+          :class="{
+            'mmark-glyph--shadowed': tile.release.glyph.kind === 'glyph',
+            'mmark-glyph--small': tile.release.small,
+          }"
+          :src="tile.release.glyph.url"
+          alt=""
+        />
+        <span v-else-if="tile.release.letters" class="mmark-glyph mmark-letters">{{
+          tile.release.letters
+        }}</span>
+        <span
+          v-if="tile.release.version"
+          class="mmark-release-version"
+          :class="{ 'mmark-release-version--small': tile.release.small }"
+          >{{ tile.release.version }}</span
+        >
+        <span class="mmark-band">{{ tile.release.name }}</span>
+      </span>
       <span
         v-else-if="tile"
         class="mmark-named"
@@ -47,14 +80,7 @@
           '--mmark-name': tile.scale,
         }"
       >
-        <img v-if="tile.icon" class="mmark-img" :src="tile.icon.url" alt="" />
-        <span
-          class="mmark-name"
-          :class="{
-            'mmark-name--over': tile.icon,
-            'mmark-name--band': tile.icon?.band,
-          }"
-        >
+        <span class="mmark-name">
           <span v-for="(line, i) in tile.lines" :key="i">{{ line }}</span>
         </span>
       </span>
@@ -71,16 +97,13 @@
     <!-- Outside the face, because the face clips: the tab sits over the
          corner rather than inside it. -->
     <!-- The named tile's tab: a role, or a bolt for a few-step model with a
-         speed LoRA's step count. Drawn over a family icon too. -->
+         speed LoRA's step count. A plain pill: an outline in the tile's own
+         colour read as a smudge against the tile. -->
     <span
       v-if="showTab"
       class="mmark-version mmark-tab"
       aria-hidden="true"
-      :style="{
-        backgroundColor: mark.ink,
-        color: tile.edge,
-        borderColor: tile.edge,
-      }"
+      :style="{ backgroundColor: mark.ink, color: tile.edge }"
       ><v-icon v-if="tile.tab.bolt" class="mmark-bolt">mdi-lightning-bolt</v-icon
       >{{ tile.tab.text }}</span
     >
@@ -157,7 +180,8 @@ const props = defineProps({
   detail: { type: String, default: null },
   /**
    * Draw the server's named tile (`mark`, `mark_tab`, `mark_colors`,
-   * `mark_icon`) where the row has one, for a host that prints no name beside
+   * `mark_icon`, `mark_letters`, `mark_band`) where the row has one, for a
+   * host that prints no name beside
    * the mark (the workflow card). The shelf leaves it off: its rows say the
    * name already.
    */
@@ -332,8 +356,8 @@ const ringClass = computed(() =>
 }
 
 /* Two lines of two, packed into the top-start corner so the version tab over
-   the bottom-end one covers no letter: 0.36 of the card's 34px mark is 12px,
-   and two lines of it at 0.9 end 3px above the tab. Semibold, because 10px
+   the bottom-end one covers no letter: 0.36 of the card's 32px mark is
+   11.5px, and two lines of it at 0.9 end 3px above the tab. Semibold, because 10px
    at the single line's medium weight thins out on the tile. Measured in a
    browser against the widest pair (WM beside a two-digit tab). */
 .mmark-initials--two {
@@ -379,21 +403,81 @@ const ringClass = computed(() =>
   white-space: nowrap;
 }
 
-/* Across the top of a family icon, whose motif sits in the lower two-thirds
-   so the name never covers it. */
-.mmark-name--over {
+/* A release's tile, laid out in 32nds of it so it holds at any size: the
+   name across a band the tile's width, the glyph below it on the left, and
+   the version right of the glyph, clear of the tab. */
+.mmark-band {
   position: absolute;
   inset: 0 0 auto 0;
-  padding-bottom: var(--space-1);
-  line-height: 0.95;
+  padding: var(--space-1);
+  background: var(--scrim-photo-strong);
+  /* One size for every name: "Chroma", the widest, fits with its padding,
+     and every band name is held to Chroma's width by
+     `model-tile-names.spec.js`. */
+  font-size: calc(var(--entity-thumb) * 7 / 32);
+  font-family: var(--font-ui);
+  font-weight: var(--weight-regular);
+  letter-spacing: -0.02em;
+  line-height: 1;
+  text-align: center;
+  white-space: nowrap;
 }
 
-/* Over a busy picture, a solid band: a gradient left the name illegible over
-   the eye's stripes on the card. Regular weight and no right padding, so
-   Chroma (31.4px at the floor in DejaVu Sans) fits the 34px tile's 32px. */
-.mmark-name--band {
-  background: var(--scrim-photo-strong);
-  font-weight: var(--weight-regular);
+.mmark-glyph {
+  position: absolute;
+  left: calc(var(--entity-thumb) * 3 / 32);
+  top: calc(var(--entity-thumb) * 13 / 32);
+  width: calc(var(--entity-thumb) * 15 / 32);
+  height: calc(var(--entity-thumb) * 15 / 32);
+}
+
+/* A maker's white glyph, with the hard shadow Krea's own K is drawn with. */
+.mmark-glyph--shadowed {
+  filter: drop-shadow(
+    calc(var(--entity-thumb) / 36) calc(var(--entity-thumb) / 36) 0
+      rgb(var(--v-theme-scrim))
+  );
+}
+
+/* Beside a version too wide for the room (Qwen's 2511, 14.9px at the small
+   size in DejaVu Sans, of 15.5px left by this glyph). */
+.mmark-glyph--small {
+  width: calc(var(--entity-thumb) * 12 / 32);
+  height: calc(var(--entity-thumb) * 12 / 32);
+}
+
+/* Where the maker has no glyph: its letters (Z, HI, Lu), set like one and
+   held inside its box, so Wa stays clear of Wan's 2.2. */
+.mmark-letters {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  font-size: calc(var(--entity-thumb) * 10 / 32);
+  font-family: var(--font-ui);
+  font-weight: var(--weight-bold);
+  letter-spacing: -0.04em;
+  line-height: 1;
+  text-shadow: calc(var(--entity-thumb) / 36) calc(var(--entity-thumb) / 36) 0
+    rgb(var(--v-theme-scrim));
+}
+
+.mmark-release-version {
+  position: absolute;
+  right: calc(var(--entity-thumb) * 2.5 / 32);
+  top: calc(var(--entity-thumb) * 14 / 32);
+  font-size: calc(var(--entity-thumb) * 7.5 / 32);
+  font-family: var(--font-ui);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.02em;
+  line-height: 1;
+  text-shadow: calc(var(--entity-thumb) / 45) calc(var(--entity-thumb) / 45) 0
+    rgb(var(--v-theme-scrim));
+}
+
+.mmark-release-version--small {
+  right: calc(var(--entity-thumb) * 1.5 / 32);
+  top: calc(var(--entity-thumb) * 15.5 / 32);
+  font-size: calc(var(--entity-thumb) * 5.5 / 32);
 }
 
 .mmark-bolt {
@@ -424,9 +508,15 @@ const ringClass = computed(() =>
   line-height: 1;
 }
 
-/* A named tile's tab, a step down: its widest word, BASE, is 29.4px at 10px
-   in DejaVu Sans (32.3px at 11px), inside the card's tile. */
+/* A named tile's tab, smaller than the shelf's version tab and with no
+   outline: its widest word, BASE, stays inside the card's 32px tile in
+   DejaVu Sans, which `model-tile-names.spec.js` measures. */
 .mmark-tab {
+  right: -4px;
+  bottom: -4px;
+  min-width: 12px;
+  height: 12px;
+  border: 0;
   font-size: var(--text-3xs);
 }
 

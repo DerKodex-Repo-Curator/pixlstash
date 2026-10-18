@@ -402,10 +402,10 @@ class ModelResponse(BaseModel):
     mark: Optional[list[str]] = Field(
         default=None,
         description=(
-            "The short name a workflow card's tile prints for a model with no "
-            'icon, on one or two lines read together: `["SDXL", "1.0"]` '
-            'for the release, `["SDXL", "JU9"]` for a fine-tune or LoRA '
-            "made for it. Null for a model of no known base model, which "
+            "The short name a workflow card's tile prints: for a release "
+            '(`mark_band`) its name and version, `["Klein", "2"]`; for a '
+            "fine-tune or LoRA the base's name over its own initials, "
+            '`["SDXL", "JU9"]`. Null for a model of no known base model, which '
             "keeps the generated initials. Worked out by the server "
             "(`known_base_models.model_tile`) so every client draws the same."
         ),
@@ -428,8 +428,23 @@ class ModelResponse(BaseModel):
     mark_icon: Optional[str] = Field(
         default=None,
         description=(
-            "The family icon a base checkpoint's tile wears (`chroma`, "
-            "`pony`, `illustrious`), or null. Never on a LoRA or fine-tune."
+            "The glyph a release's tile wears: its maker's LobeHub icon "
+            "(`flux`, `qwen`) or the owner's (`chroma`, `pony`, "
+            "`illustrious`), or null. Never on a LoRA or fine-tune."
+        ),
+    )
+    mark_letters: Optional[str] = Field(
+        default=None,
+        description=(
+            "The letters a release with no glyph wears in its place (`Z`, "
+            "`HI`, `Lu`), or null."
+        ),
+    )
+    mark_band: bool = Field(
+        default=False,
+        description=(
+            "Whether the tile is a release's: `mark` is then its name, printed "
+            "across a band, and its version, printed beside the glyph."
         ),
     )
     family: Optional[str] = Field(

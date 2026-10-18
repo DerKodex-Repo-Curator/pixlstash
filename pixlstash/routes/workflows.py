@@ -453,9 +453,9 @@ class WorkflowSlotModel(BaseModel):
     mark: list[str] | None = Field(
         None,
         description=(
-            "The short name the card's tile prints for a model with no icon, "
-            "on one or two lines: the same as `mark` on its `GET /checkpoints` "
-            "or `GET /adapters` row. Null keeps the generated initials."
+            "The short name the card's tile prints: the same as `mark` on its "
+            "`GET /checkpoints` or `GET /adapters` row. Null keeps the "
+            "generated initials."
         ),
     )
     mark_tab: str | None = Field(
@@ -465,7 +465,13 @@ class WorkflowSlotModel(BaseModel):
         None, description="The tile's colour stops, as `mark_colors` on the shelf row."
     )
     mark_icon: str | None = Field(
-        None, description="The family icon, as `mark_icon` on the shelf row."
+        None, description="The tile's glyph, as `mark_icon` on the shelf row."
+    )
+    mark_letters: str | None = Field(
+        None, description="The letters in place of a glyph, as on the shelf row."
+    )
+    mark_band: bool = Field(
+        False, description="A release's band tile, as `mark_band` on the shelf row."
     )
     kind: str
     quant: str | None = Field(
@@ -3552,6 +3558,8 @@ def _slot_models(slots) -> list[WorkflowSlotModel]:
             mark_tab=slot.mark_tab,
             mark_colors=slot.mark_colors,
             mark_icon=slot.mark_icon,
+            mark_letters=slot.mark_letters,
+            mark_band=slot.mark_band,
             kind=slot.kind,
             slot_label=slot.label,
             filename=slot.filename,

@@ -24,27 +24,55 @@ describe("namedTile", () => {
     expect(tile.tab).toBeNull();
   });
 
-  it("holds an icon tile to one line", () => {
-    const tile = namedTile({ mark: ["Pony", "V7"], mark_icon: "pony" }, "x");
-    expect(tile.lines).toEqual(["Pony"]);
-    expect(tile.icon.band).toBe(false);
-    expect(namedTile({ mark: ["Krea 2"], mark_icon: "krea2" }, "x").icon.band).toBe(
-      true,
+  it("lays a release out as its name, its maker's glyph and its version", () => {
+    const { release, lines } = namedTile(
+      { mark: ["Klein", "2"], mark_icon: "flux", mark_band: true },
+      "x",
     );
+    expect(lines).toBeUndefined();
+    expect(release).toMatchObject({ name: "Klein", version: "2", small: false });
+    expect(release.glyph.kind).toBe("glyph");
+    // Inlined by Vite as a data URI: the glyph's own <title> names it.
+    expect(release.glyph.url).toContain("title%3eFlux");
+    expect(release.letters).toBeNull();
   });
 
-  it("ignores an icon it does not ship", () => {
-    expect(namedTile({ mark: ["X"], mark_icon: "nope" }, "x").icon).toBeNull();
+  it("draws the owner's horse in the glyph's place and Chroma's eye over all", () => {
+    const glyph = (icon) =>
+      namedTile({ mark: ["X"], mark_icon: icon, mark_band: true }, "x").release
+        .glyph;
+    expect(glyph("pony")).toMatchObject({ kind: "picture" });
+    expect(glyph("illustrious")).toMatchObject({ kind: "picture" });
+    expect(glyph("chroma")).toMatchObject({ kind: "full" });
+  });
+
+  it("wears the server's letters where the maker has no glyph", () => {
+    const { release } = namedTile(
+      { mark: ["ZIT"], mark_icon: null, mark_letters: "Z", mark_band: true },
+      "x",
+    );
+    expect(release.glyph).toBeNull();
+    expect(release.letters).toBe("Z");
+    // A glyph name it does not ship draws neither.
+    expect(
+      namedTile({ mark: ["X"], mark_icon: "nope", mark_band: true }, "x").release
+        .glyph,
+    ).toBeNull();
+  });
+
+  it("sets a version too wide for the room beside a smaller glyph", () => {
+    const small = (version) =>
+      namedTile({ mark: ["Qwen", version], mark_icon: "qwen", mark_band: true }, "x")
+        .release.small;
+    // jsdom measures 0.62em a character: four do not fit 11/32 at 7.5/32.
+    expect(small("2511")).toBe(true);
+    expect(small("2")).toBe(false);
   });
 });
 
 describe("nameScale", () => {
-  it("caps one line higher than two, and an icon's band lower still", () => {
-    const one = nameScale(["Z"]);
-    const two = nameScale(["Z", "1"]);
-    const band = nameScale(["Z"], { band: true });
-    expect(one).toBeGreaterThan(two);
-    expect(two).toBeGreaterThan(band);
+  it("caps one line higher than two", () => {
+    expect(nameScale(["Z"])).toBeGreaterThan(nameScale(["Z", "1"]));
   });
 
   it("shrinks a long name to fit its line", () => {
@@ -64,8 +92,10 @@ describe("the name's floor", () => {
     );
     const rule = css.match(/\.mmark-name \{[^}]*\}/)[0];
     expect(rule.replace(/\s+/g, " ")).toContain("font-size: max( 8.25px, calc(");
-    // A band's name is regular, which `nameScale` and the e2e spec measure.
-    const band = css.match(/\.mmark-name--band \{[^}]*\}/)[0];
+    // A release's band is one size, regular, which the e2e spec measures
+    // Chroma at.
+    const band = css.match(/\.mmark-band \{[^}]*\}/)[0];
+    expect(band).toContain("font-size: calc(var(--entity-thumb) * 7 / 32)");
     expect(band).toContain("font-weight: var(--weight-regular)");
   });
 });

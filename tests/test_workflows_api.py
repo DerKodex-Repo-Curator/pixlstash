@@ -3750,6 +3750,8 @@ def test_a_card_is_served_in_the_shape_the_frontend_already_reads(workflow_env):
             "mark_tab": None,
             "mark_colors": None,
             "mark_icon": None,
+            "mark_letters": None,
+            "mark_band": False,
             "kind": "lora",
             # A recipe slot names no file at all, so there is nothing to read a
             # precision off either - and nothing is what it serves.
@@ -4580,6 +4582,8 @@ def test_an_editor_format_cards_models_are_read_off_its_own_file(
             "mark_tab": None,
             "mark_colors": ["#484c53"],
             "mark_icon": None,
+            "mark_letters": None,
+            "mark_band": False,
             "kind": "unet",
             # Null and not an empty string: neither the shelf's column nor the
             # filename records a precision for this file.
@@ -4617,6 +4621,8 @@ def test_an_editor_format_cards_models_are_read_off_its_own_file(
             "mark_tab": None,
             "mark_colors": None,
             "mark_icon": None,
+            "mark_letters": None,
+            "mark_band": False,
             "kind": "lora",
             "quant": None,
             "slot_label": None,
