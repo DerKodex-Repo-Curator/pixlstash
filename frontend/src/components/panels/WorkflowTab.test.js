@@ -1633,9 +1633,19 @@ describe("a VAE or text encoder row (#1596, #1850)", () => {
     expect(row(wrapper, "text_encoder").text()).not.toContain(
       "Text encoder missing",
     );
-    expect(
-      row(wrapper, "text_encoder").find('[data-testid="wftab-edited"]').exists(),
-    ).toBe(true);
+    // Said as the tab's own fix, with what it did one focus away.
+    const encoder = row(wrapper, "text_encoder");
+    expect(encoder.find('[data-testid="wftab-edited"]').text()).toBe("Fixed");
+    expect(encoder.find('[data-testid="wftab-saved"]').text()).toContain(
+      "Corrected: t5xxl_fp8",
+    );
+    const note = encoder
+      .find('[data-testid="wftab-fix-mark"]')
+      .attributes("data-note");
+    expect(note).toContain("t5xxl_fp8.safetensors is not installed in ComfyUI");
+    expect(note).toContain("t5-xxl_fp8.safetensors");
+    const count = wrapper.find('[data-testid="wftab-draft-count"]');
+    expect(count.text()).toBe("1 automatic fix");
 
     // Taken back, it stays taken back.
     await row(wrapper, "text_encoder")
