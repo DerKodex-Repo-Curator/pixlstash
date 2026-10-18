@@ -16871,6 +16871,27 @@ def test_a_run_names_the_person_asked_for_where_no_lora_does(runnable, person_lo
     ) == [person_lora]
 
 
+def test_the_people_the_request_lists_are_the_whole_answer(runnable, person_lora):
+    """The Run popup's "Pictures are of": LoRA people taken off or added."""
+    added = {"sha256": PERSON_LORA_DIGEST}
+    asked = person_lora + 1
+    # Taken off: the LoRA still runs, and nobody is linked.
+    assert (
+        _whose_lora(runnable, workflow_id=RUN_WF, add_loras=[added], character_ids=[])
+        == []
+    )
+    assert _lora_loaders(runnable.submitted[0]["graph"]) == ["add_detail.safetensors"]
+    runnable.submitted.clear()
+    # Added with no LoRA, beside the one whose LoRA runs.
+    assert _whose_lora(
+        runnable,
+        workflow_id=RUN_WF,
+        add_loras=[added],
+        character_ids=[person_lora, asked],
+        character_id=asked + 1,
+    ) == [person_lora, asked]
+
+
 def test_a_persons_lora_at_strength_zero_names_nobody(runnable, person_lora):
     whose = _whose_lora(
         runnable,
@@ -17012,6 +17033,45 @@ def test_a_deleted_person_keeps_no_lora_and_no_pending_picture(runnable, person_
     # Gone before the run finished: nothing is linked, and nothing raises.
     comfyui_service._assign_outputs_to_lora_people(server, [person_lora], [picture_id])
     assert server.vault.db.run_task(pending) is None
+
+
+def test_a_picture_extraction_found_no_face_in_waits_on_nobody(runnable, person_lora):
+    """Its sentinel face says extraction ran; no later pass would clear rows."""
+    server, picture_id = runnable.server, runnable.picture_id
+    created = runnable.owner.post(f"{API}/characters", json={"name": "Someone"})
+    assert created.status_code == 200, created.text
+    other = created.json()["character"]["id"]
+
+    def sentinel(session):
+        session.add(Face(picture_id=picture_id, face_index=-1, bbox=None))
+        session.commit()
+
+    def waiting(session):
+        return session.exec(
+            select(PicturePendingPerson.character_id).where(
+                PicturePendingPerson.picture_id == picture_id
+            )
+        ).all()
+
+    def clear(session):
+        session.exec(delete(Face).where(Face.picture_id == picture_id))
+        session.exec(
+            delete(PicturePendingPerson).where(
+                PicturePendingPerson.picture_id == picture_id
+            )
+        )
+        session.commit()
+
+    try:
+        server.vault.db.run_task(clear)
+        server.vault.db.run_task(sentinel)
+        comfyui_service._assign_outputs_to_lora_people(
+            server, [person_lora, other], [picture_id]
+        )
+        assert server.vault.db.run_task(waiting) == []
+    finally:
+        server.vault.db.run_task(clear)
+        runnable.owner.delete(f"{API}/characters/{other}")
 
 
 def test_a_picture_of_two_people_has_its_faces_matched_to_them(runnable, person_lora):

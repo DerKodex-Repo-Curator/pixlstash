@@ -2560,11 +2560,14 @@ table cascading from both `picture` and `character`), which
 `Vault._process_pending_character_assignments` matches and deletes when
 `FaceExtractionTask` completes. A duplicate keeps the people it has, as it
 keeps its workflow, and projects are not touched: the run's destination
-decides those. **Where the LoRAs name nobody, the request may**:
-`RunRequest.character_id` (the Run popup's *Assign to person*) is handed on
-in the same argument and linked the same way, for each graph of the run that
-`_lora_people` answered nobody for. A LoRA's people always win over it, and
-an id naming nobody is logged by `_assign_outputs_to_lora_people` and links
+decides those. **The request may name the people instead**:
+`RunRequest.character_ids` (the Run popup's *Pictures are of*), when sent, is
+the whole answer for every graph of the run, LoRAs or not, and `[]` is nobody,
+so the owner can take off a person whose LoRA runs for a look or add one who
+has no LoRA. Left out, **where the LoRAs name nobody**,
+`RunRequest.character_id` is handed on in the same argument and linked the
+same way, for each graph of the run that `_lora_people` answered nobody for.
+A LoRA's people always win over it, and an id naming nobody is logged by `_assign_outputs_to_lora_people` and links
 nothing. `DELETE /characters/{id}` deletes the person's `adapter_attachment`
 rows and clears the `pending_character_id` naming them (their
 `picture_pending_person` rows go by the cascade), because `Character.id` is

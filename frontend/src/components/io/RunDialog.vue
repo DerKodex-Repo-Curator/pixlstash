@@ -71,24 +71,86 @@
               :options="setOptions"
             />
           </dd>
-          <!-- Who the pictures are of. People's LoRAs say so by themselves
-               (the server links the run's pictures to them, matching faces
-               to people by likeness), so the choice is offered only where no
-               LoRA does. -->
-          <template v-if="loraPeopleLine">
-            <dt>Assign to person</dt>
-            <dd data-testid="rund-of">{{ loraPeopleLine }}</dd>
-          </template>
-          <template v-else-if="entityLists.characters.length">
-            <dt>Assign to person</dt>
-            <dd>
+          <!-- Who the pictures are of: everyone whose LoRA the run loads, by
+               itself, less whom the owner took off (their LoRA still runs),
+               plus whom they added (linked, nothing loaded). Sent whole as
+               `character_ids`; the tiles on the right still choose LoRAs. -->
+          <template v-if="ofRows.length || entityLists.characters.length">
+            <dt :id="ofLabelId">Pictures are of</dt>
+            <dd class="rund-of">
+              <ul class="rund-of-list" :aria-labelledby="ofLabelId" data-testid="rund-of">
+                <li v-if="!ofRows.length" class="rund-of-row rund-of-row--none">
+                  <span class="rund-of-face" aria-hidden="true">
+                    <v-icon size="14">mdi-account-off-outline</v-icon>
+                  </span>
+                  <span class="rund-of-name">No one</span>
+                </li>
+                <li
+                  v-for="row in ofRows"
+                  :key="row.id"
+                  class="rund-of-row"
+                  :class="{ 'rund-of-row--off': row.off }"
+                  :data-of="row.id"
+                >
+                  <img
+                    v-if="!brokenFaces.has(row.id)"
+                    class="rund-of-face"
+                    :src="characterThumbnailUrl(row.id)"
+                    alt=""
+                    @error="brokenFaces.add(row.id)"
+                  />
+                  <span v-else class="rund-of-face" aria-hidden="true">
+                    <v-icon size="14">mdi-account-outline</v-icon>
+                  </span>
+                  <span class="rund-of-text">
+                    <span class="rund-of-name">{{ row.name }}</span>
+                    <span class="rund-of-why">{{
+                      row.off
+                        ? "LoRA still runs"
+                        : row.byLora
+                          ? "by their LoRA"
+                          : "linked only"
+                    }}</span>
+                  </span>
+                  <AppButton
+                    v-if="row.off"
+                    size="sm"
+                    variant="ghost"
+                    data-focus="undo"
+                    :aria-label="`Link the pictures to ${row.name} again`"
+                    :disabled="submitting"
+                    @click="restorePerson(row)"
+                  >
+                    Undo
+                  </AppButton>
+                  <AppBarButton
+                    v-else
+                    icon="close"
+                    data-focus="remove"
+                    :tooltip="
+                      row.byLora
+                        ? `Do not link the pictures to ${row.name}; their LoRA still runs`
+                        : `Do not link the pictures to ${row.name}`
+                    "
+                    :disabled="submitting"
+                    @click="removePerson(row)"
+                  />
+                </li>
+              </ul>
               <AppSelect
-                v-model="ofPersonId"
-                label="Assign to person"
+                v-if="addOptions.length > 1"
+                class="rund-of-add"
+                model-value=""
+                label="Add someone"
                 hide-label
                 compact
-                :options="ofPersonOptions"
+                :options="addOptions"
+                :disabled="submitting"
+                @update:model-value="addPerson"
               />
+              <p v-if="ofPeopleIds.length > 1" class="rund-note">
+                Each face goes to whichever of these it looks most like.
+              </p>
             </dd>
           </template>
           <template v-if="seedText">
@@ -1141,6 +1203,7 @@ import {
 import { useRoute, useRouter } from "vue-router";
 import { VIcon } from "vuetify/components";
 
+import { characterThumbnailUrl } from "../../api/characters";
 import { getPictureRecipe, getPixlstashNode } from "../../api/comfyui";
 import { fetchWorkflowSets, listAdapters } from "../../api/modelShelf";
 import { pictureThumbnailUrl } from "../../api/pictures";
@@ -1374,13 +1437,18 @@ const attachedLoras = ref([]);
 const handMadeSets = ref([]);
 const destinationSetId = ref("");
 /**
- * "Assign to person": the id picked, as the select holds it; "" is no one.
- * Never remembered between popups, unlike the set: a wrong person on a later
- * run's pictures is worse than one more pick. Nothing has to reset it: every
- * opening is a new instance (App.vue keys the popup on `runOpened`) and it is
- * written nowhere else.
+ * "Pictures are of": the people whose LoRA runs that the owner took off the
+ * list, and the people they added to it, by id. Never remembered between
+ * popups, unlike the set: a wrong person on a later run's pictures is worse
+ * than one more pick. Nothing has to reset them: every opening is a new
+ * instance (App.vue keys the popup on `runOpened`) and they are written
+ * nowhere else.
  */
-const ofPersonId = ref("");
+const ofRemoved = ref([]);
+const ofAdded = ref([]);
+const ofLabelId = useId();
+/** People whose thumbnail would not load: they keep their row, with a glyph. */
+const brokenFaces = reactive(new Set());
 
 // ── Picture inputs (#1457) ───────────────────────────────────────────────
 /**
@@ -3017,14 +3085,14 @@ const setOptions = computed(() => [
 ]);
 
 /**
- * The people whose LoRAs this run loads, `[{id, name}]` in id order: the
- * server links the run's pictures to them by itself (`_lora_people`,
- * `routes/workflows.py`), and reads it as this does. A row taken off or at
- * strength zero loads nobody.
+ * The people whose LoRA this run loads, `[{id, name}]` in id order, read off
+ * the form's rows the way the server's `_lora_people` reads the graph. A row
+ * taken off or at strength zero loads nobody.
  *
- * ponytail: read off the form's rows, so a loader no output reads still
- * counts here and not on the server: such a run says "by their LoRA" and
- * links nobody. Have the pre-flight answer the person if that is ever met.
+ * Read off the form rather than the pre-flight, so the list moves as the form
+ * does; the server takes the list it is sent (`character_ids`), so a loader no
+ * output reads, which counts here and not on the server, still links whom
+ * the side column says.
  */
 const loraPeople = computed(() => {
   const owners = new Map();
@@ -3042,29 +3110,73 @@ const loraPeople = computed(() => {
     if (row.person != null) ids.add(row.person);
     for (const id of owners.get(row.sha256.toLowerCase()) || []) ids.add(id);
   }
-  return [...ids]
-    .sort((a, b) => a - b)
-    .map((id) => {
-      const row = entityLists.characters.find((item) => Number(item.id) === id);
-      return { id, name: row?.name || personName(id) };
-    });
+  return [...ids].sort((a, b) => a - b).map((id) => ({ id, name: ofName(id) }));
 });
 
-/** "Mira, by their LoRA", "Mira and Noor, by their LoRAs", else "". */
-const loraPeopleLine = computed(() => {
-  const names = loraPeople.value.map((person) => person.name);
-  if (!names.length) return "";
-  const list = new Intl.ListFormat("en", { type: "conjunction" }).format(names);
-  return `${list}, by their LoRA${names.length > 1 ? "s" : ""}`;
+function ofName(id) {
+  const row = entityLists.characters.find((item) => Number(item.id) === id);
+  return row?.name || personName(id);
+}
+
+/**
+ * "Pictures are of", row by row: the LoRA people first (struck through,
+ * `off`, where taken off), then the people added by hand.
+ */
+const ofRows = computed(() => {
+  const byLora = loraPeople.value.map((person) => ({
+    ...person,
+    byLora: true,
+    off: ofRemoved.value.includes(person.id),
+  }));
+  const listed = new Set(byLora.map((row) => row.id));
+  return [
+    ...byLora,
+    ...ofAdded.value
+      .filter((id) => !listed.has(id))
+      .map((id) => ({ id, name: ofName(id), byLora: false, off: false })),
+  ];
+});
+/** Who the run's pictures are linked to: every row not struck through. */
+const ofPeopleIds = computed(() =>
+  ofRows.value.filter((row) => !row.off).map((row) => row.id),
+);
+
+/** "Add someone": everybody in the library not on the list already. */
+const addOptions = computed(() => {
+  const listed = new Set(ofRows.value.map((row) => row.id));
+  return [
+    { value: "", label: "Add someone" },
+    ...entityLists.characters
+      .filter((row) => !listed.has(Number(row.id)))
+      .map((row) => ({ value: String(row.id), label: row.name })),
+  ];
 });
 
-const ofPersonOptions = computed(() => [
-  { value: "", label: "No one" },
-  ...entityLists.characters.map((row) => ({
-    value: String(row.id),
-    label: row.name,
-  })),
-]);
+function addPerson(value) {
+  if (!value) return;
+  const id = Number(value);
+  if (!ofAdded.value.includes(id)) ofAdded.value = [...ofAdded.value, id];
+}
+
+/**
+ * Take a person off the list. One whose LoRA runs stays, struck through,
+ * with Undo, so the gap shows; their LoRA is left alone. One added by hand
+ * just goes, back into "Add someone".
+ */
+function removePerson(row) {
+  ofAdded.value = ofAdded.value.filter((id) => id !== row.id);
+  if (row.byLora) {
+    ofRemoved.value = [...ofRemoved.value, row.id];
+    focusLater(`[data-of="${row.id}"] [data-focus="undo"]`);
+  } else {
+    focusLater(".rund-of-add .app-select__field");
+  }
+}
+
+function restorePerson(row) {
+  ofRemoved.value = ofRemoved.value.filter((id) => id !== row.id);
+  focusLater(`[data-of="${row.id}"] [data-focus="remove"]`);
+}
 
 /**
  * Where the output is filed, said as it will actually happen.
@@ -4028,10 +4140,13 @@ function runBody() {
     // be read, and the server reads it for itself.
     if (seen.value) body.waited = seen.value;
   }
-  // Only where no LoRA says it: the server would not read it otherwise, and
-  // a pick made before a person's LoRA was added is not what the form shows.
-  if (!loraPeople.value.length && ofPersonId.value) {
-    body.character_id = Number(ofPersonId.value);
+  // The whole list whenever the form knows it, which the server takes over
+  // what the LoRAs say. With no LoRA person and nobody added it is left out,
+  // so the server reads the graph itself and still links a LoRA the form
+  // could not name (a filename the shelf resolves, or attachments still
+  // loading). A LoRA person taken off is still a LoRA person: that sends [].
+  if (ofAdded.value.length || loraPeople.value.length) {
+    body.character_ids = ofPeopleIds.value;
   }
   const setId = picksDestination.value ? destinationSetId.value : props.context?.set_id;
   if (loraSource.value?.entityType === "character") {
@@ -4571,7 +4686,7 @@ async function loadLoraSource() {
 
 /**
  * The people and the shelf's unclassified files, for the person picker and
- * "Assign to person"; neither read holds the popup up.
+ * "Pictures are of"; neither read holds the popup up.
  */
 async function loadPeople() {
   void entityLists.refresh("characters");
@@ -4803,7 +4918,7 @@ async function load() {
     // means anyway.
     await loadAdapters();
     if (!mine()) return;
-    // Every run reads them: "Assign to person" lists the people, and says
+    // Every run reads them: "Pictures are of" lists the people, and says
     // whose LoRA the run loads.
     void loadPeople();
     if (runsWorkflowItself.value && key) {
@@ -5188,6 +5303,85 @@ void load();
 .rund-kv dd {
   margin: 0;
   font-size: var(--text-sm);
+}
+
+/* "Pictures are of": one row a person, field-styled like the select under it,
+   so the list reads as the control it replaced. */
+.rund-of,
+.rund-of-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.rund-of-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rund-of-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--control-h);
+  padding: 0 var(--space-2);
+  border: 1px solid rgb(var(--v-theme-border));
+  border-radius: var(--radius-sm);
+  background: rgb(var(--v-theme-input-background));
+}
+
+/* Taken off: still there, so the gap shows, and plainly not linked. */
+.rund-of-row--off {
+  border-style: dashed;
+  background: transparent;
+}
+
+.rund-of-row--off .rund-of-name {
+  color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
+  text-decoration: line-through;
+}
+
+.rund-of-row--off .rund-of-face {
+  opacity: 0.45;
+}
+
+.rund-of-row--none {
+  border-style: solid;
+  background: transparent;
+}
+
+.rund-of-face {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--space-6);
+  height: var(--space-6);
+  border-radius: 50%;
+  object-fit: cover;
+  background: rgba(var(--v-theme-on-surface), 0.06);
+  color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
+}
+
+.rund-of-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: var(--leading-tight);
+}
+
+.rund-of-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: var(--weight-medium);
+}
+
+.rund-of-why {
+  font-size: var(--text-2xs);
+  color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
 }
 
 .rund-mono {

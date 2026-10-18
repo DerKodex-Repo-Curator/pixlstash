@@ -1656,6 +1656,13 @@ class RunRequest(BaseModel):
     # not read for it. Bounded as every id here is: `MAX_PICTURE_ID` is
     # SQLite's INTEGER ceiling, not a count of pictures.
     character_id: int | None = Field(None, ge=1, le=MAX_PICTURE_ID)
+    # Everyone the run's pictures are of, the Run popup's "Pictures are of".
+    # Sent, it is the whole answer, LoRAs or not (`[]` is nobody): the owner
+    # may take off a person whose LoRA runs for a look, or add one with no
+    # LoRA. Left out, the LoRAs and `character_id` decide as above.
+    character_ids: list[Annotated[int, Field(ge=1, le=MAX_PICTURE_ID)]] | None = Field(
+        None, max_length=MAX_DEFAULTS
+    )
     # What fills each picture input of the workflow (#1457), first answer wins:
     # an entry here, a `fixed` pin whose picture is still kept, a stored
     # `selection` fed from `picture_ids`, and - once those have been applied
@@ -7716,9 +7723,12 @@ def create_router(server) -> APIRouter:
                 else None
             )
             run_workflow_version = group.workflow_version if run_workflow_id else None
-            lora_character_ids = _lora_people(graph, object_info) or (
-                [body.character_id] if body.character_id is not None else []
-            )
+            if body.character_ids is not None:
+                lora_character_ids = body.character_ids
+            else:
+                lora_character_ids = _lora_people(graph, object_info) or (
+                    [body.character_id] if body.character_id is not None else []
+                )
             # A selection feeding an input is the run's repeat axis: one pass
             # per picture, each its own source and, with `stack`, its own
             # stack. Otherwise one pass, and the group's first picture is the

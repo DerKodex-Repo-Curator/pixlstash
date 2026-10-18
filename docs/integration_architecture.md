@@ -735,14 +735,20 @@ strength_model?, strength_clip?}]` (**one slot is a node AND a field**, so a
 stacker's `lora_name_1` and `lora_name_2` are two slots), `values:
 [{slot_label, input_name, value}]` addressed the way a card's defaults are,
 `count`, `seed_mode: "new" | "keep" | "fixed"` with `seed`,
-`destination: {set_id?, project_id?, character_id?}`, `character_id`, `inputs:
+`destination: {set_id?, project_id?, character_id?}`, `character_id`,
+`character_ids`, `inputs:
 [{slot_label, input_name, picture_id}]`, `replay`, `stack` and
 `allow_unchecked`.
 
-**`character_id` is who the run's pictures are of**, read only for a graph
-whose LoRAs name nobody: one loading exactly one person's LoRA is linked to
-that person whatever this says. The pictures are linked as a drop onto a
-person links them (their largest face, once faces are read). It is not
+**`character_ids` is who the run's pictures are of**, and when sent it is the
+whole answer, whatever the LoRAs say (`[]` is nobody): the Run popup's
+*Pictures are of* list, which the owner can shorten or add to. Left out, the
+people whose LoRAs the graph loads are linked, or else `character_id`, the
+older single person, for a graph whose LoRAs name nobody. One person is linked
+as a drop onto a person links them (their largest face, once faces are read);
+several are each given the face they look most like, strongest pair first,
+once faces are read, and anyone left without one takes the largest face nobody
+took. Neither is
 `destination.character_id`, which files the pictures into the person's
 reference set and names no face.
 
