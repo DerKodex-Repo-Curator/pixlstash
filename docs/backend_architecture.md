@@ -2534,30 +2534,41 @@ splice the graph may refuse. A run made from pictures or a saved recipe places
 person is `add_loras`: the Run popup's person picker
 (`docs/frontend_architecture.md`, `RunDialog.vue`) and the MCP run tools.
 
-**The run's pictures are of the person whose LoRA it loaded.** `_submit_every`
-asks `_lora_person` of each graph as it is submitted, so a LoRA a recipe
+**The run's pictures are of the people whose LoRAs it loaded.** `_submit_every`
+asks `_lora_people` of each graph as it is submitted, so a LoRA a recipe
 placed, one `add_loras` named and one the workflow kept all answer alike: the
 shelf digests of its live LoRA slots (every slot when ComfyUI did not answer),
 less a slot at model strength zero, looked up in
-`model_shelf_service.lora_people`. Exactly one person is handed to
-`_process_comfyui_outputs` as `lora_character_id`, and
-`_assign_outputs_to_lora_person` links what the run imported or its saver
-reported, after the import event, through
+`model_shelf_service.lora_people`. They are handed to
+`_process_comfyui_outputs` as `lora_character_ids`, and
+`_assign_outputs_to_lora_people` links what the run imported or its saver
+reported, after the import event. **One person** goes through
 `move_reconciliation_service.add_person`: `Picture.pending_character_id` for
 a picture with no faces yet, which face extraction turns into its largest face
 and drops when it finds none, or the largest unassigned face of one already
-extracted. A duplicate keeps the people it has, as it keeps its workflow, and
-projects are not touched: the run's destination decides those. **LoRAs of two
-or more people name nobody**: a picture holds one pending person, so the run
-is logged and its pictures are left for the owner to assign. **Where the
-LoRAs name nobody, the request may**: `RunRequest.character_id` (the Run
-popup's *Assign to person*) is handed on in the same argument and linked the
-same way, for each graph of the run that `_lora_person` answered `None` for.
-A LoRA's one person always wins over it, and an id naming nobody is logged
-by `_assign_outputs_to_lora_person` and links nothing. `DELETE
-/characters/{id}` deletes the person's `adapter_attachment` rows and clears
-the `pending_character_id` naming them, because `Character.id` is reused by
-the next person created.
+extracted. **Two or more** are matched to the faces by likeness
+(`scoring.match_faces_to_characters`): each person is scored against every
+face nobody names by their reference faces
+(`select_reference_faces_for_character`), and the pairing taken is the one
+whose likenesses sum highest (`scipy.optimize.linear_sum_assignment`), one
+face per person; a face already naming somebody, and that somebody, are left
+out. A person with no reference faces cannot be told apart: one such person
+left over gets the largest face nobody took, two or more get none. A picture
+already extracted is matched at once; one not yet extracted gets a
+`picture_pending_person` row per person (`PicturePendingPerson`, a vault
+table cascading from both `picture` and `character`), which
+`Vault._process_pending_character_assignments` matches and deletes when
+`FaceExtractionTask` completes. A duplicate keeps the people it has, as it
+keeps its workflow, and projects are not touched: the run's destination
+decides those. **Where the LoRAs name nobody, the request may**:
+`RunRequest.character_id` (the Run popup's *Assign to person*) is handed on
+in the same argument and linked the same way, for each graph of the run that
+`_lora_people` answered nobody for. A LoRA's people always win over it, and
+an id naming nobody is logged by `_assign_outputs_to_lora_people` and links
+nothing. `DELETE /characters/{id}` deletes the person's `adapter_attachment`
+rows and clears the `pending_character_id` naming them (their
+`picture_pending_person` rows go by the cascade), because `Character.id` is
+reused by the next person created.
 
 **A run by `workflow_id`** starts from the base card's source and has the
 server apply the default recipe **under** the request: the recipe's values

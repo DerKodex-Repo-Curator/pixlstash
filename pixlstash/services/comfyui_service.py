@@ -33,7 +33,9 @@ from sqlmodel import select
 
 from pixlstash.db_models import (
     Character,
+    Face,
     Picture,
+    PicturePendingPerson,
     PictureProjectMember,
     PictureSetMember,
     PictureStack,
@@ -44,6 +46,7 @@ from pixlstash.event_types import EventType
 from pixlstash.services import import_dedup_service
 from pixlstash.services.layout_move_service import resolve_placement
 from pixlstash.services.move_reconciliation_service import add_person
+from pixlstash.scoring import match_faces_to_characters
 from pixlstash.services.comfyui_recipe_service import (
     CHECKPOINT_LOADER_ID,
     CHECKPOINT_LOADER_SHELF,
@@ -1655,43 +1658,77 @@ def _assign_pictures_to_view_context(
     )
 
 
-def _assign_outputs_to_lora_person(
-    server, character_id: int | None, new_ids: list[int]
+def _assign_outputs_to_lora_people(
+    server, character_ids: list[int] | None, new_ids: list[int]
 ) -> None:
-    """Say the run's pictures are of the person whose LoRA it loaded.
+    """Say the run's pictures are of the people whose LoRAs it loaded.
 
     Or of the person the run named (``RunRequest.character_id``), where its
     LoRAs named nobody: the caller decides which, and both are linked alike.
 
-    A fresh output has no faces yet, so this is the deferral a drop onto a
-    person uses (``Picture.pending_character_id``, which face extraction turns
-    into the largest face it finds, and drops when it finds none). One whose
-    faces are already in takes its largest unassigned one instead, and never a
-    face that names somebody else.
+    One person: a fresh output has no faces yet, so this is the deferral a
+    drop onto a person uses (``Picture.pending_character_id``, which face
+    extraction turns into the largest face it finds, and drops when it finds
+    none). One whose faces are already in takes its largest unassigned one
+    instead, and never a face that names somebody else.
+
+    Several people: which face is whose is a matter of likeness
+    (``match_faces_to_characters``). Read now where the faces are in, else
+    after face extraction, from a ``PicturePendingPerson`` row per person.
 
     Projects are left alone, as every automatic naming of a face leaves them:
     the run's own destination decides where its pictures are filed.
     """
-    if character_id is None or not new_ids:
+    if not character_ids or not new_ids:
         return
 
     def assign(session) -> tuple[int, int]:
-        if session.get(Character, character_id) is None:
-            logger.warning(
-                "Person %s was deleted before the run's pictures %s could be "
-                "linked to them.",
-                character_id,
-                new_ids,
-            )
+        people = []
+        for character_id in dict.fromkeys(character_ids):
+            if session.get(Character, character_id) is None:
+                logger.warning(
+                    "Person %s was deleted before the run's pictures %s could "
+                    "be linked to them.",
+                    character_id,
+                    new_ids,
+                )
+            else:
+                people.append(character_id)
+        if not people:
             return 0, 0
         named = deferred = 0
         for pic in session.exec(select(Picture).where(Picture.id.in_(new_ids))).all():
-            if not add_person(session, pic, character_id):
+            if len(people) == 1:
+                if not add_person(session, pic, people[0]):
+                    continue
+                if pic.pending_character_id == people[0]:
+                    deferred += 1
+                else:
+                    named += 1
                 continue
-            if pic.pending_character_id == character_id:
+            faces = Face.find(session, picture_id=pic.id)
+            if faces:
+                by_id = {face.id: face for face in faces}
+                for face_id, character_id in match_faces_to_characters(
+                    session, faces, people
+                ).items():
+                    by_id[face_id].character_id = character_id
+                    session.add(by_id[face_id])
+                    named += 1
+            elif (
+                session.exec(
+                    select(Face.id).where(Face.picture_id == pic.id).limit(1)
+                ).first()
+                is None
+            ):
+                # Extraction has not run yet (a row of any kind says it has).
+                for character_id in people:
+                    session.merge(
+                        PicturePendingPerson(
+                            picture_id=pic.id, character_id=character_id
+                        )
+                    )
                 deferred += 1
-            else:
-                named += 1
         session.commit()
         return named, deferred
 
@@ -1701,9 +1738,9 @@ def _assign_outputs_to_lora_person(
         server.vault.notify(EventType.CHANGED_CHARACTERS)
         server.vault.notify(EventType.CHANGED_FACES)
     logger.info(
-        "Person %s, whom the run's LoRA or its request named: %s of its %s "
-        "picture(s) linked now, %s when their faces are read",
-        character_id,
+        "People %s, whom the run's LoRAs or its request named: %s face(s) of "
+        "its %s picture(s) linked now, %s picture(s) when their faces are read",
+        list(character_ids),
         named,
         len(new_ids),
         deferred,
@@ -1816,7 +1853,7 @@ def _process_comfyui_outputs(
     rejected: str | None = None,
     run_workflow_version: int | None = None,
     workflow_id: str | None = None,
-    lora_character_id: int | None = None,
+    lora_character_ids: list[int] | None = None,
 ) -> None:
     """Poll ComfyUI for a prompt's outputs, import them, and say how it ended.
 
@@ -1835,10 +1872,10 @@ def _process_comfyui_outputs(
     before this poller sees it is filed by the tag ``_tag_for_workflow`` put
     in its filename instead.
 
-    *lora_character_id* is the person whose LoRA the run loaded, or the one
-    its request named where no LoRA did, whom its pictures are then of (``_assign_outputs_to_lora_person``). Like the
-    workflow, only what this run imported or its saver reported: a duplicate
-    keeps the people it has.
+    *lora_character_ids* are the people whose LoRAs the run loaded, or the one
+    its request named where no LoRA did, whom its pictures are then of
+    (``_assign_outputs_to_lora_people``). Like the workflow, only what this run
+    imported or its saver reported: a duplicate keeps the people it has.
 
     This is the documented single-event import path (see
     ``docs/backend_architecture.md`` §15). It is a deliberate exception to the
@@ -2040,7 +2077,7 @@ def _process_comfyui_outputs(
             )
         # After the event: a failure here must not cost the pictures their
         # import event. Before the ending, so a run has one.
-        _assign_outputs_to_lora_person(pinned_server, lora_character_id, new_ids)
+        _assign_outputs_to_lora_people(pinned_server, lora_character_ids, new_ids)
         held = []
         if duplicate_ids:
             try:

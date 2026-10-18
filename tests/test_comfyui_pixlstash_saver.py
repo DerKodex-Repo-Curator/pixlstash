@@ -663,8 +663,8 @@ class TestOutputProcessing:
         )
         monkeypatch.setattr(
             comfyui_service,
-            "_assign_outputs_to_lora_person",
-            lambda srv, person, ids: calls.__setitem__("person", (person, ids)),
+            "_assign_outputs_to_lora_people",
+            lambda srv, people, ids: calls.__setitem__("person", (people, ids)),
         )
         monkeypatch.setattr(
             comfyui_service,
@@ -724,9 +724,9 @@ class TestOutputProcessing:
             pixlstash_ids=[41],
             imported=[40],
             duplicates=[39],
-            lora_character_id=5,
+            lora_character_ids=[5],
         )
-        assert calls["person"] == (5, [40, 41])
+        assert calls["person"] == ([5], [40, 41])
         # Some new, one the library had: the run completed and says so.
         assert "also made a picture" in _server.vault.events[-1][1]["notice"]
         _server, calls = self._run(

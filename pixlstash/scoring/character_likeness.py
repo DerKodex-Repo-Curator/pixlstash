@@ -261,6 +261,72 @@ def compute_character_likeness_for_faces(
     }
 
 
+def match_faces_to_characters(
+    session: Session,
+    faces: list[Face],
+    character_ids: list[int],
+) -> dict[int, int]:
+    """Say which of one picture's *faces* is which of *character_ids*.
+
+    Each person is scored against every face that names nobody yet, by
+    likeness to their reference faces, and the pairing taken is the one whose
+    likenesses sum highest: two people who look alike are not both handed the
+    face that looks most like either. A person gets at most one face, a face
+    at most one person, and a person some face already names is left out.
+
+    A person with no reference faces cannot be told apart by likeness. When
+    exactly one is left over they get the largest face nobody took, the rule
+    a run of one person uses; with two or more, which face is whose would be
+    a guess, so they get none.
+
+    Args:
+        session: Database session to read reference faces with.
+        faces: The picture's real faces (no ``face_index == -1`` sentinel).
+        character_ids: The people the picture is of.
+
+    Returns:
+        face id -> character id, for the faces to assign.
+    """
+    named = {face.character_id for face in faces if face.character_id is not None}
+    people = [cid for cid in dict.fromkeys(character_ids) if cid not in named]
+    free = [face for face in faces if face.character_id is None]
+    candidates = [face for face in free if face.features]
+    scored_people: list[int] = []
+    rows: list[list[float]] = []
+    for character_id in people:
+        likeness = compute_character_likeness_for_faces(
+            select_reference_faces_for_character(session, character_id),
+            candidates,
+        )
+        if likeness:
+            scored_people.append(character_id)
+            rows.append([likeness.get(face.id, -1.0) for face in candidates])
+
+    pairs: dict[int, int] = {}
+    if rows:
+        # Local import: scipy.optimize costs ~0.35 s to load, and only a
+        # picture of several people ever needs it.
+        from scipy.optimize import linear_sum_assignment
+
+        person_idx, face_idx = linear_sum_assignment(np.array(rows), maximize=True)
+        for p, f in zip(person_idx, face_idx, strict=True):
+            pairs[candidates[f].id] = scored_people[p]
+
+    unscored = [cid for cid in people if cid not in scored_people]
+    left = [face for face in free if face.id not in pairs]
+    if len(unscored) == 1 and left:
+        largest = max(left, key=lambda face: (face.width or 0) * (face.height or 0))
+        pairs[largest.id] = unscored[0]
+    elif len(unscored) > 1:
+        logger.info(
+            "People %s have no reference faces to tell them apart by, so none "
+            "of them is matched to a face of picture %s.",
+            unscored,
+            faces[0].picture_id if faces else None,
+        )
+    return pairs
+
+
 def find_pictures_by_character_likeness(
     server,
     character_id,

@@ -71,12 +71,13 @@
               :options="setOptions"
             />
           </dd>
-          <!-- Who the pictures are of. One person's LoRA says so by itself
-               (the server links the run's pictures to them), so the choice
-               is offered only where no LoRA does. -->
-          <template v-if="loraPerson">
+          <!-- Who the pictures are of. People's LoRAs say so by themselves
+               (the server links the run's pictures to them, matching faces
+               to people by likeness), so the choice is offered only where no
+               LoRA does. -->
+          <template v-if="loraPeopleLine">
             <dt>Assign to person</dt>
-            <dd data-testid="rund-of">{{ loraPerson.name }}, by their LoRA</dd>
+            <dd data-testid="rund-of">{{ loraPeopleLine }}</dd>
           </template>
           <template v-else-if="entityLists.characters.length">
             <dt>Assign to person</dt>
@@ -2913,16 +2914,16 @@ const setOptions = computed(() => [
 ]);
 
 /**
- * The one person whose LoRA this run loads, `{id, name}`, else null: the
- * server links the run's pictures to them by itself (`_lora_person`,
+ * The people whose LoRAs this run loads, `[{id, name}]` in id order: the
+ * server links the run's pictures to them by itself (`_lora_people`,
  * `routes/workflows.py`), and reads it as this does. A row taken off or at
- * strength zero loads nobody, and LoRAs of two people name neither.
+ * strength zero loads nobody.
  *
  * ponytail: read off the form's rows, so a loader no output reads still
  * counts here and not on the server: such a run says "by their LoRA" and
  * links nobody. Have the pre-flight answer the person if that is ever met.
  */
-const loraPerson = computed(() => {
+const loraPeople = computed(() => {
   const owners = new Map();
   for (const lora of [...adapters.value, ...unknownLoras.value]) {
     for (const entry of lora.attachments || []) {
@@ -2938,10 +2939,20 @@ const loraPerson = computed(() => {
     if (row.person != null) ids.add(row.person);
     for (const id of owners.get(row.sha256.toLowerCase()) || []) ids.add(id);
   }
-  if (ids.size !== 1) return null;
-  const [id] = ids;
-  const row = entityLists.characters.find((item) => Number(item.id) === id);
-  return { id, name: row?.name || personName(id) };
+  return [...ids]
+    .sort((a, b) => a - b)
+    .map((id) => {
+      const row = entityLists.characters.find((item) => Number(item.id) === id);
+      return { id, name: row?.name || personName(id) };
+    });
+});
+
+/** "Mira, by their LoRA", "Mira and Noor, by their LoRAs", else "". */
+const loraPeopleLine = computed(() => {
+  const names = loraPeople.value.map((person) => person.name);
+  if (!names.length) return "";
+  const list = new Intl.ListFormat("en", { type: "conjunction" }).format(names);
+  return `${list}, by their LoRA${names.length > 1 ? "s" : ""}`;
 });
 
 const ofPersonOptions = computed(() => [
@@ -3916,7 +3927,7 @@ function runBody() {
   }
   // Only where no LoRA says it: the server would not read it otherwise, and
   // a pick made before a person's LoRA was added is not what the form shows.
-  if (!loraPerson.value && ofPersonId.value) {
+  if (!loraPeople.value.length && ofPersonId.value) {
     body.character_id = Number(ofPersonId.value);
   }
   const setId = picksDestination.value ? destinationSetId.value : props.context?.set_id;
