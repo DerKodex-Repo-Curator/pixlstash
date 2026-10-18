@@ -878,6 +878,25 @@ describe("the kind the workflows suggest (#1962)", () => {
     });
   });
 
+  it("hands focus back to the Kind menu when the write fails too", async () => {
+    editModels.mockReset().mockRejectedValue(new Error("offline"));
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    try {
+      const wrapper = await mountUnclassified(encoder());
+      wrapper.findComponent(KindMenu).vm.$emit("pick", "text_encoder");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await wrapper.vm.$nextTick();
+      expect(useNoticeStore().notices.at(-1).level).toBe("error");
+      expect(
+        focus.mock.contexts.some(
+          (el) => el.dataset?.testid === "kind-menu",
+        ),
+      ).toBe(true);
+    } finally {
+      focus.mockRestore();
+    }
+  });
+
   it("dismisses the suggestion without touching the kind", async () => {
     editModels.mockReset().mockResolvedValue({ updated: [7], fields: [] });
     const wrapper = await mountUnclassified(encoder());

@@ -1735,6 +1735,38 @@ describe("a VAE or text encoder row (#1596, #1850)", () => {
     expect(getWorkflowCard).toHaveBeenCalledWith(KEY);
   });
 
+  it("keeps the offer and its focus when filing it fails", async () => {
+    const offer = {
+      address: "core:n3/clip_name/ckpt_name",
+      model_id: 4,
+      file_kind: "unknown",
+      suggested_kind: "text_encoder",
+      suggested_by: 2,
+      suggested_fields: ["clip_name"],
+    };
+    getWorkflowCard.mockResolvedValue(
+      detail({ card: withSupport, kind_offers: [offer] }),
+    );
+    editModels.mockReset().mockRejectedValue(new Error("offline"));
+    const { wrapper } = await mountWith([KEY], [withSupport]);
+    await settle(wrapper);
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    try {
+      row(wrapper, "text_encoder")
+        .findComponent(KindMenu)
+        .vm.$emit("pick", "text_encoder");
+      await settle(wrapper);
+      expect(
+        focus.mock.contexts.some((el) => el.dataset?.testid === "kind-menu"),
+      ).toBe(true);
+      expect(row(wrapper, "text_encoder").findComponent(KindMenu).exists()).toBe(
+        true,
+      );
+    } finally {
+      focus.mockRestore();
+    }
+  });
+
   it("says a failed read on a missing row rather than showing nothing", async () => {
     preflightWorkflowRun.mockResolvedValue(
       missing({ file: "SDXL/sdxl_vae_fp8.safetensors", folder: "vae" }),

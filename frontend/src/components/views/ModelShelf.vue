@@ -4143,7 +4143,7 @@ async function setKindFromMenu(row, fileKind) {
   const ids = row.memberIds ?? [row.id];
   const label = fileKindLabel(fileKind);
   const undo = { file_kind: row.file_kind, suggest_kind: !row.kind_decided };
-  const landed = await store.editModelIds(
+  await store.editModelIds(
     ids,
     { file_kind: fileKind },
     {
@@ -4153,7 +4153,8 @@ async function setKindFromMenu(row, fileKind) {
       action: { label: "Undo", handler: () => store.editModelIds(ids, undo) },
     },
   );
-  if (landed) focusKindMenu(row.id);
+  // Whether or not the write landed: the menu has closed either way.
+  focusKindMenu(row.id);
 }
 
 /** "Adapter…": an adapter names its algorithm, which the Set kind dialog asks. */
@@ -4164,7 +4165,7 @@ function setKindByDialog(row) {
 
 /** "Don't suggest a kind" (false) and "Suggest a kind again" (true). */
 async function setKindSuggestion(row, on) {
-  const landed = await store.editModelIds(
+  await store.editModelIds(
     row.memberIds ?? [row.id],
     { suggest_kind: on },
     {
@@ -4173,7 +4174,8 @@ async function setKindSuggestion(row, on) {
         : "The shelf will not suggest a kind for it.",
     },
   );
-  if (landed) focusKindMenu(row.id);
+  // Whether or not the write landed: the menu has closed either way.
+  focusKindMenu(row.id);
 }
 
 /**

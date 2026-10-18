@@ -1885,6 +1885,8 @@ async function fileOffered(row, changes) {
       level: "error",
       text: errorMessage(err, "Could not write that change."),
     });
+    // The offer still stands, so its menu takes back the focus it held.
+    await refocusRow(row.address);
     return;
   }
   notices.push({
@@ -1900,9 +1902,17 @@ async function fileOffered(row, changes) {
   await loadDetail(key, { quiet: true });
   // The menu goes with the offer it answered; the row's own control takes
   // the focus it held rather than <body>.
+  await refocusRow(row.address);
+}
+
+/** Focus a model row's Kind menu, or its own control once the menu has gone. */
+async function refocusRow(address) {
   await nextTick();
-  const rowEl = [...document.querySelectorAll("[data-address]")].find(
-    (el) => el.dataset.address === row.address,
+  // This tab's own Models panel: another panel on the page may draw the
+  // same address.
+  const panel = modelsHeading.value?.closest("section");
+  const rowEl = [...(panel?.querySelectorAll("[data-address]") ?? [])].find(
+    (el) => el.dataset.address === address,
   );
   rowEl
     ?.querySelector("[data-testid='kind-menu'], button, input, [tabindex='0']")
