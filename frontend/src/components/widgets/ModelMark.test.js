@@ -319,3 +319,101 @@ describe("ModelMark", () => {
     expect(mountMark().find(".mmark").classes()).not.toContain("mmark--ring");
   });
 });
+
+// The named tile (#1951): the server's name for a model of a known base
+// model, drawn only where the host asks (the workflow card).
+describe("ModelMark, named", () => {
+  const named = {
+    mark: ["SDXL", "1.0"],
+    mark_tab: "REFI",
+    mark_colors: ["#9d39ff", "#e80000"],
+    mark_icon: null,
+  };
+  const mountNamed = (overrides, props = {}) =>
+    mount(ModelMark, {
+      props: { row: row({ ...named, ...overrides }), named: true, ...props },
+    });
+
+  it("prints the name's lines and the role on the tab, not the initials", () => {
+    const wrapper = mountNamed();
+    const lines = wrapper.findAll(".mmark-name > span").map((s) => s.text());
+    expect(lines).toEqual(["SDXL", "1.0"]);
+    expect(wrapper.find(".mmark-initials").exists()).toBe(false);
+    expect(wrapper.find(".mmark-version").text()).toBe("REFI");
+    expect(wrapper.find(".mmark-named").attributes("style")).toContain(
+      "linear-gradient(135deg, rgb(157, 57, 255), rgb(232, 0, 0))",
+    );
+  });
+
+  it("is the shelf's generated mark where the host does not ask for it", () => {
+    const wrapper = mount(ModelMark, { props: { row: row(named) } });
+    expect(wrapper.find(".mmark-named").exists()).toBe(false);
+    expect(wrapper.find(".mmark-initials").text()).toBe("CS");
+  });
+
+  it("keeps the generated mark for a row the server named nothing for", () => {
+    const wrapper = mountNamed({ mark: null, mark_tab: null });
+    expect(wrapper.find(".mmark-named").exists()).toBe(false);
+    expect(wrapper.find(".mmark-initials").text()).toBe("CS");
+  });
+
+  it("draws a few-step tab as a bolt with the step count", () => {
+    const wrapper = mountNamed({ mark: ["Qwen", "LI"], mark_tab: "⚡4" });
+    const tab = wrapper.find(".mmark-version");
+    expect(tab.find(".mmark-bolt").text()).toBe("mdi-lightning-bolt");
+    expect(tab.text()).toBe("mdi-lightning-bolt4");
+  });
+
+  it("draws a release as a band, its maker's glyph and its version", () => {
+    const wrapper = mountNamed({
+      mark: ["Klein", "2"],
+      mark_tab: "⚡",
+      mark_colors: ["#484c53"],
+      mark_icon: "flux",
+      mark_band: true,
+    });
+    expect(wrapper.find(".mmark-band").text()).toBe("Klein");
+    expect(wrapper.find(".mmark-glyph").attributes("src")).toContain("title%3eFlux");
+    expect(wrapper.find(".mmark-glyph").classes()).toContain(
+      "mmark-glyph--shadowed",
+    );
+    expect(wrapper.find(".mmark-release-version").text()).toBe("2");
+    expect(wrapper.find(".mmark-name").exists()).toBe(false);
+    // The tab is a plain pill: no outline in the tile's own colour.
+    expect(wrapper.find(".mmark-version").attributes("style")).not.toContain(
+      "border-color",
+    );
+  });
+
+  it("fills a Chroma release with its eye, and puts letters where no glyph is", () => {
+    const chroma = mountNamed({
+      mark: ["Chroma"],
+      mark_tab: "HD",
+      mark_colors: ["#7a3b12"],
+      mark_icon: "chroma",
+      mark_band: true,
+    });
+    expect(chroma.find(".mmark-named > .mmark-img").attributes("src")).toContain(
+      "chroma",
+    );
+    expect(chroma.find(".mmark-band").text()).toBe("Chroma");
+    expect(chroma.find(".mmark-version").text()).toBe("HD");
+    const zit = mountNamed({
+      mark: ["ZIT"],
+      mark_tab: "⚡",
+      mark_colors: ["#dc5100"],
+      mark_icon: null,
+      mark_letters: "Z",
+      mark_band: true,
+    });
+    expect(zit.find(".mmark-letters").text()).toBe("Z");
+    expect(zit.find(".mmark-release-version").exists()).toBe(false);
+  });
+
+  it("lets the owner's own picture of the model win, tab and all", () => {
+    const wrapper = mountNamed({ icon_sha256: "a".repeat(64) });
+    expect(wrapper.find("img").attributes("src")).toBe(icon("a".repeat(64)));
+    expect(wrapper.find(".mmark-named").exists()).toBe(false);
+    expect(wrapper.find(".mmark-version").exists()).toBe(false);
+  });
+});

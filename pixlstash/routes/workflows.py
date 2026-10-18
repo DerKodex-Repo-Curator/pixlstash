@@ -450,6 +450,29 @@ class WorkflowSlotModel(BaseModel):
             "the workflows it fits."
         ),
     )
+    mark: list[str] | None = Field(
+        None,
+        description=(
+            "The short name the card's tile prints: the same as `mark` on its "
+            "`GET /checkpoints` or `GET /adapters` row. Null keeps the "
+            "generated initials."
+        ),
+    )
+    mark_tab: str | None = Field(
+        None, description="The tile's tab, as `mark_tab` on the shelf row."
+    )
+    mark_colors: list[str] | None = Field(
+        None, description="The tile's colour stops, as `mark_colors` on the shelf row."
+    )
+    mark_icon: str | None = Field(
+        None, description="The tile's glyph, as `mark_icon` on the shelf row."
+    )
+    mark_letters: str | None = Field(
+        None, description="The letters in place of a glyph, as on the shelf row."
+    )
+    mark_band: bool = Field(
+        False, description="A release's band tile, as `mark_band` on the shelf row."
+    )
     kind: str
     quant: str | None = Field(
         None,
@@ -3531,6 +3554,12 @@ def _slot_models(slots) -> list[WorkflowSlotModel]:
             base_model_folded=slot.base_model_folded,
             sha256=slot.sha256,
             base_model_family=slot.base_model_family,
+            mark=slot.mark,
+            mark_tab=slot.mark_tab,
+            mark_colors=slot.mark_colors,
+            mark_icon=slot.mark_icon,
+            mark_letters=slot.mark_letters,
+            mark_band=slot.mark_band,
             kind=slot.kind,
             slot_label=slot.label,
             filename=slot.filename,

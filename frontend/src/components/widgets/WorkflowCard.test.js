@@ -247,7 +247,7 @@ describe("WorkflowCard height", () => {
       2 * px(meta.padding) +
       rows.reduce((sum, track) => sum + px(track, t), 0) +
       3 * px(meta["row-gap"]);
-    expect(t["--wf-meta-h"]).toBe(134);
+    expect(t["--wf-meta-h"]).toBe(138);
     expect(total).toBe(t["--wf-meta-h"]);
   });
 
@@ -404,13 +404,13 @@ describe("WorkflowCard", () => {
     // one mark per LoRA.
     const strip = mountCard({
       ...CROWDED,
-      loras: CROWDED.loras.slice(1),
+      loras: CROWDED.loras.slice(2),
     }).find(".wf-card__strip");
     const items = strip.findAll("li");
     expect(items.map((li) => li.classes()[0])).toEqual([
       "wf-card__mark",
       "wf-card__rule",
-      ...Array(4).fill("wf-card__mark"),
+      ...Array(3).fill("wf-card__mark"),
     ]);
     for (const item of items.filter((li) =>
       li.classes().includes("wf-card__mark"),
@@ -448,9 +448,9 @@ describe("WorkflowCard", () => {
   });
 
   it.each([
-    [4, 5, 0],
-    [5, 5, 1],
-    [12, 5, 8],
+    [3, 4, 0],
+    [4, 4, 1],
+    [12, 4, 9],
   ])(
     "draws a card with %i LoRAs as %i marks and a +%i",
     (count, marks, more) => {
@@ -480,15 +480,16 @@ describe("WorkflowCard", () => {
     ];
     const wrapper = mountCard({ ...BARE, loras });
     const marks = wrapper.findAll(".wf-card__strip .wf-card__mark");
-    // The base model, then each LoRA once.
-    expect(marks).toHaveLength(3);
+    // The base model, then each LoRA once, as far as the strip goes.
+    expect(marks).toHaveLength(2);
     expect(
       marks.map((mark) => mark.find(".wf-card__mark-count").exists()),
-    ).toEqual([false, true, true]);
+    ).toEqual([false, true]);
     expect(marks[1].find(".wf-card__mark-count").text()).toBe("×8");
-    // Two slots per counted mark: base 1 + 2 + 2 fills the strip, and the
-    // "+1" is the FP8 build: one name, but a file of its own.
-    expect(wrapper.find(".wf-card__mark-more").text()).toBe("+1");
+    // Two slots per counted mark: base 1 + 2 leaves one, too few for the
+    // angles' ×8, so the "+9" is its eight loaders and the FP8 build: one
+    // name, but a file of its own.
+    expect(wrapper.find(".wf-card__mark-more").text()).toBe("+9");
     // Row 3 still counts loaders, which the strip now adds up to.
     expect(wrapper.find(".wf-card__lora-count").text()).toBe("17 LoRAs");
   });
@@ -570,6 +571,50 @@ describe("WorkflowCard", () => {
     ]);
   });
 
+  it("draws the server's name for a known model, and letters only the rest", () => {
+    // #1951: the SDXL base and refiner are SDXL over 1.0 with a BASE and a
+    // REFI tab, sent with the slot. Two look-alikes the server named nothing
+    // for still take a second line between themselves.
+    const strip = mountCard({
+      ...BARE,
+      models: [
+        {
+          name: "sd xl base 1.0",
+          kind: "checkpoint",
+          base_model_folded: "SDXL 1.0",
+          mark: ["SDXL", "1.0"],
+          mark_tab: "BASE",
+          mark_colors: ["#9d39ff", "#e80000"],
+        },
+        {
+          name: "sd xl refiner 1.0",
+          kind: "checkpoint",
+          base_model_folded: "SDXL 1.0",
+          mark: ["SDXL", "1.0"],
+          mark_tab: "REFI",
+          mark_colors: ["#9d39ff", "#e80000"],
+        },
+      ],
+      loras: [{ name: "add detail one" }, { name: "add detail two" }],
+    }).findAll(".wf-card__strip .wf-card__mark .mmark");
+    const lines = (mark, part) =>
+      mark.findAll(`${part} > span`).map((line) => line.text());
+    expect(strip.map((mark) => lines(mark, ".mmark-name"))).toEqual([
+      ["SDXL", "1.0"],
+      ["SDXL", "1.0"],
+      [],
+      [],
+    ]);
+    expect(strip.slice(0, 2).map((mark) => mark.find(".mmark-version").text())).toEqual([
+      "BASE",
+      "REFI",
+    ]);
+    expect(strip.slice(2).map((mark) => lines(mark, ".mmark-initials"))).toEqual([
+      ["AD", "ON"],
+      ["AD", "TW"],
+    ]);
+  });
+
   it("counts every loader of a model the strip left off in its +N", () => {
     const wrapper = mountCard({
       ...BARE,
@@ -578,8 +623,9 @@ describe("WorkflowCard", () => {
         ...Array(3).fill({ name: "repeated", filename: "repeated.safetensors" }),
       ],
     });
-    expect(wrapper.findAll(".wf-card__strip .wf-card__mark")).toHaveLength(5);
-    expect(wrapper.find(".wf-card__mark-more").text()).toBe("+3");
+    expect(wrapper.findAll(".wf-card__strip .wf-card__mark")).toHaveLength(4);
+    // lora-3, and the repeated file's three loaders.
+    expect(wrapper.find(".wf-card__mark-more").text()).toBe("+4");
   });
 
   it("prints the base model's name once, beside the LoRA count", () => {

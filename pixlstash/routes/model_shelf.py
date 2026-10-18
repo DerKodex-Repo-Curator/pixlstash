@@ -172,6 +172,8 @@ from pixlstash.utils.known_base_models import (
     family_label,
     family_named,
     fold,
+    model_tile,
+    tile_canonical,
 )
 from pixlstash.utils.model_utils import canonical_quant, derive_model_name
 from pixlstash.utils.path_utils import path_is_within
@@ -396,6 +398,54 @@ class ModelResponse(BaseModel):
             "base model (`flux1-dev.safetensors`), that model's label, to show "
             "where the row has no name of its own. Never set for an adapter, "
             "whose base model is not its name, nor from a guessed base model."
+        ),
+    )
+    mark: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "The short name a workflow card's tile prints: for a release "
+            '(`mark_band`) its name and version, `["Klein", "2"]`; for a '
+            "fine-tune or LoRA the base's name over its own initials, "
+            '`["SDXL", "JU9"]`. Null for a model of no known base model, which '
+            "keeps the generated initials. Worked out by the server "
+            "(`known_base_models.model_tile`) so every client draws the same."
+        ),
+    )
+    mark_tab: Optional[str] = Field(
+        default=None,
+        description=(
+            "The tile's tab: a role (`BASE`, `REFI`, `EDIT`, `RAW`, `HD`), or "
+            "`⚡` for a few-step model followed by a speed LoRA's step count "
+            "(`⚡4`). Null for no tab."
+        ),
+    )
+    mark_colors: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "The tile's colour, one `#rrggbb` stop or a gradient's two: the "
+            "maker's, white text clearing 4:1 on each. Null keeps the hashed hue."
+        ),
+    )
+    mark_icon: Optional[str] = Field(
+        default=None,
+        description=(
+            "The glyph a release's tile wears: its maker's LobeHub icon "
+            "(`flux`, `qwen`) or the owner's (`chroma`, `pony`, "
+            "`illustrious`), or null. Never on a LoRA or fine-tune."
+        ),
+    )
+    mark_letters: Optional[str] = Field(
+        default=None,
+        description=(
+            "The letters a release with no glyph wears in its place (`Z`, "
+            "`HI`, `Lu`), or null."
+        ),
+    )
+    mark_band: bool = Field(
+        default=False,
+        description=(
+            "Whether the tile is a release's: `mark` is then its name, printed "
+            "across a band, and its version, printed beside the glyph."
         ),
     )
     family: Optional[str] = Field(
@@ -1625,6 +1675,13 @@ def _to_response(
         attached if row["file_kind"] in (FILE_ADAPTER, FILE_UNKNOWN) else [],
         character_names,
     )
+    tile = model_tile(
+        tile_canonical(row["base_model_canonical"], row["base_model"], row["filename"]),
+        row["filename"],
+        row["display_name"],
+        checkpoint=row["file_kind"] == FILE_CHECKPOINT,
+        adapter=row["file_kind"] == FILE_ADAPTER,
+    )
     return ModelResponse(
         id=int(row["id"]),
         sha256=row["sha256"],
@@ -1638,6 +1695,7 @@ def _to_response(
         base_model_canonical=row["base_model_canonical"],
         base_model_source=row["base_model_source"],
         matched_name=_matched_name(row),
+        **(tile or {}),
         family=served_family(row),
         base_model_family=base_model_family(row),
         base_model_family_label=family_label(base_model_family(row)),

@@ -10349,6 +10349,37 @@ Quality before provenance: an exact filename beats a fuzzy declaration. A
   `family` from the canonical label when there is one, and `matched_name`: the
   label for a checkpoint whose derived filename folds exactly to its own
   non-guessed canonical label (`flux1-dev.safetensors`), never for an adapter.
+- **The row carries the tile a workflow card draws it with** (#1951):
+  `mark`, `mark_tab`, `mark_colors`, `mark_icon`, `mark_letters`, `mark_band` from
+  `known_base_models.model_tile(canonical, filename, display_name,
+  checkpoint=...)`, guesses included, on `GET /checkpoints`, `GET /adapters`
+  and every card slot (`ShelfMark.tile`; a slot the shelf does not hold is
+  named from its filename alone, through `identify`, `_mark_fields`). Each table entry carries the short
+  name people write for it (`mark`, one or two lines), an optional `role`,
+  `few_step`, `file_version` (Qwen's 2511 comes from the file), a `band`
+  name and `version` where they differ from the mark's lines, `letters`, and
+  a `maker` (`MAKERS`, brand colours darkened to 4:1, and `MAKER_GLYPHS`, its
+  LobeHub icon) or a family `icon` (`FAMILY_ICONS`). A checkpoint whose name
+  opens with one of its base's aliases and carries nothing else but roles,
+  versions and packaging is the **release** (`mark_band`): `release_lines`
+  (its band name and version: Klein and 2), the maker's glyph or the owner's
+  icon, else `glyph_letters` (Z, HI, Lu), and the entry's role or else a
+  `ROLE_WORDS` word from the filename on the tab; packaging joined to the
+  alias in one token (`krea2TurboINTXQuants`) and a `rev2` still count as the
+  release. A fine-tune checkpoint or LoRA wears the same tile, told apart by
+  the tab: a fine-tune its own initials and version (`MO80`), a LoRA
+  `LORA_TAB`; a few-step base (`few_step`) or a speed word (`lightning`,
+  `hyper`, `lcm`, `dmd2`, `turbo`) gives `⚡` and a step count.
+  `KNOWN_FINE_TUNES` names a re-branded fine-tune checkpoint with a mark of its
+  own (Juggernaut: J on its logo's purple) whatever base it was identified as.
+  A shelf row with no base model at all is tiled from its filename
+  (`tile_canonical`): the scanner identifies a file once, so a file read
+  before the table knew its model would otherwise never get a tile.
+  Every table `mark` line is held to the card tile's 28px line at 8.25px,
+  every release name to the width of "Chroma" on its band, every version to
+  the room beside the glyph, and every `role` to the 32px tile, by
+  `frontend/e2e/specs/model-tile-names.spec.js`; a fine-tune's own second
+  line is not.
 
 `quant` is **two sources folded into one vocabulary**, and the fold happens on
 the way out rather than on the way in. The column holds whichever source wrote
