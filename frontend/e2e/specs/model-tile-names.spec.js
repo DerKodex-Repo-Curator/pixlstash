@@ -19,11 +19,12 @@ import { test, expect } from '../fixtures/test.js'
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
 // The card's mark size, read off the card so this follows it.
-const TILE_PX = Number(
-  readFileSync(resolve(REPO_ROOT, 'frontend/src/components/widgets/WorkflowCard.vue'), 'utf8').match(
-    /--wf-mark: (\d+)px;/,
-  )[1],
-)
+const TILE = readFileSync(
+  resolve(REPO_ROOT, 'frontend/src/components/widgets/WorkflowCard.vue'),
+  'utf8',
+).match(/--wf-mark: (\d+)px;/)
+if (!TILE) throw new Error('WorkflowCard.vue no longer sets --wf-mark in whole px')
+const TILE_PX = Number(TILE[1])
 const LINE_PX = TILE_PX - 2 * 2
 // An icon tile's name has no right padding, so its band runs to the edge.
 const BAND_PX = TILE_PX - 2
