@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { markWords, namesWord, triggerWord } from "./triggerWords";
+import { insertWords, markWords, namesWord, triggerWord } from "./triggerWords";
 
 describe("triggerWord", () => {
   it("is the first word, and nothing for a LoRA that needs none", () => {
@@ -39,5 +39,33 @@ describe("markWords", () => {
     expect(markWords("plain", [])).toEqual([{ text: "plain", hit: false }]);
     expect(markWords("", ["mira"])).toEqual([{ text: "", hit: false }]);
     expect(namesWord("plain", "")).toBe(false);
+  });
+});
+
+describe("insertWords", () => {
+  it("puts the words first at the start, or with no caret", () => {
+    expect(insertWords("  on a beach ", ["Mira"])).toEqual({ text: "Mira, on a beach", caret: 4 });
+    expect(insertWords("", ["a", "b"])).toEqual({ text: "a, b", caret: 4 });
+  });
+
+  it("puts the words mid-sentence where the caret is", () => {
+    const text = "a portrait of on a beach";
+    expect(insertWords(text, ["Mira Vale"], 14)).toEqual({
+      text: "a portrait of Mira Vale on a beach",
+      caret: 23,
+    });
+    // No space typed before the caret: one is added on each side.
+    expect(insertWords("photo ofon a beach", ["Mira"], 8).text).toBe("photo of Mira on a beach");
+  });
+
+  it("ends the text, or meets punctuation, without a stray space", () => {
+    expect(insertWords("a photo of", ["Mira"], 10)).toEqual({ text: "a photo of Mira", caret: 15 });
+    expect(insertWords("a photo of, smiling", ["Mira"], 10).text).toBe("a photo of Mira, smiling");
+  });
+
+  it("replaces a selection", () => {
+    expect(insertWords("a photo of her smiling", ["Mira"], 11, 14).text).toBe(
+      "a photo of Mira smiling",
+    );
   });
 });

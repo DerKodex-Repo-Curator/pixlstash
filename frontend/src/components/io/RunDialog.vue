@@ -1171,7 +1171,7 @@ import { focusLater } from "../../utils/dom";
 import { editLorasRoute, loraBase, loraStem } from "../../utils/loraChain";
 import { fitPeople, fitWorkflows } from "../../utils/loraWorkflows";
 import { deriveModelName } from "../../utils/modelShelf";
-import { namesWord, triggerWord } from "../../utils/triggerWords";
+import { insertWords, namesWord, triggerWord } from "../../utils/triggerWords";
 import { wouldDuplicate } from "../../utils/recipeKey";
 import { runTaskLabel } from "../../utils/runTaskLabel";
 import { UNMATCHED_REPLACEMENTS_TEXT } from "../../utils/workflowCard";
@@ -2827,11 +2827,19 @@ function withTriggers(words, text) {
   return [...words, text.trim()].filter(Boolean).join(", ");
 }
 
-/** Put the words first, where a trigger word goes, and hand the box back. */
-function addTriggers(words) {
-  prompt.value = withTriggers(words, prompt.value);
+/**
+ * Put the words where the caret was in the box (first, where a trigger word
+ * goes, when it was never placed) and hand the box back with the caret after
+ * them.
+ */
+async function addTriggers(words) {
+  const at = promptField.value?.selection?.();
+  const next = insertWords(prompt.value, words, at?.start, at?.end);
+  prompt.value = next.text;
+  // The box must hold the new text before the caret can be put in it.
+  await nextTick();
   // The button goes with the suggestion; focus must not fall to the page.
-  promptField.value?.focus?.();
+  promptField.value?.focus?.(next.caret);
 }
 
 /**

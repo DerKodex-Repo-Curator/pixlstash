@@ -62,3 +62,31 @@ export function markWords(text, words) {
 export function namesWord(text, word) {
   return markWords(text, [word]).some((part) => part.hit);
 }
+
+/**
+ * *text* with *words* put where the caret was, `{text, caret}`: the selection
+ * `start`..`end` is replaced, and `caret` lands just after the words.
+ *
+ * At the start of the prompt (or with no caret, `start` 0) the words go first
+ * as a comma list, where a trigger word goes. Anywhere else they join the
+ * sentence with a space on each side the text does not already give them.
+ *
+ * @param {string} text
+ * @param {string[]} words
+ * @param {number} [start]
+ * @param {number} [end]
+ */
+export function insertWords(text, words, start = 0, end = start) {
+  const source = String(text ?? "");
+  const insert = words.join(", ");
+  const before = source.slice(0, start);
+  const after = source.slice(end);
+  if (!before.trim()) {
+    const rest = after.trim();
+    return { text: rest ? `${insert}, ${rest}` : insert, caret: insert.length };
+  }
+  const lead = /\s$/.test(before) ? "" : " ";
+  const trail = !after || /^[\s,.;:!?)]/.test(after) ? "" : " ";
+  const head = before + lead + insert;
+  return { text: head + trail + after, caret: head.length };
+}

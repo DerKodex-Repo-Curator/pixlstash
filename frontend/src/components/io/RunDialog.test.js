@@ -3734,6 +3734,32 @@ describe("the person a workflow run alone is of", () => {
       expect(suggestion(wrapper).exists()).toBe(false);
     });
 
+    it("puts the word where the caret was, and the caret after it", async () => {
+      const focus = vi.fn();
+      const wrapper = mount(RunDialog, {
+        props: { source: fromCard, context: {} },
+        global: {
+          stubs: {
+            ...globalOpts.global.stubs,
+            AppTextarea: {
+              name: "AppTextarea",
+              props: ["label", "highlight", "modelValue"],
+              template: "<textarea />",
+              // Where the box last had its caret, as it reports it.
+              methods: { focus, selection: () => ({ start: 14, end: 14 }) },
+            },
+          },
+        },
+      });
+      await flushPromises();
+      await tile(wrapper, 7).trigger("click");
+      await typePrompt(wrapper, "a portrait of on a beach");
+      await suggestion(wrapper).find("button").trigger("click");
+      await flushPromises();
+      expect(wrapper.vm.prompt).toBe("a portrait of Mira Vale on a beach");
+      expect(focus).toHaveBeenCalledWith(23);
+    });
+
     it("is said by a region that was there before it, and unsaid once the word is typed", async () => {
       const live = (wrapper) => wrapper.find('[data-testid="rund-trigger-live"]');
       const wrapper = await mountRun(fromCard);
