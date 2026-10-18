@@ -3101,6 +3101,34 @@ describe("Create with LoRA", () => {
       expect(wrapper.find('[data-testid="rund-trigger"]').text()).toContain("ohwx");
     });
 
+    it("follows the LoRA the picked workflow loads", async () => {
+      const ZIT = `auto:${"f".repeat(64)}`;
+      listWorkflowCards.mockResolvedValue({
+        cards: [
+          { id: ZIT, name: "ZIT portrait", type: "txt2img", models: model("zimage") },
+          { id: KREA, name: "Krea portrait", type: "txt2img", models: model("krea2") },
+        ],
+      });
+      listAdapters.mockImplementation(async ({ fileKind, characterId } = {}) =>
+        characterId && fileKind === "adapter"
+          ? [
+              {
+                sha256: "m".repeat(64),
+                base_model_family: "zimage",
+                trigger_words: ["zword"],
+              },
+              { ...PERSON_LORA, trigger_words: ["ohwx"] },
+            ]
+          : [],
+      );
+      workflowPrompt("a portrait");
+      const wrapper = await mountRun(fromPerson);
+      expect(wrapper.vm.prompt).toBe("zword, a portrait");
+      wrapper.vm.workflowId = KREA;
+      await flushPromises();
+      expect(wrapper.vm.prompt).toBe("ohwx, a portrait");
+    });
+
     it("is never sent over a prompt the pre-flight could not read", async () => {
       preflightWorkflowRun.mockRejectedValue(new Error("network"));
       const wrapper = await mountRun(fromPerson);
