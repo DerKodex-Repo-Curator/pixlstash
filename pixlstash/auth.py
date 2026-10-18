@@ -122,6 +122,11 @@ COMFYUI_SCOPE_ROUTES: frozenset[tuple[str, str]] = frozenset(
         # The total beside "Everything" in the picture picker: the same
         # filters and token scope as the list above, so it reveals less.
         ("GET", "/api/v1/pictures/count"),
+        # The checkpoint picker's side panel: every recorded checkpoint name,
+        # so it can match subfolder names (`SDXL/x.safetensors`) by basename.
+        # The distinct values over what the key may already list above, plus
+        # the shelf names it already reads from /checkpoints and /adapters.
+        ("GET", "/api/v1/pictures/comfyui_models"),
         ("GET", "/api/v1/pictures/thumbnails/{id}.webp"),
         ("GET", "/api/v1/picture_sets/{id}/thumbnail"),
         # A character's thumbnail is served by the field route.

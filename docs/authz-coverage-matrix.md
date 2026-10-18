@@ -974,7 +974,7 @@ Declared and armed behind the report-only gate (`AUTHZ_GATE_ENFORCING` stays `Fa
 
 ## The ComfyUI scope (#1811)
 
-A token with scope `COMFYUI` (the ComfyUI link key) is the owner on the 30 routes below and is refused on every other route that asks for a credential. This is a property of the token, not a new access policy: the route keeps the policy in the matrix above, and `AuthzGate._admit_comfyui_scope` runs before it. On a listed route the gate clears the request's `token_scope`, so the route's own policy then sees the owner (locality and the library pin still apply). On any other route it answers 403. Admission is by the matched route's identity and method.
+A token with scope `COMFYUI` (the ComfyUI link key) is the owner on the 31 routes below and is refused on every other route that asks for a credential. This is a property of the token, not a new access policy: the route keeps the policy in the matrix above, and `AuthzGate._admit_comfyui_scope` runs before it. On a listed route the gate clears the request's `token_scope`, so the route's own policy then sees the owner (locality and the library pin still apply). On any other route it answers 403. Admission is by the matched route's identity and method.
 
 The list is `auth.COMFYUI_SCOPE_ROUTES`. It is every route the ComfyUI-PixlStash pack calls and nothing else: `tests/test_architecture_guardrails.py::test_the_comfyui_scope_admits_every_route_the_pack_calls` reads the pack's source and fails in both directions, and `test_the_comfyui_scope_section_of_the_matrix_matches_the_code` holds this table to the list. `GET /version` is public and needs no entry.
 
@@ -999,6 +999,7 @@ The middleware checks the same list first, by the path's shape (`auth.comfyui_sc
 | GET | `/api/v1/picture_sets/{id}/thumbnail` | set_scoped | A set's face on a model in the adapter picker |
 | GET | `/api/v1/pictures` | scoped_list | Picture picker and the loader nodes |
 | GET | `/api/v1/pictures/count` | scoped_list | The picture picker's total beside Everything |
+| GET | `/api/v1/pictures/comfyui_models` | scoped_list | The checkpoint picker's panel matches recorded checkpoint names by basename |
 | POST | `/api/v1/pictures/face-search` | scoped_list | Face search |
 | POST | `/api/v1/pictures/import` | owner_only | The saver imports a picture |
 | GET | `/api/v1/pictures/import/status` | owner_only | The saver waits for the import |
