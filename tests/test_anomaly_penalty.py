@@ -677,6 +677,15 @@ def test_malformed_eyes_is_a_default_anatomy_defect():
         {"malformed eyes": 1.0, "malformed teeth": 1.0}, tag_precisions=precisions
     )
     assert both == pytest.approx(_severity_for_weight(4) * (1.0 + RANK_DECAY))
+    # A table stored before the tag existed has no row for it, so it inherits the
+    # anatomy family's highest weight (5, "bad anatomy") rather than going uncharged.
+    assert "malformed eyes" not in _USER_WEIGHTS
+    stored = anomaly_penalty(
+        {"malformed eyes": 1.0},
+        tag_weights=_USER_WEIGHTS,
+        tag_precisions={"malformed eyes": 1.0},
+    )
+    assert stored == pytest.approx(_severity_for_weight(5))
 
 
 def test_user_weight_overrides_the_default_table_for_the_same_tag():
