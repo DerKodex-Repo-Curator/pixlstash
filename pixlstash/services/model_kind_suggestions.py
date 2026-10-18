@@ -88,9 +88,54 @@ def kind_suggestions(hub, model_ids: Iterable[int]) -> dict[int, KindSuggestion]
     Returns:
         ``{model_id: KindSuggestion}``; a model with no agreed kind is absent.
     """
+    candidates, kinds, workflows, fields = _evidence(hub, model_ids)
+    return {
+        model_id: KindSuggestion(
+            file_kind=candidates[model_id][0],
+            kind=next(iter(found)),
+            workflows=len(workflows[model_id]),
+            fields=tuple(sorted(fields[model_id])),
+            decided=candidates[model_id][1],
+        )
+        for model_id, found in kinds.items()
+        if len(found) == 1 and next(iter(found)) in OFFERED_KINDS
+    }
+
+
+def may_refile_by_name(hub, model_id: int, kind: str) -> bool:
+    """Whether a file named like a missing one may be offered as *kind* (#1962).
+
+    The weaker evidence: a loader of *kind* names a file this machine has never
+    had, and *model_id*'s name reads as that file's renamed. Offered only on a
+    checkpoint or Unclassified model nobody has decided the kind of, and only
+    where no recorded workflow loads it, under its own name, as anything else.
+    """
+    candidates, kinds, _workflows, _fields = _evidence(hub, [model_id])
+    return (
+        model_id in candidates
+        and not candidates[model_id][1]
+        and kinds.get(model_id, {kind}) == {kind}
+    )
+
+
+def _evidence(
+    hub, model_ids: Iterable[int]
+) -> tuple[
+    dict[int, tuple[str, bool]],
+    dict[int, set[str]],
+    dict[int, set[str]],
+    dict[int, set[str]],
+]:
+    """What the recorded workflows load each re-fileable model as.
+
+    Returns ``(candidates, kinds, workflows, fields)``: *candidates* maps each
+    of *model_ids* filed as a checkpoint or Unclassified to ``(file_kind,
+    decided)``; the other three map a model some workflow loads to the kinds
+    it is loaded as, the workflows (core hashes) and the loader fields.
+    """
     wanted = set(model_ids)
     if not wanted:
-        return {}
+        return {}, {}, {}, {}
     candidates = {
         int(row["id"]): (row["file_kind"], bool(row["file_kind_decided"]))
         for batch in chunked(sorted(wanted))
@@ -102,7 +147,7 @@ def kind_suggestions(hub, model_ids: Iterable[int]) -> dict[int, KindSuggestion]
         )
     }
     if not candidates:
-        return {}
+        return {}, {}, {}, {}
 
     # A name two shelf models share says nothing about either.
     by_name = recipe_asset_index(hub)[0]
@@ -112,7 +157,7 @@ def kind_suggestions(hub, model_ids: Iterable[int]) -> dict[int, KindSuggestion]
         if len(ids) == 1 and next(iter(ids)) in candidates
     }
     if not owner:
-        return {}
+        return candidates, {}, {}, {}
 
     loads: list[tuple[int, str, str]] = []
     for batch in chunked(sorted(owner)):
@@ -131,7 +176,7 @@ def kind_suggestions(hub, model_ids: Iterable[int]) -> dict[int, KindSuggestion]
                 (owner[row["normalized_filename"]], row["structural_hash"], widget)
             )
     if not loads:
-        return {}
+        return candidates, {}, {}, {}
 
     recipes = sorted({recipe for _model, recipe, _widget in loads})
     topology: dict[str, tuple[str, str]] = {}
@@ -156,18 +201,7 @@ def kind_suggestions(hub, model_ids: Iterable[int]) -> dict[int, KindSuggestion]
         kinds.setdefault(model_id, set()).add(_loaded_as(recipe, widget, slots))
         workflows.setdefault(model_id, set()).add(workflow)
         fields.setdefault(model_id, set()).add(widget)
-
-    return {
-        model_id: KindSuggestion(
-            file_kind=candidates[model_id][0],
-            kind=next(iter(found)),
-            workflows=len(workflows[model_id]),
-            fields=tuple(sorted(fields[model_id])),
-            decided=candidates[model_id][1],
-        )
-        for model_id, found in kinds.items()
-        if len(found) == 1 and next(iter(found)) in OFFERED_KINDS
-    }
+    return candidates, kinds, workflows, fields
 
 
 def loader_offers(

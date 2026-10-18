@@ -44,7 +44,7 @@
       @keydown="onMenuKeydown"
     >
       <template v-if="offered">
-        <div class="ctx-label section-label">Workflows load it as</div>
+        <div class="ctx-label section-label">{{ evidenceHeading }}</div>
         <button
           class="ctx-item kmenu-pinned"
           type="button"
@@ -53,10 +53,10 @@
           data-autofocus
           @click="choose(suggestedKind)"
         >
-          <Tooltip :text="evidence" activator="parent" />
+          <Tooltip :text="evidenceNote || evidence" activator="parent" />
           <v-icon class="ctx-icon">mdi-sitemap-outline</v-icon>
           <span class="ctx-label-text">{{ suggestedLabel }}</span>
-          <span class="ctx-meta">{{ workflowsText }}</span>
+          <span v-if="!evidenceNote" class="ctx-meta">{{ workflowsText }}</span>
         </button>
         <div class="ctx-sep"></div>
       </template>
@@ -137,6 +137,13 @@ const props = defineProps({
   suggestedBy: { type: Number, default: 0 },
   /** The loader fields that name it. */
   suggestedFields: { type: Array, default: () => [] },
+  /**
+   * Where the suggestion comes from, when it is not the workflows that load
+   * the model: the pinned section's heading, and what its tooltip says in
+   * place of the workflow count.
+   */
+  evidenceHeading: { type: String, default: "Workflows load it as" },
+  evidenceNote: { type: String, default: "" },
   /** A person has decided the kind: the suggestion is not offered. */
   decided: { type: Boolean, default: false },
   /** Offer "Adapter…", which needs the algorithm dialog the shelf owns. */

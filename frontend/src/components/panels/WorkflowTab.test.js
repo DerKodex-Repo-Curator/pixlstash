@@ -1669,6 +1669,85 @@ describe("a VAE or text encoder row (#1596, #1850)", () => {
     ).toBe("t5xxl_fp8 (missing)");
   });
 
+  it("files the missing file's misfiled shelf copy and picks it, in one choice", async () => {
+    // #1962 after #1966: the copy is on the shelf as Unclassified, so nothing
+    // offers it until it is filed as a text encoder.
+    preflightWorkflowRun.mockResolvedValue(
+      missing({ file: "t5/t5xxl_fp8.safetensors", folder: "text_encoders" }),
+    );
+    getWorkflowCard.mockResolvedValue(detail({ card: withSupport }));
+    const copy = {
+      id: 5,
+      filename: "t5-xxl_fp8.gguf",
+      display_name: null,
+      file_kind: "unknown",
+    };
+    let filed = false;
+    readModelSwap.mockReset().mockImplementation((_key, { slotKind } = {}) =>
+      Promise.resolve(
+        slotKind !== "text_encoder"
+          ? { replacements: [], replacements_reason: null }
+          : filed
+            ? {
+                replacements: [{ id: 5, filename: copy.filename, likely: true }],
+                replacements_reason: null,
+                refile: null,
+              }
+            : {
+                replacements: [],
+                replacements_reason: "none_go_with_it",
+                refile: copy,
+              },
+      ),
+    );
+    editModels.mockReset().mockImplementation(async () => {
+      filed = true;
+      return { updated: [5], fields: ["file_kind"] };
+    });
+    const { wrapper } = await mountWith([KEY], [withSupport]);
+    await settle(wrapper);
+
+    const encoder = row(wrapper, "text_encoder");
+    // The offer, never a pick: nothing waits until the owner chooses.
+    expect(setWorkflowChanges).not.toHaveBeenCalled();
+    expect(textOf(encoder)).toContain("t5-xxl_fp8: Unclassified on shelf");
+    expect(textOf(encoder)).toContain("Text encoder?");
+    // The one note under the picker: the offer, not "Nothing to offer".
+    expect(
+      wrapper.find('[data-testid="wftab-no-replacement-text_encoder"]').exists(),
+    ).toBe(false);
+
+    encoder.findComponent(KindMenu).vm.$emit("pick", "text_encoder");
+    await settle(wrapper);
+    expect(editModels).toHaveBeenCalledWith([5], { file_kind: "text_encoder" });
+    expect(setWorkflowChanges).toHaveBeenCalledTimes(1);
+    const [picked] = setWorkflowChanges.mock.calls[0][1].models;
+    expect(picked.filename).toBe("t5-xxl_fp8.gguf");
+    expect(
+      row(wrapper, "text_encoder").find('[data-testid="wftab-edited"]').text(),
+    ).toBe("Fixed");
+  });
+
+  it("offers no renamed copy for a file ComfyUI has", async () => {
+    preflightWorkflowRun.mockResolvedValue({ groups: [{ reasons: [] }] });
+    getWorkflowCard.mockResolvedValue(detail({ card: withSupport }));
+    readModelSwap.mockReset().mockResolvedValue({
+      replacements: [],
+      replacements_reason: "none_go_with_it",
+      refile: {
+        id: 5,
+        filename: "t5-xxl_fp8.gguf",
+        display_name: null,
+        file_kind: "unknown",
+      },
+    });
+    const { wrapper } = await mountWith([KEY], [withSupport]);
+    await settle(wrapper);
+    expect(row(wrapper, "text_encoder").findComponent(KindMenu).exists()).toBe(
+      false,
+    );
+  });
+
   it("warns on the missing one's own row, and never on a vision encoder's account", async () => {
     preflightWorkflowRun.mockResolvedValue(
       missing(

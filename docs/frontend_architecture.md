@@ -6622,7 +6622,11 @@ so Enter files it. Any pick counts as deciding, "Don't suggest a kind" and
 kind and the offer both. The Workflow tab draws the same component under a VAE or
 text-encoder picker from the detail's `kind_offers`, without "Adapter…" (the
 algorithm dialog is the shelf's), and the offer replaces "Nothing to offer" so a
-picker carries one note at most.
+picker carries one note at most. On a missing file nothing has been picked for,
+the same menu offers the `refile` copy the `?replacing=` read names (the file
+renamed, on the shelf as another kind): filing it there re-reads that row's
+offer and picks the copy, now `likely`, so filing and picking are one choice and
+the row reads Fixed.
 
 ### 13.2 The workflow library
 

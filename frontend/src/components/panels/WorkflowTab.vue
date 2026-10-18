@@ -317,11 +317,23 @@
             <KindMenu
               v-if="row.offer"
               :file-kind="row.offer.file_kind"
-              :kind-text="`${fileKindLabel(row.offer.file_kind)} on shelf`"
-              :subject="row.savedLabel"
+              :kind-text="
+                row.offer.copy
+                  ? `${modelLabel(fileName(row.offer.copy.filename))}: ${fileKindLabel(row.offer.file_kind)} on shelf`
+                  : `${fileKindLabel(row.offer.file_kind)} on shelf`
+              "
+              :subject="
+                row.offer.copy
+                  ? modelLabel(fileName(row.offer.copy.filename))
+                  : row.savedLabel
+              "
               :suggested-kind="row.offer.suggested_kind"
               :suggested-by="row.offer.suggested_by"
               :suggested-fields="row.offer.suggested_fields"
+              :evidence-heading="
+                row.offer.copy ? 'Named like the missing file' : undefined
+              "
+              :evidence-note="row.offer.copy ? copyNote(row) : ''"
               :adapter="false"
               @pick="(kind) => fileOffered(row, { file_kind: kind })"
               @suggest="(on) => fileOffered(row, { suggest_kind: on })"
@@ -1861,15 +1873,51 @@ const modelRows = computed(() => {
       noOptions: noReplacementText(model.kind, answer),
       // Only on the file the loader still loads: a replacement is a shelf
       // model of the loader's own kind already.
-      offer:
-        canPick && file === model.filename
-          ? (detail.value?.kind_offers ?? []).find(
-              (offer) => offer.address === model.address,
-            ) ?? null
-          : null,
+      offer: kindOfferFor(model, canPick, file, gone, pick, answer),
     };
   });
 });
+
+/**
+ * The shelf's kind offer on a model row (#1962), or null.
+ *
+ * Its own file, where every workflow loading it says it is this loader's kind
+ * (`kind_offers`): only on the file the loader still loads, since a
+ * replacement is a shelf model of the loader's own kind already. Or, on a
+ * missing file nothing has been picked for, the shelf's copy of it under
+ * another name, filed as another kind (`refile`, #1966's case): filing it as
+ * this loader's kind is what makes it the row's likely pick.
+ */
+function kindOfferFor(model, canPick, file, gone, pick, answer) {
+  if (!canPick) return null;
+  if (file === model.filename) {
+    const offer = (detail.value?.kind_offers ?? []).find(
+      (entry) => entry.address === model.address,
+    );
+    if (offer) return offer;
+  }
+  const copy = answer?.refile;
+  if (!gone || pick || !copy) return null;
+  return {
+    model_id: copy.id,
+    file_kind: copy.file_kind,
+    suggested_kind: model.kind,
+    suggested_by: 0,
+    suggested_fields: [],
+    copy,
+  };
+}
+
+/** What the offer of a renamed copy says in place of a workflow count. */
+function copyNote(row) {
+  const kind = fileKindLabel(row.kind).toLowerCase();
+  return (
+    `${fileName(row.offer.copy.filename)} is on your shelf as ` +
+    `${fileKindLabel(row.offer.file_kind)}, and its name reads as ` +
+    `${fileName(row.missing)} renamed. File it as a ${kind} and this row ` +
+    "picks it for you to save."
+  );
+}
 
 /**
  * Re-file a loader's model on the shelf from its Kind menu, or stop the
@@ -1889,10 +1937,24 @@ async function fileOffered(row, changes) {
     await refocusRow(row.address);
     return;
   }
+  const named = row.offer.copy
+    ? modelLabel(fileName(row.offer.copy.filename))
+    : row.savedLabel;
+  // The renamed copy's offer is the row's own answer, so it is asked again.
+  // Filed as this loader's kind, the copy is now its likely pick, and picked:
+  // both steps in the one gesture.
+  const picked = row.offer.copy
+    ? await rereadCopy(key, row, Boolean(changes.file_kind))
+    : "";
   notices.push({
     level: "success",
     text: changes.file_kind
-      ? `Filed ${row.savedLabel} as ${fileKindLabel(changes.file_kind)} on your shelf.`
+      ? `Filed ${named} as ${fileKindLabel(changes.file_kind)} on your shelf.` +
+        (row.offer.copy
+          ? picked
+            ? " It is picked for this row: save to keep it."
+            : " This loader cannot load it, so nothing was picked."
+          : "")
       : "The shelf will not suggest a kind for it.",
   });
   // A shelf already read shows the old kind until it is read again.
@@ -1903,6 +1965,31 @@ async function fileOffered(row, changes) {
   // The menu goes with the offer it answered; the row's own control takes
   // the focus it held rather than <body>.
   await refocusRow(row.address);
+}
+
+/**
+ * Ask a missing row's offer again and, with *pick*, pick its likely match as
+ * the tab does on selection. Answers with the file picked, or "".
+ */
+async function rereadCopy(key, row, pick) {
+  const ask = `${row.kind}:${row.file}`;
+  let answer;
+  try {
+    answer = await readModelSwap(key, {
+      replacing: row.file,
+      slotKind: row.kind,
+      cached: true,
+    });
+  } catch (err) {
+    console.warn(`[workflows] could not read replacements for ${row.file}`, err);
+    return "";
+  }
+  if (selectedKey.value !== key) return "";
+  replacementsByFile.value = { ...replacementsByFile.value, [ask]: answer };
+  const likely = answer?.replacements?.find((candidate) => candidate.likely);
+  if (!pick || !likely) return "";
+  pickModel(row, likely.filename);
+  return likely.filename;
 }
 
 /** Focus a model row's Kind menu, or its own control once the menu has gone. */

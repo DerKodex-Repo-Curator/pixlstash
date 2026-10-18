@@ -61,7 +61,10 @@ from pixlstash.routes.model_imports import (
     sample_path_within,
 )
 from pixlstash.routes.model_shelf import MAX_ATTACHMENTS_PER_MODEL
-from pixlstash.services.model_kind_suggestions import loader_offers
+from pixlstash.services.model_kind_suggestions import (
+    loader_offers,
+    may_refile_by_name,
+)
 from pixlstash.server import Server
 from pixlstash.services import builtin_caches, builtin_models, comfyui_service
 from pixlstash.services import model_shelf_service, model_workflow_sets
@@ -6346,6 +6349,25 @@ def test_a_loader_is_offered_its_models_suggestion_only_where_it_takes_that_kind
     )
     assert r.status_code == 200, r.text
     assert loader_offers(server.hub, loaders) == {}
+
+
+def test_a_name_match_is_refiled_only_where_no_workflow_says_otherwise(
+    shelf_env, gguf_encoder
+):
+    """The weaker evidence (#1962 after #1966) gives way to any recorded load
+    of the file under its own name, and to the owner's say."""
+    hub = shelf_env.server.hub
+    assert may_refile_by_name(hub, gguf_encoder, "text_encoder")
+    _seed_loader(shelf_env.server, "r-vae", "vae_name", "t5-xxl-q8_0.gguf", "VAELoader")
+    assert not may_refile_by_name(hub, gguf_encoder, "text_encoder")
+    assert may_refile_by_name(hub, gguf_encoder, "vae")
+    r = shelf_env.owner.patch(
+        f"{API}/models", json={"ids": [gguf_encoder], "suggest_kind": False}
+    )
+    assert r.status_code == 200, r.text
+    assert not may_refile_by_name(hub, gguf_encoder, "vae")
+    alice = shelf_env.model_ids["alice.safetensors"]
+    assert not may_refile_by_name(hub, alice, "vae"), "a LoRA is not re-filed"
 
 
 def test_suggest_kind_cannot_be_null(shelf_env, gguf_encoder):

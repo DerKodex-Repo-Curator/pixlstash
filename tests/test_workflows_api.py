@@ -16050,6 +16050,88 @@ def test_the_missing_file_under_another_name_is_offered_first_as_likely(cloneabl
             _unshelve(conn, [*shelved.values(), _h("likely-umt5")])
 
 
+def test_the_missing_file_filed_as_another_kind_is_offered_for_refiling(cloneable):
+    """#1962 after #1966: the shelf's renamed copy of the missing T5 is filed
+    Unclassified (a GGUF, a T5 of another width), so the text-encoder offer
+    cannot see it. `refile` names it; once filed as a text encoder it is the
+    `likely` replacement.
+
+    Wrong if it is offered as a replacement before it is filed (a name match
+    must never re-file or load anything by itself), or offered for refiling
+    once somebody has decided its kind.
+    """
+    graph = _with_support_loaders(cloneable.graph)
+    cloneable.monkeypatch.setattr(
+        workflows_routes,
+        "_load_embedded_api_prompt",
+        lambda server, pid, object_info=None: (graph, []),
+    )
+    cloneable.monkeypatch.setattr(
+        workflows_routes,
+        "propose_companions",
+        lambda hub, checkpoint_id, index=None: {"vae": [], "text_encoder": []},
+    )
+    digest, clip_l = _h("refile-t5-renamed"), _h("refile-clip-l")
+    with cloneable.server.hub.transaction() as conn:
+        # The Dual loader's other file: the pack's loader takes both by digest.
+        _shelve_with_copy(conn, "text_encoder", "test-clip-l.safetensors", clip_l)
+        _shelve_with_copy(conn, "unknown", "test-t5-xxl-fp16.safetensors", digest)
+        model_id = conn.execute(
+            "SELECT id FROM model WHERE sha256 = ?", (digest,)
+        ).fetchone()[0]
+    info = json.loads(json.dumps(RUN_OBJECT_INFO))
+    listed = [["test-clip-l.safetensors"], {}]
+    info["DualCLIPLoader"] = {
+        "input": {"required": {"clip_name1": listed, "clip_name2": listed}}
+    }
+    info["PixlStashCLIPLoader"] = {
+        "input": {"required": {"clip_sha256": ["STRING", {}], "type": [["flux"], {}]}}
+    }
+    cloneable.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url: (info, None)
+    )
+
+    def offered():
+        r = cloneable.owner.get(
+            f"{API}/workflows/{RUN_WF}/model-swap",
+            params={
+                "replacing": "test-t5-fp16.safetensors",
+                "slot_kind": "text_encoder",
+            },
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        return (
+            [(c["filename"], c["likely"]) for c in body["replacements"]],
+            body["refile"],
+        )
+
+    def patch(**body):
+        r = cloneable.owner.patch(f"{API}/models", json={"ids": [model_id], **body})
+        assert r.status_code == 200, r.text
+
+    try:
+        assert offered() == (
+            [],
+            {
+                "id": model_id,
+                "filename": "test-t5-xxl-fp16.safetensors",
+                "display_name": None,
+                "file_kind": "unknown",
+            },
+        )
+        # Don't suggest: nothing more is offered for it.
+        patch(suggest_kind=False)
+        assert offered()[1] is None
+        patch(suggest_kind=True)
+        # Filed: the ordinary likely replacement, and nothing left to refile.
+        patch(file_kind="text_encoder")
+        assert offered() == ([("test-t5-xxl-fp16.safetensors", True)], None)
+    finally:
+        with cloneable.server.hub.transaction() as conn:
+            _unshelve(conn, [digest, clip_l])
+
+
 def test_a_shelf_checkpoint_comfyui_does_not_list_is_offered_and_run_off_the_shelf(
     cloneable,
 ):

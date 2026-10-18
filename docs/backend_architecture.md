@@ -10859,6 +10859,18 @@ Unclassified. A recorded workflow that loads the file says what it is, and
   `suggest_kind: true` clears it; sent beside `file_kind`, `suggest_kind` decides
   the mark (an Undo puts back a kind and the offer together). The suggestion is still computed for a decided
   row, so the shelf can offer "Suggest a kind again".
+- **A missing file's renamed copy, filed as the wrong kind** (#1962 after #1966).
+  A loader may name a file this machine never had while the shelf holds the
+  same model under another name (`t5xxl_flan_latest_…` against
+  `flan-t5-xxl_…`). #1966's `likely` match only looks at shelf models of the
+  slot's kind, so a copy filed as a checkpoint or Unclassified is invisible to
+  it, and the asset-row lookup above never pairs the two names. The
+  `?replacing=` read (`_misfiled_copy`) answers that copy as `refile`: the one
+  match over the slot's kind and the re-fileable kinds together, and only where
+  `may_refile_by_name` allows it (nobody decided its kind, no recorded load of it
+  under its own name as anything else). A name match is weaker evidence than a
+  workflow naming the file, so it is only an offer; once the owner files it, it
+  is the `likely` replacement and the Workflow tab picks it.
 - **The Workflow tab gets the same offer**, on `GET /workflows/{id}` as
   `kind_offers`: `loader_offers` hands a default-recipe loader its model's
   suggestion only where the loader takes that kind and nobody has decided.
