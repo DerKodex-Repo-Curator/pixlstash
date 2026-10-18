@@ -54,13 +54,20 @@ describe("insertWords", () => {
       text: "a portrait of Mira Vale on a beach",
       caret: 23,
     });
-    // No space typed before the caret: one is added on each side.
-    expect(insertWords("photo ofon a beach", ["Mira"], 8).text).toBe("photo of Mira on a beach");
+    // The caret right after a word: the space before is added, the one after kept.
+    expect(insertWords("photo of on a beach", ["Mira"], 8).text).toBe("photo of Mira on a beach");
   });
 
   it("ends the text, or meets punctuation, without a stray space", () => {
     expect(insertWords("a photo of", ["Mira"], 10)).toEqual({ text: "a photo of Mira", caret: 15 });
     expect(insertWords("a photo of, smiling", ["Mira"], 10).text).toBe("a photo of Mira, smiling");
+  });
+
+  it("moves a caret inside a word to its end, never splitting it", () => {
+    expect(insertWords("a portrait smiling", ["Mira"], 4)).toEqual({
+      text: "a portrait Mira smiling",
+      caret: 15,
+    });
   });
 
   it("replaces a selection", () => {

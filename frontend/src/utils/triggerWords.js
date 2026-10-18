@@ -69,7 +69,8 @@ export function namesWord(text, word) {
  *
  * At the start of the prompt (or with no caret, `start` 0) the words go first
  * as a comma list, where a trigger word goes. Anywhere else they join the
- * sentence with a space on each side the text does not already give them.
+ * sentence with a space on each side the text does not already give them; a
+ * bare caret inside a word moves to that word's end rather than split it.
  *
  * @param {string} text
  * @param {string[]} words
@@ -79,6 +80,13 @@ export function namesWord(text, word) {
 export function insertWords(text, words, start = 0, end = start) {
   const source = String(text ?? "");
   const insert = words.join(", ");
+  if (start === end) {
+    const word = /[\p{L}\p{N}_]/u;
+    while (start > 0 && start < source.length && word.test(source[start - 1]) && word.test(source[start])) {
+      start += 1;
+    }
+    end = start;
+  }
   const before = source.slice(0, start);
   const after = source.slice(end);
   if (!before.trim()) {

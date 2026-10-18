@@ -78,8 +78,15 @@ function rememberCaret() {
   if (el) caret.value = { start: el.selectionStart, end: el.selectionEnd, text: el.value };
 }
 
-/** The last caret `{start, end}`, or null if never placed or the text has moved on. */
+/**
+ * The caret `{start, end}`: the live one while the field has focus, else the
+ * last one remembered, or null when none was or the text has moved on.
+ */
 function selection() {
+  const el = field.value;
+  if (el && el === document.activeElement) {
+    return { start: el.selectionStart, end: el.selectionEnd };
+  }
   const last = caret.value;
   return last && last.text === props.modelValue ? { start: last.start, end: last.end } : null;
 }

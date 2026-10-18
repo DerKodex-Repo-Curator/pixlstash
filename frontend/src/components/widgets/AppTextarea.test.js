@@ -48,6 +48,19 @@ describe("AppTextarea caret", () => {
     expect(wrapper.vm.selection()).toBeNull();
   });
 
+  it("reports the live caret while the field has focus", () => {
+    const wrapper = mount(AppTextarea, {
+      props: { modelValue: "a portrait of on a beach" },
+      attachTo: document.body,
+    });
+    const field = wrapper.find("textarea").element;
+    field.focus();
+    field.setSelectionRange(14, 14);
+    // No blur: a button that takes no focus on click (Safari) must still know.
+    expect(wrapper.vm.selection()).toEqual({ start: 14, end: 14 });
+    wrapper.unmount();
+  });
+
   it("puts the caret where it is told on focus", () => {
     const wrapper = mount(AppTextarea, {
       props: { modelValue: "a portrait of Mira on a beach" },
