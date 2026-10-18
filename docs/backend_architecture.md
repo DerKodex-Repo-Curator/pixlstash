@@ -10343,11 +10343,12 @@ Quality before provenance: an exact filename beats a fuzzy declaration. A
   from the columns would never be checked against the header's
   `modelspec.architecture`. Every other row is identified from all its
   evidence on its next scan. Backfill v22
-  (`schema._forget_stale_filename_guesses`, #1959) clears a `filename` or
-  `filename_fuzzy` answer the token-run matcher no longer gives for the row's
-  own filename, since an equal-rank rescan could never replace it; the next
-  scan re-reads that header. Workflow families are frozen per variant, so an
-  existing automatic workflow does not move. The columns themselves are amended
+  (`schema._reidentify_filename_guesses`, #1959) rewrites a `filename` or
+  `filename_fuzzy` answer where the row's own filename now folds exactly to
+  another label, since an equal-rank rescan could never replace it. A variant
+  whose family was already known keeps it (families are frozen per variant), so
+  its workflow does not move; one whose family was unknown is moved by
+  `reidentify_families` as for any newly identified file. The columns themselves are amended
   into schema v2 like the header facts, not a v3, which an older build would
   refuse.
 - The shelf **sorts and filters** on `COALESCE(base_model_canonical,

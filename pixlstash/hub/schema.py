@@ -2341,16 +2341,18 @@ def _backfill_base_model_canonical(conn: sqlite3.Connection) -> int:
     return len(updates)
 
 
-def _forget_stale_filename_guesses(conn: sqlite3.Connection) -> int:
-    """Clear a filename identification today's matcher would not repeat.
+def _reidentify_filename_guesses(conn: sqlite3.Connection) -> int:
+    """Re-read a filename identification the token-run matcher answers differently.
 
     A filename now matches across tokens (#1959): ``qwen_image_edit_2511`` is
-    Qwen-Image-Edit, not the ``qwen`` it starts with. A row identified from its
-    filename keeps the old answer for good, the scanner replacing only a source
-    it outranks, so a row whose own filename now reads differently is cleared
-    to NULL instead. The next scan re-reads its header, never its bytes, and
-    identifies it from all of its evidence. ``user`` and ``declared`` rows are
-    never touched.
+    Qwen-Image-Edit, not the ``qwen`` it starts with. A row identified from a
+    filename keeps that answer for good, the scanner replacing only a source it
+    outranks, so the new answer is written here. Only where the row's own
+    filename now folds exactly (``filename``) to another label: the matcher
+    only gained runs, so that answer is what a scan would give, and a row whose
+    own name says nothing was answered from kohya's ``ss_sd_model_name`` and is
+    left alone. Written, not cleared, so an offline file keeps an answer.
+    ``user`` and ``declared`` rows are never touched.
 
     Runs exactly once per hub (see :data:`CURRENT_DATA_VERSION`).
 
@@ -2358,31 +2360,29 @@ def _forget_stale_filename_guesses(conn: sqlite3.Connection) -> int:
         conn: An open hub connection, inside the caller's transaction.
 
     Returns:
-        How many rows were cleared.
+        How many rows were re-identified.
     """
     rows = conn.execute(
         "SELECT id, filename, base_model_canonical FROM model "
         "WHERE base_model_source IN (?, ?) AND filename IS NOT NULL",
         (SOURCE_FILENAME, SOURCE_FILENAME_FUZZY),
     ).fetchall()
-    stale = [
-        (model_id,)
-        for model_id, filename, canonical in rows
-        if identify([], [filename])[0] != canonical
-    ]
+    updates = []
+    for model_id, filename, canonical in rows:
+        label, source = identify([], [filename])
+        if source == SOURCE_FILENAME and label != canonical:
+            updates.append((label, source, model_id))
     conn.executemany(
-        "UPDATE model SET base_model_canonical = NULL, base_model_source = NULL "
-        "WHERE id = ?",
-        stale,
+        "UPDATE model SET base_model_canonical = ?, base_model_source = ? WHERE id = ?",
+        updates,
     )
-    if stale:
+    if updates:
         logger.info(
-            "Hub data v22: %d of %d filename-identified shelf row(s) will be "
-            "identified again on the next scan.",
-            len(stale),
+            "Hub data v22: re-identified %d of %d filename-identified shelf row(s).",
+            len(updates),
             len(rows),
         )
-    return len(stale)
+    return len(updates)
 
 
 def _has_old_cores(conn: sqlite3.Connection, rule: str = "v1") -> bool:
@@ -2653,7 +2653,7 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
                 if data_version < 22:
                     # A filename matches across tokens (#1959), so a row it
                     # identified may now read as another base model.
-                    _forget_stale_filename_guesses(conn)
+                    _reidentify_filename_guesses(conn)
                 if data_version < CURRENT_DATA_VERSION:
                     # No placeholder: PRAGMA takes no parameters, and the value
                     # is this module's own constant, nothing from outside.
