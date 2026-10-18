@@ -10364,12 +10364,17 @@ Quality before provenance: an exact filename beats a fuzzy declaration. A
   versions and packaging is the **release** (`mark_band`): `release_lines`
   (its band name and version: Klein and 2), the maker's glyph or the owner's
   icon, else `glyph_letters` (Z, HI, Lu), and the entry's role or else a
-  `ROLE_WORDS` word from the filename on the tab. Anything else is a fine-tune or
-  LoRA: the base's first line over its own initials and version (`SDXL JU9`),
-  never the base's role or icon; a few-step base (`few_step`) or a speed word
-  (`lightning`, `hyper`, `lcm`, `dmd2`, `turbo`) gives `⚡` and a step count.
-  `KNOWN_FINE_TUNES` names a fine-tune checkpoint with a mark of its own
-  (Juggernaut: J on its logo's purple) whatever base it was identified as.
+  `ROLE_WORDS` word from the filename on the tab; packaging joined to the
+  alias in one token (`krea2TurboINTXQuants`) and a `rev2` still count as the
+  release. A fine-tune checkpoint or LoRA wears the same tile, told apart by
+  the tab: a fine-tune its own initials and version (`MO80`), a LoRA
+  `LORA_TAB`; a few-step base (`few_step`) or a speed word (`lightning`,
+  `hyper`, `lcm`, `dmd2`, `turbo`) gives `⚡` and a step count.
+  `KNOWN_FINE_TUNES` names a re-branded fine-tune checkpoint with a mark of its
+  own (Juggernaut: J on its logo's purple) whatever base it was identified as.
+  A shelf row with no base model at all is tiled from its filename
+  (`tile_canonical`): the scanner identifies a file once, so a file read
+  before the table knew its model would otherwise never get a tile.
   Every table `mark` line is held to the card tile's 28px line at 8.25px,
   every release name to the width of "Chroma" on its band, every version to
   the room beside the glyph, and every `role` to the 32px tile, by

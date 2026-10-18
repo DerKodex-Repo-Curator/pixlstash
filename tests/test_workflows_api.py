@@ -4576,14 +4576,15 @@ def test_an_editor_format_cards_models_are_read_off_its_own_file(
             # without a second read.
             "sha256": _h("realvisxl-digest"),
             "base_model_family": _EDITOR_FAMILY,
-            # The tile (#1951): a fine-tune of FLUX.1 dev, so its base's name
-            # over the initials of its own, on Black Forest Labs' graphite.
-            "mark": ["F1D", "KR"],
-            "mark_tab": None,
+            # The tile (#1951): a fine-tune of FLUX.1 dev, so its base's band
+            # and glyph with its own initials on the tab, on Black Forest
+            # Labs' graphite.
+            "mark": ["Dev", "1"],
+            "mark_tab": "KR",
             "mark_colors": ["#484c53"],
-            "mark_icon": None,
+            "mark_icon": "flux",
             "mark_letters": None,
-            "mark_band": False,
+            "mark_band": True,
             "kind": "unet",
             # Null and not an empty string: neither the shelf's column nor the
             # filename records a precision for this file.

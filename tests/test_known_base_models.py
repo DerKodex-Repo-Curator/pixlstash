@@ -27,6 +27,7 @@ from pixlstash.utils.known_base_models import (
     modality_of,
     model_tile,
     suggest,
+    tile_canonical,
 )
 
 
@@ -242,12 +243,12 @@ GRAPHITE = ["#484c53"]
             "sdxlUnstableDiffusers_v11.safetensors",
             None,
             True,
-            ["SDXL", "UN11"],
-            None,
+            ["SDXL", "1.0"],
+            "UN11",
             SDXL,
+            "stability",
             None,
-            None,
-            False,
+            True,
         ),
         # Juggernaut XL has a mark of its own, base model identified or not;
         # a LoRA of that name is only named like it.
@@ -280,12 +281,12 @@ GRAPHITE = ["#484c53"]
             "jugg.safetensors",
             "Juggernaut XL v9",
             False,
-            ["SDXL", "JU9"],
-            None,
+            ["SDXL", "1.0"],
+            "LORA",
             SDXL,
+            "stability",
             None,
-            None,
-            False,
+            True,
         ),
         # The version comes from the file; the role from the entry.
         (
@@ -306,24 +307,24 @@ GRAPHITE = ["#484c53"]
             "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
             None,
             False,
-            ["Qwen", "LI"],
+            ["Qwen", "2511"],
             "⚡4",
             ["#615ced"],
+            "qwen",
             None,
-            None,
-            False,
+            True,
         ),
         (
             "Qwen-Image-Edit",
             "qwen_edit_2511_multiple_angles.safetensors",
             None,
             False,
-            ["Qwen", "MA"],
-            None,
+            ["Qwen", "2511"],
+            "LORA",
             ["#615ced"],
+            "qwen",
             None,
-            None,
-            False,
+            True,
         ),
         (
             "FLUX.1 dev",
@@ -368,12 +369,12 @@ GRAPHITE = ["#484c53"]
             "zimage_turbo_clementine.safetensors",
             None,
             False,
-            ["ZIT", "CL"],
-            None,
+            ["ZIT"],
+            "LORA",
             ["#dc5100"],
             None,
-            None,
-            False,
+            "Z",
+            True,
         ),
         # A role word that is the base model's own name is no tab.
         (
@@ -431,12 +432,12 @@ GRAPHITE = ["#484c53"]
             "chroma_ada.safetensors",
             "Ada v3",
             False,
-            ["CHRO", "AD3"],
-            None,
+            ["Chroma"],
+            "LORA",
             ["#7a3b12"],
+            "chroma",
             None,
-            None,
-            False,
+            True,
         ),
         # A fine-tune checkpoint is not one of the base's releases, so the
         # role that tells those apart is not its tab.
@@ -445,12 +446,12 @@ GRAPHITE = ["#484c53"]
             "chroma1_hd_myanime.safetensors",
             None,
             True,
-            ["CHRO", "MY"],
-            None,
+            ["Chroma"],
+            "MY",
             ["#7a3b12"],
+            "chroma",
             None,
-            None,
-            False,
+            True,
         ),
         (
             "Pony Diffusion V6 XL",
@@ -482,24 +483,24 @@ GRAPHITE = ["#484c53"]
             "krea2_inkwash.safetensors",
             "Ink Wash",
             False,
-            ["Krea", "IW"],
-            None,
+            ["Krea", "2"],
+            "LORA",
             ["#d55551", "#ac53a1", "#6b49e4"],
+            "krea",
             None,
-            None,
-            False,
+            True,
         ),
         (
             "Illustrious XL",
             "waiNSFWIllustrious_v140.safetensors",
             None,
             True,
-            ["ILXL", "WA14"],
-            None,
+            ["ILXL"],
+            "WA14",
             ["#0c183e"],
+            "illustrious",
             None,
-            None,
-            False,
+            True,
         ),
         # Packaging and file-kind words are nobody's initials.
         (
@@ -507,24 +508,24 @@ GRAPHITE = ["#484c53"]
             "wan22_style_high.safetensors",
             None,
             False,
-            ["Wan", "ST"],
-            None,
+            ["Wan", "2.2"],
+            "LORA",
             ["#dc5100"],
             None,
-            None,
-            False,
+            "Wa",
+            True,
         ),
         (
             "SDXL 1.0",
             "my_style_lora.safetensors",
             None,
             False,
-            ["SDXL", "MS"],
-            None,
+            ["SDXL", "1.0"],
+            "LORA",
             SDXL,
+            "stability",
             None,
-            None,
-            False,
+            True,
         ),
         # A family with no maker colour keeps the client's hashed hue.
         (
@@ -532,12 +533,12 @@ GRAPHITE = ["#484c53"]
             "noobai_style.safetensors",
             "Style",
             False,
-            ["Noob", "ST"],
+            ["Noob"],
+            "LORA",
             None,
             None,
-            None,
-            None,
-            False,
+            "No",
+            True,
         ),
         # A precision mid-name is packaging too.
         (
@@ -601,12 +602,55 @@ GRAPHITE = ["#484c53"]
             None,
             True,
         ),
+        # Packaging joined to the name in one token, and a revision, are still
+        # the release.
+        (
+            "Krea 2",
+            "krea2TurboINTXQuants_int8Mixed85GB.safetensors",
+            None,
+            True,
+            ["Krea", "2"],
+            None,
+            ["#d55551", "#ac53a1", "#6b49e4"],
+            "krea",
+            None,
+            True,
+        ),
+        (
+            "Chroma1 HD",
+            "Chroma1-HD-fp8_scaled_rev2.safetensors",
+            None,
+            True,
+            ["Chroma"],
+            "HD",
+            ["#7a3b12"],
+            "chroma",
+            None,
+            True,
+        ),
+        # A fine-tune merge wears its base's tile, its initials on the tab.
+        (
+            "Krea 2",
+            "moodyKrea2MixUncensoredWeekend_v80_int8.safetensors",
+            None,
+            True,
+            ["Krea", "2"],
+            "MO80",
+            ["#d55551", "#ac53a1", "#6b49e4"],
+            "krea",
+            None,
+            True,
+        ),
     ],
 )
 def test_a_model_is_drawn_with_the_name_people_write(
     canonical, filename, name, checkpoint, mark, tab, colours, icon, letters, band
 ):
-    assert model_tile(canonical, filename, name, checkpoint=checkpoint) == {
+    # Every case that is not a checkpoint is a LoRA.
+    tile = model_tile(
+        canonical, filename, name, checkpoint=checkpoint, adapter=not checkpoint
+    )
+    assert tile == {
         "mark": mark,
         "mark_tab": tab,
         "mark_colors": colours,
@@ -626,6 +670,17 @@ def test_a_long_run_of_digits_in_a_name_is_read_in_linear_time():
         "SDXL",
         "1.0",
     ]
+
+
+def test_a_shelf_row_with_no_base_model_is_tiled_from_its_filename():
+    """Scanned before the table knew SeedVR2, the row records nothing."""
+    assert tile_canonical(None, None, "seedvr2_7b_int8_convrot.safetensors") == (
+        "SeedVR2"
+    )
+    # The shelf's own answer wins, and a stored base model is not guessed past.
+    assert tile_canonical("Krea 2", None, "seedvr2.safetensors") == "Krea 2"
+    assert tile_canonical(None, "sdxl", "seedvr2.safetensors") == "SDXL 1.0"
+    assert tile_canonical(None, "my house model", "seedvr2.safetensors") is None
 
 
 def test_an_unknown_or_closed_base_model_keeps_the_generated_mark():

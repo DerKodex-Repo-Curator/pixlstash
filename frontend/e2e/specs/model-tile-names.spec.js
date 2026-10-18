@@ -35,16 +35,20 @@ const LINE_PX = TILE_PX - 2 * 2
 const at = (n) => (TILE_PX * n) / 32
 
 // A `file_version` release's version comes from its file; 2511 stands in.
+// Every model of a known base model wears its base's band; the tab tells a
+// fine-tune (its initials) and a LoRA (LORA) from the release.
 const READ_NAMES = `
 import json
-from pixlstash.utils.known_base_models import KNOWN_BASE_MODELS, KNOWN_FINE_TUNES, ROLE_WORDS, release_lines
+from pixlstash.utils.known_base_models import KNOWN_BASE_MODELS, KNOWN_FINE_TUNES, LORA_TAB, ROLE_WORDS, release_lines
 tiles = [*KNOWN_BASE_MODELS.values(), *KNOWN_FINE_TUNES.values()]
 releases = [release_lines(t, "2511" if t.get("file_version") else None) for t in KNOWN_BASE_MODELS.values() if t.get("mark")]
 print(json.dumps({
     "lines": sorted({line for t in tiles for line in t.get("mark", [])}),
     "names": sorted({r[0] for r in releases}),
     "versions": sorted({v for r in releases for v in r[1:]}),
-    "roles": sorted({t["role"] for t in tiles if t.get("role")} | set(ROLE_WORDS.values())),
+    # A fine-tune's tab is its initials and version, two letters and two
+    # digits at most: WW88 stands for the widest.
+    "roles": sorted({t["role"] for t in tiles if t.get("role")} | set(ROLE_WORDS.values()) | {LORA_TAB, "WW88"}),
 }))
 `
 

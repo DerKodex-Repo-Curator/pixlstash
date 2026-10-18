@@ -100,9 +100,9 @@ from pixlstash.utils.model_utils import derive_model_name
 # :data:`MAKER_GLYPHS`, or ``icon`` one of the owner's from
 # :data:`FAMILY_ICONS`. A release prints ``band`` (else the mark's first line)
 # across a band and ``version`` (else the mark's second line, or with
-# ``file_version`` the filename's) beside the glyph (:func:`release_lines`). A
-# LoRA's or fine-tune's tile prints the mark's first line over its own
-# initials. A release with no glyph wears ``letters`` in its place, else
+# ``file_version`` the filename's) beside the glyph (:func:`release_lines`),
+# and so do its fine-tunes and LoRAs, told apart by the tab
+# (:func:`model_tile`). A release with no glyph wears ``letters`` in its place, else
 # its name's first two capitals or first two letters (:func:`glyph_letters`).
 # Every ``mark`` line must fit the card's 32px tile's 28px line at
 # 8.25px, and no band be wider than "Chroma", which
@@ -952,11 +952,9 @@ MAKER_GLYPHS: dict[str, str] = {
 }
 
 # The owner's family icons (``frontend/src/assets/model-families/``), in
-# place of a maker's glyph -> the field they are drawn on. Only the base
-# checkpoint wears the icon; its LoRAs and fine-tunes are text tiles in this
-# colour, or every Chroma LoRA would draw one identical eye. Illustrious's is
-# a step lighter than its picture's near-black field, so a LoRA tile keeps its
-# edge on the dark theme.
+# place of a maker's glyph -> the field they are drawn on, which its
+# fine-tunes and LoRAs wear too. Illustrious's is a step lighter than its
+# picture's near-black field, so the tile keeps its edge on the dark theme.
 FAMILY_ICONS: dict[str, str] = {
     "chroma": "#7a3b12",
     "pony": "#4b2373",
@@ -977,6 +975,8 @@ ROLE_WORDS = {"base": "BASE", "refiner": "REFI"}
 # What the tab of a few-step model or speed LoRA shows, followed by the step
 # count a speed LoRA is named for (``⚡4``).
 FEW_STEP_TAB = "⚡"
+# The tab a LoRA wears on its base's tile.
+LORA_TAB = "LORA"
 _SPEED_WORDS = frozenset({"lightning", "hyper", "lcm", "dmd2", "turbo"})
 _STEPS_RE = re.compile(r"(?<![a-z0-9])(\d+)[\s_-]?steps?(?![a-z])", re.IGNORECASE)
 
@@ -986,8 +986,11 @@ _PACKAGING_WORDS = frozenset(
         *("pruned", "emaonly", "ema", "noema", "nonema", "vae", "bakedvae"),
         *("fixed", "full", "dev", "t2v", "i2v", "ti2v", "high", "low", "noise"),
         *("convrot", "mixed", "scaled", "fast", "awq", "gptq"),
+        *("intx", "quant", "quants", "quantized"),
     }
 )
+# A revision in a release's name (`Chroma1-HD-fp8_scaled_rev2`): a version.
+_REVISION_RE = re.compile(r"rev\d+", re.IGNORECASE)
 # A precision anywhere in a name (`seedvr2_7b_int8_convrot`), where the shelf's
 # own quant parser only strips one at the end.
 _QUANT_WORD_RE = re.compile(
@@ -1022,6 +1025,12 @@ def _vocabulary(canonical: str) -> frozenset[str]:
     return frozenset(
         word for name in names for word in re.findall(r"[a-z]+|\d+", name.casefold())
     ) | {_norm(name) for name in names}
+
+
+@functools.cache
+def _release_words(vocabulary: frozenset[str]) -> frozenset[str]:
+    """*vocabulary* and every word a release's name may carry beside it."""
+    return vocabulary | _PACKAGING_WORDS | _SPEED_WORDS | frozenset(ROLE_WORDS)
 
 
 def _leftover_is(text: str, vocabulary: frozenset[str]) -> bool:
@@ -1067,11 +1076,14 @@ def _is_release(canonical: str, tokens: list[str], vocabulary: frozenset[str]) -
                 continue
             if not joined.startswith(alias):
                 break
-            if not _leftover_is(joined[len(alias) :], vocabulary):
+            # Joined to the alias in one token, the same words a separate one
+            # may be: `krea2TurboINTXQuants` is Krea 2 Turbo, requantised.
+            if not _leftover_is(joined[len(alias) :], _release_words(vocabulary)):
                 break
             rest = tokens[i + 1 :]
             if all(
                 re.match(r"\d|v(?:\d|[A-Z])", token)
+                or _REVISION_RE.fullmatch(token)
                 or _norm(token) in vocabulary
                 or _norm(token) in ROLE_WORDS
                 or _norm(token) in _SPEED_WORDS
@@ -1185,41 +1197,63 @@ def release_lines(entry: dict, file_version: Optional[str] = None) -> list[str]:
     return [name, version] if version else [name]
 
 
+def tile_canonical(
+    canonical: Optional[str], base_model: Optional[str], filename: Optional[str]
+) -> Optional[str]:
+    """The known base model a shelf row's tile is drawn for.
+
+    The row's identified label, else its stored base model folded. A row that
+    records no base model at all is named from its filename, as a file the
+    shelf does not hold is: the scanner identifies a file once, so one read
+    before the table knew its model (SeedVR2) would otherwise never get a
+    tile. A stored base model is never second-guessed.
+    """
+    if canonical:
+        return canonical
+    if base_model:
+        return fold(base_model)
+    return identify((), (filename,))[0]
+
+
 def model_tile(
     canonical: Optional[str],
     filename: Optional[str],
     name: Optional[str] = None,
     checkpoint: bool = False,
+    adapter: bool = False,
 ) -> Optional[dict]:
     """The tile a workflow card draws a model with, or ``None`` for the generated one.
 
     *canonical* is the known base model the row was identified as, *name* the
-    shelf's own name for it (else its filename's), and *checkpoint* whether it
-    is one; a LoRA never wears its base model's role or icon.
+    shelf's own name for it (else its filename's), *checkpoint* whether it is
+    a checkpoint and *adapter* whether a LoRA.
 
     Returns ``{"mark", "mark_tab", "mark_colors", "mark_icon",
-    "mark_letters", "mark_band"}``: the one or two lines of the name; the tab
-    (a role, or :data:`FEW_STEP_TAB` with a speed LoRA's step count), or
-    ``None``; the colour stops, or ``None`` for the client's hashed hue; the
-    glyph or family icon a release wears, else the letters it wears instead
-    (:func:`glyph_letters`), both ``None`` off a release; and whether the tile
-    is a release's, drawn as a band.
+    "mark_letters", "mark_band"}``: the name and version (or a re-branded
+    fine-tune's own mark); the tab, or ``None``; the colour stops, or ``None``
+    for the client's hashed hue; the maker's glyph or the owner's icon, else
+    the letters worn in its place (:func:`glyph_letters`); and whether the
+    tile is drawn as a band, which every model of a known base model is.
 
-    * **The base model's own release** sends :func:`release_lines` (Klein
-      and 2), its name printed across a band over its maker's glyph and its
-      version beside the glyph, and the role word in its filename or else its
-      entry's ``role`` on the tab.
-    * **A fine-tune or LoRA** shows the base's first line over its own
-      initials and version (SDXL over JU9), or its own mark where
-      :data:`KNOWN_FINE_TUNES` has one. It is none of the base's releases, so
-      its tab is only a role word of its own name.
+    Every model of a known base model wears its base's band: the name and
+    version of :func:`release_lines` (Klein and 2), its maker's glyph, its
+    colour. The tab tells them apart:
+
+    * **the release**: the role word in its filename, else its entry's
+      ``role``, else a bolt for a few-step base;
+    * **a fine-tune checkpoint**: its own initials and version (MO80 for
+      moodyKrea2Mix v80);
+    * **a LoRA**: :data:`LORA_TAB`, or a speed LoRA's bolt and step count.
+
+    A fine-tune :data:`KNOWN_FINE_TUNES` names (Juggernaut) is re-branded, and
+    wears its own mark instead.
     """
     tokens = derive_model_name(filename or "").split()
     own_name = name or " ".join(tokens)
     words = [_norm(word) for word in re.split(r"[\s_-]+", own_name) if word]
     # Whatever base model it was identified as, or none: a fine-tune with a
     # mark of its own is known by its name.
-    fine_tune = next(
+    rebranded = next(
         (
             tile
             for start, tile in KNOWN_FINE_TUNES.items()
@@ -1227,35 +1261,36 @@ def model_tile(
         ),
         None,
     )
+    if rebranded:
+        return {
+            "mark": list(rebranded["mark"]),
+            "mark_tab": None,
+            "mark_colors": list(rebranded["colors"]),
+            "mark_icon": None,
+            "mark_letters": None,
+            "mark_band": False,
+        }
     entry = KNOWN_BASE_MODELS.get(canonical or "", {})
-    if "mark" not in entry and not fine_tune:
+    if "mark" not in entry:
         return None
-    vocabulary = _vocabulary(canonical) if "mark" in entry else frozenset()
-    release = bool(
-        checkpoint and not fine_tune and _is_release(canonical, tokens, vocabulary)
-    )
+    vocabulary = _vocabulary(canonical)
+    release = checkpoint and _is_release(canonical, tokens, vocabulary)
     icon = entry.get("icon")
     colors = [FAMILY_ICONS[icon]] if icon else MAKERS.get(entry.get("maker", ""))
-    if fine_tune:
-        mark = list(fine_tune["mark"])
-        colors = fine_tune["colors"]
-    elif release:
-        version = entry.get("file_version") and next(
-            (t for t in tokens if re.fullmatch(r"\d{4}|\d+\.\d+", t)), None
-        )
-        mark = release_lines(entry, version)
-    else:
-        own = _own_line(own_name, vocabulary)
-        mark = [entry["mark"][0]] + ([own] if own else [])
+    version = entry.get("file_version") and next(
+        (t for t in tokens if re.fullmatch(r"\d{4}|\d+\.\d+", t)), None
+    )
+    glyph = icon or MAKER_GLYPHS.get(entry.get("maker", ""))
 
-    glyph = (icon or MAKER_GLYPHS.get(entry.get("maker", ""))) if release else None
-    tab = None
     own_words = {_norm(t) for t in tokens} | set(words)
-    if checkpoint:
+    steps = _STEPS_RE.search(own_name)
+    bolt = FEW_STEP_TAB + (steps.group(1) if steps else "")
+    speed_word = any(word in _SPEED_WORDS for word in own_words - vocabulary)
+    if adapter:
+        tab = bolt if speed_word else LORA_TAB
+    else:
         label_words = set(re.findall(r"[a-z]+", (canonical or "").casefold()))
-        # The entry's role tells the base's own releases apart, so only a
-        # release wears it; a role word in the file's own name is its own.
-        tab = (entry.get("role") if release else None) or next(
+        role_word = next(
             (
                 ROLE_WORDS[word]
                 for word in own_words
@@ -1263,18 +1298,20 @@ def model_tile(
             ),
             None,
         )
-    if tab is None:
-        speed = (checkpoint and entry.get("few_step")) or any(
-            word in _SPEED_WORDS for word in own_words - vocabulary
+        # The entry's role tells the base's own releases apart, so only a
+        # release wears it; a fine-tune wears its own initials instead.
+        own = None if release or not checkpoint else _own_line(own_name, vocabulary)
+        tab = (
+            own
+            or role_word
+            or (entry.get("role") if release else None)
+            or (bolt if (checkpoint and entry.get("few_step")) or speed_word else None)
         )
-        if speed:
-            steps = _STEPS_RE.search(own_name)
-            tab = FEW_STEP_TAB + (steps.group(1) if steps else "")
     return {
-        "mark": mark,
+        "mark": release_lines(entry, version),
         "mark_tab": tab,
         "mark_colors": list(colors) if colors else None,
         "mark_icon": glyph,
-        "mark_letters": glyph_letters(entry) if release and not glyph else None,
-        "mark_band": release,
+        "mark_letters": None if glyph else glyph_letters(entry),
+        "mark_band": True,
     }

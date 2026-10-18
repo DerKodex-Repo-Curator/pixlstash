@@ -173,6 +173,7 @@ from pixlstash.utils.known_base_models import (
     family_named,
     fold,
     model_tile,
+    tile_canonical,
 )
 from pixlstash.utils.model_utils import canonical_quant, derive_model_name
 from pixlstash.utils.path_utils import path_is_within
@@ -1675,10 +1676,11 @@ def _to_response(
         character_names,
     )
     tile = model_tile(
-        row["base_model_canonical"] or fold(row["base_model"]),
+        tile_canonical(row["base_model_canonical"], row["base_model"], row["filename"]),
         row["filename"],
         row["display_name"],
         checkpoint=row["file_kind"] == FILE_CHECKPOINT,
+        adapter=row["file_kind"] == FILE_ADAPTER,
     )
     return ModelResponse(
         id=int(row["id"]),

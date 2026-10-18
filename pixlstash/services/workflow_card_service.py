@@ -120,7 +120,12 @@ from pixlstash.utils.adapter_header import (
     FILE_TEXT_ENCODER,
     FILE_UNKNOWN,
 )
-from pixlstash.utils.known_base_models import fold, identify, model_tile
+from pixlstash.utils.known_base_models import (
+    fold,
+    identify,
+    model_tile,
+    tile_canonical,
+)
 from pixlstash.utils.model_utils import (
     canonical_quant,
     derive_model_name,
@@ -819,10 +824,11 @@ def model_marks(hub: HubDatabase, names: list[str]) -> dict[str, ShelfMark]:
         ):
             canonical = row["base_model_canonical"] or fold(row["base_model"])
             tile = model_tile(
-                canonical,
+                tile_canonical(canonical, row["base_model"], row["filename"]),
                 row["filename"],
                 row["display_name"],
                 checkpoint=row["file_kind"] == FILE_CHECKPOINT,
+                adapter=row["file_kind"] == FILE_ADAPTER,
             )
             for value in single[row["id"]]:
                 pictures[value] = (
@@ -1245,7 +1251,12 @@ def _mark_fields(
     quant = (mark.quant if mark else None) or quant_from_filename(name or "")
     if mark is None:
         canonical, _source = identify((), (name,))
-        tile = model_tile(canonical, name, checkpoint=kind in BASE_MODEL_KINDS)
+        tile = model_tile(
+            canonical,
+            name,
+            checkpoint=kind in BASE_MODEL_KINDS,
+            adapter=kind == "lora",
+        )
         return {"quant": quant, **(tile or {})}
     return {
         "title": mark.title,
