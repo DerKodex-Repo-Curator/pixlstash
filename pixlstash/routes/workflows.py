@@ -3959,7 +3959,9 @@ def create_router(server) -> APIRouter:
         source tiers do not agree on folders. Where the loader cannot load the
         replacement, a PixlStash loader is swapped in (#1605) and the node
         added to *swapped*, which the caller records with
-        :func:`_record_loader_swaps` once the graph is final. Returns the
+        :func:`_record_loader_swaps` once the graph is final; a checkpoint
+        the shelf holds a copy of is written unlisted, for the run to load
+        off the shelf (:func:`_swap_in_shelf_loaders`). Returns the
         substitutions made. A replacement that could not be loaded leaves its
         loader naming the original and is added to *unloaded*, as
         ``{was, now, reason}``.
@@ -3993,6 +3995,27 @@ def create_router(server) -> APIRouter:
                     model_fix_kind(cls, widget) == kind
                 ),
             )
+            if kind == FILE_CHECKPOINT:
+                # A checkpoint ComfyUI does not list is written all the same
+                # where the shelf holds a copy: a run loads it from there
+                # through the pack's checkpoint loader, as it loads any shelf
+                # checkpoint ComfyUI lacks (`_swap_in_shelf_loaders`).
+                row_of = _shelf_checkpoint(_hub())
+                held = {
+                    miss["was"]: miss["now"]
+                    for miss in kind_missed
+                    if miss["reason"] == "not_on_comfyui" and row_of(miss["now"])
+                }
+                if held:
+                    kind_done += apply_filename_swap(
+                        graph,
+                        held,
+                        None,
+                        fields=lambda cls, widget: (
+                            model_fix_kind(cls, widget) == FILE_CHECKPOINT
+                        ),
+                    )[0]
+                    kind_missed = [m for m in kind_missed if m["was"] not in held]
             done += kind_done
             missed += _swap_in_pixlstash_loaders(
                 card, graph, kind, swaps, kind_missed, object_info, swapped
@@ -4063,7 +4086,8 @@ def create_router(server) -> APIRouter:
         misses that are still missed.
         """
         if kind not in run_service.PIXLSTASH_SWAP_LOADERS:
-            # Checkpoints keep the rename only: nothing to try, nothing to say.
+            # A checkpoint is loaded off the shelf later, by row
+            # (`_swap_in_shelf_loaders`): nothing to try here.
             return missed
         unlisted = {m["was"] for m in missed if m["reason"] == "not_on_comfyui"}
         nodes = {
@@ -9523,7 +9547,9 @@ def create_router(server) -> APIRouter:
           GGUF loader lists safetensors too; a core one never lists GGUF.
           When ComfyUI answers, a file the loader does not list passes too
           where a run would swap a PixlStash loader in for it
-          (``run_service.plan_pixlstash_swap``, #1605), marked ``loader``.
+          (``run_service.plan_pixlstash_swap``, #1605; a checkpoint by shelf
+          row, :func:`swap_in_pack_nodes`, only with ComfyUI on this
+          computer), marked ``loader``.
 
         Returns:
             ``(candidates, reason, narrowed)``, *reason* set only when there
@@ -9640,9 +9666,42 @@ def create_router(server) -> APIRouter:
         else:
             object_info, error = _read_object_info(_comfyui_url(_user(request)))
 
+        # A checkpoint loads off the shelf by row only where ComfyUI is on this
+        # computer: the pack's checkpoint loader reads the file, it cannot
+        # fetch one.
+        row_of = (
+            _shelf_checkpoint(_hub())
+            if kind == FILE_CHECKPOINT and _comfyui_is_here(request)
+            else None
+        )
+
+        def through_pack(node_id, widget, value, filename, info):
+            """The PixlStash loader a run would load *filename* through in
+            *node_id*'s place, by the run's own rule, or None."""
+            if row_of is not None:
+                node = deepcopy(graph[node_id])
+                node["inputs"][widget] = filename
+                swapped = swap_in_pack_nodes(
+                    {node_id: node},
+                    info,
+                    lambda _name: None,
+                    checkpoint_id=row_of,
+                    shelf_uuid="trial",
+                )
+                return node["class_type"] if swapped else None
+            plan, _refusal = run_service.plan_pixlstash_swap(
+                graph,
+                node_id,
+                kind,
+                {value: filename},
+                info,
+                _shelf_digest(_hub(), kind),
+            )
+            return plan["class_type"] if plan is not None else None
+
         def loadable(candidates, info, log=True):
             """The candidates every loader naming the file can load, given *info*."""
-            for cls, widget, value, fix_kind, node_id in loaders:
+            for cls, widget, value, _fix_kind, node_id in loaders:
                 options = listed_options(info, cls, widget)
                 if options is not None:
                     # Listed by this loader, or loadable through a PixlStash
@@ -9652,18 +9711,9 @@ def create_router(server) -> APIRouter:
                         if listed_as(c.filename, options):
                             kept.append(c)
                             continue
-                        plan, _refusal = run_service.plan_pixlstash_swap(
-                            graph,
-                            node_id,
-                            fix_kind,
-                            {value: c.filename},
-                            info,
-                            _shelf_digest(_hub(), fix_kind),
-                        )
-                        if plan is not None:
-                            kept.append(
-                                c.model_copy(update={"loader": plan["class_type"]})
-                            )
+                        loader = through_pack(node_id, widget, value, c.filename, info)
+                        if loader is not None:
+                            kept.append(c.model_copy(update={"loader": loader}))
                     candidates = kept
                 else:
                     if log:
