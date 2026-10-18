@@ -2334,19 +2334,37 @@ function resetSize() {
 }
 
 /**
+ * Create with LoRA… on a person: the trigger word of the LoRA their row runs,
+ * or "" when it needs none.
+ */
+const fixedTrigger = computed(() => {
+  if (loraSource.value?.entityType !== "character") return "";
+  const id = Number(loraSource.value.entityId);
+  const row = addedLoras.value.find((entry) => entry.person === id);
+  return triggerWord(
+    attachedLoras.value.find((lora) => row?.sha256 && lora.sha256 === row.sha256),
+  );
+});
+/**
  * The prompt the box opens with, and what its reset chip goes back to.
  *
  * A caller's own `source.prompt` wins: the Recipes tab passes the prompt its
- * row shows, and the picture's re-read can come back without one.
+ * row shows, and the picture's re-read can come back without one. Create with
+ * LoRA… on a person puts their trigger word first, unless it is already there,
+ * so the box follows the workflow's own prompt with the word still in. Only
+ * once the pre-flight says the graph takes a prompt: before that, or where it
+ * failed, the word alone would be sent over a prompt nobody has read.
  */
-const basePrompt = computed(
-  () =>
+const basePrompt = computed(() => {
+  const own =
     props.source?.prompt ||
     recipe.value?.positive_prompt ||
     savedRecipe.value?.prompt ||
     graphPrompt.value?.positive_text ||
-    "",
-);
+    "";
+  const word = graphPrompt.value?.positive_settable ? fixedTrigger.value : "";
+  return word && !namesWord(own, word) ? withTriggers([word], own) : own;
+});
 /**
  * A run with nothing else to prefill from shows the workflow's own prompt once
  * the pre-flight has read it, so what will run is visible (#1832), and follows
@@ -2803,9 +2821,14 @@ const triggerLive = computed(() => {
 });
 const promptField = ref(null);
 
+/** *text* with *words* put first, where a trigger word goes. */
+function withTriggers(words, text) {
+  return [...words, text.trim()].filter(Boolean).join(", ");
+}
+
 /** Put the words first, where a trigger word goes, and hand the box back. */
 function addTriggers(words) {
-  prompt.value = [...words, prompt.value.trim()].filter(Boolean).join(", ");
+  prompt.value = withTriggers(words, prompt.value);
   // The button goes with the suggestion; focus must not fall to the page.
   promptField.value?.focus?.();
 }

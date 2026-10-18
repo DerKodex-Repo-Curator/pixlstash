@@ -3147,7 +3147,6 @@ function openLoraRunFromCtx(entityType, item) {
   runDialogStore.openRun({
     kind: "card",
     pickWorkflow: true,
-    emptyPrompt: true,
     name: item.name,
     lora: { entityType, entityId: item.id, name: item.name },
   });

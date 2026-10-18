@@ -2948,10 +2948,10 @@ describe("Create with LoRA", () => {
   const model = (family) => [
     { kind: "unet", name: "model", base_model_family: family },
   ];
+  // As `SideBar.openLoraRunFromCtx` opens it.
   const fromPerson = {
     kind: "card",
     pickWorkflow: true,
-    emptyPrompt: true,
     name: "Example",
     lora: { entityType: "character", entityId: 3, name: "Example" },
   };
@@ -3062,14 +3062,100 @@ describe("Create with LoRA", () => {
     expect(wrapper.vm.addedLoras.map((row) => row.person)).toEqual([3]);
   });
 
-  it("suggests the fixed person's trigger word too", async () => {
-    listAdapters.mockImplementation(async ({ fileKind, characterId } = {}) =>
-      characterId && fileKind === "adapter"
-        ? [{ ...PERSON_LORA, trigger_words: ["ohwx"], trigger_words_source: "recorded" }]
-        : [],
-    );
-    const wrapper = await mountRun(fromPerson);
-    expect(wrapper.find('[data-testid="rund-trigger"]').text()).toContain("ohwx");
+  describe("the fixed person's trigger word", () => {
+    beforeEach(() => {
+      // A set's LoRA has the word too, so only the person rule keeps it out.
+      listAdapters.mockImplementation(async ({ fileKind, characterId, setId } = {}) =>
+        (characterId || setId) && fileKind === "adapter"
+          ? [{ ...PERSON_LORA, trigger_words: ["ohwx"], trigger_words_source: "recorded" }]
+          : [],
+      );
+    });
+    const workflowPrompt = (text) =>
+      preflightWorkflowRun.mockResolvedValue({
+        ok: true,
+        runs: 1,
+        groups: [{ prompt: { positive_settable: true, positive_text: text } }],
+      });
+
+    it("is already in the prompt, ahead of the workflow's own", async () => {
+      workflowPrompt("a portrait");
+      const wrapper = await mountRun(fromPerson);
+      expect(wrapper.vm.prompt).toBe("ohwx, a portrait");
+      expect(wrapper.find('[data-testid="rund-trigger"]').exists()).toBe(false);
+      await wrapper.vm.submit();
+      expect(runWorkflowCard.mock.calls[0][0].prompt).toBe("ohwx, a portrait");
+    });
+
+    it("is not put in twice when the workflow's prompt names it", async () => {
+      workflowPrompt("OHWX smiling");
+      const wrapper = await mountRun(fromPerson);
+      expect(wrapper.vm.prompt).toBe("OHWX smiling");
+    });
+
+    it("is suggested again once taken out", async () => {
+      workflowPrompt("a portrait");
+      const wrapper = await mountRun(fromPerson);
+      wrapper.vm.prompt = "a portrait";
+      await flushPromises();
+      expect(wrapper.find('[data-testid="rund-trigger"]').text()).toContain("ohwx");
+    });
+
+    it("follows the LoRA the picked workflow loads", async () => {
+      const ZIT = `auto:${"f".repeat(64)}`;
+      listWorkflowCards.mockResolvedValue({
+        cards: [
+          { id: ZIT, name: "ZIT portrait", type: "txt2img", models: model("zimage") },
+          { id: KREA, name: "Krea portrait", type: "txt2img", models: model("krea2") },
+        ],
+      });
+      listAdapters.mockImplementation(async ({ fileKind, characterId } = {}) =>
+        characterId && fileKind === "adapter"
+          ? [
+              {
+                sha256: "m".repeat(64),
+                base_model_family: "zimage",
+                trigger_words: ["zword"],
+              },
+              { ...PERSON_LORA, trigger_words: ["ohwx"] },
+            ]
+          : [],
+      );
+      workflowPrompt("a portrait");
+      const wrapper = await mountRun(fromPerson);
+      expect(wrapper.vm.prompt).toBe("zword, a portrait");
+      wrapper.vm.workflowId = KREA;
+      await flushPromises();
+      expect(wrapper.vm.prompt).toBe("ohwx, a portrait");
+    });
+
+    it("is never sent over a prompt the pre-flight could not read", async () => {
+      preflightWorkflowRun.mockRejectedValue(new Error("network"));
+      const wrapper = await mountRun(fromPerson);
+      expect(wrapper.vm.prompt).toBe("");
+      await wrapper.vm.submit();
+      expect(runWorkflowCard.mock.calls[0][0].prompt).toBe(null);
+    });
+
+    it("is not kept for a graph with no prompt to set", async () => {
+      preflightWorkflowRun.mockResolvedValue({
+        ok: true,
+        runs: 1,
+        groups: [{ prompt: { positive_settable: false, negative_settable: false } }],
+      });
+      const wrapper = await mountRun(fromPerson);
+      expect(wrapper.vm.prompt).toBe("");
+    });
+
+    it("is a person's only: a set's run opens on the workflow's prompt", async () => {
+      workflowPrompt("a beach");
+      const wrapper = await mountRun({
+        ...fromPerson,
+        name: "Beach",
+        lora: { entityType: "set", entityId: 5, name: "Beach" },
+      });
+      expect(wrapper.vm.prompt).toBe("a beach");
+    });
   });
 
   it("keeps a set's LoRA removable: only a person is fixed", async () => {
