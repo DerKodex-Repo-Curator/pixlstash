@@ -666,6 +666,19 @@ def test_tag_present_in_user_table_contributes_its_own_weight_severity():
         assert penalty == pytest.approx(_severity_for_weight(weight)), tag
 
 
+def test_malformed_eyes_is_a_default_anatomy_defect():
+    # Charged at its own default weight, and in the anatomy family: alongside malformed
+    # teeth it is a second distinct defect (rank-decayed), not a duplicate folded away.
+    assert DEFAULT_SMART_SCORE_PENALIZED_TAGS["malformed eyes"] == 4
+    precisions = {"malformed eyes": 1.0, "malformed teeth": 1.0}
+    eyes = anomaly_penalty({"malformed eyes": 1.0}, tag_precisions=precisions)
+    assert eyes == pytest.approx(_severity_for_weight(4))
+    both = anomaly_penalty(
+        {"malformed eyes": 1.0, "malformed teeth": 1.0}, tag_precisions=precisions
+    )
+    assert both == pytest.approx(_severity_for_weight(4) * (1.0 + RANK_DECAY))
+
+
 def test_user_weight_overrides_the_default_table_for_the_same_tag():
     # "malformed hand" is 4 in the defaults and 3 in this user's table. The penalty must
     # follow the user, which is exactly the divergence the old module-level table caused.
