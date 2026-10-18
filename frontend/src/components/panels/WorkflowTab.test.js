@@ -1645,6 +1645,12 @@ describe("a VAE or text encoder row (#1596, #1850)", () => {
     expect(setWorkflowChanges).toHaveBeenCalledTimes(2);
     expect(setWorkflowChanges.mock.calls[1][1].models ?? []).toEqual([]);
     expect(row(wrapper, "text_encoder").text()).toContain("Text encoder missing");
+    // Its own name is no pick: the option says the file is missing.
+    expect(
+      row(wrapper, "text_encoder")
+        .find('[data-testid="wftab-pick-text_encoder"] select option')
+        .text(),
+    ).toBe("t5xxl_fp8 (missing)");
   });
 
   it("warns on the missing one's own row, and never on a vision encoder's account", async () => {

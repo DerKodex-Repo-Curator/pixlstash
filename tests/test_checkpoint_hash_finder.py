@@ -461,6 +461,30 @@ class TestFinder:
         # queue that can never drain.
         assert MissingCheckpointHashFinder(hub).progress() == (1, 1)
 
+    def test_the_managed_store_is_hashed_though_pixlstash_owns_it(self, hub, tmp_path):
+        """The managed store has the declared folders' owner, but its files are
+        plain files: the Downloads intake moves the owner's models there. A
+        text encoder never hashed there is one no PixlStash loader can load by
+        digest. Wrong if it is left out, or not counted as owed."""
+        downloaded = register(
+            hub,
+            write_model(tmp_path / "managed" / "t5-downloaded.safetensors"),
+            file_kind="text_encoder",
+        )
+        with hub.transaction() as conn:
+            conn.execute(
+                "UPDATE model_folder SET owner = 'pixlstash', kind = 'managed', "
+                "movable = 'root_only' WHERE path = ?",
+                (str(tmp_path / "managed"),),
+            )
+
+        task = MissingCheckpointHashFinder(hub).find_task()
+
+        assert task.params["checkpoint_ids"] == [downloaded]
+        assert MissingCheckpointHashFinder(hub).progress() == (1, 1)
+        pending = fetch_models(hub, ("text_encoder",))
+        assert [row["hash_pending"] for row in pending] == [1]
+
     def test_nothing_waits_on_a_row_that_is_never_hashed(self, hub, tmp_path):
         """A row this finder leaves out for good has `sha256` NULL for good.
         Reading that as "still hashing" had the Models rail offer every cached

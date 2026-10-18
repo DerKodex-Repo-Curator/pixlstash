@@ -74,9 +74,17 @@ BUILTIN_OWNER = "pixlstash"
 # drive that is unplugged comes back. A row with no copy at all (NULL) stays
 # owed too, because the readers of this forget recipe digests once nothing is
 # pending, and wrongly waiting costs less than wrongly forgetting.
+# A folder (`f`) whose files nothing hashes: one PixlStash declared, which an
+# index describes rather than a walk, so a "file" may be a directory. The
+# managed store (`managed_model_store.MANAGED_KIND`) has the same owner but
+# holds plain files, the Downloads intake's among them, and is hashed like any
+# folder: a text encoder there with no digest is one no PixlStash loader can
+# load.
+UNHASHED_FOLDER_SQL = f"(f.owner IS '{BUILTIN_OWNER}' AND f.kind IS NOT 'managed')"
+
 HASH_PENDING_SQL = (
     f"m.sha256 IS NULL AND m.file_kind <> '{FILE_ENGINE}' AND COALESCE(("
-    f"SELECT MIN(f.owner IS '{BUILTIN_OWNER}') FROM model_file mf "
+    f"SELECT MIN{UNHASHED_FOLDER_SQL} FROM model_file mf "
     "JOIN model_folder f ON f.id = mf.model_folder_id "
     "WHERE mf.model_id = m.id), 0) = 0"
 )

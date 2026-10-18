@@ -1806,7 +1806,8 @@ const modelRows = computed(() => {
       options:
         candidates.length || pick
           ? [
-              { value: "", label: savedLabel },
+              // A missing file is no choice: said, or it reads as picked.
+              { value: "", label: gone ? `${savedLabel} (missing)` : savedLabel },
               ...candidates.map((candidate) => ({
                 value: candidate.filename,
                 label: candidateLabel(candidate),

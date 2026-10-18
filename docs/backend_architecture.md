@@ -8736,7 +8736,12 @@ fails — can only ever mean the other two.
 **A NULL `sha256` here is final, and one predicate says so.** Nothing in a
 declared folder is hashed: an engine carries no digest by design, and
 `MissingCheckpointHashFinder` leaves out every declared folder because an entry
-may be a directory (`models--org--name`). So "`sha256 IS NULL`" alone does not
+may be a directory (`models--org--name`). Declared means
+`builtin_models.UNHASHED_FOLDER_SQL`: PixlStash's owner marker on a folder that
+is not the managed store. The managed store carries the same owner but holds
+plain files, the Downloads intake's among them, and is hashed like any other
+folder; a text encoder there without a digest is one no PixlStash loader can
+load. So "`sha256 IS NULL`" alone does not
 mean "still hashing". `builtin_models.HASH_PENDING_SQL` is the rows the worker
 still owes a digest: NULL, not an engine, and not every copy in a declared
 folder. The server's readers that wait on the hasher go through it: the shelf
