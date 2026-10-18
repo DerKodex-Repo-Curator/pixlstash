@@ -63,6 +63,22 @@ describe("KindMenu", () => {
     expect(wrapper.find("[data-testid='kind-menu-suggested']").exists()).toBe(false);
   });
 
+  it("names the evidence in a sentence that agrees with its count", async () => {
+    const tip = async (props) => {
+      const wrapper = mountMenu(props);
+      await open(wrapper);
+      return wrapper
+        .find("[data-testid='kind-menu-suggested'] tooltip-stub")
+        .attributes("text");
+    };
+    expect(await tip({ suggestedBy: 1 })).toBe(
+      "1 workflow loads this as a text encoder, by clip_name.",
+    );
+    expect(await tip({})).toBe(
+      "3 workflows load this as a text encoder, by clip_name.",
+    );
+  });
+
   it("files any other kind the same way, and hands Adapter… to the dialog", async () => {
     const wrapper = mountMenu();
     await open(wrapper);

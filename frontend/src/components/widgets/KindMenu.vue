@@ -183,7 +183,8 @@ const workflowsText = computed(
 );
 const evidence = computed(
   () =>
-    `${workflowsText.value} load this as a ${suggestedLabel.value.toLowerCase()}` +
+    `${workflowsText.value} ${props.suggestedBy === 1 ? "loads" : "load"} ` +
+    `this as a ${suggestedLabel.value.toLowerCase()}` +
     (props.suggestedFields.length
       ? `, by ${props.suggestedFields.join(", ")}.`
       : "."),
