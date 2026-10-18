@@ -28,6 +28,9 @@ describe("namedTile", () => {
     const tile = namedTile({ mark: ["Pony", "V7"], mark_icon: "pony" }, "x");
     expect(tile.lines).toEqual(["Pony"]);
     expect(tile.icon.band).toBe(false);
+    expect(namedTile({ mark: ["Krea 2"], mark_icon: "krea2" }, "x").icon.band).toBe(
+      true,
+    );
   });
 
   it("ignores an icon it does not ship", () => {
@@ -39,7 +42,7 @@ describe("nameScale", () => {
   it("caps one line higher than two, and an icon's band lower still", () => {
     const one = nameScale(["Z"]);
     const two = nameScale(["Z", "1"]);
-    const band = nameScale(["Z"], true);
+    const band = nameScale(["Z"], { band: true });
     expect(one).toBeGreaterThan(two);
     expect(two).toBeGreaterThan(band);
   });
@@ -61,5 +64,8 @@ describe("the name's floor", () => {
     );
     const rule = css.match(/\.mmark-name \{[^}]*\}/)[0];
     expect(rule.replace(/\s+/g, " ")).toContain("font-size: max( 8.25px, calc(");
+    // A band's name is regular, which `nameScale` and the e2e spec measure.
+    const band = css.match(/\.mmark-name--band \{[^}]*\}/)[0];
+    expect(band).toContain("font-weight: var(--weight-regular)");
   });
 });

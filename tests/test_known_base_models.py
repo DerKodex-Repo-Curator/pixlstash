@@ -354,10 +354,10 @@ GRAPHITE = ["#484c53"]
             "krea2_raw.safetensors",
             None,
             True,
-            ["Krea", "2"],
+            ["Krea 2"],
             "RAW",
-            GRAPHITE,
-            None,
+            ["#aa54a3"],
+            "krea2",
         ),
         (
             "Wan 2.2",
@@ -369,14 +369,14 @@ GRAPHITE = ["#484c53"]
             ["#dc5100"],
             None,
         ),
-        # Only the base checkpoint wears the family icon; its LoRA is a text
-        # tile in the icon's colour.
+        # Only the base checkpoint wears the family icon, under its name on
+        # one line; its LoRA is a text tile in the icon's colour.
         (
             "Chroma1 HD",
             "Chroma1-HD.safetensors",
             None,
             True,
-            ["CHRO"],
+            ["Chroma"],
             "HD",
             ["#7a3b12"],
             "chroma",
@@ -422,6 +422,17 @@ GRAPHITE = ["#484c53"]
             "V7",
             ["#4b2373"],
             "pony",
+        ),
+        # Krea 2's LoRA is a text tile in its icon's colour.
+        (
+            "Krea 2",
+            "krea2_inkwash.safetensors",
+            "Ink Wash",
+            False,
+            ["Krea", "IW"],
+            None,
+            ["#aa54a3"],
+            None,
         ),
         (
             "Illustrious XL",

@@ -25,13 +25,16 @@ const TILE_PX = Number(
   )[1],
 )
 const LINE_PX = TILE_PX - 2 * 2
+// An icon tile's name has no right padding, so its band runs to the edge.
+const BAND_PX = TILE_PX - 2
 
 const READ_NAMES = `
 import json
-from pixlstash.utils.known_base_models import KNOWN_BASE_MODELS, KNOWN_FINE_TUNES, ROLE_WORDS
+from pixlstash.utils.known_base_models import KNOWN_BASE_MODELS, KNOWN_FINE_TUNES, ROLE_WORDS, icon_line
 tiles = [*KNOWN_BASE_MODELS.values(), *KNOWN_FINE_TUNES.values()]
 print(json.dumps({
     "lines": sorted({line for t in tiles for line in t.get("mark", [])}),
+    "bands": sorted({icon_line(t) for t in tiles if t.get("icon")}),
     "roles": sorted({t["role"] for t in tiles if t.get("role")} | set(ROLE_WORDS.values())),
 }))
 `
@@ -46,12 +49,12 @@ function knownNames() {
 }
 
 test('every known name fits the tile at the smallest size it may take', async ({ page }) => {
-  const { lines, roles } = knownNames()
+  const { lines, bands, roles } = knownNames()
   expect(lines.length).toBeGreaterThan(30)
 
   await page.goto('/')
   const widths = await page.evaluate(
-    ({ lines, roles }) => {
+    ({ lines, bands, roles }) => {
       const measure = (text, style) => {
         const span = document.createElement('span')
         Object.assign(span.style, { position: 'absolute', whiteSpace: 'nowrap', ...style })
@@ -61,28 +64,35 @@ test('every known name fits the tile at the smallest size it may take', async ({
         span.remove()
         return [text, width]
       }
+      // `.mmark-name`: semibold, tracked -0.02em, at the floor.
+      const name = {
+        fontFamily: 'var(--font-ui)',
+        fontSize: '8.25px',
+        fontWeight: '600',
+        letterSpacing: '-0.02em',
+      }
       return {
-        // `.mmark-name`: semibold, tracked -0.02em, at the floor.
-        lines: lines.map((line) =>
-          measure(line, {
-            fontFamily: 'var(--font-ui)',
-            fontSize: '8.25px',
-            fontWeight: '600',
-            letterSpacing: '-0.02em',
-          }),
-        ),
+        lines: lines.map((line) => measure(line, name)),
+        // `.mmark-name--band`: regular weight. Pony's and Illustrious's
+        // unbanded names are semibold, which the lines check holds to the
+        // narrower line.
+        bands: bands.map((band) => measure(band, { ...name, fontWeight: '400' })),
         // `.mmark-tab`: the type ramp's 3xs, bold.
         roles: roles.map((role) =>
           measure(role, { fontSize: 'var(--text-3xs)', fontWeight: '700' }),
         ),
       }
     },
-    { lines, roles },
+    { lines, bands, roles },
   )
 
   const tooWide = (measured, budget) =>
     measured.filter(([, width]) => width > budget).map(([text, width]) => `${text} ${width}px`)
   expect(tooWide(widths.lines, LINE_PX), `names wider than the ${LINE_PX}px line at 8.25px`).toEqual(
+    [],
+  )
+  expect(widths.bands.length).toBeGreaterThan(0)
+  expect(tooWide(widths.bands, BAND_PX), `icon names wider than the ${BAND_PX}px band at 8.25px`).toEqual(
     [],
   )
   expect(tooWide(widths.roles, TILE_PX), `tab words wider than the ${TILE_PX}px tile`).toEqual([])

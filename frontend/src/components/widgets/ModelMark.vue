@@ -332,8 +332,8 @@ const ringClass = computed(() =>
 }
 
 /* Two lines of two, packed into the top-start corner so the version tab over
-   the bottom-end one covers no letter: 0.36 of the card's 30px mark is 11px,
-   and two lines of it at 0.9 end 2px above the tab. Semibold, because 10px
+   the bottom-end one covers no letter: 0.36 of the card's 34px mark is 12px,
+   and two lines of it at 0.9 end 3px above the tab. Semibold, because 10px
    at the single line's medium weight thins out on the tile. Measured in a
    browser against the widest pair (WM beside a two-digit tab). */
 .mmark-initials--two {
@@ -389,9 +389,11 @@ const ringClass = computed(() =>
 }
 
 /* Over a busy picture, a solid band: a gradient left the name illegible over
-   the eye's stripes on the card. */
+   the eye's stripes on the card. Regular weight and no right padding, so
+   Chroma (31.4px at the floor in DejaVu Sans) fits the 34px tile's 32px. */
 .mmark-name--band {
   background: var(--scrim-photo-strong);
+  font-weight: var(--weight-regular);
 }
 
 .mmark-bolt {
@@ -423,7 +425,7 @@ const ringClass = computed(() =>
 }
 
 /* A named tile's tab, a step down: its widest word, BASE, is 29.4px at 10px
-   in DejaVu Sans (32.3px at 11px), inside the card's 30px tile. */
+   in DejaVu Sans (32.3px at 11px), inside the card's tile. */
 .mmark-tab {
   font-size: var(--text-3xs);
 }

@@ -97,8 +97,10 @@ from pixlstash.utils.model_utils import derive_model_name
 # REFI, EDIT, RAW, HD); ``few_step`` puts a bolt on the tab instead;
 # ``file_version`` takes the second line from the filename (Qwen 2511);
 # ``maker`` picks the tile colour from :data:`MAKERS` and ``icon`` a family
-# icon from :data:`FAMILY_ICONS`. Every ``mark`` line must fit the card's 30px
-# tile's 26px line at 8.25px, which ``frontend/e2e/specs/model-tile-names.spec.js``
+# icon from :data:`FAMILY_ICONS`, under its name on one line (:func:`icon_line`:
+# ``icon_name``, else the mark's lines joined). Every ``mark`` line must fit
+# the card's 34px tile's 30px line at 8.25px, and every icon line its 32px band
+# in regular weight, which ``frontend/e2e/specs/model-tile-names.spec.js``
 # measures in Chromium; a fine-tune's own second line is not measured.
 # Closed models carry none: they never exist as files.
 KNOWN_BASE_MODELS: dict[str, dict] = {
@@ -221,6 +223,7 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
         "mark": ["CHRO"],
         "role": "HD",
         "icon": "chroma",
+        "icon_name": "Chroma",
         "aliases": [
             "chroma",
             "chroma1",
@@ -235,6 +238,7 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
         "mark": ["CHRO"],
         "role": "BASE",
         "icon": "chroma",
+        "icon_name": "Chroma",
         "aliases": ["chroma1base", "lodestones/Chroma1-Base"],
     },
     "Chroma1 Radiance": {
@@ -242,6 +246,7 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
         "modality": "image",
         "mark": ["CHRO"],
         "icon": "chroma",
+        "icon_name": "Chroma",
         "aliases": ["chroma radiance", "lodestones/Chroma1-Radiance"],
     },
     # --- Alibaba ------------------------------------------------------------
@@ -317,6 +322,7 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
         "mark": ["Krea", "2"],
         "role": "RAW",
         "maker": "Krea",
+        "icon": "krea2",
         "aliases": ["krea2raw", "krea raw"],
     },
     "Krea 2 Turbo": {
@@ -325,6 +331,7 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
         "mark": ["Krea", "2"],
         "few_step": True,
         "maker": "Krea",
+        "icon": "krea2",
         "aliases": ["krea2turbo", "krea turbo"],
     },
     "Krea 2": {
@@ -332,6 +339,7 @@ KNOWN_BASE_MODELS: dict[str, dict] = {
         "modality": "image",
         "mark": ["Krea", "2"],
         "maker": "Krea",
+        "icon": "krea2",
         "aliases": ["krea2", "krea"],
     },
     # --- Tencent --------------------------------------------------------------
@@ -912,6 +920,7 @@ FAMILY_ICONS: dict[str, str] = {
     "chroma": "#7a3b12",
     "pony": "#4b2373",
     "illustrious": "#0c183e",
+    "krea2": "#aa54a3",
 }
 
 # Fine-tunes with a mark of their own, by how their name starts (normalised)
@@ -1105,6 +1114,15 @@ def _own_line(name: str, vocabulary: frozenset[str]) -> Optional[str]:
     return letters + (version[:2] if version and version != "1" else "")
 
 
+def icon_line(entry: dict) -> str:
+    """The one line a family icon's band prints: Chroma, Krea 2.
+
+    Wider than a plain tile's line (``CHRO``, ``Krea`` over ``2``), because
+    the band runs to the tile's edge and sets it in regular weight.
+    """
+    return entry.get("icon_name") or " ".join(entry["mark"])
+
+
 def model_tile(
     canonical: Optional[str],
     filename: Optional[str],
@@ -1154,6 +1172,8 @@ def model_tile(
     if fine_tune:
         mark = list(fine_tune["mark"])
         colors = fine_tune["colors"]
+    elif release and icon:
+        mark = [icon_line(entry)]
     elif release:
         mark = list(entry["mark"])
         if entry.get("file_version"):

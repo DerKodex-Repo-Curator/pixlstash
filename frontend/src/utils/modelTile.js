@@ -8,17 +8,21 @@
 
 import chromaIcon from "../assets/model-families/chroma.webp";
 import illustriousIcon from "../assets/model-families/illustrious.webp";
+import krea2Icon from "../assets/model-families/krea2.svg";
 import ponyIcon from "../assets/model-families/pony.webp";
 
 /**
- * The owner's family icons. `band` puts a solid band behind the name: the
- * tiger's eye is busy enough to swallow it, the horse and the star sit low on
- * a plain field that needs none.
+ * The owner's family icons. `band` puts a solid band behind the name, set in
+ * regular weight so Chroma and Krea 2 fit it: the tiger's eye is busy enough
+ * to swallow the name, and Krea's K needs it kept apart; the horse and the
+ * star sit low on a plain field that needs none. Krea's is a vector, its K's
+ * straight edges on the 34px tile's pixel grid, so the outline stays sharp.
  */
 const FAMILY_ICONS = {
   chroma: { url: chromaIcon, band: true },
   pony: { url: ponyIcon, band: false },
   illustrious: { url: illustriousIcon, band: false },
+  krea2: { url: krea2Icon, band: true },
 };
 
 /** What the server's tab sends for a few-step model; drawn as a bolt icon. */
@@ -44,12 +48,13 @@ let context;
 const widths = new Map();
 
 /**
- * The width of *text* at 1px, semibold, tracked, in `--font-ui`: the face
- * `.mmark-name` sets. A system font stack, so nothing loads late and a width
- * once measured stays true.
+ * The width of *text* at 1px, tracked, in `--font-ui` at *weight*: the face
+ * `.mmark-name` sets, semibold, or regular on a band. A system font stack, so
+ * nothing loads late and a width once measured stays true.
  */
-function widthEm(text) {
-  if (!widths.has(text)) {
+function widthEm(text, weight = 600) {
+  const key = `${weight} ${text}`;
+  if (!widths.has(key)) {
     if (context === undefined) {
       context =
         typeof OffscreenCanvas === "function"
@@ -62,21 +67,25 @@ function widthEm(text) {
       const face = getComputedStyle(document.documentElement)
         .getPropertyValue("--font-ui")
         .trim();
-      context.font = `600 100px ${face || "system-ui"}`;
+      context.font = `${weight} 100px ${face || "system-ui"}`;
       em = context.measureText(text).width / 100 + TRACKING * chars;
     }
-    widths.set(text, em);
+    widths.set(key, em);
   }
-  return widths.get(text);
+  return widths.get(key);
 }
 
 /**
  * The name's font size as a share of the tile's line: the cap for its shape,
  * shrunk until its widest line fits. The CSS holds it at its 8.25px floor.
+ *
+ * @param {string[]} lines - the name's lines.
+ * @param {?{band: boolean}} icon - the family icon it sits over, if any.
  */
-export function nameScale(lines, band = false) {
-  const cap = band ? BAND : lines.length > 1 ? TWO_LINES : ONE_LINE;
-  const widest = Math.max(...lines.map(widthEm));
+export function nameScale(lines, icon = null) {
+  const cap = icon ? BAND : lines.length > 1 ? TWO_LINES : ONE_LINE;
+  const weight = icon?.band ? 400 : 600;
+  const widest = Math.max(...lines.map((line) => widthEm(line, weight)));
   return Math.min(cap, 1 / widest);
 }
 
@@ -96,7 +105,8 @@ export function namedTile(row, fallbackColor) {
   if (!row?.mark?.length) return null;
   const stops = row.mark_colors?.length ? row.mark_colors : [fallbackColor];
   const icon = FAMILY_ICONS[row.mark_icon] ?? null;
-  // A family icon holds one line: a second covered the eye.
+  // A family icon holds one line (the server sends one): a second covered the
+  // eye.
   const lines = icon ? row.mark.slice(0, 1) : row.mark;
   const tab = row.mark_tab
     ? row.mark_tab.startsWith(FEW_STEP_TAB)
@@ -112,6 +122,6 @@ export function namedTile(row, fallbackColor) {
         : stops[0],
     edge: stops[stops.length - 1],
     icon,
-    scale: nameScale(lines, Boolean(icon)),
+    scale: nameScale(lines, icon),
   };
 }

@@ -227,11 +227,11 @@ import ModelMark from "./ModelMark.vue";
 import Tooltip from "./Tooltip.vue";
 
 // How much row 2 draws before it counts the rest (#1485), in mark-widths: a
-// mark is one slot, a mark with its "×N" two. Five --wf-mark (30px) marks, the
+// mark is one slot, a mark with its "×N" two. Four --wf-mark (34px) marks, the
 // hairline, "+N" and their gaps fit the row of a card at the grid's 240px
 // column floor; `overflow: hidden` would otherwise clip the "+N" rather than a
 // mark. `WorkflowCard.test.js` sums this against the tokens.
-const STRIP_SLOTS = 5;
+const STRIP_SLOTS = 4;
 
 const props = defineProps({
   /** One workflow card (see utils/workflowCard.js for the shape). */
@@ -454,7 +454,7 @@ const accessibleName = computed(() =>
 
 <style scoped src="./cardCover.css"></style>
 <style scoped>
-/* 136 = 8 + 36 + 30 + 2 × 24 + 3 × 2 + 8: the meta block - the name's
+/* 140 = 8 + 36 + 34 + 2 × 24 + 3 × 2 + 8: the meta block - the name's
    two-line --wf-name-h, row 2 at --wf-mark and two --control-h-sm rows. The
    block is fixed whatever the card holds and is `flex: none`, so a change to
    that sum shows as a wrong height rather than being absorbed. Local on purpose (approved as
@@ -467,15 +467,16 @@ const accessibleName = computed(() =>
    Pictures here are mostly portrait or square (832×1216, 1024×1024), so that
    shape threw away most of every cover. */
 .wf-card {
-  --wf-meta-h: 136px;
+  --wf-meta-h: 140px;
   /* Row 1 is always two lines tall, a one-line name included, so the rows
      below it line up across every card. Two 18px lines of --text-sm. */
   --wf-name-h: 36px;
   /* Row 2's marks, a step up from the shared --entity-thumb (24px) so the
-     models a card is made of stand out on it. Local, like --wf-meta-h. 30
-     and not 28 so a named tile's widest name (HUNY, 25.8px at the 8.25px
-     floor in DejaVu Sans) fits its 26px line in every face measured (#1951). */
-  --wf-mark: 30px;
+     models a card is made of stand out on it. Local, like --wf-meta-h. 34
+     so a family icon's band holds Chroma and Krea 2 (Chroma is 31.4px in
+     regular weight at the 8.25px floor in DejaVu Sans, of the band's 32px)
+     in every face measured (#1951). */
+  --wf-mark: 34px;
 
   position: relative;
   display: flex;
