@@ -1574,6 +1574,62 @@ def test_0130_hands_back_a_picture_with_a_graph_and_no_prompt():
         }
 
 
+def test_0131_rescores_only_pictures_carrying_malformed_eyes():
+    """A picture with the tag applied, or a human POS for it, loses its cached
+    score; one with only an unapplied model prediction, or another tag, keeps it.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "vault.db")
+        db_url = f"sqlite:///{db_path}"
+        up = _run_alembic(["upgrade", "head"], db_url, _MIGRATIONS_DIR)
+        assert up.returncode == 0, up.stderr
+
+        with contextlib.closing(sqlite3.connect(db_path)) as conn:
+            for name in ("tagged", "human-pos", "predicted-only", "teeth"):
+                _insert_minimal_row(
+                    conn, "picture", file_path=f"{name}.png", smart_score=3.0
+                )
+            ids = dict(conn.execute("SELECT file_path, id FROM picture"))
+            _insert_minimal_row(
+                conn, "tag", picture_id=ids["tagged.png"], tag="Malformed Eyes"
+            )
+            _insert_minimal_row(
+                conn, "tag", picture_id=ids["teeth.png"], tag="malformed teeth"
+            )
+            _insert_minimal_row(
+                conn,
+                "tag_prediction",
+                picture_id=ids["human-pos.png"],
+                tag="malformed eyes",
+                label_source="human",
+                label_state="POS",
+            )
+            _insert_minimal_row(
+                conn,
+                "tag_prediction",
+                picture_id=ids["predicted-only.png"],
+                tag="malformed eyes",
+                confidence=0.9,
+            )
+            conn.execute(
+                "UPDATE alembic_version SET version_num = "
+                "'0130_rescan_pictures_with_a_graph_and_no_prompt'"
+            )
+            conn.commit()
+
+        up = _run_alembic(["upgrade", "head"], db_url, _MIGRATIONS_DIR)
+        assert up.returncode == 0, up.stderr
+
+        with contextlib.closing(sqlite3.connect(db_path)) as conn:
+            scores = dict(conn.execute("SELECT file_path, smart_score FROM picture"))
+        assert scores == {
+            "tagged.png": None,
+            "human-pos.png": None,
+            "predicted-only.png": 3.0,
+            "teeth.png": 3.0,
+        }
+
+
 def test_0125_resets_only_recipes_on_a_hand_made_workflow():
     """A hand-made group id goes back to NULL for re-filing; an automatic id
     and an already-NULL one are left as they are."""

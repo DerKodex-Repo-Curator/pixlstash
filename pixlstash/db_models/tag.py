@@ -13,6 +13,7 @@ DEFAULT_SMART_SCORE_PENALIZED_TAGS = {
     "bad anatomy": 5,
     "malformed hand": 4,
     "malformed teeth": 4,
+    "malformed eyes": 4,
     "missing nipples": 5,
     "malformed nipples": 4,
     "waxy skin": 2,
