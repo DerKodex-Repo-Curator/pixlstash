@@ -43,6 +43,8 @@
 
 - *Create with LoRA…* on a person or set, and pick several people in the Run
   popup. Pictures from a person's LoRA are linked to that person.
+- Typing a person's trigger word in the Run popup's prompt picks that person
+  and adds their LoRA.
 
 ## AI agents
 
