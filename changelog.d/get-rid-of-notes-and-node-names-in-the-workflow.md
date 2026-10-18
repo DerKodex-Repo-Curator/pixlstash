@@ -1,1 +1,0 @@
-- The Workflow tab no longer shows the Notes box or the Node names list.

@@ -1,3 +1,87 @@
+# [1.12.0] [Security:Low]
+
+## Workflows and recipes
+
+- New Workflows view: a grid of cards, one per workflow, grouped from your
+  pictures or imported from ComfyUI files. Filter, sort, hide per library,
+  export without your prompts, and delete to the system trash.
+- Edit a workflow in place: swap models, LoRAs and stages, add your own
+  parameters, and save over it with earlier versions kept, or save as new.
+- Every picture and video made in ComfyUI, A1111 or Forge gets a Recipe tab:
+  prompt, models, LoRAs, seed and settings. Workflows has a Recipes tab listing
+  every recipe your pictures used, and you can save, name and export your own.
+- One Run popup wherever you start: rerun a picture's recipe, *Make more like
+  these…*, run any workflow on a selection, or edit a picture from the
+  lightbox's new Edit tab. Video workflows run too.
+- A run no longer stops on a missing LoRA, seed node or text node: PixlStash
+  works around it and says so first. A missing checkpoint or VAE is named with
+  the folder it belongs in.
+- Runs show in the Tasks tab until ComfyUI is really done, and a failed run
+  says which node failed and why.
+
+## ComfyUI
+
+- Settings finds a local ComfyUI and connects it in one click, adds its models
+  folder to the shelf, links its PixlStash nodes with a key of their own, and
+  can install the nodes for you.
+- *Open in ComfyUI* puts PixlStash loaders and savers into the workflow, so
+  models load off your shelf and results come back to PixlStash. Ctrl+S in
+  ComfyUI saves a new version of the workflow.
+
+## Model shelf
+
+- The shelf opens on workflow sets: each checkpoint with the VAEs, text
+  encoders and LoRAs it has run with. Make, merge, duplicate and hide your
+  own sets.
+- GGUF models, upscalers and ControlNets are catalogued, base models are
+  recognised from more filenames, and precision shows as a chip (`BF16`,
+  `Q4_K_M`) instead of cluttering the name.
+- Keep one copy of a duplicated model file, watch your Downloads folder for
+  new models, and set LoRA trigger words.
+
+## People
+
+- *Create with LoRA…* on a person or set, and pick several people in the Run
+  popup. Pictures from a person's LoRA are linked to that person.
+- Typing a person's trigger word in the Run popup's prompt picks that person
+  and adds their LoRA.
+
+## AI agents
+
+- `pixlstash-mcp` lets an AI agent search and read your library, and with
+  `--allow-write` edit and run workflows. **Connect AI agent** under API
+  Tokens hands back the finished configuration, and a token can now work in
+  every library.
+
+## Library
+
+- Text in pictures is read and searchable.
+- *Suggest more pictures* for a set, *Move to library* for a selection, and
+  *Edit stack* to reorder a stack without dragging.
+- A rebuilt Filters menu, with active filters as removable chips.
+- Animated GIFs are read across frames, and a new whole-face close-up option
+  improves the tagger's face checks.
+- A consistent look across menus, buttons, fields, tooltips and focus rings.
+
+## Apple Silicon Macs
+
+- PixlStash now uses the GPU on Apple Silicon. The built-in tagger is roughly
+  twenty times faster.
+- Thanks to [@adamwolf](https://github.com/adamwolf) for the thread-safety work
+  that keeps PixlStash from crashing on Apple's Metal (#1546).
+
+## Fixes
+
+- A share link could list the names of every stored workflow. Only the owner
+  can now.
+- Prompts, models and seeds are read from the graph ComfyUI actually ran, so
+  pictures built with wildcard or style nodes no longer show the wrong prompt.
+- A tag added while a picture waited for auto-tagging is no longer removed.
+- Filtering on a checkpoint and a LoRA together now means both.
+- Deleting a person no longer leaves their LoRAs for the next person created.
+- Smaller fixes to rotate undo, thumbnails after a delete, the sidebar after a
+  library switch, and the server log.
+
 # [1.11.5] [Security:Low]
 
 - Fixed: the Windows downloads are back. Certum changed its sign-in page, which
