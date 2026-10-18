@@ -1010,6 +1010,10 @@ _WORKFLOW_ID_RE = re.compile(WORKFLOW_ID_PATTERN)
 # resolves as a path.
 _UPLOAD_EXTENSION_RE = re.compile(r"^\.[a-z0-9]{1,8}$")
 _PIXEL_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+# The stock loaders Open in ComfyUI puts the pack's digest loaders in for,
+# whether or not ComfyUI lists their files. A run swaps more, and only for a
+# file ComfyUI lacks (`_digest_swap_kind`).
+_PACK_MODEL_LOADERS = {"VAELoader": FILE_VAE, "CLIPLoader": FILE_TEXT_ENCODER}
 # The name `_upload_files` gives a hashed picture, read back for its content:
 # a loader still holding one says what its run loaded (`_made_from`).
 _UPLOAD_NAME_RE = re.compile(
@@ -8382,7 +8386,7 @@ def create_router(server) -> APIRouter:
         node = graph.get(node_id)
         if object_info is None or not isinstance(node, dict):
             return False
-        kind = model_fix_kind(node.get("class_type", ""), widget)
+        kind = model_fix_kind(str(node.get("class_type") or ""), widget)
         if kind in run_service.PIXLSTASH_SWAP_LOADERS:
             plan, _refusal = run_service.plan_pixlstash_swap(
                 graph,
@@ -8495,7 +8499,7 @@ def create_router(server) -> APIRouter:
         # loader would lose, no GGUF).
         for node_id, node in list(graph.items()):
             was = node.get("class_type") if isinstance(node, dict) else None
-            kind = _digest_swap_kind(str(was or ""))
+            kind = _PACK_MODEL_LOADERS.get(was)
             if kind is None:
                 continue
             plan, _refusal = run_service.plan_pixlstash_swap(
@@ -8548,9 +8552,9 @@ def create_router(server) -> APIRouter:
         ``ControlNetLoader``, ``UpscaleModelLoader``, VAE or text-encoder
         loader (``CLIPLoader``, ``DualCLIPLoader``) naming a file ComfyUI does
         not list becomes the pack's loader on the shelf's copy of that file,
-        the swap *Open in ComfyUI* makes (:func:`_with_pack_nodes`), on the
-        same terms. A checkpoint or
-        diffusion model by the shelf's row, only where the shelf holds one copy
+        the swap *Open in ComfyUI* makes (:func:`_with_pack_nodes`; there only
+        on a ``VAELoader`` or ``CLIPLoader``), on the same terms. A checkpoint
+        or diffusion model by the shelf's row, only where the shelf holds one copy
         and ComfyUI is on this computer to read it, since that loader cannot
         fetch its file; a ControlNet, an upscaler, a VAE or a CLIP by digest,
         which its loader fetches when it has to. Anywhere else the loader is
