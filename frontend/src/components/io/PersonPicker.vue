@@ -17,6 +17,7 @@
           <v-icon v-else aria-hidden="true">mdi-account-outline</v-icon>
         </span>
         <span class="persontile__name">{{ o.label }}</span>
+        <Tooltip v-if="o.hint" :text="o.hint" activator="parent" />
       </span>
       <button
         v-else
@@ -42,6 +43,7 @@
           }}</v-icon>
         </span>
         <span class="persontile__name">{{ o.label }}</span>
+        <Tooltip v-if="o.hint" :text="o.hint" activator="parent" />
       </button>
     </template>
   </div>
@@ -61,12 +63,16 @@
 import { computed, reactive } from "vue";
 import { VIcon } from "vuetify/components";
 import { characterThumbnailUrl } from "../../api/characters";
+import Tooltip from "../widgets/Tooltip.vue";
 
 /** The id of the "No one" tile: no person is a choice, not an absence. */
 const NO_ONE = null;
 
 const props = defineProps({
-  /** `[{ id, name }]`: the people offered, in the order to draw them. */
+  /**
+   * `[{ id, name, trigger }]`: the people offered, in the order to draw them;
+   * `trigger` is the word their LoRA answers to, told in the tile's tip.
+   */
   people: { type: Array, required: true },
   /** The ids of the people picked, the fixed one included. */
   modelValue: { type: Array, default: () => [] },
@@ -85,6 +91,7 @@ const options = computed(() => [
   ...props.people.map((person) => ({
     id: person.id,
     label: person.name,
+    hint: person.trigger ? `Trigger word: ${person.trigger}` : "",
     fixed: person.id === props.fixedId,
   })),
 ]);

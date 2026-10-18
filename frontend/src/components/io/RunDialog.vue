@@ -264,12 +264,13 @@
           <AppTextarea
             v-else
             ref="promptField"
-            v-model="prompt"
+            :model-value="prompt"
             label="Prompt"
             :placeholder="isEdit ? 'Describe the change, e.g. make it night time' : ''"
             :rows="3"
             :disabled="submitting"
             :highlight="personTriggers.map((trigger) => trigger.word)"
+            @update:model-value="typePrompt"
             @keydown.stop
           />
           <!-- A picked person's LoRA answers to a word the prompt does not
@@ -1171,7 +1172,7 @@ import { focusLater } from "../../utils/dom";
 import { editLorasRoute, loraBase, loraStem } from "../../utils/loraChain";
 import { fitPeople, fitWorkflows } from "../../utils/loraWorkflows";
 import { deriveModelName } from "../../utils/modelShelf";
-import { namesWord, triggerWord } from "../../utils/triggerWords";
+import { insertWords, namesWord, triggerWord, wordSpans } from "../../utils/triggerWords";
 import { wouldDuplicate } from "../../utils/recipeKey";
 import { runTaskLabel } from "../../utils/runTaskLabel";
 import { UNMATCHED_REPLACEMENTS_TEXT } from "../../utils/workflowCard";
@@ -2713,7 +2714,10 @@ const personTiles = computed(() => {
   const offered = personFits.value.people.filter(
     (person) => person.id !== fixed?.id,
   );
-  return fixed ? [fixed, ...offered] : offered;
+  return (fixed ? [fixed, ...offered] : offered).map((person) => ({
+    ...person,
+    trigger: personWord(person.id),
+  }));
 });
 /** Absent, not empty, in a library where nobody has a LoRA. */
 const showPerson = computed(
@@ -2741,6 +2745,27 @@ const personNote = computed(() => {
 
 function personName(id) {
   return personTiles.value.find((person) => person.id === id)?.name || "this person";
+}
+
+/**
+ * The trigger word a person's run carries: their row's LoRA's, or for one not
+ * picked, the LoRA a pick would add, as `settlePeople` chooses it (their first
+ * that fits and no other person's row holds). "" for none.
+ */
+function personWord(id) {
+  const shelf = [...attachedLoras.value, ...adapters.value, ...unknownLoras.value];
+  const row = addedLoras.value.find((entry) => entry.person === id && entry.sha256);
+  const held = new Set(
+    addedLoras.value
+      .filter((entry) => entry.person != null && entry.person !== id)
+      .map((entry) => entry.sha256),
+  );
+  const sha256 =
+    row?.sha256 ??
+    personFits.value.people
+      .find((person) => person.id === id)
+      ?.loras.find((lora) => !held.has(lora.sha256))?.sha256;
+  return sha256 ? triggerWord(shelf.find((entry) => entry.sha256 === sha256)) : "";
 }
 
 /** What an added row is called, by whose it is or by where it stands. */
@@ -2827,11 +2852,86 @@ function withTriggers(words, text) {
   return [...words, text.trim()].filter(Boolean).join(", ");
 }
 
-/** Put the words first, where a trigger word goes, and hand the box back. */
-function addTriggers(words) {
-  prompt.value = withTriggers(words, prompt.value);
+/**
+ * Put the words where the caret was in the box (first, where a trigger word
+ * goes, when it was never placed) and hand the box back with the caret after
+ * them.
+ */
+async function addTriggers(words) {
+  const at = promptField.value?.selection?.();
+  const next = insertWords(prompt.value, words, at?.start, at?.end);
+  prompt.value = next.text;
+  // The box must hold the new text before the caret can be put in it.
+  await nextTick();
   // The button goes with the suggestion; focus must not fall to the page.
-  promptField.value?.focus?.();
+  promptField.value?.focus?.(next.caret);
+}
+
+/** People unpicked by hand, whom the prompt's text does not pick again. */
+const unpickedIds = new Set();
+
+/**
+ * The prompt as the owner types it. A person's name, once typed past, becomes
+ * their trigger word where that is another word: not where the word holds the
+ * name ("Mira" of "Mira Vale" is the word being typed), nor where the prompt
+ * already names it (the name beside it is then meant). A person whose trigger
+ * word is typed past is picked. "Typed past" is a hit the caret is not at the end
+ * of and the text goes on after, so "Mira" on the way to "Miranda" counts for
+ * nothing. Never unpicks: an edit must not take a LoRA off, and a person
+ * unpicked by hand is neither picked again by the text nor has their name
+ * swapped.
+ */
+function typePrompt(text) {
+  const live = promptField.value?.selection?.();
+  let caret = live ? live.start : text.length;
+  let next = text;
+  const past = (span) => span.end !== caret && span.end < next.length;
+  const terms = personTiles.value
+    .flatMap((person) => [person.name, person.trigger])
+    .map((term) => String(term || "").trim())
+    .filter(Boolean);
+  // A hit of *term* that is its own, not part of a longer name or word typed
+  // round it: "Mira" in "Mira Vale", when Mira Vale is somebody too.
+  const own = (span, term) =>
+    !terms.some(
+      (other) =>
+        other.length > term.length &&
+        wordSpans(next, other).some((hit) => hit.start <= span.start && hit.end >= span.end),
+    );
+  for (const person of personTiles.value) {
+    const word = person.trigger;
+    if (!word) continue;
+    const name = String(person.name || "").trim();
+    let swapped = false;
+    // Not for a person unpicked by hand: their word would run without their LoRA.
+    if (
+      name &&
+      !unpickedIds.has(person.id) &&
+      !namesWord(word, name) &&
+      !namesWord(next, word)
+    ) {
+      const span = wordSpans(next, name).find((hit) => past(hit) && own(hit, name));
+      if (span) {
+        next = next.slice(0, span.start) + word + next.slice(span.end);
+        if (caret >= span.end) caret += word.length - (span.end - span.start);
+        // Edited inside the name: the caret goes after the word, not into it.
+        else if (caret > span.start) caret = span.start + word.length;
+        swapped = true;
+      }
+    }
+    if (
+      !chosenPersonIds.value.includes(person.id) &&
+      !unpickedIds.has(person.id) &&
+      // A swapped name was typed past, wherever the caret now sits after it.
+      (swapped || wordSpans(next, word).some((hit) => past(hit) && own(hit, word)))
+    ) {
+      pickPerson(person.id);
+    }
+  }
+  prompt.value = next;
+  // The box shows the swapped name only once it redraws; the caret goes back
+  // where the owner was typing.
+  if (next !== text && live) nextTick(() => promptField.value?.focus?.(caret));
 }
 
 /**
@@ -2840,10 +2940,13 @@ function addTriggers(words) {
  */
 function pickPerson(id) {
   if (id == null) {
+    personIds.value.forEach((picked) => unpickedIds.add(picked));
     personIds.value = [];
   } else if (personIds.value.includes(id)) {
+    unpickedIds.add(id);
     personIds.value = personIds.value.filter((picked) => picked !== id);
   } else if (id !== fixedPerson.value?.id) {
+    unpickedIds.delete(id);
     personIds.value = [...personIds.value, id];
   }
   settlePeople();
@@ -4392,6 +4495,8 @@ function layOwn() {
 async function dropLoras() {
   loras.value = [];
   addedLoras.value = [];
+  // Taken off on purpose, as a tile's press would: typing does not put them back.
+  personIds.value.forEach((picked) => unpickedIds.add(picked));
   personIds.value = [];
   await runPreflight();
 }

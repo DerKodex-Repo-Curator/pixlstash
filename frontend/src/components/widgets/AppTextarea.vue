@@ -23,6 +23,7 @@
         :disabled="disabled"
         @input="emit('update:modelValue', $event.target.value)"
         @scroll="syncScroll"
+        @blur="rememberCaret"
       />
     </span>
   </label>
@@ -66,7 +67,38 @@ function syncScroll() {
 // scroll event reaching it, so it is put level after every draw.
 watch([marking, parts], syncScroll, { flush: "post" });
 
-defineExpose({ focus: () => field.value?.focus() });
+/**
+ * Where the caret was when the field last lost focus, with the text it was in:
+ * a button pressed beside the box takes focus first, and still has to know.
+ */
+const caret = ref(null);
+
+function rememberCaret() {
+  const el = field.value;
+  if (el) caret.value = { start: el.selectionStart, end: el.selectionEnd, text: el.value };
+}
+
+/**
+ * The caret `{start, end}`: the live one while the field has focus, else the
+ * last one remembered, or null when none was or the text has moved on.
+ */
+function selection() {
+  const el = field.value;
+  if (el && el === document.activeElement) {
+    return { start: el.selectionStart, end: el.selectionEnd };
+  }
+  const last = caret.value;
+  return last && last.text === props.modelValue ? { start: last.start, end: last.end } : null;
+}
+
+/** Focus the field, with the caret at *at* when given. */
+function focus(at) {
+  const el = field.value;
+  el?.focus();
+  if (el && at != null) el.setSelectionRange(at, at);
+}
+
+defineExpose({ focus, selection });
 </script>
 
 <style scoped>
