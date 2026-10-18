@@ -991,6 +991,14 @@ _PACKAGING_WORDS = frozenset(
 )
 # A revision in a release's name (`Chroma1-HD-fp8_scaled_rev2`): a version.
 _REVISION_RE = re.compile(r"rev\d+", re.IGNORECASE)
+# Digits a version's number runs to: Qwen's `2511`, not `sdxl123456789`.
+_VERSION_DIGITS = 4
+# A version opening a token (`1.0`, `2511`). What follows must be packaging
+# (`0.9vae`, a size its base's names carry: `14B`), so `2xMoreDetailed` is a
+# fine-tune.
+_VERSION_RE = re.compile(
+    rf"\d{{1,{_VERSION_DIGITS}}}(?!\d)(?:\.\d{{1,{_VERSION_DIGITS}}}(?!\d))*"
+)
 # A precision anywhere in a name (`seedvr2_7b_int8_convrot`), where the shelf's
 # own quant parser only strips one at the end.
 _QUANT_WORD_RE = re.compile(
@@ -1034,18 +1042,26 @@ def _release_words(vocabulary: frozenset[str]) -> frozenset[str]:
 
 
 def _leftover_is(text: str, vocabulary: frozenset[str]) -> bool:
-    """Whether *text* (normalised) is nothing but *vocabulary* words and digits.
+    """Whether *text* (normalised) is nothing but *vocabulary* words and versions.
 
-    A word break over the positions *text* can be split at, not a regex: a
-    ``*`` over overlapping words and digit runs backtracks exponentially on a
-    filename's long run of digits.
+    A version is a whole run of digits, :data:`_VERSION_DIGITS` at most, and
+    nothing is read from inside a run, so neither ``sdxl123456789`` nor
+    ``sdxl11111111`` (``1`` is an SDXL word) is the release. A word break over
+    the positions *text* can be split at, not a regex: a ``*`` over
+    overlapping words and digit runs backtracks exponentially on a filename's
+    long run of digits.
     """
     reached = [True] + [False] * len(text)
     for start in range(len(text)):
-        if not reached[start]:
+        inside_run = start and text[start - 1].isdigit() and text[start].isdigit()
+        if not reached[start] or inside_run:
             continue
         if text[start].isdigit():
-            reached[start + 1] = True
+            end = start
+            while end < len(text) and text[end].isdigit():
+                end += 1
+            if end - start <= _VERSION_DIGITS:
+                reached[end] = True
         for word in vocabulary:
             if word and text.startswith(word, start):
                 reached[start + len(word)] = True
@@ -1058,9 +1074,10 @@ def _is_release(canonical: str, tokens: list[str], vocabulary: frozenset[str]) -
     The name must open with one of the base model's aliases, and everything
     after it be a role, a speed word, a version or packaging:
     ``sd xl refiner 1.0`` and ``flux1 dev`` are releases, ``sdxlUnstable
-    Diffusers v11`` and ``juggernautXL v9`` are fine-tunes. A token opening
-    with ``v`` and a digit or a capital is a version and its label
-    (``v6StartWithThisOne``).
+    Diffusers v11``, ``juggernautXL v9`` and ``sdxl 2xMoreDetailed`` are
+    fine-tunes. A token opening with ``v`` and a digit or a capital is a
+    version and its label (``v6StartWithThisOne``); one opening with a digit
+    is a version (:data:`_VERSION_RE`) and packaging (``0.9vae``).
     """
     # ponytail: a fine-tune named exactly "<base alias> <version>" reads as the
     # release; a per-file list of real releases if that ever bites.
@@ -1082,7 +1099,13 @@ def _is_release(canonical: str, tokens: list[str], vocabulary: frozenset[str]) -
                 break
             rest = tokens[i + 1 :]
             if all(
-                re.match(r"\d|v(?:\d|[A-Z])", token)
+                re.match(r"v(?:\d|[A-Z])", token)
+                or (
+                    (version := _VERSION_RE.match(token))
+                    and _leftover_is(
+                        _norm(token[version.end() :]), _release_words(vocabulary)
+                    )
+                )
                 or _REVISION_RE.fullmatch(token)
                 or _norm(token) in vocabulary
                 or _norm(token) in ROLE_WORDS
@@ -1101,7 +1124,8 @@ def _initials(words: list[str]) -> str:
 
     The first letters of the first two words that open with a letter, or the
     first two letters of the only one; a ``v1.0`` is a version, not a word.
-    ``""`` when no word has a letter.
+    With no word opening with a letter, the first word's first two
+    characters (2X for ``2xMoreDetailed``); ``""`` with no word at all.
     """
     significant = [
         word
@@ -1118,7 +1142,7 @@ def _initials(words: list[str]) -> str:
         return (lettered[0][0] + lettered[1][0]).upper()
     if lettered:
         return "".join(ch for ch in lettered[0] if ch.isalpha())[:2].upper()
-    return ""
+    return words[0][:2].upper() if words else ""
 
 
 def _own_line(name: str, vocabulary: frozenset[str]) -> Optional[str]:
