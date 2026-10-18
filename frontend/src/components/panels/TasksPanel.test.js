@@ -199,6 +199,10 @@ describe("what the task manager shows", () => {
       ram_percent: 19.2,
     };
     const wrapper = mount(TasksPanel, globalOpts);
+    // The figures are the server's own, so the heading says whose.
+    expect(wrapper.find(".tm-system-heading").text()).toBe(
+      "PixlStash resource usage",
+    );
     const items = wrapper
       .findAll(".tm-system-item")
       .map((i) => [
