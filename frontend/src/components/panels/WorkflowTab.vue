@@ -310,8 +310,24 @@
                 row.savedLabel
               }}</span
             >
+            <!-- What the shelf files this loader's model as, where every
+                 workflow loading it says it is this loader's kind (#1962): the
+                 shelf's Kind menu, here too. It is the one note under the
+                 picker, so "Nothing to offer" gives way to it. -->
+            <KindMenu
+              v-if="row.offer"
+              :file-kind="row.offer.file_kind"
+              :kind-text="`${fileKindLabel(row.offer.file_kind)} on shelf`"
+              :subject="row.savedLabel"
+              :suggested-kind="row.offer.suggested_kind"
+              :suggested-by="row.offer.suggested_by"
+              :suggested-fields="row.offer.suggested_fields"
+              :adapter="false"
+              @pick="(kind) => fileOffered(row, { file_kind: kind })"
+              @suggest="(on) => fileOffered(row, { suggest_kind: on })"
+            />
             <p
-              v-if="row.missing && !row.options.length && row.noOptions"
+              v-else-if="row.missing && !row.options.length && row.noOptions"
               class="wftab-note wftab-quiet"
               :data-testid="`wftab-no-replacement-${row.kind}`"
             >
@@ -1228,7 +1244,8 @@ import {
   loraBase,
   loraStem,
 } from "../../utils/loraChain";
-import { quantBadge } from "../../utils/modelShelf";
+import { editModels } from "../../api/modelShelf";
+import { fileKindLabel, quantBadge } from "../../utils/modelShelf";
 import {
   PACK_OUTDATED,
   PACK_OUTDATED_ACTION,
@@ -1274,6 +1291,7 @@ import AppSelect from "../widgets/AppSelect.vue";
 import BreakableTitle from "../widgets/BreakableTitle.vue";
 import ComfyuiIcon from "../widgets/ComfyuiIcon.vue";
 import EditLorasDialog from "../io/EditLorasDialog.vue";
+import KindMenu from "../widgets/KindMenu.vue";
 import ExposeParameterDialog from "../io/ExposeParameterDialog.vue";
 import TasksPanel, { tasksTabFor } from "./TasksPanel.vue";
 import Tooltip from "../widgets/Tooltip.vue";
@@ -1594,7 +1612,7 @@ const MODEL_ROWS = {
   },
   vae: { heading: "VAE", missingText: "VAE missing", folders: new Set(["vae"]) },
   text_encoder: {
-    heading: "CLIP",
+    heading: "Text encoder",
     missingText: "Text encoder missing",
     folders: new Set(["text_encoders"]),
   },
@@ -1840,9 +1858,52 @@ const modelRows = computed(() => {
             ]
           : [],
       noOptions: noReplacementText(model.kind, answer),
+      // Only on the file the loader still loads: a replacement is a shelf
+      // model of the loader's own kind already.
+      offer:
+        canPick && file === model.filename
+          ? (detail.value?.kind_offers ?? []).find(
+              (offer) => offer.address === model.address,
+            ) ?? null
+          : null,
     };
   });
 });
+
+/**
+ * Re-file a loader's model on the shelf from its Kind menu, or stop the
+ * offer. A shelf write, not a workflow change: nothing joins the unsaved
+ * set, and the row is read again so the offer goes once it is answered.
+ */
+async function fileOffered(row, changes) {
+  const key = selectedKey.value;
+  try {
+    await editModels([row.offer.model_id], changes);
+  } catch (err) {
+    notices.push({
+      level: "error",
+      text: errorMessage(err, "Could not write that change."),
+    });
+    return;
+  }
+  notices.push({
+    level: "success",
+    text: changes.file_kind
+      ? `Filed ${row.savedLabel} as ${fileKindLabel(changes.file_kind)} on your shelf.`
+      : "The shelf will not suggest a kind for it.",
+  });
+  if (selectedKey.value !== key) return;
+  await loadDetail(key, { quiet: true });
+  // The menu goes with the offer it answered; the row's own control takes
+  // the focus it held rather than <body>.
+  await nextTick();
+  const rowEl = [...document.querySelectorAll("[data-address]")].find(
+    (el) => el.dataset.address === row.address,
+  );
+  rowEl
+    ?.querySelector("[data-testid='kind-menu'], button, input, [tabindex='0']")
+    ?.focus();
+}
 
 /**
  * The rows a model set may fill: the loader's address, the file it loads as

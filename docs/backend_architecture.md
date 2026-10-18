@@ -35,7 +35,7 @@
 22. [Tiered Duplicate Detection](#22-tiered-duplicate-detection)
 23. [Opt-in telemetry](#23-opt-in-telemetry-the-install-id-and-the-consent-flags)
 24. [Folder structure: read, commit, layout and moves](#24-folder-structure-read-commit-layout-and-moves) — incl. [24.1 The folder-structure read](#241-the-folder-structure-read), [24.2 The folder-structure commit](#242-the-folder-structure-commit), [24.3 The library layout](#243-the-library-layout), [24.4 The layout and the move engine](#244-the-layout-and-the-move-engine), [24.5 Reconciling moves made outside PixlStash](#245-reconciling-moves-made-outside-pixlstash)
-25. [Model Shelf](#25-model-shelf) — incl. [25.1 The shelf's five verbs (shelf plan F3)](#251-the-shelfs-five-verbs-shelf-plan-f3), [25.2 The built-in model folder: declared, never scanned](#252-the-built-in-model-folder-declared-never-scanned), [25.3 The other two roots: InsightFace packs and the HuggingFace cache](#253-the-other-two-roots-insightface-packs-and-the-huggingface-cache), [25.4 What a cached model is FOR: the feature classifier and `model_capability`](#254-what-a-cached-model-is-for-the-feature-classifier-and-model_capability), [25.5 The managed model store (shelf plan B7)](#255-the-managed-model-store-shelf-plan-b7), [25.6 `Add file`: one loose model onto the shelf (shelf plan F6)](#256-add-file-one-loose-model-onto-the-shelf-shelf-plan-f6), [25.7 A trained model's previews: `<stem>_samples/`](#257-a-trained-models-previews-stem_samples), [25.8 `Delete`: models off the shelf and off the disk (#933)](#258-delete-models-off-the-shelf-and-off-the-disk-933), [25.9 `Keep one copy`: merging duplicate models (#1439)](#259-keep-one-copy-merging-duplicate-models-1439), [25.10 The Downloads folder and the default folder](#2510-the-downloads-folder-and-the-default-folder)
+25. [Model Shelf](#25-model-shelf) — incl. [25.1 The shelf's five verbs (shelf plan F3)](#251-the-shelfs-five-verbs-shelf-plan-f3), [25.2 The built-in model folder: declared, never scanned](#252-the-built-in-model-folder-declared-never-scanned), [25.3 The other two roots: InsightFace packs and the HuggingFace cache](#253-the-other-two-roots-insightface-packs-and-the-huggingface-cache), [25.4 What a cached model is FOR: the feature classifier and `model_capability`](#254-what-a-cached-model-is-for-the-feature-classifier-and-model_capability), [25.5 The managed model store (shelf plan B7)](#255-the-managed-model-store-shelf-plan-b7), [25.6 `Add file`: one loose model onto the shelf (shelf plan F6)](#256-add-file-one-loose-model-onto-the-shelf-shelf-plan-f6), [25.7 A trained model's previews: `<stem>_samples/`](#257-a-trained-models-previews-stem_samples), [25.8 `Delete`: models off the shelf and off the disk (#933)](#258-delete-models-off-the-shelf-and-off-the-disk-933), [25.9 `Keep one copy`: merging duplicate models (#1439)](#259-keep-one-copy-merging-duplicate-models-1439), [25.10 The Downloads folder and the default folder](#2510-the-downloads-folder-and-the-default-folder), [25.11 The kind a workflow loads a model as (#1962)](#2511-the-kind-a-workflow-loads-a-model-as-1962)
 26. [Prompt match](#26-prompt-match)
 
 ---
@@ -10829,6 +10829,37 @@ and announces `models_arrived` with the model ids it registered.
   read with `markNew`, so the arrivals wear the row `New` badge. An unread shelf
   is not fetched: against no previous fetch every row would be new.
 
+
+### 25.11 The kind a workflow loads a model as (#1962)
+
+The shelf files a model from its header, its folder and its parameter count, and
+some files beat all three: a GGUF text encoder in a flat folder stays
+Unclassified. A recorded workflow that loads the file says what it is, and
+`workflow_recipe_asset` already holds which loader field names which file, so
+`services/model_kind_suggestions.py` reads the answer rather than rescanning.
+
+- **An offer, never a write.** `kind_suggestions` serves `suggested_kind`,
+  `suggested_by` (distinct workflows, by core hash) and `suggested_fields` on
+  each shelf row (`ModelResponse`); nothing re-files the model until the owner
+  picks a kind.
+- **Only when the evidence agrees.** Every load of the model is mapped through
+  `workflow_identity.model_fix_kind`, and a suggestion exists only when there is
+  exactly one kind and it is one of `OFFERED_KINDS` (VAE, text encoder). A
+  `clip_name` takes its loader's class from the topology's recorded slots
+  (`workflow_topology_core.slots`): a vision loader's is an image encoder, and a
+  graph holding both kinds of CLIP loader, or whose slots were never recorded,
+  cannot say which one named the file. Both disagree.
+- **Only a checkpoint or an Unclassified model is re-filed** (`REFILEABLE_KINDS`).
+  A model the header placed as a VAE or a LoRA was placed by what it is. A
+  filename two shelf models share is evidence for neither.
+- **The owner's say is `model.file_kind_decided`.** Any `file_kind` write over
+  `PATCH /models` sets it, the kind already stored included: picking a kind is
+  deciding it. `suggest_kind: false` ("Don't suggest a kind") sets it alone and
+  `suggest_kind: true` clears it. The suggestion is still computed for a decided
+  row, so the shelf can offer "Suggest a kind again".
+- **The Workflow tab gets the same offer**, on `GET /workflows/{id}` as
+  `kind_offers`: `loader_offers` hands a default-recipe loader its model's
+  suggestion only where the loader takes that kind and nobody has decided.
 
 ---
 

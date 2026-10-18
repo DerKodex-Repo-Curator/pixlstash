@@ -61,6 +61,7 @@ from pixlstash.routes.model_imports import (
     sample_path_within,
 )
 from pixlstash.routes.model_shelf import MAX_ATTACHMENTS_PER_MODEL
+from pixlstash.services.model_kind_suggestions import loader_offers
 from pixlstash.server import Server
 from pixlstash.services import builtin_caches, builtin_models, comfyui_service
 from pixlstash.services import model_shelf_service, model_workflow_sets
@@ -904,7 +905,12 @@ def _seed_picture(server, structural_hash: str, **fields) -> int:
 
 def _wipe_recipes(server) -> None:
     with server.hub.transaction() as conn:
-        for table in ("workflow_recipe_asset", "workflow_recipe", "workflow_topology"):
+        for table in (
+            "workflow_recipe_asset",
+            "workflow_recipe",
+            "workflow_topology_core",
+            "workflow_topology",
+        ):
             conn.execute(f"DELETE FROM {table}")
 
     def wipe(session: Session):
@@ -6173,6 +6179,173 @@ def test_file_kind_cannot_be_cleared_only_corrected(shelf_env):
     assert r.status_code == 400
     assert "unknown" in r.text
     assert _model_row(shelf_env, alice)["file_kind"] == "adapter"
+
+
+# ---------------------------------------------------------------------------
+# The kind a model's workflows load it as (#1962). Hand-written recipes again:
+# what is under test is which loads count as agreeing, not how a graph files.
+# ---------------------------------------------------------------------------
+
+
+def _seed_loader(server, structural_hash: str, widget: str, name: str, cls: str):
+    """One recipe whose only loader, of class *cls*, names *name* by *widget*.
+
+    Its own core hash, so two recipes are two workflows.
+    """
+    _seed_recipe(server, structural_hash, [(widget, name)])
+    with server.hub.transaction() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO workflow_topology_core "
+            "(topology_hash, core_hash, core_version, slots) VALUES (?, ?, 'v1', ?)",
+            (
+                f"topo-{structural_hash}",
+                f"core-{structural_hash}",
+                json.dumps(
+                    [
+                        {
+                            "label": "l1",
+                            "class_type": cls,
+                            "widget": widget,
+                            "is_lora": False,
+                        }
+                    ]
+                ),
+            ),
+        )
+
+
+def _unclassified(shelf_env) -> dict[int, dict]:
+    r = shelf_env.owner.get(f"{API}/adapters", params={"file_kind": "unknown"})
+    assert r.status_code == 200, r.text
+    return {row["id"]: row for row in r.json()["adapters"]}
+
+
+@pytest.fixture
+def gguf_encoder(shelf_env):
+    """An Unclassified GGUF, named in mixed case as a download names it."""
+    model_id = _add_model(shelf_env, "unknown", "T5-XXL-Q8_0.gguf", None)
+    yield model_id
+    _wipe_recipes(shelf_env.server)
+
+
+def test_a_model_every_workflow_loads_as_a_text_encoder_is_offered_it(
+    shelf_env, gguf_encoder
+):
+    server = shelf_env.server
+    _seed_loader(server, "r-te-1", "clip_name", "t5-xxl-q8_0.gguf", "CLIPLoaderGGUF")
+    _seed_loader(server, "r-te-2", "clip_name1", "t5-xxl-q8_0.gguf", "DualCLIPLoader")
+
+    row = _unclassified(shelf_env)[gguf_encoder]
+    assert row["file_kind"] == "unknown", "an offer must never re-file the model"
+    assert row["suggested_kind"] == "text_encoder"
+    assert row["suggested_by"] == 2
+    assert row["suggested_fields"] == ["clip_name", "clip_name1"]
+    assert row["kind_decided"] is False
+
+
+def test_workflows_that_disagree_offer_nothing(shelf_env, gguf_encoder):
+    server = shelf_env.server
+    _seed_loader(server, "r-te", "clip_name", "t5-xxl-q8_0.gguf", "CLIPLoader")
+    _seed_loader(server, "r-vae", "vae_name", "t5-xxl-q8_0.gguf", "VAELoader")
+
+    row = _unclassified(shelf_env)[gguf_encoder]
+    assert row["suggested_kind"] is None
+    assert row["suggested_by"] == 0
+
+
+def test_a_vision_loader_is_not_a_text_encoder_and_disagrees(shelf_env, gguf_encoder):
+    """`clip_name` on a CLIP Vision loader names an image encoder."""
+    server = shelf_env.server
+    _seed_loader(
+        server, "r-vision", "clip_name", "t5-xxl-q8_0.gguf", "CLIPVisionLoader"
+    )
+    assert _unclassified(shelf_env)[gguf_encoder]["suggested_kind"] is None
+
+    _seed_loader(server, "r-te", "clip_name", "t5-xxl-q8_0.gguf", "CLIPLoader")
+    assert _unclassified(shelf_env)[gguf_encoder]["suggested_kind"] is None
+
+
+def test_a_name_two_shelf_models_share_is_evidence_for_neither(shelf_env, gguf_encoder):
+    twin = _add_model(shelf_env, "unknown", "t5-xxl-q8_0.gguf", None)
+    _seed_loader(
+        shelf_env.server, "r-te", "clip_name", "t5-xxl-q8_0.gguf", "CLIPLoader"
+    )
+    rows = _unclassified(shelf_env)
+    assert rows[gguf_encoder]["suggested_kind"] is None
+    assert rows[twin]["suggested_kind"] is None
+
+
+def test_a_model_the_shelf_already_files_is_offered_nothing(shelf_env):
+    """Only a checkpoint or an Unclassified file is re-filed: a LoRA's header
+    said what it is, and a workflow loading it oddly is the odd one."""
+    alice = shelf_env.model_ids["alice.safetensors"]
+    _seed_loader(
+        shelf_env.server, "r-lora", "vae_name", "alice.safetensors", "VAELoader"
+    )
+    try:
+        r = shelf_env.owner.get(f"{API}/adapters")
+        row = {row["id"]: row for row in r.json()["adapters"]}[alice]
+        assert row["suggested_kind"] is None
+    finally:
+        _wipe_recipes(shelf_env.server)
+
+
+def test_deciding_the_kind_stops_the_offer_and_suggest_again_restores_it(
+    shelf_env, gguf_encoder
+):
+    _seed_loader(
+        shelf_env.server, "r-te", "clip_name", "t5-xxl-q8_0.gguf", "CLIPLoader"
+    )
+
+    def patch(**body):
+        r = shelf_env.owner.patch(f"{API}/models", json={"ids": [gguf_encoder], **body})
+        assert r.status_code == 200, r.text
+
+    # Don't suggest: the mark only. The kind stays, and the suggestion is
+    # still served so the shelf can offer it again.
+    patch(suggest_kind=False)
+    row = _unclassified(shelf_env)[gguf_encoder]
+    assert row["kind_decided"] is True
+    assert row["suggested_kind"] == "text_encoder"
+
+    patch(suggest_kind=True)
+    assert _unclassified(shelf_env)[gguf_encoder]["kind_decided"] is False
+
+    # Picking a kind is deciding it, even the kind it already has.
+    patch(file_kind="unknown")
+    assert _unclassified(shelf_env)[gguf_encoder]["kind_decided"] is True
+
+
+def test_a_loader_is_offered_its_models_suggestion_only_where_it_takes_that_kind(
+    shelf_env, gguf_encoder
+):
+    """The Workflow tab's offer (#1962): the shelf's suggestion, on the loaders
+    of its kind, until somebody decides."""
+    server = shelf_env.server
+    _seed_loader(server, "r-te", "clip_name", "t5-xxl-q8_0.gguf", "CLIPLoader")
+    loaders = [
+        ("core:a/clip_name", "text_encoder", "T5-XXL-Q8_0.gguf"),
+        ("core:b/vae_name", "vae", "t5-xxl-q8_0.gguf"),
+    ]
+    offers = loader_offers(server.hub, loaders)
+    assert list(offers) == ["core:a/clip_name"]
+    model_id, suggestion = offers["core:a/clip_name"]
+    assert model_id == gguf_encoder
+    assert (suggestion.file_kind, suggestion.kind) == ("unknown", "text_encoder")
+
+    r = shelf_env.owner.patch(
+        f"{API}/models", json={"ids": [gguf_encoder], "suggest_kind": False}
+    )
+    assert r.status_code == 200, r.text
+    assert loader_offers(server.hub, loaders) == {}
+
+
+def test_suggest_kind_cannot_be_null(shelf_env, gguf_encoder):
+    r = shelf_env.owner.patch(
+        f"{API}/models", json={"ids": [gguf_encoder], "suggest_kind": None}
+    )
+    assert r.status_code == 400
+    assert _model_row(shelf_env, gguf_encoder)["file_kind_decided"] == 0
 
 
 def test_forget_takes_a_model_whose_every_copy_is_missing(shelf_env):

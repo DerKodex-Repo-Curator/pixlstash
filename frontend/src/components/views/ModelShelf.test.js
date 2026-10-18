@@ -26,6 +26,7 @@ const listUnclassified = vi.fn();
 // `listAdapters.mockResolvedValue` here would answer them with adapter rows.
 const listSupport = vi.fn();
 const deleteModels = vi.fn();
+const editModels = vi.fn();
 const fetchModelCompanions = vi.fn();
 const deleteWorkflowSet = vi.fn();
 const fetchWorkflowSets = vi.fn();
@@ -50,6 +51,7 @@ vi.mock("../../api/modelShelf", () => ({
   // really called it would be asserting the server's gate rather than the
   // view's.
   deleteModels: (...args) => deleteModels(...args),
+  editModels: (...args) => editModels(...args),
   // Asked before the delete prompt opens; answered per test.
   fetchModelCompanions: (...args) => fetchModelCompanions(...args),
   deleteWorkflowSet: (...args) => deleteWorkflowSet(...args),
@@ -191,6 +193,7 @@ vi.mock("../../api/modelIcons", async (importOriginal) => ({
 }));
 
 import ModelShelf from "./ModelShelf.vue";
+import KindMenu from "../widgets/KindMenu.vue";
 import { useModelMovesStore } from "../../stores/useModelMovesStore";
 import { useModelShelfStore } from "../../stores/useModelShelfStore";
 import { useNoticeStore } from "../../stores/useNoticeStore";
@@ -817,6 +820,81 @@ describe("editing a base model in place", () => {
     await field.setValue("FLUX.2");
     await field.trigger("keydown", { key: "Enter" });
     expect(edit).toHaveBeenCalledWith([1, 2], { base_model: "FLUX.2" });
+  });
+});
+
+describe("the kind the workflows suggest (#1962)", () => {
+  const encoder = (overrides = {}) =>
+    adapter({
+      id: 7,
+      file_kind: "unknown",
+      kind: null,
+      display_name: "t5 xxl",
+      suggested_kind: "text_encoder",
+      suggested_by: 3,
+      suggested_fields: ["clip_name"],
+      kind_decided: false,
+      ...overrides,
+    });
+
+  async function mountUnclassified(row) {
+    useModelShelfStore().setFilters({
+      adapters: false,
+      checkpoints: false,
+      unclassified: true,
+    });
+    return mountShelf([], [], [row]);
+  }
+
+  it("writes the suggestion under the Kind chip, and only while undecided", async () => {
+    const offered = await mountUnclassified(encoder());
+    const cell = offered.find(".shelf-row .shelf-col--kind");
+    expect(textOf(cell.find(".kmenu-chip"))).toBe("Unclassified");
+    expect(textOf(cell.find("[data-testid='kind-suggestion']"))).toBe(
+      "Text encoder?",
+    );
+
+    const decided = await mountUnclassified(encoder({ kind_decided: true }));
+    const plain = decided.find(".shelf-row .shelf-col--kind");
+    expect(textOf(plain)).toBe("Unclassified");
+    expect(plain.find("[data-testid='kind-suggestion']").exists()).toBe(false);
+  });
+
+  it("files the row from its menu, with a receipt that undoes it", async () => {
+    editModels.mockReset().mockResolvedValue({ updated: [7], fields: ["file_kind"] });
+    const wrapper = await mountUnclassified(encoder());
+    wrapper.findComponent(KindMenu).vm.$emit("pick", "text_encoder");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(editModels).toHaveBeenCalledWith([7], { file_kind: "text_encoder" });
+    const notice = useNoticeStore().notices.at(-1);
+    expect(notice.text).toBe("Filed t5 xxl as Text encoder.");
+    expect(notice.action.label).toBe("Undo");
+
+    await notice.action.handler();
+    expect(editModels).toHaveBeenLastCalledWith([7], {
+      file_kind: "unknown",
+      suggest_kind: true,
+    });
+  });
+
+  it("dismisses the suggestion without touching the kind", async () => {
+    editModels.mockReset().mockResolvedValue({ updated: [7], fields: [] });
+    const wrapper = await mountUnclassified(encoder());
+    wrapper.findComponent(KindMenu).vm.$emit("suggest", false);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(editModels).toHaveBeenCalledWith([7], { suggest_kind: false });
+  });
+
+  it("leaves an engine's kind a chip: PixlStash's own is not curated", async () => {
+    // Served through the adapter double: which block brings it is not this
+    // test's business, what its Kind cell draws is.
+    const wrapper = await mountShelf([
+      adapter({ id: 9, file_kind: "engine", capabilities: ["tagger"] }),
+    ]);
+    const row = wrapper.find(".shelf-row");
+    expect(row.exists()).toBe(true);
+    expect(row.findComponent(KindMenu).exists()).toBe(false);
   });
 });
 
@@ -3249,13 +3327,16 @@ describe("a run's disclosure", () => {
     // tabindex="0">` is exactly as much of a second control, and a
     // tag-name-only assertion let that mutant through when this was checked.
     // `[tabindex]` is on the row itself, so the search is for descendants.
-    // The count badge is the one control in a row, and it is a real button on
-    // purpose: the grid role permits one where the old listbox did not, and a
-    // pointer needs a target for the disclosure that Right/Left gives the
-    // keyboard. Everything else in the row is still inert.
-    const controls = row.findAll(
-      'button, a[href], input, select, textarea, [tabindex], [role="button"]',
-    );
+    // The count badge is the one disclosure control in a row, and it is a real
+    // button on purpose: the grid role permits one where the old listbox did
+    // not, and a pointer needs a target for the disclosure that Right/Left
+    // gives the keyboard. The Kind menu (#1962) sets a value, not the
+    // disclosure; everything else in the row is still inert.
+    const controls = row
+      .findAll(
+        'button, a[href], input, select, textarea, [tabindex], [role="button"]',
+      )
+      .filter((el) => el.attributes("data-testid") !== "kind-menu");
     expect(controls).toHaveLength(1);
     expect(controls[0].classes()).toContain("shelf-stack-badge");
     // ...and it does not pick the row. The badge sits inside the one thing a

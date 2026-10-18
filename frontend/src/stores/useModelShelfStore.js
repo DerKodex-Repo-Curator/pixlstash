@@ -381,6 +381,7 @@ const FIELD_WORDS = {
   base_model: "base model",
   kind: "algorithm",
   file_kind: "type",
+  suggest_kind: "kind suggestion",
   capabilities: "features",
   trigger_words: "trigger words",
 };
@@ -3821,9 +3822,11 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
    *
    * @param {number[]} ids - model ids. A stack cover passes its members.
    * @param {Object} changes - as {@link editSelected}.
+   * @param {Object} [receipt] - the success notice's `text` and `action`, for
+   *   a caller that can say more than which columns it wrote.
    * @returns {Promise<boolean>} true when the write landed.
    */
-  async function editModelIds(ids, changes) {
+  async function editModelIds(ids, changes, receipt = null) {
     const notices = useNoticeStore();
     if (!ids.length) return false;
     try {
@@ -3835,6 +3838,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
       notices.push({
         level: "success",
         text: editReceipt(body?.updated?.length ?? ids.length, changes),
+        ...receipt,
       });
       return true;
     } catch (err) {

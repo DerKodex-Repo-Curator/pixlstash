@@ -422,6 +422,10 @@ CREATE TABLE IF NOT EXISTS model (
     -- scanner takes as a reason to look again.
     base_model_canonical  TEXT,
     base_model_source     TEXT,
+    -- 1 once a person has decided what the file is: picked a kind, or said
+    -- not to suggest one (#1962). A workflow loading the file as another
+    -- kind is offered to the owner only while this is 0.
+    file_kind_decided     INTEGER NOT NULL DEFAULT 0,
     CHECK (file_kind <> 'adapter' OR sha256 IS NOT NULL),
     -- Same shape one column over: every producer already supplies an algorithm
     -- for an adapter ('unknown' is a first-class value, never NULL), so an
@@ -2014,6 +2018,12 @@ def _apply_v2(conn: sqlite3.Connection) -> None:
     for column in ("base_model_canonical", "base_model_source"):
         if column not in model_columns:
             conn.execute(f"ALTER TABLE model ADD COLUMN {column} TEXT")
+    # The owner's say on what a file is (#1962), the same way and for the
+    # same reason. 0, every existing row, means nobody has decided.
+    if "file_kind_decided" not in model_columns:
+        conn.execute(
+            "ALTER TABLE model ADD COLUMN file_kind_decided INTEGER NOT NULL DEFAULT 0"
+        )
 
     # The owner's chosen default destination for a new model, guarded the same
     # way. 0 everywhere means "the managed store", so an existing hub keeps the

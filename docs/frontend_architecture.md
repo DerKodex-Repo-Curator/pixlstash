@@ -6611,6 +6611,19 @@ the tab's width on that edge while the rail is closed; the row list does not.
 - Not built yet: the narrow-window drawer (`statsForcedHidden`), *Works with*
   from the rail, and virtualisation (rows use `content-visibility: auto`).
 
+**The Kind cell is a menu (#1962).** `widgets/KindMenu.vue` turns the Kind chip
+into a menu that sets `file_kind` in place, the way the name and the base model
+are already edited on the row; an engine keeps a plain chip. When every workflow
+that loads the model loads it as one kind (`suggested_kind`, backend §25.11) and
+nobody has decided (`kind_decided`), the cell carries that kind under the chip in
+amber, written out with its dot, and the menu opens with it pinned and focused,
+so Enter files it. Any pick counts as deciding, "Don't suggest a kind" and
+"Suggest a kind again" write `suggest_kind`, and the receipt's Undo puts back the
+kind and the offer both. The Workflow tab draws the same component under a VAE or
+text-encoder picker from the detail's `kind_offers`, without "Adapter…" (the
+algorithm dialog is the shelf's), and the offer replaces "Nothing to offer" so a
+picker carries one note at most.
+
 ### 13.2 The workflow library
 
 `/workflows` mounts `WorkflowsView.vue` in place of `ImageGrid` (`App.vue`,

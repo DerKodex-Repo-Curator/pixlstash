@@ -159,6 +159,7 @@ MODEL_COLUMNS = (
     "weights_id",
     "base_model_canonical",
     "base_model_source",
+    "file_kind_decided",
 )
 
 # Computed per row by the two aggregate joins below, never by a second query.
@@ -2264,6 +2265,11 @@ def update_models(hub, ids: list[int], changes: dict) -> list[int]:
     (:func:`encode_trigger_words`): an empty list is "needs none" and is not
     the same write as ``None``.
 
+    Writing ``file_kind`` records that a person decided what the file is
+    (``file_kind_decided``), whatever kind they picked, so a workflow loading
+    it as another kind is no longer offered (#1962). ``suggest_kind`` writes
+    that mark alone: ``False`` is "don't suggest", ``True`` takes it back.
+
     ``capabilities`` is the one entry that is not a column. It is the complete
     set for every id, written to ``model_capability``: replaced wholesale rather
     than merged, because these sets are two entries long and a merge would leave
@@ -2281,7 +2287,9 @@ def update_models(hub, ids: list[int], changes: dict) -> list[int]:
     if not ids or not changes:
         return []
     capabilities = changes.get("capabilities")
-    columns_only = {k: v for k, v in changes.items() if k != "capabilities"}
+    columns_only = {
+        k: v for k, v in changes.items() if k not in ("capabilities", "suggest_kind")
+    }
     unknown = set(columns_only) - set(CURATABLE_FIELDS)
     if unknown:
         raise ValueError(f"not a curatable field: {sorted(unknown)}")
@@ -2295,6 +2303,12 @@ def update_models(hub, ids: list[int], changes: dict) -> list[int]:
             ).fetchall()
         ]
         if existing:
+            if "suggest_kind" in changes or "file_kind" in changes:
+                conn.execute(
+                    "UPDATE model SET file_kind_decided = ? "
+                    f"WHERE id IN ({placeholders})",
+                    (int(not changes.get("suggest_kind", False)), *ids),
+                )
             if columns_only:
                 assignments = dict(columns_only)
                 if "base_model" in assignments:

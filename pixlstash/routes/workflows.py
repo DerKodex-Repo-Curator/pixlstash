@@ -191,6 +191,7 @@ from pixlstash.services.workflow_card_service import (
     workflow_lora_summary,
 )
 from pixlstash.services import saved_recipe_service
+from pixlstash.services.model_kind_suggestions import loader_offers
 from pixlstash.services.model_shelf_service import (
     adapter_digest_index,
     character_lora_hashes,
@@ -915,6 +916,17 @@ class ModelFixRow(BaseModel):
     )
 
 
+class KindOffer(BaseModel):
+    """A loader's model the shelf files as another kind than the loader takes."""
+
+    address: str = Field(description="The default-recipe loader it is offered on.")
+    model_id: int = Field(description="The shelf model, for `PATCH /models`.")
+    file_kind: str = Field(description="What the shelf files it as now.")
+    suggested_kind: str = Field(description="What every workflow loads it as.")
+    suggested_by: int = Field(description="How many workflows load it so.")
+    suggested_fields: list[str] = Field(default_factory=list)
+
+
 class WorkflowCardDetail(BaseModel):
     """``GET /workflows/{workflow_id}``: one workflow opened."""
 
@@ -952,6 +964,15 @@ class WorkflowCardDetail(BaseModel):
             "The models the owner replaced in this workflow's base graph "
             "because the original is gone (`PUT /workflows/{workflow_id}/"
             "model-fix`). A run loads `now` wherever the graph names `was`."
+        ),
+    )
+    kind_offers: list[KindOffer] = Field(
+        default_factory=list,
+        description=(
+            "Default-recipe loaders whose model the shelf files as a "
+            "checkpoint or Unclassified while every workflow loads it as the "
+            "kind this loader takes (#1962): the shelf's `suggested_kind`, "
+            "offered here too. Empty once the owner has decided the kind."
         ),
     )
 
@@ -4048,7 +4069,29 @@ def create_router(server) -> APIRouter:
                     else []
                 )
             ],
+            kind_offers=_kind_offers(hub, recipe),
         )
+
+    def _kind_offers(hub, recipe) -> list[KindOffer]:
+        """The shelf's kind suggestions (#1962) on the default recipe's loaders."""
+        offers = loader_offers(
+            hub,
+            [
+                (model.address, model.kind, model.filename)
+                for model in (recipe.models if recipe else [])
+            ],
+        )
+        return [
+            KindOffer(
+                address=address,
+                model_id=model_id,
+                file_kind=suggestion.file_kind,
+                suggested_kind=suggestion.kind,
+                suggested_by=suggestion.workflows,
+                suggested_fields=list(suggestion.fields),
+            )
+            for address, (model_id, suggestion) in offers.items()
+        ]
 
     def _apply_model_fixes(
         card,

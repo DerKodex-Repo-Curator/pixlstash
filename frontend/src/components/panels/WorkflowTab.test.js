@@ -15,6 +15,11 @@ import { mount } from "@vue/test-utils";
 import { setActivePinia, createPinia } from "pinia";
 
 const getWorkflowCard = vi.fn();
+const editModels = vi.fn();
+vi.mock("../../api/modelShelf", async (importOriginal) => ({
+  ...(await importOriginal()),
+  editModels: (...args) => editModels(...args),
+}));
 const listWorkflowCards = vi.fn();
 const patchWorkflowCard = vi.fn();
 const preflightWorkflowRun = vi.fn();
@@ -73,6 +78,7 @@ vi.mock("vue-router", () => ({
 }));
 
 import WorkflowTab from "./WorkflowTab.vue";
+import KindMenu from "../widgets/KindMenu.vue";
 import { useFilterStore } from "../../stores/useFilterStore";
 import { useNoticeStore } from "../../stores/useNoticeStore";
 import { useRunDialogStore } from "../../stores/useRunDialogStore";
@@ -1564,7 +1570,7 @@ describe("a VAE or text encoder row (#1596, #1850)", () => {
     return wrapper.find(`[data-testid="wftab-row-${kind}"]`);
   }
 
-  it("names the default recipe's text encoder on the CLIP row", async () => {
+  it("names the default recipe's text encoder on the Text encoder row", async () => {
     // The recipe says `text_encoder` where the card's slot says `clip`: the
     // row and its shelf name have to join the two.
     preflightWorkflowRun.mockResolvedValue({ groups: [{ reasons: [] }] });
@@ -1694,6 +1700,39 @@ describe("a VAE or text encoder row (#1596, #1850)", () => {
       slotKind: "text_encoder",
       cached: true,
     });
+  });
+
+  it("offers the shelf's kind under a text encoder the shelf files as Unclassified", async () => {
+    // #1962: every workflow loads it as a text encoder, the shelf does not.
+    const offer = {
+      address: "core:n3/clip_name/ckpt_name",
+      model_id: 4,
+      file_kind: "unknown",
+      suggested_kind: "text_encoder",
+      suggested_by: 2,
+      suggested_fields: ["clip_name"],
+    };
+    getWorkflowCard.mockResolvedValue(
+      detail({ card: withSupport, kind_offers: [offer] }),
+    );
+    editModels.mockReset().mockResolvedValue({ updated: [4], fields: ["file_kind"] });
+    const { wrapper } = await mountWith([KEY], [withSupport]);
+    await settle(wrapper);
+
+    const encoder = row(wrapper, "text_encoder");
+    // Named for what it is, as the shelf and the warning name it.
+    expect(encoder.find(".wftab-label").text()).toBe("Text encoder");
+    expect(textOf(encoder)).toContain("Unclassified on shelf");
+    expect(textOf(encoder)).toContain("Text encoder?");
+    // Only on the loader the offer names.
+    expect(row(wrapper, "vae").findComponent(KindMenu).exists()).toBe(false);
+
+    getWorkflowCard.mockClear();
+    encoder.findComponent(KindMenu).vm.$emit("pick", "text_encoder");
+    await settle(wrapper);
+    expect(editModels).toHaveBeenCalledWith([4], { file_kind: "text_encoder" });
+    // Read again, so the answered offer goes.
+    expect(getWorkflowCard).toHaveBeenCalledWith(KEY);
   });
 
   it("says a failed read on a missing row rather than showing nothing", async () => {
