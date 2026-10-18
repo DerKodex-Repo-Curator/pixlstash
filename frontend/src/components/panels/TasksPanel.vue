@@ -231,6 +231,11 @@
     >{{ " " }}<span v-if="doneWaits">{{ doneWaits }}</span>
   </p>
   <div v-if="tmSystemItems.length" class="tm-system-bar">
+    <!-- The figures are the server process's own, not the machine's. -->
+    <div class="tm-system-heading section-label">
+      <span class="tm-system-mark" aria-hidden="true"></span>
+      PixlStash resource usage
+    </div>
     <div v-for="item in tmSystemItems" :key="item.label" class="tm-system-item">
       <span class="tm-system-label">{{ item.label }}</span>
       <span class="tm-system-value">{{ item.value }}</span>
@@ -1023,6 +1028,22 @@ const tmSystemItems = computed(() => {
   flex-direction: column;
   gap: var(--space-2);
   width: 100%;
+}
+
+.tm-system-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* The logo as a silhouette in the label's own ink: a quiet mark in chrome,
+   not the amber brand moment. */
+.tm-system-mark {
+  width: 1.2em;
+  height: 1.2em;
+  flex-shrink: 0;
+  background-color: currentColor;
+  mask: url("/Logo.png") center / contain no-repeat;
 }
 
 .tm-system-item {
