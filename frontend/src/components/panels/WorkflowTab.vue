@@ -4039,6 +4039,40 @@ watch(
   { immediate: true },
 );
 
+/**
+ * Pick the shelf's likely match for each missing file (`likely`: the same
+ * file under another name), as unsaved changes the owner saves or takes back.
+ * Once per selection, when the offers are in and the changes can be edited:
+ * a match taken back stays taken back until the card is selected again.
+ */
+let prefilled = null;
+watch(
+  () => [replacementsByFile.value, canEdit.value],
+  () => {
+    const key = selectedKey.value;
+    if (!key || prefilled === key || !canEdit.value) return;
+    if (!Object.keys(replacementsByFile.value).length) return;
+    prefilled = key;
+    const picks = modelRows.value
+      .filter((row) => row.settable && row.missing && !row.pick)
+      .map((row) => [
+        row,
+        replacementsByFile.value[`${row.kind}:${row.file}`]?.replacements?.find(
+          (candidate) => candidate.likely,
+        ),
+      ])
+      .filter(([, likely]) => likely);
+    if (!picks.length) return;
+    edit((set) =>
+      picks.reduce(
+        (next, [row, likely]) =>
+          withModel(next, row.address, likely.filename, row.file),
+        set,
+      ),
+    );
+  },
+);
+
 async function checkInstalled(key, { quiet = false } = {}) {
   const check = ++installedCheck;
   // `quiet`: the rows keep what they say until the new answers are in.

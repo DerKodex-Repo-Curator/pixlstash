@@ -306,6 +306,7 @@ from pixlstash.utils.adapter_header import (
 )
 from pixlstash.utils.image_processing.image_utils import ImageUtils
 from pixlstash.utils.known_base_models import family_label, family_of, modality_of
+from pixlstash.utils.model_utils import quant_from_filename
 from pixlstash.utils.comfyui_utilities import NotAWorkflowError, check_comfy_workflow
 from pixlstash.hub.workflow_origin import FILE_ORIGIN, INBOX_ORIGIN
 from pixlstash.utils.sql_chunking import chunked
@@ -1010,6 +1011,11 @@ _WORKFLOW_ID_RE = re.compile(WORKFLOW_ID_PATTERN)
 # resolves as a path.
 _UPLOAD_EXTENSION_RE = re.compile(r"^\.[a-z0-9]{1,8}$")
 _PIXEL_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+# How alike (`SequenceMatcher`, extensions off) a shelf file's name must read
+# to a missing file's to be offered as that file renamed: 0.80 for a flan T5
+# shelved as `flan-t5-xxl_…` where a graph asks for `t5xxl_flan_latest_…`,
+# 0.61 for the nearest other T5.
+LIKELY_SAME_FILE_RATIO = 0.75
 # The stock loaders Open in ComfyUI puts the pack's digest loaders in for,
 # whether or not ComfyUI lists their files. A run swaps more, and only for a
 # file ComfyUI lacks (`_digest_swap_kind`).
@@ -2724,6 +2730,14 @@ class ModelFixCandidate(BaseModel):
             "the original. Null when the original loader loads it."
         ),
     )
+    likely: bool = Field(
+        False,
+        description=(
+            "Whether this is the shelf's one file whose name reads as the "
+            "missing one's, renamed (`_likely_same_file`): the Workflow tab "
+            "picks it for the owner to save."
+        ),
+    )
 
 
 class ModelSwapOptions(BaseModel):
@@ -3120,6 +3134,30 @@ def _checkpoint_off_the_shelf(
         shelf_uuid="trial",
     )
     return node["class_type"] if swapped else None
+
+
+def _likely_same_file(wanted: str, shelf) -> SwapModel | None:
+    """The one shelf model whose file name reads as *wanted*'s, renamed, or None.
+
+    ``flan-t5-xxl_float8_…`` for a graph's ``t5xxl_flan_latest_float8_…``:
+    a file that is not on this machine has nothing but its name to compare.
+    None where two read that close, where it is *wanted* itself, and where
+    both names say a precision and they differ.
+    """
+    # ponytail: name similarity, the only thing known about a missing file;
+    # it is only ever a pre-selection the owner saves, never a silent load.
+    quant = quant_from_filename(wanted)
+    stem = os.path.splitext(wanted)[0]
+    close = []
+    for model in shelf:
+        name = normalized_filename(model.filename)
+        theirs = quant_from_filename(name)
+        if name == wanted or (quant and theirs and quant != theirs):
+            continue
+        ratio = SequenceMatcher(None, stem, os.path.splitext(name)[0]).ratio()
+        if ratio >= LIKELY_SAME_FILE_RATIO:
+            close.append(model)
+    return close[0] if len(close) == 1 else None
 
 
 def _digest_swap_kind(class_type: str) -> str | None:
@@ -9698,6 +9736,12 @@ def create_router(server) -> APIRouter:
           row, :func:`swap_in_pack_nodes`, only with ComfyUI on this
           computer), marked ``loader``.
 
+        One shelf file of the kind whose name reads as *replacing*'s, renamed
+        (:func:`_likely_same_file`), is offered first and marked ``likely``
+        without the first two filters: it is the file the graph asks for, as
+        far as anything here can tell. Nothing loads it until the owner saves
+        the pick the Workflow tab makes of it.
+
         Returns:
             ``(candidates, reason, narrowed)``, *reason* set only when there
             are none, *narrowed* whether a checkpoint's were held to a base
@@ -9750,6 +9794,10 @@ def create_router(server) -> APIRouter:
         # `wider`: the checkpoints of another base model, offered only when
         # none in `candidates` can be loaded.
         candidates, wider = [], []
+        likely = _likely_same_file(
+            wanted,
+            [m for m in models.values() if m.file_kind == kind and m.id not in hidden],
+        )
         if kind == FILE_CHECKPOINT:
             base_model = _replaced_base_model(graph, models, index, wanted)
             shelf = sorted(
@@ -9785,18 +9833,35 @@ def create_router(server) -> APIRouter:
                 ),
                 None,
             )
-            if base is None or base.file_kind != FILE_CHECKPOINT:
+            if base is not None and base.file_kind == FILE_CHECKPOINT:
+                candidates = [
+                    ModelFixCandidate(
+                        id=entry["id"],
+                        filename=entry["filename"],
+                        display_name=entry["display_name"],
+                        via=entry["via"],
+                    )
+                    for entry in propose_companions(_hub(), base.id, index)[kind]
+                    if entry["id"] not in hidden
+                ]
+            elif likely is None:
                 return [], "no_checkpoint", None
+        if likely is not None:
+            # First, whatever else says it goes with the workflow: the file
+            # the graph asks for, renamed, is the likeliest of all.
+            same = next((c for c in candidates if c.id == likely.id), None)
             candidates = [
-                ModelFixCandidate(
-                    id=entry["id"],
-                    filename=entry["filename"],
-                    display_name=entry["display_name"],
-                    via=entry["via"],
-                )
-                for entry in propose_companions(_hub(), base.id, index)[kind]
-                if entry["id"] not in hidden
+                (
+                    same
+                    or ModelFixCandidate(
+                        id=likely.id,
+                        filename=likely.filename,
+                        display_name=likely.display_name,
+                    )
+                ).model_copy(update={"likely": True}),
+                *(c for c in candidates if c.id != likely.id),
             ]
+            wider = [c for c in wider if c.id != likely.id]
         candidates = [
             c for c in candidates if normalized_filename(c.filename) != wanted
         ]

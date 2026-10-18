@@ -2604,7 +2604,11 @@ can no longer see.
     sized by the browser**: nothing here sets its width, and no test can
     measure it. **A missing file is a row
     that needs a pick**: its warning and the file's name stay above the field
-    until one is made. The pre-flight names a file as the graph spells it and
+    until one is made. Where the offer marks one `likely` (the missing file
+    under another name on the shelf), the tab makes that pick itself, once per
+    selection, as an unsaved change like any other: the row reads *Edited*,
+    Save uses it, and a reset keeps it taken back until the card is selected
+    again. The pre-flight names a file as the graph spells it and
     the recipe may spell it another way, so `missingByAddress` gives a
     missing file to the row naming it, else to the first row of its kind
     without one, and it is the graph's spelling the server is asked about. A

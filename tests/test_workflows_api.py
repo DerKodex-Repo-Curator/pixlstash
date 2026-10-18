@@ -15983,6 +15983,73 @@ def test_a_replacement_the_loader_cannot_load_is_offered_through_our_loader(
             _unshelve(conn, [digest for _kind, digest in digests.values()])
 
 
+def test_the_missing_file_under_another_name_is_offered_first_as_likely(cloneable):
+    """The shelf holds the missing T5 renamed (`test-t5-xxl-fp16` for the
+    graph's `test-t5-fp16`) and nothing says it goes with the checkpoint: it is
+    offered all the same, first and marked `likely`, for the tab to pick.
+
+    Wrong if it is not offered, or marked where two names read that close or
+    where the precision differs: a pre-selection must be the one file.
+    """
+    graph = _with_support_loaders(cloneable.graph)
+    cloneable.monkeypatch.setattr(
+        workflows_routes,
+        "_load_embedded_api_prompt",
+        lambda server, pid, object_info=None: (graph, []),
+    )
+    cloneable.monkeypatch.setattr(
+        workflows_routes,
+        "propose_companions",
+        lambda hub, checkpoint_id, index=None: {"vae": [], "text_encoder": []},
+    )
+    shelved = {
+        "test-clip-l.safetensors": _h("likely-clip-l"),
+        "test-t5-xxl-fp16.safetensors": _h("likely-t5-renamed"),
+        "test-t5-fp8.safetensors": _h("likely-t5-fp8"),
+    }
+    with cloneable.server.hub.transaction() as conn:
+        for name, digest in shelved.items():
+            _shelve_with_copy(conn, "text_encoder", name, digest)
+    info = json.loads(json.dumps(RUN_OBJECT_INFO))
+    listed = [["test-clip-l.safetensors"], {}]
+    info["DualCLIPLoader"] = {
+        "input": {"required": {"clip_name1": listed, "clip_name2": listed}}
+    }
+    info["PixlStashCLIPLoader"] = {
+        "input": {"required": {"clip_sha256": ["STRING", {}], "type": [["flux"], {}]}}
+    }
+    cloneable.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url: (info, None)
+    )
+
+    def offered():
+        r = cloneable.owner.get(
+            f"{API}/workflows/{RUN_WF}/model-swap",
+            params={"replacing": "test-t5-fp16.safetensors"},
+        )
+        assert r.status_code == 200, r.text
+        return [
+            (c["filename"], c["loader"], c["likely"]) for c in r.json()["replacements"]
+        ]
+
+    try:
+        assert offered() == [
+            ("test-t5-xxl-fp16.safetensors", "PixlStashCLIPLoader", True)
+        ]
+        # A second name that close: which one it is would be a guess.
+        with cloneable.server.hub.transaction() as conn:
+            _shelve_with_copy(
+                conn,
+                "text_encoder",
+                "test-umt5-xxl-fp16.safetensors",
+                _h("likely-umt5"),
+            )
+        assert offered() == []
+    finally:
+        with cloneable.server.hub.transaction() as conn:
+            _unshelve(conn, [*shelved.values(), _h("likely-umt5")])
+
+
 def test_a_shelf_checkpoint_comfyui_does_not_list_is_offered_and_run_off_the_shelf(
     cloneable,
 ):
