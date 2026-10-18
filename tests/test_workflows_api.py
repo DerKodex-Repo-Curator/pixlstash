@@ -16022,11 +16022,25 @@ def test_a_shelf_checkpoint_comfyui_does_not_list_is_offered_and_run_off_the_she
             json={"was": _SHELF_FILENAME, "now": unlisted},
         )
         assert r.status_code == 200, r.text
+
+        def run():
+            r = cloneable.owner.post(
+                f"{API}/workflows/run", json={"workflow_id": RUN_WF}
+            )
+            assert r.json()["status"] == "success", r.json()
+            return cloneable.submitted[-1]["graph"]["1"]
+
+        # Where it was not offered, the fix is not written: the loader keeps
+        # the original (which this ComfyUI happens to list).
+        with cloneable.monkeypatch.context() as m:
+            m.setattr(workflows_routes, "locate", lambda url: (None, None))
+            assert run() == {
+                "class_type": "CheckpointLoaderSimple",
+                "inputs": {"ckpt_name": _SHELF_FILENAME},
+            }
         payload = _preflight(cloneable.owner, workflow_id=RUN_WF)
         assert _reasons(payload) == set(), payload
-        r = cloneable.owner.post(f"{API}/workflows/run", json={"workflow_id": RUN_WF})
-        assert r.json()["status"] == "success", r.json()
-        loader = cloneable.submitted[-1]["graph"]["1"]
+        loader = run()
         assert loader["class_type"] == "PixlStashCheckpointLoader", loader
         assert loader["inputs"]["checkpoint_id"] == str(row_id), loader
     finally:

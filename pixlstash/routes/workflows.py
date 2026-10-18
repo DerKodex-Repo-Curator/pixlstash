@@ -3076,6 +3076,27 @@ def _shelf_checkpoint(hub):
     return row_of
 
 
+def _checkpoint_off_the_shelf(
+    graph: dict, node_id: str, widget: str, filename: str, object_info, row_of
+) -> str | None:
+    """The pack's loader a run loads checkpoint *filename* through in
+    *node_id*'s place, by :func:`swap_in_pack_nodes` tried on a copy, or None.
+
+    The caller says ComfyUI is on this computer: that loader reads the file,
+    it cannot fetch one.
+    """
+    node = deepcopy(graph[node_id])
+    node["inputs"][widget] = filename
+    swapped = swap_in_pack_nodes(
+        {node_id: node},
+        object_info,
+        lambda _name: None,
+        checkpoint_id=row_of,
+        shelf_uuid="trial",
+    )
+    return node["class_type"] if swapped else None
+
+
 def _holds_class(graph: dict, class_type: str) -> bool:
     return any(
         isinstance(node, dict) and node.get("class_type") == class_type
@@ -3951,6 +3972,7 @@ def create_router(server) -> APIRouter:
         object_info: dict | None,
         swapped: dict[str, tuple[dict, dict]] | None = None,
         unloaded: list[dict] | None = None,
+        request: Request | None = None,
     ) -> list[dict]:
         """Load each model the owner replaced on this card's graph, in place.
 
@@ -3959,9 +3981,11 @@ def create_router(server) -> APIRouter:
         source tiers do not agree on folders. Where the loader cannot load the
         replacement, a PixlStash loader is swapped in (#1605) and the node
         added to *swapped*, which the caller records with
-        :func:`_record_loader_swaps` once the graph is final; a checkpoint
-        the shelf holds a copy of is written unlisted, for the run to load
-        off the shelf (:func:`_swap_in_shelf_loaders`). Returns the
+        :func:`_record_loader_swaps` once the graph is final. A checkpoint is
+        written unlisted where, given *request* with ComfyUI on this computer,
+        the pack's checkpoint loader would load it off the shelf
+        (:func:`_checkpoint_off_the_shelf`), for the run to swap that loader
+        in (:func:`_swap_in_shelf_loaders`). Returns the
         substitutions made. A replacement that could not be loaded leaves its
         loader naming the original and is added to *unloaded*, as
         ``{was, now, reason}``.
@@ -3995,16 +4019,30 @@ def create_router(server) -> APIRouter:
                     model_fix_kind(cls, widget) == kind
                 ),
             )
-            if kind == FILE_CHECKPOINT:
+            unlisted = {
+                miss["was"]: miss["now"]
+                for miss in kind_missed
+                if miss["reason"] == "not_on_comfyui"
+            }
+            if (
+                kind == FILE_CHECKPOINT
+                and unlisted
+                and request is not None
+                and _comfyui_is_here(request)
+            ):
                 # A checkpoint ComfyUI does not list is written all the same
-                # where the shelf holds a copy: a run loads it from there
-                # through the pack's checkpoint loader, as it loads any shelf
-                # checkpoint ComfyUI lacks (`_swap_in_shelf_loaders`).
+                # where the pack's checkpoint loader would load it off the
+                # shelf, the rule `?replacing=` offers it by: the run then
+                # swaps that loader in (`_swap_in_shelf_loaders`).
                 row_of = _shelf_checkpoint(_hub())
                 held = {
-                    miss["was"]: miss["now"]
-                    for miss in kind_missed
-                    if miss["reason"] == "not_on_comfyui" and row_of(miss["now"])
+                    value: unlisted[value]
+                    for node_id, cls, widget, value in iter_model_fields_api(graph)
+                    if value in unlisted
+                    and model_fix_kind(cls, widget) == FILE_CHECKPOINT
+                    and _checkpoint_off_the_shelf(
+                        graph, node_id, widget, unlisted[value], object_info, row_of
+                    )
                 }
                 if held:
                     kind_done += apply_filename_swap(
@@ -6991,7 +7029,7 @@ def create_router(server) -> APIRouter:
             unloaded: list[dict] = []
             stale_pack: set[str] = set()
             group.substitutions = _apply_model_fixes(
-                card, graph, object_info, swapped, unloaded
+                card, graph, object_info, swapped, unloaded, request
             )
             if object_info is not None:
                 same_model = apply_model_swap(
@@ -8946,7 +8984,7 @@ def create_router(server) -> APIRouter:
         )
         graph = deepcopy(source.graph)
         changes: list[str] = []
-        for entry in _apply_model_fixes(card, graph, object_info, {}):
+        for entry in _apply_model_fixes(card, graph, object_info, {}, request=request):
             changes.append(f"Loads {entry.get('now')} in place of {entry.get('was')}.")
         for entry in apply_model_swap(
             graph,
@@ -9679,16 +9717,9 @@ def create_router(server) -> APIRouter:
             """The PixlStash loader a run would load *filename* through in
             *node_id*'s place, by the run's own rule, or None."""
             if row_of is not None:
-                node = deepcopy(graph[node_id])
-                node["inputs"][widget] = filename
-                swapped = swap_in_pack_nodes(
-                    {node_id: node},
-                    info,
-                    lambda _name: None,
-                    checkpoint_id=row_of,
-                    shelf_uuid="trial",
+                return _checkpoint_off_the_shelf(
+                    graph, node_id, widget, filename, info, row_of
                 )
-                return node["class_type"] if swapped else None
             plan, _refusal = run_service.plan_pixlstash_swap(
                 graph,
                 node_id,
