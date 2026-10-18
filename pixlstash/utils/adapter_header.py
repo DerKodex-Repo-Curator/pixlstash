@@ -537,6 +537,20 @@ def family_from_header(header: dict) -> Optional[str]:
     conv_in = _valid_shape(header.get("decoder.conv_in.weight"))
     if conv_in is not None and len(conv_in) == 4:
         return f"vae_{conv_in[1]}ch"
+    return _text_encoder_family(header)
+
+
+def has_text_encoder_markers(header: dict) -> bool:
+    """Return whether *header* holds a CLIP, T5 or UMT5 text encoder's token table.
+
+    The table at the top level, as :func:`family_from_header` reads it: a
+    checkpoint keeps its encoders under a prefix, which never matches.
+    """
+    return _text_encoder_family(header) is not None
+
+
+def _text_encoder_family(header: dict) -> Optional[str]:
+    """``clip_l``/``clip_h``/``clip_g``/``t5_xxl``/``umt5_xxl``, or ``None``."""
     for name in (
         "text_model.embeddings.token_embedding.weight",
         "token_embedding.weight",
@@ -588,7 +602,9 @@ def role_from_folder(path: str) -> Optional[str]:
     return _ROLE_FOLDERS.get(_normalise_folder(folder))
 
 
-def classify_model_file(tensor_names, param_count: int, path: str = "") -> str:
+def classify_model_file(
+    tensor_names, param_count: int, path: str = "", header: Optional[dict] = None
+) -> str:
     """Return what a file *is*, from its tensor names, parameter count and location.
 
     The rule is deliberately asymmetric, and the order below is the ranking of
@@ -601,8 +617,11 @@ def classify_model_file(tensor_names, param_count: int, path: str = "") -> str:
        LoRA. ControlNet markers (:func:`has_controlnet_markers`) come next, on
        the same footing: a ControlNet in ``diffusion_models/`` is a ControlNet.
        So do VAE markers (:func:`has_vae_markers`), which is what files a VAE
-       downloaded into a flat folder as a VAE.
-    2. **The directory**, when it names a role. A text encoder carries no
+       downloaded into a flat folder as a VAE, and a text encoder's token
+       table (:func:`has_text_encoder_markers`), which is what keeps a T5
+       downloaded there from clearing the checkpoint threshold.
+    2. **The directory**, when it names a role. A text encoder of a layout
+       :func:`has_text_encoder_markers` does not know (Qwen, Gemma) carries no
        marker to find, nor does a VAE of a layout :data:`_VAE_TENSORS` does not
        know (a Wan one), so the layout the user (or their launcher) already
        maintains is the best evidence there is. It outranks the parameter count
@@ -625,6 +644,8 @@ def classify_model_file(tensor_names, param_count: int, path: str = "") -> str:
         path: Where the file lives. Optional - omitting it drops rule 2 and
             leaves the pre-existing behaviour, which is what a caller holding
             only a header should get.
+        header: The parsed header, for the shapes a token table is told by.
+            Optional: a file with no header to read has no table either.
 
     Returns:
         ``"adapter"``, ``"vae"``, ``"text_encoder"``, ``"controlnet"``,
@@ -636,6 +657,8 @@ def classify_model_file(tensor_names, param_count: int, path: str = "") -> str:
         return FILE_CONTROLNET
     if has_vae_markers(tensor_names):
         return FILE_VAE
+    if header is not None and has_text_encoder_markers(header):
+        return FILE_TEXT_ENCODER
     role = role_from_folder(path) if path else None
     if role is not None:
         return role
@@ -774,7 +797,7 @@ def describe_adapter(path: str) -> Optional[AdapterInfo]:
         kind=detect_adapter_kind(tensor_names),
         tensor_count=len(tensor_names),
         is_adapter=has_adapter_markers(tensor_names),
-        file_kind=classify_model_file(tensor_names, param_count, path),
+        file_kind=classify_model_file(tensor_names, param_count, path, header),
         param_count=param_count,
         base_model=base_model,
         trigger_words=_trigger_words_from_tag_frequency(

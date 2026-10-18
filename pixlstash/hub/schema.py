@@ -33,10 +33,12 @@ from pixlstash.pixl_logging import get_logger
 from pixlstash.utils.adapter_header import (
     FILE_CHECKPOINT,
     FILE_CONTROLNET,
+    FILE_TEXT_ENCODER,
     FILE_UNKNOWN,
     FILE_UPSCALER,
     FILE_VAE,
     has_controlnet_markers,
+    has_text_encoder_markers,
     has_vae_markers,
     read_safetensors_header,
     role_from_folder,
@@ -70,7 +72,7 @@ CURRENT_SCHEMA_VERSION = 2
 # reasoning the model-shelf tables were amended into v2 for. ``user_version`` is
 # free (nothing in PixlStash has ever written it), costs no DDL, and an older
 # build ignores it entirely.
-CURRENT_DATA_VERSION = 20
+CURRENT_DATA_VERSION = 21
 
 # `model_file.state` for a copy the last scan actually looked at, spelled out
 # rather than imported from `services.model_folder_scanner`. That module imports
@@ -2188,7 +2190,8 @@ def _refile_by_tensors(
 ) -> int:
     """Re-file as *file_kind* the ``checkpoint`` and ``unknown`` rows whose
     tensors *has_markers* recognises: a ControlNet's
-    (:func:`has_controlnet_markers`) or a VAE's (:func:`has_vae_markers`).
+    (:func:`has_controlnet_markers`), a VAE's (:func:`has_vae_markers`) or a
+    text encoder's (:func:`has_text_encoder_markers`).
 
     Unlike :func:`_backfill_component_roles` this reads bytes: one
     ``.safetensors`` header per row, off its first present copy. A row with no
@@ -2586,6 +2589,17 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
                         "JOIN workflow_recipe_graph g "
                         "ON g.structural_hash = v.structural_hash "
                         "WHERE g.document LIKE '%SeedVR2%')"
+                    )
+                if data_version < 21:
+                    # A text encoder is told by its token table too: a T5
+                    # downloaded into a flat folder cleared the parameter
+                    # count and was a `checkpoint`, so no graph could load it
+                    # as an encoder. A CLIP there was `unknown`. Unlike
+                    # step 19 this takes `checkpoint` rows too, since that is
+                    # what the bug stored; an owner setting a T5 to
+                    # `checkpoint` by hand is not a correction worth keeping.
+                    _refile_by_tensors(
+                        conn, FILE_TEXT_ENCODER, has_text_encoder_markers
                     )
                 if data_version < CURRENT_DATA_VERSION:
                     # No placeholder: PRAGMA takes no parameters, and the value
