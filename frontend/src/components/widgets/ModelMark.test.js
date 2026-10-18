@@ -364,7 +364,7 @@ describe("ModelMark, named", () => {
     expect(tab.text()).toBe("mdi-lightning-bolt4");
   });
 
-  it("draws a release as a band, its maker's glyph and its version", () => {
+  it("draws a release as its maker's glyph, a version pill and a role tab", () => {
     const wrapper = mountNamed({
       mark: ["Klein", "2"],
       mark_tab: "⚡",
@@ -372,15 +372,21 @@ describe("ModelMark, named", () => {
       mark_icon: "flux",
       mark_band: true,
     });
-    expect(wrapper.find(".mmark-band").text()).toBe("Klein");
+    // The name is the card's to print: no band.
+    expect(wrapper.text()).not.toContain("Klein");
     expect(wrapper.find(".mmark-glyph").attributes("src")).toContain("title%3eFlux");
     expect(wrapper.find(".mmark-glyph").classes()).toContain(
       "mmark-glyph--shadowed",
     );
-    expect(wrapper.find(".mmark-release-version").text()).toBe("2");
+    // Both pills are the tile's pair inverted, off the corners, outside the
+    // clipping face.
+    const version = wrapper.find(".mmark > .mmark-release-version");
+    expect(version.text()).toBe("2");
+    expect(version.attributes("style")).toContain("color: rgb(72, 76, 83)");
+    expect(wrapper.find(".mmark > .mmark-tab").exists()).toBe(true);
     expect(wrapper.find(".mmark-name").exists()).toBe(false);
     // The tab is a plain pill: no outline in the tile's own colour.
-    expect(wrapper.find(".mmark-version").attributes("style")).not.toContain(
+    expect(wrapper.find(".mmark-tab").attributes("style")).not.toContain(
       "border-color",
     );
   });
@@ -396,8 +402,9 @@ describe("ModelMark, named", () => {
     expect(chroma.find(".mmark-named > .mmark-img").attributes("src")).toContain(
       "chroma",
     );
-    expect(chroma.find(".mmark-band").text()).toBe("Chroma");
-    expect(chroma.find(".mmark-version").text()).toBe("HD");
+    expect(chroma.text()).not.toContain("Chroma");
+    expect(chroma.find(".mmark-tab").text()).toBe("HD");
+    expect(chroma.find(".mmark-release-version").exists()).toBe(false);
     const zit = mountNamed({
       mark: ["ZIT"],
       mark_tab: "⚡",
@@ -415,5 +422,12 @@ describe("ModelMark, named", () => {
     expect(wrapper.find("img").attributes("src")).toBe(icon("a".repeat(64)));
     expect(wrapper.find(".mmark-named").exists()).toBe(false);
     expect(wrapper.find(".mmark-version").exists()).toBe(false);
+    const release = mountNamed({
+      icon_sha256: "a".repeat(64),
+      mark: ["Klein", "2"],
+      mark_icon: "flux",
+      mark_band: true,
+    });
+    expect(release.find(".mmark-release-version").exists()).toBe(false);
   });
 });

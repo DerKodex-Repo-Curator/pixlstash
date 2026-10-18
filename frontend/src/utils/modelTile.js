@@ -1,11 +1,11 @@
 // The named tile a workflow card draws a model of a known base model with
 // (#1951). The server works all of it out (`known_base_models.model_tile`)
 // and sends it on the row as `mark`, `mark_tab`, `mark_colors`, `mark_icon`,
-// `mark_letters` and `mark_band`; this only lays it out. A release (`mark_band`) is its name
-// across a band, its maker's glyph and its version beside it (Klein, the Flux
-// glyph, 2); a LoRA or fine-tune is its base's name over its own initials
-// (SDXL over JU9). Either has a tab for its role or a bolt for a few-step
-// model, on its maker's colour. The shelf keeps the generated initials,
+// `mark_letters` and `mark_band`; this only lays it out. A release
+// (`mark_band`) is its maker's glyph centred on its maker's colour, with its
+// version on a pill off the top-end corner (the Flux glyph and 2); a
+// re-branded fine-tune is its own name (JU9). Either has a tab for its role or
+// a bolt for a few-step model off the bottom-end corner. The shelf keeps the generated initials,
 // because each of its rows prints the name beside the mark.
 
 import chromaIcon from "../assets/model-families/chroma.webp";
@@ -24,8 +24,8 @@ const LOBEHUB = Object.fromEntries(
 );
 
 /**
- * A release's art, by `mark_icon`. A maker's glyph sits beside the version
- * with a hard shadow; the owner's horse and star sit in the same place as
+ * A release's art, by `mark_icon`. A maker's glyph sits in the middle of the
+ * tile with a hard shadow; the owner's horse and star sit in the same place as
  * pictures; Chroma's eye fills the tile.
  */
 function glyphOf(icon) {
@@ -47,11 +47,6 @@ export const FEW_STEP_TAB = "⚡";
 // `frontend/e2e/specs/model-tile-names.spec.js` measures.
 const ONE_LINE = 15.4 / 24;
 const TWO_LINES = 11.4 / 24;
-// A release's version and the room beside the glyph, in 32nds of the tile
-// (`.mmark-release-version`): 7.5 high in 11 of width, or 5.5 high in 15.5
-// beside a smaller glyph where it is wider than that (Qwen's 2511).
-const VERSION = 7.5;
-const VERSION_ROOM = 11;
 // The tile's tracking, `letter-spacing: -0.02em`, which canvas does not apply.
 const TRACKING = -0.02;
 // What a character measures where nothing can be measured (jsdom), in em.
@@ -106,11 +101,11 @@ export function nameScale(lines) {
  *   family with no maker colour.
  * @returns {{lines: string[], tab: ?{bolt: boolean, text: string},
  *   background: string, edge: string, scale: number,
- *   release: ?{name: string, version: ?string, small: boolean,
+ *   release: ?{version: ?string,
  *     glyph: ?{url: string, kind: string}, letters: ?string}} | null}
  *   `letters` stand where a maker has no glyph (Z, HI, Lu).
- *   `edge` is the colour the tab's ink takes: the gradient's last stop.
- *   `release` is set for a release's band tile, and `lines`/`scale` for the
+ *   `edge` is the colour the pills' ink takes: the gradient's last stop.
+ *   `release` is set for a release's tile, and `lines`/`scale` for the
  *   rest.
  */
 export function namedTile(row, fallbackColor) {
@@ -132,14 +127,13 @@ export function namedTile(row, fallbackColor) {
   if (!row.mark_band) {
     return { ...tile, lines: row.mark, scale: nameScale(row.mark) };
   }
-  const [name, version = null] = row.mark;
+  // The release's name (`mark[0]`) is the card's to print, not the tile's.
+  const [, version = null] = row.mark;
   const glyph = glyphOf(row.mark_icon);
   return {
     ...tile,
     release: {
-      name,
       version,
-      small: Boolean(version) && widthEm(version) * VERSION > VERSION_ROOM,
       glyph,
       letters: glyph ? null : row.mark_letters || null,
     },
