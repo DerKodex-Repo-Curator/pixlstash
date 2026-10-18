@@ -58,6 +58,23 @@ export function markWords(text, words) {
   return parts;
 }
 
+/**
+ * Where *text* names *word*, `[{start, end}]` in order, by the rule
+ * {@link markWords} marks with.
+ *
+ * @param {string} text
+ * @param {string} word
+ */
+export function wordSpans(text, word) {
+  const spans = [];
+  let at = 0;
+  for (const part of markWords(text, [word])) {
+    if (part.hit) spans.push({ start: at, end: at + part.text.length });
+    at += part.text.length;
+  }
+  return spans;
+}
+
 /** Whether *text* names *word*, by the rule {@link markWords} marks with. */
 export function namesWord(text, word) {
   return markWords(text, [word]).some((part) => part.hit);

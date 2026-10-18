@@ -3760,6 +3760,86 @@ describe("the person a workflow run alone is of", () => {
       expect(focus).toHaveBeenCalledWith(23);
     });
 
+    describe("typed into the prompt", () => {
+      const picked = (wrapper) => tile(wrapper, 7).attributes("aria-checked") === "true";
+      const useWord = (word) =>
+        listAdapters.mockImplementation(async ({ fileKind } = {}) =>
+          fileKind ? [] : [{ ...MIRA, trigger_words: [word] }],
+        );
+
+      it("tells each person's trigger word in their tile's tip", async () => {
+        const wrapper = await mountRun(fromCard);
+        const tip = tile(wrapper, 7).findComponent({ name: "Tooltip" });
+        expect(tip.props("text")).toBe("Trigger word: Mira Vale");
+      });
+
+      it("picks the person once their word is typed past, and never unpicks", async () => {
+        const wrapper = await mountRun(fromCard);
+        // Still being typed: "Mira Vale" may be on its way to something else.
+        await typePrompt(wrapper, "a portrait of mira vale");
+        expect(picked(wrapper)).toBe(false);
+        await typePrompt(wrapper, "a portrait of mira vale ");
+        expect(picked(wrapper)).toBe(true);
+        expect(wrapper.vm.addedLoras.map((row) => row.person)).toEqual([7]);
+        // Taking the word out leaves the LoRA on.
+        await typePrompt(wrapper, "a portrait");
+        expect(picked(wrapper)).toBe(true);
+      });
+
+      it("does not pick again someone unpicked by hand", async () => {
+        const wrapper = await mountRun(fromCard);
+        await typePrompt(wrapper, "mira vale, smiling");
+        await tile(wrapper, 7).trigger("click");
+        expect(picked(wrapper)).toBe(false);
+        await typePrompt(wrapper, "mira vale, smiling on a beach");
+        expect(picked(wrapper)).toBe(false);
+      });
+
+      it("swaps the name, once typed past, for a trigger word of its own", async () => {
+        useWord("ohwx");
+        const wrapper = await mountRun(fromCard);
+        await typePrompt(wrapper, "a photo of Mira");
+        expect(wrapper.vm.prompt).toBe("a photo of Mira");
+        await typePrompt(wrapper, "a photo of Mira, smiling");
+        expect(wrapper.vm.prompt).toBe("a photo of ohwx, smiling");
+        expect(picked(wrapper)).toBe(true);
+        // The word is there: a name typed beside it is meant.
+        await typePrompt(wrapper, "a photo of ohwx, Mira smiling");
+        expect(wrapper.vm.prompt).toBe("a photo of ohwx, Mira smiling");
+      });
+
+      it("keeps the name where the trigger word holds it", async () => {
+        const wrapper = await mountRun(fromCard);
+        await typePrompt(wrapper, "a photo of Mira V");
+        expect(wrapper.vm.prompt).toBe("a photo of Mira V");
+      });
+
+      it("puts the caret back after the swapped word", async () => {
+        useWord("ohwxwoman");
+        const focus = vi.fn();
+        const wrapper = mount(RunDialog, {
+          props: { source: fromCard, context: {} },
+          global: {
+            stubs: {
+              ...globalOpts.global.stubs,
+              AppTextarea: {
+                name: "AppTextarea",
+                props: ["label", "highlight", "modelValue"],
+                template: "<textarea />",
+                // Typing, just past "Mira ".
+                methods: { focus, selection: () => ({ start: 16, end: 16 }) },
+              },
+            },
+          },
+        });
+        await flushPromises();
+        await typePrompt(wrapper, "a photo of Mira smiling");
+        await flushPromises();
+        expect(wrapper.vm.prompt).toBe("a photo of ohwxwoman smiling");
+        expect(focus).toHaveBeenCalledWith(21);
+      });
+    });
+
     it("is said by a region that was there before it, and unsaid once the word is typed", async () => {
       const live = (wrapper) => wrapper.find('[data-testid="rund-trigger-live"]');
       const wrapper = await mountRun(fromCard);

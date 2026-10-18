@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { insertWords, markWords, namesWord, triggerWord } from "./triggerWords";
+import { insertWords, markWords, namesWord, triggerWord, wordSpans } from "./triggerWords";
 
 describe("triggerWord", () => {
   it("is the first word, and nothing for a LoRA that needs none", () => {
@@ -74,5 +74,15 @@ describe("insertWords", () => {
     expect(insertWords("a photo of her smiling", ["Mira"], 11, 14).text).toBe(
       "a photo of Mira smiling",
     );
+  });
+});
+
+describe("wordSpans", () => {
+  it("is where the text names the word, by the marking rule", () => {
+    expect(wordSpans("Mira, admiral mira", "mira")).toEqual([
+      { start: 0, end: 4 },
+      { start: 14, end: 18 },
+    ]);
+    expect(wordSpans("nothing here", "mira")).toEqual([]);
   });
 });
