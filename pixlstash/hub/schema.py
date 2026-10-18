@@ -2591,8 +2591,8 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
                         "WHERE g.document LIKE '%SeedVR2%')"
                     )
                 if data_version < 21:
-                    # A text encoder is told by its token table too: a T5
-                    # downloaded into a flat folder cleared the parameter
+                    # A text encoder is told by its token table too: a T5 or a
+                    # Qwen downloaded into a flat folder cleared the parameter
                     # count and was a `checkpoint`, so no graph could load it
                     # as an encoder. A CLIP there was `unknown`. Unlike
                     # step 19 this takes `checkpoint` rows too, since that is

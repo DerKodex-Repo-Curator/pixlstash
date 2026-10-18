@@ -206,6 +206,12 @@ _CLIP_WIDTHS = {768: "clip_l", 1024: "clip_h", 1280: "clip_g"}
 _T5_VOCABS = {32128: "t5", 256384: "umt5"}
 _T5_XXL_WIDTH = 4096
 
+# The token table of a decoder-only language model in the Hugging Face layout:
+# the Qwen 2.5-VL, Gemma, Llama and Mistral encoders newer image models load.
+# No diffusion model keeps a tensor by this name at the top level, and a
+# checkpoint bundling one keeps it under a prefix.
+_LM_TOKEN_TABLE = "model.embed_tokens.weight"
+
 
 @dataclass(frozen=True)
 class AdapterInfo:
@@ -541,12 +547,17 @@ def family_from_header(header: dict) -> Optional[str]:
 
 
 def has_text_encoder_markers(header: dict) -> bool:
-    """Return whether *header* holds a CLIP, T5 or UMT5 text encoder's token table.
+    """Return whether *header* holds a text encoder's token table.
 
-    The table at the top level, as :func:`family_from_header` reads it: a
-    checkpoint keeps its encoders under a prefix, which never matches.
+    A CLIP, T5 or UMT5 one as :func:`family_from_header` reads it, or a
+    language model's (:data:`_LM_TOKEN_TABLE`), which names no family. At the
+    top level only: a checkpoint keeps its encoders under a prefix, which never
+    matches.
     """
-    return _text_encoder_family(header) is not None
+    if _text_encoder_family(header) is not None:
+        return True
+    table = _valid_shape(header.get(_LM_TOKEN_TABLE))
+    return table is not None and len(table) == 2
 
 
 def _text_encoder_family(header: dict) -> Optional[str]:
@@ -621,7 +632,7 @@ def classify_model_file(
        table (:func:`has_text_encoder_markers`), which is what keeps a T5
        downloaded there from clearing the checkpoint threshold.
     2. **The directory**, when it names a role. A text encoder of a layout
-       :func:`has_text_encoder_markers` does not know (Qwen, Gemma) carries no
+       :func:`has_text_encoder_markers` does not know (a T5 of another width) carries no
        marker to find, nor does a VAE of a layout :data:`_VAE_TENSORS` does not
        know (a Wan one), so the layout the user (or their launcher) already
        maintains is the best evidence there is. It outranks the parameter count

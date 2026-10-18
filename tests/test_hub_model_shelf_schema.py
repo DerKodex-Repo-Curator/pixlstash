@@ -1083,6 +1083,12 @@ class TestComponentRoleBackfill:
             [49408, 768],
             "unknown",
         )
+        qwen = shelved(
+            "qwen_2.5_vl_7b.safetensors",
+            "model.embed_tokens.weight",
+            [152064, 3584],
+            "checkpoint",
+        )
         sd35 = shelved(
             "sd3.5_large.safetensors",
             "text_encoders.t5xxl.transformer.shared.weight",
@@ -1094,7 +1100,8 @@ class TestComponentRoleBackfill:
         apply_migrations(hub)
 
         kinds = dict(hub.execute("SELECT id, file_kind FROM model").fetchall())
-        assert [kinds[t5], kinds[clip], kinds[sd35]] == [
+        assert [kinds[t5], kinds[clip], kinds[qwen], kinds[sd35]] == [
+            "text_encoder",
             "text_encoder",
             "text_encoder",
             "checkpoint",

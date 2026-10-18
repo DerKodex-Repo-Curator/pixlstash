@@ -193,6 +193,8 @@ class TestFileClassification:
             {"encoder.embed_tokens.weight": _tensor([32128, 4096])},
             {"shared.weight": _tensor([256384, 4096])},  # umt5_xxl
             {"text_model.embeddings.token_embedding.weight": _tensor([49408, 768])},
+            # Qwen 2.5-VL 7B, as Qwen-Image loads it
+            {"model.embed_tokens.weight": _tensor([152064, 3584])},
         ],
     )
     def test_a_token_table_makes_a_text_encoder_at_checkpoint_scale(
@@ -211,11 +213,17 @@ class TestFileClassification:
         assert info is not None
         assert info.file_kind == FILE_TEXT_ENCODER
 
-    def test_a_token_table_under_a_prefix_is_a_checkpoints_own(self):
-        # SD3.5 bakes its T5 in under `text_encoders.`; the file is a checkpoint.
-        header = {
-            "text_encoders.t5xxl.transformer.shared.weight": _tensor([32128, 4096])
-        }
+    @pytest.mark.parametrize(
+        "table",
+        [
+            # SD3.5 bakes its T5 in under `text_encoders.`
+            ("text_encoders.t5xxl.transformer.shared.weight", [32128, 4096]),
+            # Lumina 2 bakes its Gemma in the same way
+            ("text_encoders.gemma2_2b.model.embed_tokens.weight", [256000, 2304]),
+        ],
+    )
+    def test_a_token_table_under_a_prefix_is_a_checkpoints_own(self, table):
+        header = {table[0]: _tensor(table[1])}
         assert classify_model_file(list(header), 8_000_000_000, "", header) == (
             FILE_CHECKPOINT
         )
