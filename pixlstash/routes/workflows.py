@@ -1042,6 +1042,12 @@ _PIXEL_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 # shelved as `flan-t5-xxl_…` where a graph asks for `t5xxl_flan_latest_…`,
 # 0.61 for the nearest other T5.
 LIKELY_SAME_FILE_RATIO = 0.75
+# Words a model file's name uses for its kind, which a missing file and its
+# misfiled copy must share (`_misfiled_copy`).
+_KIND_NAME_MARKERS = {
+    FILE_VAE: ("vae",),
+    FILE_TEXT_ENCODER: ("t5", "clip", "encoder", "llama", "qwen", "gemma", "bert"),
+}
 # The stock loaders Open in ComfyUI puts the pack's digest loaders in for,
 # whether or not ComfyUI lists their files. A run swaps more, and only for a
 # file ComfyUI lacks (`_digest_swap_kind`).
@@ -3228,6 +3234,13 @@ def _misfiled_copy(
         ],
     )
     if copy is None or copy.file_kind == kind:
+        return None
+    # ponytail: a word for the kind in both names, so a close name of another
+    # kind is not taken for it (`flux_vae` reads 0.75 like `flux_dev`). A copy
+    # named without one is not offered; the asset-row evidence still is.
+    markers = _KIND_NAME_MARKERS[kind]
+    name = normalized_filename(copy.filename)
+    if not any(m in wanted and m in name for m in markers):
         return None
     if not may_refile_by_name(hub, copy.id, kind):
         return None

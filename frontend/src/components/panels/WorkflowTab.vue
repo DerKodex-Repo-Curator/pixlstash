@@ -1943,17 +1943,16 @@ async function fileOffered(row, changes) {
   // The renamed copy's offer is the row's own answer, so it is asked again.
   // Filed as this loader's kind, the copy is now its likely pick, and picked:
   // both steps in the one gesture.
-  const picked = row.offer.copy
-    ? await rereadCopy(key, row, Boolean(changes.file_kind))
-    : "";
+  const forRow = changes.file_kind === row.kind;
+  const picked = row.offer.copy ? await rereadCopy(key, row, forRow) : "";
   notices.push({
     level: "success",
     text: changes.file_kind
       ? `Filed ${named} as ${fileKindLabel(changes.file_kind)} on your shelf.` +
-        (row.offer.copy
+        (row.offer.copy && forRow
           ? picked
             ? " It is picked for this row: save to keep it."
-            : " This loader cannot load it, so nothing was picked."
+            : " Nothing was picked for this row: choose it in the picker."
           : "")
       : "The shelf will not suggest a kind for it.",
   });
@@ -1988,8 +1987,8 @@ async function rereadCopy(key, row, pick) {
   replacementsByFile.value = { ...replacementsByFile.value, [ask]: answer };
   const likely = answer?.replacements?.find((candidate) => candidate.likely);
   if (!pick || !likely) return "";
-  pickModel(row, likely.filename);
-  return likely.filename;
+  // `edit` refuses while the changes are being written or read, and says so.
+  return pickModel(row, likely.filename) ? likely.filename : "";
 }
 
 /** Focus a model row's Kind menu, or its own control once the menu has gone. */

@@ -6624,9 +6624,10 @@ text-encoder picker from the detail's `kind_offers`, without "Adapter…" (the
 algorithm dialog is the shelf's), and the offer replaces "Nothing to offer" so a
 picker carries one note at most. On a missing file nothing has been picked for,
 the same menu offers the `refile` copy the `?replacing=` read names (the file
-renamed, on the shelf as another kind): filing it there re-reads that row's
-offer and picks the copy, now `likely`, so filing and picking are one choice and
-the row reads Fixed.
+renamed, on the shelf as another kind): filing it as the row's kind re-reads
+that row's offer and picks the copy where it is now `likely` (the loader can
+load it), so filing and picking are one choice and the row reads Fixed. Where
+nothing is picked, or `edit` refuses the pick, the receipt says so.
 
 ### 13.2 The workflow library
 

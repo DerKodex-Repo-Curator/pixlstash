@@ -16110,6 +16110,17 @@ def test_the_missing_file_filed_as_another_kind_is_offered_for_refiling(cloneabl
         r = cloneable.owner.patch(f"{API}/models", json={"ids": [model_id], **body})
         assert r.status_code == 200, r.text
 
+    def shelved_alongside(kind, name, state="present"):
+        """``offered()`` with one more shelf model, which is taken off again."""
+        extra = _h(f"refile-{name}")
+        with cloneable.server.hub.transaction() as conn:
+            _shelve_with_copy(conn, kind, name, extra, state)
+        try:
+            return offered()
+        finally:
+            with cloneable.server.hub.transaction() as conn:
+                _unshelve(conn, [extra])
+
     try:
         assert offered() == (
             [],
@@ -16120,6 +16131,25 @@ def test_the_missing_file_filed_as_another_kind_is_offered_for_refiling(cloneabl
                 "file_kind": "unknown",
             },
         )
+        # A second close name, of the right kind: which one it is is a guess.
+        # Its copy is gone, so it cannot be offered as `likely` itself.
+        assert (
+            shelved_alongside(
+                "text_encoder", "test-umt5-xxl-fp16.safetensors", "missing"
+            )[1]
+            is None
+        )
+        # A checkpoint named as close (0.83) but with no word for a text
+        # encoder in it is not the file, however alike the names read.
+        # (The copy is filed out of the pool meanwhile, so the checkpoint is
+        # the one close name.)
+        with cloneable.server.hub.transaction() as conn:
+            conn.execute("UPDATE model SET file_kind = 'vae' WHERE id = ?", (model_id,))
+        assert shelved_alongside("checkpoint", "test-sd-fp16.safetensors")[1] is None
+        with cloneable.server.hub.transaction() as conn:
+            conn.execute(
+                "UPDATE model SET file_kind = 'unknown' WHERE id = ?", (model_id,)
+            )
         # Don't suggest: nothing more is offered for it.
         patch(suggest_kind=False)
         assert offered()[1] is None

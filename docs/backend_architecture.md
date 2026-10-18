@@ -10866,11 +10866,14 @@ Unclassified. A recorded workflow that loads the file says what it is, and
   slot's kind, so a copy filed as a checkpoint or Unclassified is invisible to
   it, and the asset-row lookup above never pairs the two names. The
   `?replacing=` read (`_misfiled_copy`) answers that copy as `refile`: the one
-  match over the slot's kind and the re-fileable kinds together, and only where
+  match over the slot's kind and the re-fileable kinds together, only where both
+  names carry a word for the kind (`_KIND_NAME_MARKERS`: `flux_vae` reads as
+  close to `flux_dev` as a renamed file does), and only where
   `may_refile_by_name` allows it (nobody decided its kind, no recorded load of it
   under its own name as anything else). A name match is weaker evidence than a
   workflow naming the file, so it is only an offer; once the owner files it, it
-  is the `likely` replacement and the Workflow tab picks it.
+  is the `likely` replacement wherever the loader can load it, and the Workflow
+  tab picks it.
 - **The Workflow tab gets the same offer**, on `GET /workflows/{id}` as
   `kind_offers`: `loader_offers` hands a default-recipe loader its model's
   suggestion only where the loader takes that kind and nobody has decided.

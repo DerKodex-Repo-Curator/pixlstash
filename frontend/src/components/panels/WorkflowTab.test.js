@@ -1728,6 +1728,38 @@ describe("a VAE or text encoder row (#1596, #1850)", () => {
     ).toBe("Fixed");
   });
 
+  it("files the copy as another kind without picking it or saying it was", async () => {
+    preflightWorkflowRun.mockResolvedValue(
+      missing({ file: "t5/t5xxl_fp8.safetensors", folder: "text_encoders" }),
+    );
+    getWorkflowCard.mockResolvedValue(detail({ card: withSupport }));
+    readModelSwap.mockReset().mockResolvedValue({
+      replacements: [],
+      replacements_reason: "none_go_with_it",
+      refile: {
+        id: 5,
+        filename: "t5-xxl_fp8.gguf",
+        display_name: null,
+        file_kind: "unknown",
+      },
+    });
+    editModels.mockReset().mockResolvedValue({ updated: [5], fields: ["file_kind"] });
+    const { wrapper } = await mountWith([KEY], [withSupport]);
+    await settle(wrapper);
+    const asked = readModelSwap.mock.calls.length;
+
+    row(wrapper, "text_encoder")
+      .findComponent(KindMenu)
+      .vm.$emit("pick", "checkpoint");
+    await settle(wrapper);
+    expect(editModels).toHaveBeenCalledWith([5], { file_kind: "checkpoint" });
+    expect(readModelSwap.mock.calls.length).toBe(asked + 1);
+    expect(setWorkflowChanges).not.toHaveBeenCalled();
+    expect(useNoticeStore().notices.at(-1).text).toBe(
+      "Filed t5-xxl_fp8 as Checkpoint on your shelf.",
+    );
+  });
+
   it("offers no renamed copy for a file ComfyUI has", async () => {
     preflightWorkflowRun.mockResolvedValue({ groups: [{ reasons: [] }] });
     getWorkflowCard.mockResolvedValue(detail({ card: withSupport }));
