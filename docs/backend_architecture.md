@@ -10374,7 +10374,11 @@ Quality before provenance: an exact filename beats a fuzzy declaration. A
   icon, else `glyph_letters` (Z, HI, Lu), and the entry's role or else a
   `ROLE_WORDS` word from the filename on the tab; packaging joined to the
   alias in one token (`krea2TurboINTXQuants`) and a `rev2` still count as the
-  release. A fine-tune checkpoint or LoRA wears the same tile, told apart by
+  release. A version is a whole run of at most four digits
+  (`_VERSION_DIGITS`) with only packaging after it in its token (`0.9vae`),
+  and a size, resolution or step count (`22b`, `1024px`, `4steps`) is
+  packaging, so `sdxl_2xMoreDetailed` and `sdxl123456789` are fine-tunes. A
+  fine-tune checkpoint or LoRA wears the same tile, told apart by
   the tab: a fine-tune its own initials and version (`MO80`), a LoRA
   `LORA_TAB`; a few-step base (`few_step`) or a speed word (`lightning`,
   `hyper`, `lcm`, `dmd2`, `turbo`) gives `⚡` and a step count.
