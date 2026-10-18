@@ -1728,6 +1728,35 @@ describe("a VAE or text encoder row (#1596, #1850)", () => {
     ).toBe("Fixed");
   });
 
+  it("says which way a suggestion answer went", async () => {
+    const offer = {
+      address: "core:n3/clip_name/ckpt_name",
+      model_id: 4,
+      file_kind: "unknown",
+      suggested_kind: "text_encoder",
+      suggested_by: 2,
+      suggested_fields: ["clip_name"],
+    };
+    getWorkflowCard.mockResolvedValue(
+      detail({ card: withSupport, kind_offers: [offer] }),
+    );
+    editModels.mockReset().mockResolvedValue({ updated: [4], fields: [] });
+    const { wrapper } = await mountWith([KEY], [withSupport]);
+    await settle(wrapper);
+    const menu = () => row(wrapper, "text_encoder").findComponent(KindMenu);
+
+    menu().vm.$emit("suggest", false);
+    await settle(wrapper);
+    expect(useNoticeStore().notices.at(-1).text).toBe(
+      "The shelf will not suggest a kind for it.",
+    );
+    menu().vm.$emit("suggest", true);
+    await settle(wrapper);
+    expect(useNoticeStore().notices.at(-1).text).toBe(
+      "The shelf will suggest a kind for it again.",
+    );
+  });
+
   it("files the copy as another kind without picking it or saying it was", async () => {
     preflightWorkflowRun.mockResolvedValue(
       missing({ file: "t5/t5xxl_fp8.safetensors", folder: "text_encoders" }),

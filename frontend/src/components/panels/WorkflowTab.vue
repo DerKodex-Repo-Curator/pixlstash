@@ -1954,7 +1954,9 @@ async function fileOffered(row, changes) {
             ? " It is picked for this row: save to keep it."
             : " Nothing was picked for this row: choose it in the picker."
           : "")
-      : "The shelf will not suggest a kind for it.",
+      : changes.suggest_kind === false
+        ? "The shelf will not suggest a kind for it."
+        : "The shelf will suggest a kind for it again.",
   });
   // A shelf already read shows the old kind until it is read again.
   const shelf = useModelShelfStore();
