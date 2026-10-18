@@ -6,6 +6,7 @@
     :location="layerSide() || location"
     :attach="layer || false"
     :open-delay="openDelay"
+    :max-width="maxWidth"
     :disabled="disabled || !(text || $slots.default)"
     :activator-props="activatorProps"
     :eager="false"
@@ -33,7 +34,12 @@ let delays;
 function tooltipDelays() {
   if (!delays) {
     const style = getComputedStyle(document.documentElement);
-    delays = { openDelay: cssDurationMs(style, "--tooltip-delay") };
+    delays = {
+      openDelay: cssDurationMs(style, "--tooltip-delay"),
+      // Vuetify writes the space available as an inline `max-width`, which
+      // beats the class rule below: handed the token, it takes the smaller.
+      maxWidth: parseFloat(style.getPropertyValue("--tooltip-max-w")) || undefined,
+    };
   }
   return delays;
 }
@@ -117,7 +123,7 @@ const instance = getCurrentInstance();
 const open = ref(false);
 const tipRef = ref(null);
 
-const { openDelay } = tooltipDelays();
+const { openDelay, maxWidth } = tooltipDelays();
 
 const description = computed(() =>
   props.describe && props.text ? props.text : "",

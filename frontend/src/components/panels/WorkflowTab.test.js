@@ -1608,6 +1608,61 @@ describe("a VAE or text encoder row (#1596, #1850)", () => {
     ).toBe(false);
   });
 
+  it("picks the shelf's likely match for a missing file, to save or take back", async () => {
+    // The shelf holds the missing T5 under another name: it is picked as an
+    // unsaved change, so Save uses it without the owner choosing it again.
+    preflightWorkflowRun.mockResolvedValue(
+      missing({ file: "t5/t5xxl_fp8.safetensors", folder: "text_encoders" }),
+    );
+    getWorkflowCard.mockResolvedValue(detail({ card: withSupport }));
+    readModelSwap.mockReset().mockImplementation(
+      replacementsByKind({
+        text_encoder: [
+          { id: 4, filename: "t5xxl_fp16.safetensors" },
+          { id: 5, filename: "t5-xxl_fp8.safetensors", likely: true },
+        ],
+      }),
+    );
+    const { wrapper } = await mountWith([KEY], [withSupport]);
+    await settle(wrapper);
+
+    expect(setWorkflowChanges).toHaveBeenCalledTimes(1);
+    const [picked] = setWorkflowChanges.mock.calls[0][1].models;
+    expect(picked.filename).toBe("t5-xxl_fp8.safetensors");
+    expect(picked.address).toMatch(/clip_name/);
+    expect(row(wrapper, "text_encoder").text()).not.toContain(
+      "Text encoder missing",
+    );
+    // Said as the tab's own fix, with what it did one focus away.
+    const encoder = row(wrapper, "text_encoder");
+    expect(encoder.find('[data-testid="wftab-edited"]').text()).toBe("Fixed");
+    expect(encoder.find('[data-testid="wftab-saved"]').text()).toContain(
+      "Corrected: t5xxl_fp8",
+    );
+    const note = encoder
+      .find('[data-testid="wftab-fix-mark"]')
+      .attributes("data-note");
+    expect(note).toContain("t5xxl_fp8.safetensors is not installed in ComfyUI");
+    expect(note).toContain("t5-xxl_fp8.safetensors");
+    const count = wrapper.find('[data-testid="wftab-draft-count"]');
+    expect(count.text()).toBe("1 automatic fix");
+
+    // Taken back, it stays taken back.
+    await row(wrapper, "text_encoder")
+      .find('[data-testid="wftab-reset-model"]')
+      .trigger("click");
+    await settle(wrapper);
+    expect(setWorkflowChanges).toHaveBeenCalledTimes(2);
+    expect(setWorkflowChanges.mock.calls[1][1].models ?? []).toEqual([]);
+    expect(row(wrapper, "text_encoder").text()).toContain("Text encoder missing");
+    // Its own name is no pick: the option says the file is missing.
+    expect(
+      row(wrapper, "text_encoder")
+        .find('[data-testid="wftab-pick-text_encoder"] select option')
+        .text(),
+    ).toBe("t5xxl_fp8 (missing)");
+  });
+
   it("warns on the missing one's own row, and never on a vision encoder's account", async () => {
     preflightWorkflowRun.mockResolvedValue(
       missing(
@@ -1631,6 +1686,8 @@ describe("a VAE or text encoder row (#1596, #1850)", () => {
       wrapper.find('[data-testid="wftab-no-replacement-text_encoder"]').text(),
     ).toContain("is known to work with this checkpoint");
     expect(row(wrapper, "vae").text()).not.toContain("missing");
+    // Nothing reads as the missing one renamed: nothing is picked for it.
+    expect(setWorkflowChanges).not.toHaveBeenCalled();
     expect(textOf(wrapper)).not.toContain("clip_vision_h");
     expect(readModelSwap).toHaveBeenCalledWith(KEY, {
       replacing: "t5/t5xxl_fp8.safetensors",

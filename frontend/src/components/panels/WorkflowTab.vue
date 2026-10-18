@@ -268,7 +268,7 @@
               v-if="row.edited"
               class="wftab-yours wftab-yours--unsaved"
               data-testid="wftab-edited"
-              >Edited</span
+              >{{ row.fix ? "Fixed" : "Edited" }}</span
             >
             <span v-else-if="row.yours" class="wftab-yours">Yours</span>
           </span>
@@ -321,8 +321,24 @@
                  the way back beside it. -->
             <div v-if="row.edited" class="wftab-meta" data-testid="wftab-saved">
               <span class="wftab-coverage wftab-quiet"
-                ><Tooltip :text="row.file" activator="parent" />Saved:
-                {{ row.savedLabel }}</span
+                ><span
+                  v-if="row.fix"
+                  class="wftab-fix-mark"
+                  tabindex="0"
+                  :aria-label="`How ${row.name} was fixed`"
+                  data-testid="wftab-fix-mark"
+                  :data-note="autoFixNote(row.fix)"
+                  ><Tooltip :text="autoFixNote(row.fix)" activator="parent" /><v-icon
+                    size="16"
+                    aria-hidden="true"
+                    >mdi-auto-fix</v-icon
+                  ></span
+                ><span
+                  ><Tooltip :text="row.file" activator="parent" />{{
+                    row.fix ? "Corrected:" : "Saved:"
+                  }}
+                  {{ row.savedLabel }}</span
+                ></span
               >
               <AppButton
                 variant="ghost"
@@ -891,8 +907,12 @@
       >
         <div class="wftab-draft__line">
           <span class="wftab-draft__count" data-testid="wftab-draft-count">
-            <v-icon size="16" aria-hidden="true">mdi-pencil</v-icon>
-            {{ unsavedText(changeCount) }}
+            <v-icon size="16" aria-hidden="true">{{
+              autoFixCount && autoFixCount >= changeCount
+                ? "mdi-auto-fix"
+                : "mdi-pencil"
+            }}</v-icon>
+            {{ draftText(changeCount) }}
           </span>
           <AppButton
             size="sm"
@@ -1794,6 +1814,7 @@ const modelRows = computed(() => {
       savedLabel,
       pick,
       edited: Boolean(pick),
+      fix: autoFixOf(gone, pick, candidates),
       yours: model.provenance === "edited",
       missing: gone,
       missingText: staleFiles.value.has(gone)
@@ -1806,7 +1827,8 @@ const modelRows = computed(() => {
       options:
         candidates.length || pick
           ? [
-              { value: "", label: savedLabel },
+              // A missing file is no choice: said, or it reads as picked.
+              { value: "", label: gone ? `${savedLabel} (missing)` : savedLabel },
               ...candidates.map((candidate) => ({
                 value: candidate.filename,
                 label: candidateLabel(candidate),
@@ -1842,6 +1864,32 @@ const settableModels = computed(() =>
       pick: row.pick,
     })),
 );
+
+/**
+ * The automatic fix a missing row's pick is: the offer's likely match for the
+ * file (the tab picks it itself), `{ was, now, loader }`, or null. Read off
+ * the waiting pick rather than remembered, so it still says so after a reload;
+ * any other pick is the owner's own, and Edited.
+ */
+function autoFixOf(missing, pick, candidates) {
+  const likely = candidates.find((candidate) => candidate.likely);
+  return missing && pick && likely?.filename === pick
+    ? { was: missing, now: pick, loader: likely.loader ?? null }
+    : null;
+}
+
+/** What a row's automatic fix did, in full, for its mark's tooltip. */
+function autoFixNote(fix) {
+  const through = fix.loader
+    ? ` ComfyUI does not have it either, so a run loads it through ${fix.loader}.`
+    : "";
+  return (
+    `${fileName(fix.was)} is not installed in ComfyUI. Your model shelf ` +
+    `has ${fileName(fix.now)}, whose name reads as the same file renamed, so ` +
+    `PixlStash picked it.${through} Save to keep it, or undo to put the ` +
+    "original back."
+  );
+}
 
 /** Pick a file for a model row; the saved one ("") takes the change back. */
 function pickModel(row, file) {
@@ -2984,6 +3032,19 @@ function unsavedText(count) {
   return `${count} unsaved ${count === 1 ? "change" : "changes"}`;
 }
 
+/** How many of the waiting changes are the tab's own fixes, still unchanged. */
+const autoFixCount = computed(
+  () => modelRows.value.filter((row) => row.fix).length,
+);
+
+/** The bar's count: automatic fixes said as such, the rest as changes. */
+function draftText(count) {
+  const fixed = Math.min(autoFixCount.value, count);
+  if (!fixed) return unsavedText(count);
+  const fixes = `${fixed} automatic ${fixed === 1 ? "fix" : "fixes"}`;
+  return count > fixed ? `${fixes} · ${unsavedText(count - fixed)}` : fixes;
+}
+
 /**
  * The bar has just arrived, in two parts that end at different times.
  * `arrived` is the landing pulse, and lasts as long as the bar. `arrival` is
@@ -3006,7 +3067,7 @@ watch(
   () => [selectedKey.value, Boolean(shownChanges.value), changeCount.value],
   ([key, , count], [wasKey, wasRead, wasCount] = []) => {
     if (count && !wasCount && wasRead && key === wasKey && barOf.value) {
-      arrival.value = unsavedText(count);
+      arrival.value = draftText(count);
       arrived.value = true;
     } else if (count !== wasCount) {
       arrival.value = "";
@@ -4039,6 +4100,40 @@ watch(
   { immediate: true },
 );
 
+/**
+ * Pick the shelf's likely match for each missing file (`likely`: the same
+ * file under another name), as unsaved changes the owner saves or takes back.
+ * Once per selection, when the offers are in and the changes can be edited:
+ * a match taken back stays taken back until the card is selected again.
+ */
+let prefilled = null;
+watch(
+  () => [replacementsByFile.value, canEdit.value],
+  () => {
+    const key = selectedKey.value;
+    if (!key || prefilled === key || !canEdit.value) return;
+    if (!Object.keys(replacementsByFile.value).length) return;
+    prefilled = key;
+    const picks = modelRows.value
+      .filter((row) => row.settable && row.missing && !row.pick)
+      .map((row) => [
+        row,
+        replacementsByFile.value[`${row.kind}:${row.file}`]?.replacements?.find(
+          (candidate) => candidate.likely,
+        ),
+      ])
+      .filter(([, likely]) => likely);
+    if (!picks.length) return;
+    edit((set) =>
+      picks.reduce(
+        (next, [row, likely]) =>
+          withModel(next, row.address, likely.filename, row.file),
+        set,
+      ),
+    );
+  },
+);
+
 async function checkInstalled(key, { quiet = false } = {}) {
   const check = ++installedCheck;
   // `quiet`: the rows keep what they say until the new answers are in.
@@ -4313,6 +4408,16 @@ async function checkInstalled(key, { quiet = false } = {}) {
   margin-right: var(--space-2);
   border-radius: var(--radius-pill);
   background: rgb(var(--v-theme-surface-tertiary));
+}
+
+/* The automatic fix's mark: a free-standing glyph at the text's size, with
+   the gap an icon keeps from its label (design §8). Focusable, so its
+   tooltip opens from the keyboard too. */
+.wftab-fix-mark {
+  display: inline-flex;
+  vertical-align: text-bottom;
+  margin-right: var(--space-2);
+  border-radius: var(--radius-sm);
 }
 
 .wftab-col {

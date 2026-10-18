@@ -15983,6 +15983,73 @@ def test_a_replacement_the_loader_cannot_load_is_offered_through_our_loader(
             _unshelve(conn, [digest for _kind, digest in digests.values()])
 
 
+def test_the_missing_file_under_another_name_is_offered_first_as_likely(cloneable):
+    """The shelf holds the missing T5 renamed (`test-t5-xxl-fp16` for the
+    graph's `test-t5-fp16`) and nothing says it goes with the checkpoint: it is
+    offered all the same, first and marked `likely`, for the tab to pick.
+
+    Wrong if it is not offered, or marked where two names read that close or
+    where the precision differs: a pre-selection must be the one file.
+    """
+    graph = _with_support_loaders(cloneable.graph)
+    cloneable.monkeypatch.setattr(
+        workflows_routes,
+        "_load_embedded_api_prompt",
+        lambda server, pid, object_info=None: (graph, []),
+    )
+    cloneable.monkeypatch.setattr(
+        workflows_routes,
+        "propose_companions",
+        lambda hub, checkpoint_id, index=None: {"vae": [], "text_encoder": []},
+    )
+    shelved = {
+        "test-clip-l.safetensors": _h("likely-clip-l"),
+        "test-t5-xxl-fp16.safetensors": _h("likely-t5-renamed"),
+        "test-t5-fp8.safetensors": _h("likely-t5-fp8"),
+    }
+    with cloneable.server.hub.transaction() as conn:
+        for name, digest in shelved.items():
+            _shelve_with_copy(conn, "text_encoder", name, digest)
+    info = json.loads(json.dumps(RUN_OBJECT_INFO))
+    listed = [["test-clip-l.safetensors"], {}]
+    info["DualCLIPLoader"] = {
+        "input": {"required": {"clip_name1": listed, "clip_name2": listed}}
+    }
+    info["PixlStashCLIPLoader"] = {
+        "input": {"required": {"clip_sha256": ["STRING", {}], "type": [["flux"], {}]}}
+    }
+    cloneable.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url: (info, None)
+    )
+
+    def offered():
+        r = cloneable.owner.get(
+            f"{API}/workflows/{RUN_WF}/model-swap",
+            params={"replacing": "test-t5-fp16.safetensors"},
+        )
+        assert r.status_code == 200, r.text
+        return [
+            (c["filename"], c["loader"], c["likely"]) for c in r.json()["replacements"]
+        ]
+
+    try:
+        assert offered() == [
+            ("test-t5-xxl-fp16.safetensors", "PixlStashCLIPLoader", True)
+        ]
+        # A second name that close: which one it is would be a guess.
+        with cloneable.server.hub.transaction() as conn:
+            _shelve_with_copy(
+                conn,
+                "text_encoder",
+                "test-umt5-xxl-fp16.safetensors",
+                _h("likely-umt5"),
+            )
+        assert offered() == []
+    finally:
+        with cloneable.server.hub.transaction() as conn:
+            _unshelve(conn, [*shelved.values(), _h("likely-umt5")])
+
+
 def test_a_shelf_checkpoint_comfyui_does_not_list_is_offered_and_run_off_the_shelf(
     cloneable,
 ):
@@ -18924,6 +18991,90 @@ def test_a_shelf_checkpoint_comfyui_does_not_list_is_saved_and_run_off_the_shelf
     finally:
         with saving.server.hub.transaction() as conn:
             _unshelve(conn, [digest])
+
+
+def test_a_shelf_text_encoder_comfyui_does_not_list_is_saved_and_run_off_the_shelf(
+    saving,
+):
+    """Not only a checkpoint: a text encoder only the shelf holds, picked at a
+    dual CLIP loader's second slot, is saved as picked, and the run loads both
+    of the loader's files through the pack's CLIP loader by digest.
+
+    Wrong if the save is refused as `not_on_comfyui` with the pack's loader
+    in ComfyUI, if it is saved without it, or if the run submits the dual
+    loader still naming a file this ComfyUI does not list.
+    """
+    clip_l, old_t5 = "test-clip-l.safetensors", "test-t5-missing.safetensors"
+    new_t5 = "test-t5-shelf-only.safetensors"
+    l_digest, t5_digest = _h("clip-l-listed"), _h("t5-shelf-only")
+    graph = json.loads(json.dumps(CHAIN_DOCUMENT))
+    graph["8"] = {
+        "class_type": "DualCLIPLoader",
+        "inputs": {"clip_name1": clip_l, "clip_name2": old_t5, "type": "flux"},
+    }
+    graph["6"]["inputs"]["clip"] = ["8", 0]
+    manual = workflows_routes.store_manual_workflow(
+        saving.server.hub, "Dual CLIP", graph, "import"
+    )
+    with saving.server.hub.transaction() as conn:
+        _shelve_with_copy(conn, "text_encoder", clip_l, l_digest)
+        _shelve_with_copy(conn, "text_encoder", new_t5, t5_digest)
+    info = json.loads(json.dumps(CHAIN_OBJECT_INFO))
+    listed = [[clip_l, old_t5], {}]
+    info["DualCLIPLoader"] = {
+        "input": {
+            "required": {
+                "clip_name1": listed,
+                "clip_name2": listed,
+                "type": [["flux"], {}],
+            }
+        },
+        "output": ["CLIP"],
+    }
+    saving.monkeypatch.setattr(
+        workflows_routes,
+        "_read_object_info",
+        lambda url, **_: (json.loads(json.dumps(info)), None),
+    )
+    detail = saving.owner.get(f"{API}/workflows/{manual}").json()
+    (address,) = [
+        m["address"]
+        for m in detail["card"]["default_recipe"]["models"]
+        if m["address"].endswith("/clip_name2")
+    ]
+    changes = {"models": [{"address": address, "filename": new_t5}]}
+    try:
+        # Without the pack's loader nothing can load it.
+        r = _save(saving, manual, changes=changes)
+        assert r.status_code == 409, r.text
+        assert "not_on_comfyui" in r.json()["detail"], r.text
+
+        info["PixlStashCLIPLoader"] = {
+            "input": {
+                "required": {"clip_sha256": ["STRING", {}], "type": [["flux"], {}]},
+                "optional": {"clip_sha256_2": ["STRING", {}]},
+            },
+            "output": ["CLIP"],
+        }
+        r = _save(saving, manual, changes=changes)
+        assert r.status_code == 200, r.text
+        last = _versions_of(saving, manual)[-1]
+        assert last[2]["8"]["inputs"]["clip_name2"] == new_t5
+
+        r = saving.owner.post(f"{API}/workflows/run", json={"workflow_id": manual})
+        assert r.json()["status"] == "success", r.json()
+        loader = saving.submitted[-1]["graph"]["8"]
+        assert loader == {
+            "class_type": "PixlStashCLIPLoader",
+            "inputs": {
+                "clip_sha256": l_digest,
+                "clip_sha256_2": t5_digest,
+                "type": "flux",
+            },
+        }, loader
+    finally:
+        with saving.server.hub.transaction() as conn:
+            _unshelve(conn, [l_digest, t5_digest])
 
 
 def test_changes_made_before_another_version_are_save_as_new_only(saving):

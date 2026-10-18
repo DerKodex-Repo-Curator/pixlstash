@@ -306,6 +306,7 @@ from pixlstash.utils.adapter_header import (
 )
 from pixlstash.utils.image_processing.image_utils import ImageUtils
 from pixlstash.utils.known_base_models import family_label, family_of, modality_of
+from pixlstash.utils.model_utils import quant_from_filename
 from pixlstash.utils.comfyui_utilities import NotAWorkflowError, check_comfy_workflow
 from pixlstash.hub.workflow_origin import FILE_ORIGIN, INBOX_ORIGIN
 from pixlstash.utils.sql_chunking import chunked
@@ -1010,7 +1011,14 @@ _WORKFLOW_ID_RE = re.compile(WORKFLOW_ID_PATTERN)
 # resolves as a path.
 _UPLOAD_EXTENSION_RE = re.compile(r"^\.[a-z0-9]{1,8}$")
 _PIXEL_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
-# The stock loaders Open in ComfyUI puts the pack's digest loaders in for.
+# How alike (`SequenceMatcher`, extensions off) a shelf file's name must read
+# to a missing file's to be offered as that file renamed: 0.80 for a flan T5
+# shelved as `flan-t5-xxl_…` where a graph asks for `t5xxl_flan_latest_…`,
+# 0.61 for the nearest other T5.
+LIKELY_SAME_FILE_RATIO = 0.75
+# The stock loaders Open in ComfyUI puts the pack's digest loaders in for,
+# whether or not ComfyUI lists their files. A run swaps more, and only for a
+# file ComfyUI lacks (`_digest_swap_kind`).
 _PACK_MODEL_LOADERS = {"VAELoader": FILE_VAE, "CLIPLoader": FILE_TEXT_ENCODER}
 # The name `_upload_files` gives a hashed picture, read back for its content:
 # a loader still holding one says what its run loaded (`_made_from`).
@@ -2722,6 +2730,14 @@ class ModelFixCandidate(BaseModel):
             "the original. Null when the original loader loads it."
         ),
     )
+    likely: bool = Field(
+        False,
+        description=(
+            "Whether this is the shelf's one file whose name reads as the "
+            "missing one's, renamed (`_likely_same_file`): the Workflow tab "
+            "picks it for the owner to save."
+        ),
+    )
 
 
 class ModelSwapOptions(BaseModel):
@@ -3118,6 +3134,45 @@ def _checkpoint_off_the_shelf(
         shelf_uuid="trial",
     )
     return node["class_type"] if swapped else None
+
+
+def _likely_same_file(wanted: str, shelf) -> SwapModel | None:
+    """The one shelf model whose file name reads as *wanted*'s, renamed, or None.
+
+    ``flan-t5-xxl_float8_…`` for a graph's ``t5xxl_flan_latest_float8_…``:
+    a file that is not on this machine has nothing but its name to compare.
+    None where two read that close, where it is *wanted* itself, and where
+    both names say a precision and they differ.
+    """
+    # ponytail: name similarity, the only thing known about a missing file;
+    # it is only ever a pre-selection the owner saves, never a silent load.
+    quant = quant_from_filename(wanted)
+    stem = os.path.splitext(wanted)[0]
+    close = []
+    for model in shelf:
+        name = normalized_filename(model.filename)
+        theirs = quant_from_filename(name)
+        if name == wanted or (quant and theirs and quant != theirs):
+            continue
+        ratio = SequenceMatcher(None, stem, os.path.splitext(name)[0]).ratio()
+        if ratio >= LIKELY_SAME_FILE_RATIO:
+            close.append(model)
+    return close[0] if len(close) == 1 else None
+
+
+def _digest_swap_kind(class_type: str) -> str | None:
+    """The slot kind a PixlStash digest loader may stand in for *class_type*
+    by (``run_service.PIXLSTASH_SWAP_LOADERS``), or None.
+
+    Read off its model fields, not its name, so ``DualCLIPLoader`` answers as
+    ``CLIPLoader`` does: ``run_service.plan_pixlstash_swap`` refuses whatever
+    the swap would lose, as it does for the offer.
+    """
+    kinds = {
+        model_fix_kind(class_type, field) for field in model_filename_fields(class_type)
+    }
+    kind = kinds.pop() if len(kinds) == 1 else None
+    return kind if kind in run_service.PIXLSTASH_SWAP_LOADERS else None
 
 
 def _holds_class(graph: dict, class_type: str) -> bool:
@@ -5317,9 +5372,9 @@ def create_router(server) -> APIRouter:
         replaces is flagged ``family_mismatch`` and still loaded (#1620 Q3): a
         family table not knowing a base model is no reason to refuse a run. One
         ComfyUI cannot load is flagged ``model_not_applied`` and the loader
-        keeps its file, which ``judge`` then checks like any other, unless it
-        is a checkpoint the run loads off the shelf (:func:`_loads_off_the_shelf`,
-        given *request*): that one is written unlisted.
+        keeps its file, which ``judge`` then checks like any other, unless the
+        run loads it off the shelf (:func:`_loads_off_the_shelf`; a checkpoint
+        only given *request*): that one is written unlisted.
         """
         if not models:
             return []
@@ -8357,20 +8412,32 @@ def create_router(server) -> APIRouter:
         filename: str,
         object_info: dict | None,
     ) -> bool:
-        """Whether a run loads checkpoint *filename* at *node_id* off the shelf.
+        """Whether a run loads *filename* at *node_id* off the shelf.
 
         For a file ComfyUI does not list: written in all the same, the run
-        swaps the pack's checkpoint loader in for it
-        (:func:`_swap_in_shelf_loaders`), the rule ``?replacing=`` offers
-        such a checkpoint by. Only with ComfyUI on this computer, since that
-        loader reads the file and cannot fetch one.
+        swaps the pack's loader in for it (:func:`_swap_in_shelf_loaders`),
+        the rule ``?replacing=`` offers such a file by. A VAE or a text
+        encoder by digest, which that loader fetches when it has to; a
+        checkpoint by shelf row, only with ComfyUI on this computer, since
+        that loader reads the file and cannot fetch one.
         """
         node = graph.get(node_id)
+        if object_info is None or not isinstance(node, dict):
+            return False
+        kind = model_fix_kind(str(node.get("class_type") or ""), widget)
+        if kind in run_service.PIXLSTASH_SWAP_LOADERS:
+            plan, _refusal = run_service.plan_pixlstash_swap(
+                graph,
+                node_id,
+                kind,
+                {node["inputs"][widget]: filename},
+                object_info,
+                _shelf_digest(_hub(), kind),
+            )
+            return plan is not None
         return (
             request is not None
-            and object_info is not None
-            and isinstance(node, dict)
-            and model_fix_kind(node.get("class_type", ""), widget) == FILE_CHECKPOINT
+            and kind == FILE_CHECKPOINT
             and _comfyui_is_here(request)
             and _checkpoint_off_the_shelf(
                 graph,
@@ -8520,11 +8587,12 @@ def create_router(server) -> APIRouter:
         """Load each model file this ComfyUI lacks off the shelf.
 
         For a run: a ``CheckpointLoaderSimple``, ``UNETLoader``,
-        ``ControlNetLoader``, ``UpscaleModelLoader``, ``VAELoader`` or
-        ``CLIPLoader`` naming a file ComfyUI does not list becomes the pack's
-        loader on the shelf's copy of that file, the swap *Open in ComfyUI*
-        makes (:func:`_with_pack_nodes`), on the same terms. A checkpoint or
-        diffusion model by the shelf's row, only where the shelf holds one copy
+        ``ControlNetLoader``, ``UpscaleModelLoader``, VAE or text-encoder
+        loader (``CLIPLoader``, ``DualCLIPLoader``) naming a file ComfyUI does
+        not list becomes the pack's loader on the shelf's copy of that file,
+        the swap *Open in ComfyUI* makes (:func:`_with_pack_nodes`; there only
+        on a ``VAELoader`` or ``CLIPLoader``), on the same terms. A checkpoint
+        or diffusion model by the shelf's row, only where the shelf holds one copy
         and ComfyUI is on this computer to read it, since that loader cannot
         fetch its file; a ControlNet, an upscaler, a VAE or a CLIP by digest,
         which its loader fetches when it has to. Anywhere else the loader is
@@ -8543,12 +8611,12 @@ def create_router(server) -> APIRouter:
             )
         }
         swapped = []
-        # A VAE or a CLIP by digest, as `_with_pack_nodes` swaps one in: the
-        # only two classes in `_PACK_MODEL_LOADERS`, and `targets` holds only
-        # the files ComfyUI does not list.
+        # A VAE or a CLIP by digest, on the rule a pick of one is written by
+        # (`_loads_off_the_shelf`): any loader of that kind, a dual CLIP too.
+        # `targets` holds only the files ComfyUI does not list.
         for item in targets:
             was = item.get("class_type")
-            kind = _PACK_MODEL_LOADERS.get(was)
+            kind = _digest_swap_kind(str(was or ""))
             if kind is None:
                 continue
             node_id = str(item.get("node_id"))
@@ -9668,6 +9736,12 @@ def create_router(server) -> APIRouter:
           row, :func:`swap_in_pack_nodes`, only with ComfyUI on this
           computer), marked ``loader``.
 
+        One shelf file of the kind whose name reads as *replacing*'s, renamed
+        (:func:`_likely_same_file`), is offered first and marked ``likely``
+        without the first two filters: it is the file the graph asks for, as
+        far as anything here can tell. Nothing loads it until the owner saves
+        the pick the Workflow tab makes of it.
+
         Returns:
             ``(candidates, reason, narrowed)``, *reason* set only when there
             are none, *narrowed* whether a checkpoint's were held to a base
@@ -9720,6 +9794,10 @@ def create_router(server) -> APIRouter:
         # `wider`: the checkpoints of another base model, offered only when
         # none in `candidates` can be loaded.
         candidates, wider = [], []
+        likely = _likely_same_file(
+            wanted,
+            [m for m in models.values() if m.file_kind == kind and m.id not in hidden],
+        )
         if kind == FILE_CHECKPOINT:
             base_model = _replaced_base_model(graph, models, index, wanted)
             shelf = sorted(
@@ -9755,18 +9833,35 @@ def create_router(server) -> APIRouter:
                 ),
                 None,
             )
-            if base is None or base.file_kind != FILE_CHECKPOINT:
+            if base is not None and base.file_kind == FILE_CHECKPOINT:
+                candidates = [
+                    ModelFixCandidate(
+                        id=entry["id"],
+                        filename=entry["filename"],
+                        display_name=entry["display_name"],
+                        via=entry["via"],
+                    )
+                    for entry in propose_companions(_hub(), base.id, index)[kind]
+                    if entry["id"] not in hidden
+                ]
+            elif likely is None:
                 return [], "no_checkpoint", None
+        if likely is not None:
+            # First, whatever else says it goes with the workflow: the file
+            # the graph asks for, renamed, is the likeliest of all.
+            same = next((c for c in candidates if c.id == likely.id), None)
             candidates = [
-                ModelFixCandidate(
-                    id=entry["id"],
-                    filename=entry["filename"],
-                    display_name=entry["display_name"],
-                    via=entry["via"],
-                )
-                for entry in propose_companions(_hub(), base.id, index)[kind]
-                if entry["id"] not in hidden
+                (
+                    same
+                    or ModelFixCandidate(
+                        id=likely.id,
+                        filename=likely.filename,
+                        display_name=likely.display_name,
+                    )
+                ).model_copy(update={"likely": True}),
+                *(c for c in candidates if c.id != likely.id),
             ]
+            wider = [c for c in wider if c.id != likely.id]
         candidates = [
             c for c in candidates if normalized_filename(c.filename) != wanted
         ]

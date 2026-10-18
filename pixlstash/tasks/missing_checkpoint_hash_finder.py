@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 
 from pixlstash.hub.db import HubDatabase
-from pixlstash.services.builtin_models import BUILTIN_OWNER
+from pixlstash.services.builtin_models import UNHASHED_FOLDER_SQL
 from pixlstash.task_runner import TaskCancelledError
 from pixlstash.tasks.base_task_finder import BaseDeferringFinder
 from pixlstash.tasks.checkpoint_hash_task import CheckpointHashTask
@@ -38,7 +38,9 @@ class MissingCheckpointHashFinder(BaseDeferringFinder):
     reclassify (``builtin_caches``), any such row they correct to ``checkpoint``
     would match on ``file_kind`` and send the worker to open a directory, fail,
     and defer it - every start, forever. ``owner`` is the same marker that makes
-    the folder scanner skip these roots.
+    the folder scanner skip these roots. The managed store shares that owner
+    but holds plain files (the Downloads intake moves models there), so it is
+    hashed like any folder (``UNHASHED_FOLDER_SQL``).
 
     The query is left as the plain ``sha256 IS NULL`` all the same, so it
     matches ``ix_model_hash_queue`` exactly and cannot silently strand a row.
@@ -90,8 +92,7 @@ class MissingCheckpointHashFinder(BaseDeferringFinder):
             "AND EXISTS (SELECT 1 FROM model_file mf "
             "JOIN model_folder f ON f.id = mf.model_folder_id "
             "WHERE mf.model_id = m.id AND mf.state = 'present' "
-            "AND (f.owner IS NULL OR f.owner <> ?))",
-            (BUILTIN_OWNER,),
+            f"AND NOT {UNHASHED_FOLDER_SQL})",
         )
         if row is None:
             return 0, 0
@@ -113,9 +114,9 @@ class MissingCheckpointHashFinder(BaseDeferringFinder):
                     "JOIN model_folder f ON f.id = mf.model_folder_id "
                     "WHERE m.sha256 IS NULL AND m.file_kind <> 'engine' "
                     "AND mf.state = 'present' "
-                    "AND (f.owner IS NULL OR f.owner <> ?) "
+                    f"AND NOT {UNHASHED_FOLDER_SQL} "
                     "GROUP BY m.id ORDER BY m.id LIMIT ?",
-                    (BUILTIN_OWNER, limit),
+                    (limit,),
                 )
             ],
             CheckpointHashTask.BATCH_SIZE,
