@@ -97,6 +97,7 @@ export function namesWord(text, word) {
 export function insertWords(text, words, start = 0, end = start) {
   const source = String(text ?? "");
   const insert = words.join(", ");
+  if (!insert) return { text: source, caret: end };
   if (start === end) {
     const word = /[\p{L}\p{N}_]/u;
     while (start > 0 && start < source.length && word.test(source[start - 1]) && word.test(source[start])) {

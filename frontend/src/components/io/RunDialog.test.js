@@ -3795,6 +3795,16 @@ describe("the person a workflow run alone is of", () => {
         expect(picked(wrapper)).toBe(false);
       });
 
+      it("does not swap the name of someone unpicked by hand", async () => {
+        useWord("ohwx");
+        const wrapper = await mountRun(fromCard);
+        await tile(wrapper, 7).trigger("click");
+        await tile(wrapper, 7).trigger("click");
+        expect(picked(wrapper)).toBe(false);
+        await typePrompt(wrapper, "a photo of Mira, smiling");
+        expect(wrapper.vm.prompt).toBe("a photo of Mira, smiling");
+      });
+
       it("swaps the name, once typed past, for a trigger word of its own", async () => {
         useWord("ohwx");
         const wrapper = await mountRun(fromCard);
@@ -3834,8 +3844,7 @@ describe("the person a workflow run alone is of", () => {
         expect(wrapper.vm.prompt).toBe("a photo of Mira V");
       });
 
-      it("puts the caret back after the swapped word", async () => {
-        useWord("ohwxwoman");
+      const mountAt = (start) => {
         const focus = vi.fn();
         const wrapper = mount(RunDialog, {
           props: { source: fromCard, context: {} },
@@ -3846,17 +3855,34 @@ describe("the person a workflow run alone is of", () => {
                 name: "AppTextarea",
                 props: ["label", "highlight", "modelValue"],
                 template: "<textarea />",
-                // Typing, just past "Mira ".
-                methods: { focus, selection: () => ({ start: 16, end: 16 }) },
+                methods: { focus, selection: () => ({ start, end: start }) },
               },
             },
           },
         });
+        return { wrapper, focus };
+      };
+
+      it("puts the caret back after the swapped word", async () => {
+        useWord("ohwxwoman");
+        // Typing, just past "Mira ".
+        const { wrapper, focus } = mountAt(16);
         await flushPromises();
         await typePrompt(wrapper, "a photo of Mira smiling");
         await flushPromises();
         expect(wrapper.vm.prompt).toBe("a photo of ohwxwoman smiling");
         expect(focus).toHaveBeenCalledWith(21);
+      });
+
+      it("puts the caret after the word, not into it, for an edit inside the name", async () => {
+        useWord("ohwxwoman");
+        // "Mra" mended to "Mira": the caret is just past the "i".
+        const { wrapper, focus } = mountAt(2);
+        await flushPromises();
+        await typePrompt(wrapper, "Mira smiling");
+        await flushPromises();
+        expect(wrapper.vm.prompt).toBe("ohwxwoman smiling");
+        expect(focus).toHaveBeenCalledWith(9);
       });
     });
 

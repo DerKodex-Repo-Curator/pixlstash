@@ -2870,7 +2870,8 @@ const unpickedIds = new Set();
  * word is typed past is picked. "Typed past" is a hit the caret is not at the end
  * of and the text goes on after, so "Mira" on the way to "Miranda" counts for
  * nothing. Never unpicks: an edit must not take a LoRA off, and a person
- * unpicked by hand is not picked again by the text.
+ * unpicked by hand is neither picked again by the text nor has their name
+ * swapped.
  */
 function typePrompt(text) {
   const live = promptField.value?.selection?.();
@@ -2893,11 +2894,19 @@ function typePrompt(text) {
     const word = person.trigger;
     if (!word) continue;
     const name = String(person.name || "").trim();
-    if (name && !namesWord(word, name) && !namesWord(next, word)) {
+    // Not for a person unpicked by hand: their word would run without their LoRA.
+    if (
+      name &&
+      !unpickedIds.has(person.id) &&
+      !namesWord(word, name) &&
+      !namesWord(next, word)
+    ) {
       const span = wordSpans(next, name).find((hit) => past(hit) && own(hit, name));
       if (span) {
         next = next.slice(0, span.start) + word + next.slice(span.end);
         if (caret >= span.end) caret += word.length - (span.end - span.start);
+        // Edited inside the name: the caret goes after the word, not into it.
+        else if (caret > span.start) caret = span.start + word.length;
       }
     }
     if (

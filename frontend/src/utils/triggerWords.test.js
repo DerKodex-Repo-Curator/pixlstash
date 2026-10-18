@@ -70,6 +70,10 @@ describe("insertWords", () => {
     });
   });
 
+  it("leaves the text alone with nothing to put in", () => {
+    expect(insertWords("a photo of", [], 10)).toEqual({ text: "a photo of", caret: 10 });
+  });
+
   it("replaces a selection", () => {
     expect(insertWords("a photo of her smiling", ["Mira"], 11, 14).text).toBe(
       "a photo of Mira smiling",
