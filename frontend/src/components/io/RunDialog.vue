@@ -2749,14 +2749,22 @@ function personName(id) {
 
 /**
  * The trigger word a person's run carries: their row's LoRA's, or for one not
- * picked, the LoRA a pick would add (their first that fits). "" for none.
+ * picked, the LoRA a pick would add, as `settlePeople` chooses it (their first
+ * that fits and no other person's row holds). "" for none.
  */
 function personWord(id) {
   const shelf = [...attachedLoras.value, ...adapters.value, ...unknownLoras.value];
   const row = addedLoras.value.find((entry) => entry.person === id && entry.sha256);
+  const held = new Set(
+    addedLoras.value
+      .filter((entry) => entry.person != null && entry.person !== id)
+      .map((entry) => entry.sha256),
+  );
   const sha256 =
     row?.sha256 ??
-    personFits.value.people.find((person) => person.id === id)?.loras[0]?.sha256;
+    personFits.value.people
+      .find((person) => person.id === id)
+      ?.loras.find((lora) => !held.has(lora.sha256))?.sha256;
   return sha256 ? triggerWord(shelf.find((entry) => entry.sha256 === sha256)) : "";
 }
 

@@ -3773,6 +3773,30 @@ describe("the person a workflow run alone is of", () => {
         expect(tip.props("text")).toBe("Trigger word: Mira Vale");
       });
 
+      it("tells the word of the LoRA a pick would add, not one another's row holds", async () => {
+        listCharacters.mockResolvedValue([
+          { id: 7, name: "Mira" },
+          { id: 9, name: "Vale" },
+        ]);
+        listAdapters.mockImplementation(async ({ fileKind } = {}) =>
+          fileKind
+            ? []
+            : [
+                { ...MIRA, attachments: [...of(7), ...of(9)], trigger_words: ["shared"] },
+                { ...MIRA, sha256: "v".repeat(64), attachments: of(9), trigger_words: ["valeword"] },
+              ],
+        );
+        const wrapper = await mountRun(fromCard);
+        const tip = () => tile(wrapper, 9).findComponent({ name: "Tooltip" }).props("text");
+        expect(tip()).toBe("Trigger word: shared");
+        // Mira's row takes the shared file, so a pick of Vale adds Vale's own.
+        await tile(wrapper, 7).trigger("click");
+        expect(tip()).toBe("Trigger word: valeword");
+        await tile(wrapper, 9).trigger("click");
+        const vale = wrapper.vm.addedLoras.find((row) => row.person === 9);
+        expect(vale.sha256).toBe("v".repeat(64));
+      });
+
       it("picks the person once their word is typed past, and never unpicks", async () => {
         const wrapper = await mountRun(fromCard);
         // Still being typed: "Mira Vale" may be on its way to something else.
