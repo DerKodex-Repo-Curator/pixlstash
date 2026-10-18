@@ -110,6 +110,17 @@ describe("fitWorkflows", () => {
     expect(ids(clash)).toEqual(["sdxl"]);
   });
 
+  it("lets a LoRA with no base model keep every workflow offered", () => {
+    const { match, unknown, clash } = fitWorkflows(
+      [card("krea"), card("sdxl", { family: "sdxl" })],
+      [LORA, { ...LORA, sha256: "e".repeat(64), base_model_family: null }],
+      [],
+    );
+    expect(ids(match)).toEqual(["krea"]);
+    expect(ids(unknown)).toEqual(["sdxl"]);
+    expect(clash).toEqual([]);
+  });
+
   it("narrows nothing with no LoRA to fit against", () => {
     const { match, unknown, clash } = fitWorkflows([card("krea")], [], []);
     expect(match).toEqual([]);

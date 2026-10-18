@@ -2581,14 +2581,18 @@ const loraFitNote = computed(() => {
  * person with a LoRA for each of two base models is offered both models'
  * workflows, and picking one must load the LoRA made for it, so a row holding
  * an attached LoRA that does not match *key*'s checkpoint takes the first that
- * does. A row that already matches, or a workflow nothing matches, is left be.
+ * does and no other row holds. A row that already matches, or a workflow
+ * nothing free matches, is left be.
  */
 function followLora(key) {
   const row = addedLoras.value[0];
   const entry = loraFits.value?.match.find((fit) => fit.card.id === key);
   if (!row || !entry || entry.loras.some((lora) => lora.sha256 === row.sha256)) return;
   if (!attachedLoras.value.some((lora) => lora.sha256 === row.sha256)) return;
-  row.sha256 = entry.loras[0].sha256;
+  // Never a file another row already holds: one loader asked for twice.
+  const held = new Set(addedLoras.value.map((other) => other.sha256));
+  const free = entry.loras.find((lora) => !held.has(lora.sha256));
+  if (free) row.sha256 = free.sha256;
 }
 
 const workflowOptions = computed(() => {
