@@ -310,8 +310,36 @@
                 row.savedLabel
               }}</span
             >
+            <!-- What the shelf files this loader's model as, where every
+                 workflow loading it says it is this loader's kind (#1962): the
+                 shelf's Kind menu, here too. It is the one note under the
+                 picker, so "Nothing to offer" gives way to it. -->
+            <KindMenu
+              v-if="row.offer"
+              :file-kind="row.offer.file_kind"
+              :kind-text="
+                row.offer.copy
+                  ? `${modelLabel(fileName(row.offer.copy.filename))}: ${fileKindLabel(row.offer.file_kind)} on shelf`
+                  : `${fileKindLabel(row.offer.file_kind)} on shelf`
+              "
+              :subject="
+                row.offer.copy
+                  ? modelLabel(fileName(row.offer.copy.filename))
+                  : row.savedLabel
+              "
+              :suggested-kind="row.offer.suggested_kind"
+              :suggested-by="row.offer.suggested_by"
+              :suggested-fields="row.offer.suggested_fields"
+              :evidence-heading="
+                row.offer.copy ? 'Named like the missing file' : undefined
+              "
+              :evidence-note="row.offer.copy ? copyNote(row) : ''"
+              :adapter="false"
+              @pick="(kind) => fileOffered(row, { file_kind: kind })"
+              @suggest="(on) => fileOffered(row, { suggest_kind: on })"
+            />
             <p
-              v-if="row.missing && !row.options.length && row.noOptions"
+              v-else-if="row.missing && !row.options.length && row.noOptions"
               class="wftab-note wftab-quiet"
               :data-testid="`wftab-no-replacement-${row.kind}`"
             >
@@ -1215,6 +1243,7 @@ import {
   useComfyuiOpen,
 } from "../../composables/useComfyuiOpen";
 import { useWorkflowPictures } from "../../composables/useWorkflowPictures";
+import { useModelShelfStore } from "../../stores/useModelShelfStore";
 import { useNoticeStore } from "../../stores/useNoticeStore";
 import { useSidebarStore } from "../../stores/useSidebarStore";
 import { useRunDialogStore } from "../../stores/useRunDialogStore";
@@ -1228,7 +1257,8 @@ import {
   loraBase,
   loraStem,
 } from "../../utils/loraChain";
-import { quantBadge } from "../../utils/modelShelf";
+import { editModels } from "../../api/modelShelf";
+import { fileKindLabel, quantBadge } from "../../utils/modelShelf";
 import {
   PACK_OUTDATED,
   PACK_OUTDATED_ACTION,
@@ -1274,6 +1304,7 @@ import AppSelect from "../widgets/AppSelect.vue";
 import BreakableTitle from "../widgets/BreakableTitle.vue";
 import ComfyuiIcon from "../widgets/ComfyuiIcon.vue";
 import EditLorasDialog from "../io/EditLorasDialog.vue";
+import KindMenu from "../widgets/KindMenu.vue";
 import ExposeParameterDialog from "../io/ExposeParameterDialog.vue";
 import TasksPanel, { tasksTabFor } from "./TasksPanel.vue";
 import Tooltip from "../widgets/Tooltip.vue";
@@ -1594,7 +1625,7 @@ const MODEL_ROWS = {
   },
   vae: { heading: "VAE", missingText: "VAE missing", folders: new Set(["vae"]) },
   text_encoder: {
-    heading: "CLIP",
+    heading: "Text encoder",
     missingText: "Text encoder missing",
     folders: new Set(["text_encoders"]),
   },
@@ -1840,9 +1871,141 @@ const modelRows = computed(() => {
             ]
           : [],
       noOptions: noReplacementText(model.kind, answer),
+      // Only on the file the loader still loads: a replacement is a shelf
+      // model of the loader's own kind already.
+      offer: kindOfferFor(model, canPick, file, gone, pick, answer),
     };
   });
 });
+
+/**
+ * The shelf's kind offer on a model row (#1962), or null.
+ *
+ * Its own file, where every workflow loading it says it is this loader's kind
+ * (`kind_offers`): only on the file the loader still loads, since a
+ * replacement is a shelf model of the loader's own kind already. Or, on a
+ * missing file nothing has been picked for, the shelf's copy of it under
+ * another name, filed as another kind (`refile`, #1966's case): filing it as
+ * this loader's kind is what makes it the row's likely pick.
+ */
+function kindOfferFor(model, canPick, file, gone, pick, answer) {
+  if (!canPick) return null;
+  if (file === model.filename) {
+    const offer = (detail.value?.kind_offers ?? []).find(
+      (entry) => entry.address === model.address,
+    );
+    if (offer) return offer;
+  }
+  const copy = answer?.refile;
+  if (!gone || pick || !copy) return null;
+  return {
+    model_id: copy.id,
+    file_kind: copy.file_kind,
+    suggested_kind: model.kind,
+    suggested_by: 0,
+    suggested_fields: [],
+    copy,
+  };
+}
+
+/** What the offer of a renamed copy says in place of a workflow count. */
+function copyNote(row) {
+  const kind = fileKindLabel(row.kind).toLowerCase();
+  return (
+    `${fileName(row.offer.copy.filename)} is on your shelf as ` +
+    `${fileKindLabel(row.offer.file_kind)}, and its name reads as ` +
+    `${fileName(row.missing)} renamed. File it as a ${kind} and this row ` +
+    "picks it for you to save."
+  );
+}
+
+/**
+ * Re-file a loader's model on the shelf from its Kind menu, or stop the
+ * offer. A shelf write, not a workflow change: nothing joins the unsaved
+ * set, and the row is read again so the offer goes once it is answered.
+ */
+async function fileOffered(row, changes) {
+  const key = selectedKey.value;
+  try {
+    await editModels([row.offer.model_id], changes);
+  } catch (err) {
+    notices.push({
+      level: "error",
+      text: errorMessage(err, "Could not write that change."),
+    });
+    // The offer still stands, so its menu takes back the focus it held.
+    await refocusRow(row.address);
+    return;
+  }
+  const named = row.offer.copy
+    ? modelLabel(fileName(row.offer.copy.filename))
+    : row.savedLabel;
+  // The renamed copy's offer is the row's own answer, so it is asked again.
+  // Filed as this loader's kind, the copy is now its likely pick, and picked:
+  // both steps in the one gesture.
+  const forRow = changes.file_kind === row.kind;
+  const picked = row.offer.copy ? await rereadCopy(key, row, forRow) : "";
+  notices.push({
+    level: "success",
+    text: changes.file_kind
+      ? `Filed ${named} as ${fileKindLabel(changes.file_kind)} on your shelf.` +
+        (row.offer.copy && forRow
+          ? picked
+            ? " It is picked for this row: save to keep it."
+            : " Nothing was picked for this row: choose it in the picker."
+          : "")
+      : changes.suggest_kind === false
+        ? "The shelf will not suggest a kind for it."
+        : "The shelf will suggest a kind for it again.",
+  });
+  // A shelf already read shows the old kind until it is read again.
+  const shelf = useModelShelfStore();
+  if (shelf.loaded) void shelf.fetchRows();
+  if (selectedKey.value !== key) return;
+  await loadDetail(key, { quiet: true });
+  // The menu goes with the offer it answered; the row's own control takes
+  // the focus it held rather than <body>.
+  await refocusRow(row.address);
+}
+
+/**
+ * Ask a missing row's offer again and, with *pick*, pick its likely match as
+ * the tab does on selection. Answers with the file picked, or "".
+ */
+async function rereadCopy(key, row, pick) {
+  const ask = `${row.kind}:${row.file}`;
+  let answer;
+  try {
+    answer = await readModelSwap(key, {
+      replacing: row.file,
+      slotKind: row.kind,
+      cached: true,
+    });
+  } catch (err) {
+    console.warn(`[workflows] could not read replacements for ${row.file}`, err);
+    return "";
+  }
+  if (selectedKey.value !== key) return "";
+  replacementsByFile.value = { ...replacementsByFile.value, [ask]: answer };
+  const likely = answer?.replacements?.find((candidate) => candidate.likely);
+  if (!pick || !likely) return "";
+  // `edit` refuses while the changes are being written or read, and says so.
+  return pickModel(row, likely.filename) ? likely.filename : "";
+}
+
+/** Focus a model row's Kind menu, or its own control once the menu has gone. */
+async function refocusRow(address) {
+  await nextTick();
+  // This tab's own Models panel: another panel on the page may draw the
+  // same address.
+  const panel = modelsHeading.value?.closest("section");
+  const rowEl = [...(panel?.querySelectorAll("[data-address]") ?? [])].find(
+    (el) => el.dataset.address === address,
+  );
+  rowEl
+    ?.querySelector("[data-testid='kind-menu'], button, input, [tabindex='0']")
+    ?.focus();
+}
 
 /**
  * The rows a model set may fill: the loader's address, the file it loads as

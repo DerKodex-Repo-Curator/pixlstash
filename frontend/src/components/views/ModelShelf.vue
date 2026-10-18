@@ -1327,9 +1327,30 @@
                     </span>
                   </span>
                   <span role="gridcell" class="shelf-col shelf-col--kind">
-                    <span class="shelf-chip" :title="kindLabel(row)">{{
-                      kindLabel(row)
-                    }}</span>
+                    <!-- Set in place, like the name and the base model, with
+                         the kind the workflows that load it agree on under the
+                         chip (#1962). An engine is PixlStash's own and is not
+                         curated, so its chip stays a chip. -->
+                    <span
+                      v-if="row.file_kind === 'engine'"
+                      class="shelf-chip"
+                      :title="kindLabel(row)"
+                      >{{ kindLabel(row) }}</span
+                    >
+                    <KindMenu
+                      v-else
+                      :file-kind="row.file_kind"
+                      :kind-text="kindLabel(row)"
+                      :subject="row.name.text || row.filename || 'this model'"
+                      :suggested-kind="row.suggested_kind || ''"
+                      :suggested-by="row.suggested_by || 0"
+                      :suggested-fields="row.suggested_fields || []"
+                      :decided="Boolean(row.kind_decided)"
+                      :tabindex="row.rowKey === rovingRowKey ? 0 : -1"
+                      @pick="(kind) => setKindFromMenu(row, kind)"
+                      @adapter="setKindByDialog(row)"
+                      @suggest="(on) => setKindSuggestion(row, on)"
+                    />
                   </span>
                   <!-- Base is a COLUMN, not a phrase on a metadata line: it is
                        the field a reader scans a shelf for, and it can only be
@@ -1686,6 +1707,7 @@ import WorkflowSetSelectionBar from "../panels/WorkflowSetSelectionBar.vue";
 import MissingSetSelectionBar from "../panels/MissingSetSelectionBar.vue";
 import ReplaceMissingDialog from "../io/ReplaceMissingDialog.vue";
 import BaseModelInput from "../widgets/BaseModelInput.vue";
+import KindMenu from "../widgets/KindMenu.vue";
 import ShelfEditDialog from "../panels/ShelfEditDialog.vue";
 import MergeCopiesDialog from "../panels/MergeCopiesDialog.vue";
 import ShelfMoveDialog from "../panels/ShelfMoveDialog.vue";
@@ -4106,6 +4128,70 @@ async function commitBaseModel(restoreFocus = false) {
   // one base model.
   await store.editModelIds(row.memberIds ?? [row.id], {
     base_model: next || null,
+  });
+}
+
+/**
+ * File a row as the kind its Kind menu picked (#1962).
+ *
+ * Any pick is a person deciding what the file is, so the server stops the
+ * offer with it. The receipt names where the row went, because on the feature
+ * axis it leaves the group it was picked in; Undo puts back the kind and the
+ * offer both.
+ */
+async function setKindFromMenu(row, fileKind) {
+  const ids = row.memberIds ?? [row.id];
+  const label = fileKindLabel(fileKind);
+  const undo = { file_kind: row.file_kind, suggest_kind: !row.kind_decided };
+  await store.editModelIds(
+    ids,
+    { file_kind: fileKind },
+    {
+      text:
+        `Filed ${row.name.text || row.filename || "the model"} as ${label}.` +
+        (store.view.groupBy === "feature" ? ` It is now under ${label}.` : ""),
+      action: { label: "Undo", handler: () => store.editModelIds(ids, undo) },
+    },
+  );
+  // Whether or not the write landed: the menu has closed either way.
+  focusKindMenu(row.id);
+}
+
+/** "Adapter…": an adapter names its algorithm, which the Set kind dialog asks. */
+function setKindByDialog(row) {
+  store.selectFromClick(row.id, {}, orderedRowIds.value);
+  editVerb.value = "kind";
+}
+
+/** "Don't suggest a kind" (false) and "Suggest a kind again" (true). */
+async function setKindSuggestion(row, on) {
+  await store.editModelIds(
+    row.memberIds ?? [row.id],
+    { suggest_kind: on },
+    {
+      text: on
+        ? "The shelf will suggest a kind for it again."
+        : "The shelf will not suggest a kind for it.",
+    },
+  );
+  // Whether or not the write landed: the menu has closed either way.
+  focusKindMenu(row.id);
+}
+
+/**
+ * Back to the row's Kind menu once the shelf has redrawn: a refiled row moves
+ * group, and its row key carries the group, so it is found by its model id.
+ */
+function focusKindMenu(modelId) {
+  nextTick(() => {
+    const id = String(modelId);
+    for (const el of rootEl.value?.querySelectorAll("[data-row-key]") || []) {
+      const key = el.dataset.rowKey;
+      if (key === id || key.startsWith(`${id}:`)) {
+        el.querySelector("[data-testid='kind-menu']")?.focus();
+        return;
+      }
+    }
   });
 }
 

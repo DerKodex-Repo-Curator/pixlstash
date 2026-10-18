@@ -15,6 +15,11 @@ import { mount } from "@vue/test-utils";
 import { setActivePinia, createPinia } from "pinia";
 
 const getWorkflowCard = vi.fn();
+const editModels = vi.fn();
+vi.mock("../../api/modelShelf", async (importOriginal) => ({
+  ...(await importOriginal()),
+  editModels: (...args) => editModels(...args),
+}));
 const listWorkflowCards = vi.fn();
 const patchWorkflowCard = vi.fn();
 const preflightWorkflowRun = vi.fn();
@@ -73,6 +78,7 @@ vi.mock("vue-router", () => ({
 }));
 
 import WorkflowTab from "./WorkflowTab.vue";
+import KindMenu from "../widgets/KindMenu.vue";
 import { useFilterStore } from "../../stores/useFilterStore";
 import { useNoticeStore } from "../../stores/useNoticeStore";
 import { useRunDialogStore } from "../../stores/useRunDialogStore";
@@ -1564,7 +1570,7 @@ describe("a VAE or text encoder row (#1596, #1850)", () => {
     return wrapper.find(`[data-testid="wftab-row-${kind}"]`);
   }
 
-  it("names the default recipe's text encoder on the CLIP row", async () => {
+  it("names the default recipe's text encoder on the Text encoder row", async () => {
     // The recipe says `text_encoder` where the card's slot says `clip`: the
     // row and its shelf name have to join the two.
     preflightWorkflowRun.mockResolvedValue({ groups: [{ reasons: [] }] });
@@ -1663,6 +1669,146 @@ describe("a VAE or text encoder row (#1596, #1850)", () => {
     ).toBe("t5xxl_fp8 (missing)");
   });
 
+  it("files the missing file's misfiled shelf copy and picks it, in one choice", async () => {
+    // #1962 after #1966: the copy is on the shelf as Unclassified, so nothing
+    // offers it until it is filed as a text encoder.
+    preflightWorkflowRun.mockResolvedValue(
+      missing({ file: "t5/t5xxl_fp8.safetensors", folder: "text_encoders" }),
+    );
+    getWorkflowCard.mockResolvedValue(detail({ card: withSupport }));
+    const copy = {
+      id: 5,
+      filename: "t5-xxl_fp8.gguf",
+      display_name: null,
+      file_kind: "unknown",
+    };
+    let filed = false;
+    readModelSwap.mockReset().mockImplementation((_key, { slotKind } = {}) =>
+      Promise.resolve(
+        slotKind !== "text_encoder"
+          ? { replacements: [], replacements_reason: null }
+          : filed
+            ? {
+                replacements: [{ id: 5, filename: copy.filename, likely: true }],
+                replacements_reason: null,
+                refile: null,
+              }
+            : {
+                replacements: [],
+                replacements_reason: "none_go_with_it",
+                refile: copy,
+              },
+      ),
+    );
+    editModels.mockReset().mockImplementation(async () => {
+      filed = true;
+      return { updated: [5], fields: ["file_kind"] };
+    });
+    const { wrapper } = await mountWith([KEY], [withSupport]);
+    await settle(wrapper);
+
+    const encoder = row(wrapper, "text_encoder");
+    // The offer, never a pick: nothing waits until the owner chooses.
+    expect(setWorkflowChanges).not.toHaveBeenCalled();
+    expect(textOf(encoder)).toContain("t5-xxl_fp8: Unclassified on shelf");
+    expect(textOf(encoder)).toContain("Text encoder?");
+    // The one note under the picker: the offer, not "Nothing to offer".
+    expect(
+      wrapper.find('[data-testid="wftab-no-replacement-text_encoder"]').exists(),
+    ).toBe(false);
+
+    encoder.findComponent(KindMenu).vm.$emit("pick", "text_encoder");
+    await settle(wrapper);
+    expect(editModels).toHaveBeenCalledWith([5], { file_kind: "text_encoder" });
+    expect(setWorkflowChanges).toHaveBeenCalledTimes(1);
+    const [picked] = setWorkflowChanges.mock.calls[0][1].models;
+    expect(picked.filename).toBe("t5-xxl_fp8.gguf");
+    expect(
+      row(wrapper, "text_encoder").find('[data-testid="wftab-edited"]').text(),
+    ).toBe("Fixed");
+  });
+
+  it("says which way a suggestion answer went", async () => {
+    const offer = {
+      address: "core:n3/clip_name/ckpt_name",
+      model_id: 4,
+      file_kind: "unknown",
+      suggested_kind: "text_encoder",
+      suggested_by: 2,
+      suggested_fields: ["clip_name"],
+    };
+    getWorkflowCard.mockResolvedValue(
+      detail({ card: withSupport, kind_offers: [offer] }),
+    );
+    editModels.mockReset().mockResolvedValue({ updated: [4], fields: [] });
+    const { wrapper } = await mountWith([KEY], [withSupport]);
+    await settle(wrapper);
+    const menu = () => row(wrapper, "text_encoder").findComponent(KindMenu);
+
+    menu().vm.$emit("suggest", false);
+    await settle(wrapper);
+    expect(useNoticeStore().notices.at(-1).text).toBe(
+      "The shelf will not suggest a kind for it.",
+    );
+    menu().vm.$emit("suggest", true);
+    await settle(wrapper);
+    expect(useNoticeStore().notices.at(-1).text).toBe(
+      "The shelf will suggest a kind for it again.",
+    );
+  });
+
+  it("files the copy as another kind without picking it or saying it was", async () => {
+    preflightWorkflowRun.mockResolvedValue(
+      missing({ file: "t5/t5xxl_fp8.safetensors", folder: "text_encoders" }),
+    );
+    getWorkflowCard.mockResolvedValue(detail({ card: withSupport }));
+    readModelSwap.mockReset().mockResolvedValue({
+      replacements: [],
+      replacements_reason: "none_go_with_it",
+      refile: {
+        id: 5,
+        filename: "t5-xxl_fp8.gguf",
+        display_name: null,
+        file_kind: "unknown",
+      },
+    });
+    editModels.mockReset().mockResolvedValue({ updated: [5], fields: ["file_kind"] });
+    const { wrapper } = await mountWith([KEY], [withSupport]);
+    await settle(wrapper);
+    const asked = readModelSwap.mock.calls.length;
+
+    row(wrapper, "text_encoder")
+      .findComponent(KindMenu)
+      .vm.$emit("pick", "checkpoint");
+    await settle(wrapper);
+    expect(editModels).toHaveBeenCalledWith([5], { file_kind: "checkpoint" });
+    expect(readModelSwap.mock.calls.length).toBe(asked + 1);
+    expect(setWorkflowChanges).not.toHaveBeenCalled();
+    expect(useNoticeStore().notices.at(-1).text).toBe(
+      "Filed t5-xxl_fp8 as Checkpoint on your shelf.",
+    );
+  });
+
+  it("offers no renamed copy for a file ComfyUI has", async () => {
+    preflightWorkflowRun.mockResolvedValue({ groups: [{ reasons: [] }] });
+    getWorkflowCard.mockResolvedValue(detail({ card: withSupport }));
+    readModelSwap.mockReset().mockResolvedValue({
+      replacements: [],
+      replacements_reason: "none_go_with_it",
+      refile: {
+        id: 5,
+        filename: "t5-xxl_fp8.gguf",
+        display_name: null,
+        file_kind: "unknown",
+      },
+    });
+    const { wrapper } = await mountWith([KEY], [withSupport]);
+    await settle(wrapper);
+    expect(row(wrapper, "text_encoder").findComponent(KindMenu).exists()).toBe(
+      false,
+    );
+  });
+
   it("warns on the missing one's own row, and never on a vision encoder's account", async () => {
     preflightWorkflowRun.mockResolvedValue(
       missing(
@@ -1694,6 +1840,71 @@ describe("a VAE or text encoder row (#1596, #1850)", () => {
       slotKind: "text_encoder",
       cached: true,
     });
+  });
+
+  it("offers the shelf's kind under a text encoder the shelf files as Unclassified", async () => {
+    // #1962: every workflow loads it as a text encoder, the shelf does not.
+    const offer = {
+      address: "core:n3/clip_name/ckpt_name",
+      model_id: 4,
+      file_kind: "unknown",
+      suggested_kind: "text_encoder",
+      suggested_by: 2,
+      suggested_fields: ["clip_name"],
+    };
+    getWorkflowCard.mockResolvedValue(
+      detail({ card: withSupport, kind_offers: [offer] }),
+    );
+    editModels.mockReset().mockResolvedValue({ updated: [4], fields: ["file_kind"] });
+    const { wrapper } = await mountWith([KEY], [withSupport]);
+    await settle(wrapper);
+
+    const encoder = row(wrapper, "text_encoder");
+    // Named for what it is, as the shelf and the warning name it.
+    expect(encoder.find(".wftab-label").text()).toBe("Text encoder");
+    expect(textOf(encoder)).toContain("Unclassified on shelf");
+    expect(textOf(encoder)).toContain("Text encoder?");
+    // Only on the loader the offer names.
+    expect(row(wrapper, "vae").findComponent(KindMenu).exists()).toBe(false);
+
+    getWorkflowCard.mockClear();
+    encoder.findComponent(KindMenu).vm.$emit("pick", "text_encoder");
+    await settle(wrapper);
+    expect(editModels).toHaveBeenCalledWith([4], { file_kind: "text_encoder" });
+    // Read again, so the answered offer goes.
+    expect(getWorkflowCard).toHaveBeenCalledWith(KEY);
+  });
+
+  it("keeps the offer and its focus when filing it fails", async () => {
+    const offer = {
+      address: "core:n3/clip_name/ckpt_name",
+      model_id: 4,
+      file_kind: "unknown",
+      suggested_kind: "text_encoder",
+      suggested_by: 2,
+      suggested_fields: ["clip_name"],
+    };
+    getWorkflowCard.mockResolvedValue(
+      detail({ card: withSupport, kind_offers: [offer] }),
+    );
+    editModels.mockReset().mockRejectedValue(new Error("offline"));
+    const { wrapper } = await mountWith([KEY], [withSupport]);
+    await settle(wrapper);
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    try {
+      row(wrapper, "text_encoder")
+        .findComponent(KindMenu)
+        .vm.$emit("pick", "text_encoder");
+      await settle(wrapper);
+      expect(
+        focus.mock.contexts.some((el) => el.dataset?.testid === "kind-menu"),
+      ).toBe(true);
+      expect(row(wrapper, "text_encoder").findComponent(KindMenu).exists()).toBe(
+        true,
+      );
+    } finally {
+      focus.mockRestore();
+    }
   });
 
   it("says a failed read on a missing row rather than showing nothing", async () => {

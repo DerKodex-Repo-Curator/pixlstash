@@ -191,6 +191,12 @@ from pixlstash.services.workflow_card_service import (
     workflow_lora_summary,
 )
 from pixlstash.services import saved_recipe_service
+from pixlstash.services.model_kind_suggestions import (
+    OFFERED_KINDS,
+    REFILEABLE_KINDS,
+    loader_offers,
+    may_refile_by_name,
+)
 from pixlstash.services.model_shelf_service import (
     adapter_digest_index,
     character_lora_hashes,
@@ -915,6 +921,17 @@ class ModelFixRow(BaseModel):
     )
 
 
+class KindOffer(BaseModel):
+    """A loader's model the shelf files as another kind than the loader takes."""
+
+    address: str = Field(description="The default-recipe loader it is offered on.")
+    model_id: int = Field(description="The shelf model, for `PATCH /models`.")
+    file_kind: str = Field(description="What the shelf files it as now.")
+    suggested_kind: str = Field(description="What every workflow loads it as.")
+    suggested_by: int = Field(description="How many workflows load it so.")
+    suggested_fields: list[str] = Field(default_factory=list)
+
+
 class WorkflowCardDetail(BaseModel):
     """``GET /workflows/{workflow_id}``: one workflow opened."""
 
@@ -952,6 +969,15 @@ class WorkflowCardDetail(BaseModel):
             "The models the owner replaced in this workflow's base graph "
             "because the original is gone (`PUT /workflows/{workflow_id}/"
             "model-fix`). A run loads `now` wherever the graph names `was`."
+        ),
+    )
+    kind_offers: list[KindOffer] = Field(
+        default_factory=list,
+        description=(
+            "Default-recipe loaders whose model the shelf files as a "
+            "checkpoint or Unclassified while every workflow loads it as the "
+            "kind this loader takes (#1962): the shelf's `suggested_kind`, "
+            "offered here too. Empty once the owner has decided the kind."
         ),
     )
 
@@ -1016,6 +1042,12 @@ _PIXEL_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 # shelved as `flan-t5-xxl_…` where a graph asks for `t5xxl_flan_latest_…`,
 # 0.61 for the nearest other T5.
 LIKELY_SAME_FILE_RATIO = 0.75
+# Words a model file's name uses for its kind, which a missing file and its
+# misfiled copy must share (`_misfiled_copy`).
+_KIND_NAME_MARKERS = {
+    FILE_VAE: ("vae",),
+    FILE_TEXT_ENCODER: ("t5", "clip", "encoder", "llama", "qwen", "gemma", "bert"),
+}
 # The stock loaders Open in ComfyUI puts the pack's digest loaders in for,
 # whether or not ComfyUI lists their files. A run swaps more, and only for a
 # file ComfyUI lacks (`_digest_swap_kind`).
@@ -2740,6 +2772,15 @@ class ModelFixCandidate(BaseModel):
     )
 
 
+class MisfiledCopy(BaseModel):
+    """A shelf model whose name reads as a missing file, filed as another kind."""
+
+    id: int
+    filename: str
+    display_name: str | None = None
+    file_kind: str = Field(description="What the shelf files it as now.")
+
+
 class ModelSwapOptions(BaseModel):
     """``GET /workflows/{workflow_id}/model-swap``: what the clone dialog draws."""
 
@@ -2775,6 +2816,18 @@ class ModelSwapOptions(BaseModel):
             "were held to the missing one's base model, false when nothing "
             "said which it was, or no loadable checkpoint has it, and every "
             "loadable checkpoint is offered."
+        ),
+    )
+    refile: MisfiledCopy | None = Field(
+        None,
+        description=(
+            "Only with `?replacing=` and a `slot_kind` of `vae` or "
+            "`text_encoder` (#1962): the one shelf model whose name reads as "
+            "the missing file's, renamed, where the shelf files it as a "
+            "checkpoint or Unclassified, so `replacements` cannot offer it. "
+            "Filed as `slot_kind`, it is offered there as `likely`. Only while "
+            "nobody has decided its kind and no recorded workflow loads it as "
+            "anything else; never re-filed by this read."
         ),
     )
     replacements_reason: (
@@ -3158,6 +3211,45 @@ def _likely_same_file(wanted: str, shelf) -> SwapModel | None:
         if ratio >= LIKELY_SAME_FILE_RATIO:
             close.append(model)
     return close[0] if len(close) == 1 else None
+
+
+def _misfiled_copy(
+    hub, models: dict, replacing: str, kind: str, hidden
+) -> MisfiledCopy | None:
+    """The shelf's copy of missing *replacing*, filed as the wrong kind (#1962).
+
+    :func:`_likely_same_file` over the shelf models of *kind* and the ones
+    filed as a checkpoint or Unclassified together, so a close name of the
+    right kind leaves nothing to re-file. A name match is weaker evidence than
+    a workflow naming the file itself, so it is only ever offered
+    (:func:`may_refile_by_name`).
+    """
+    wanted = normalized_filename(replacing)
+    copy = _likely_same_file(
+        wanted,
+        [
+            m
+            for m in models.values()
+            if m.file_kind in (kind, *REFILEABLE_KINDS) and m.id not in hidden
+        ],
+    )
+    if copy is None or copy.file_kind == kind:
+        return None
+    # ponytail: a word for the kind in both names, so a close name of another
+    # kind is not taken for it (`flux_vae` reads 0.75 like `flux_dev`). A copy
+    # named without one is not offered; the asset-row evidence still is.
+    markers = _KIND_NAME_MARKERS[kind]
+    name = normalized_filename(copy.filename)
+    if not any(m in wanted and m in name for m in markers):
+        return None
+    if not may_refile_by_name(hub, copy.id, kind):
+        return None
+    return MisfiledCopy(
+        id=copy.id,
+        filename=copy.filename,
+        display_name=copy.display_name,
+        file_kind=copy.file_kind,
+    )
 
 
 def _digest_swap_kind(class_type: str) -> str | None:
@@ -4048,7 +4140,29 @@ def create_router(server) -> APIRouter:
                     else []
                 )
             ],
+            kind_offers=_kind_offers(hub, recipe),
         )
+
+    def _kind_offers(hub, recipe) -> list[KindOffer]:
+        """The shelf's kind suggestions (#1962) on the default recipe's loaders."""
+        offers = loader_offers(
+            hub,
+            [
+                (model.address, model.kind, model.filename)
+                for model in (recipe.models if recipe else [])
+            ],
+        )
+        return [
+            KindOffer(
+                address=address,
+                model_id=model_id,
+                file_kind=suggestion.file_kind,
+                suggested_kind=suggestion.kind,
+                suggested_by=suggestion.workflows,
+                suggested_fields=list(suggestion.fields),
+            )
+            for address, (model_id, suggestion) in offers.items()
+        ]
 
     def _apply_model_fixes(
         card,
@@ -10045,6 +10159,12 @@ def create_router(server) -> APIRouter:
                 slot_kind,
                 cached=cached,
             )
+            if slot_kind in OFFERED_KINDS and not any(
+                c.likely for c in options.replacements or []
+            ):
+                options.refile = _misfiled_copy(
+                    hub, models, replacing, slot_kind, hidden
+                )
             return options
         if checkpoint_id is None:
             # Asked once, on open: the choice lists are what the dialog draws

@@ -101,6 +101,11 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 
 from pixlstash.db_models.adapter_attachment import ENTITY_CHARACTER, ENTITY_SET
 from pixlstash.pixl_logging import get_logger
+from pixlstash.services.model_kind_suggestions import (
+    REFILEABLE_KINDS,
+    KindSuggestion,
+    kind_suggestions,
+)
 from pixlstash.services.model_shelf_service import (
     CURATABLE_CAPABILITIES,
     CURATABLE_FIELDS,
@@ -606,6 +611,32 @@ class ModelResponse(BaseModel):
             "recipe or a workflow that already uses the model can name it."
         ),
     )
+    suggested_kind: Optional[str] = Field(
+        default=None,
+        description=(
+            "The kind every recorded workflow that loads this model loads it "
+            "as (`vae` or `text_encoder`), on a model the shelf files as a "
+            "checkpoint or Unclassified. Null when no workflow loads it, when "
+            "they disagree, or when they agree with the shelf. An offer only: "
+            "nothing re-files the model until the owner does (#1962)."
+        ),
+    )
+    suggested_by: int = Field(
+        default=0,
+        description="How many workflows load it as `suggested_kind`.",
+    )
+    suggested_fields: list[str] = Field(
+        default_factory=list,
+        description="The loader fields that name it (`clip_name`, `vae_name`).",
+    )
+    kind_decided: bool = Field(
+        default=False,
+        description=(
+            "A person has decided what this file is: picked a kind, or said "
+            "not to suggest one. While true, `suggested_kind` is not offered; "
+            "it is still served so the shelf can offer to suggest again."
+        ),
+    )
     set_verdicts: list[ModelSetVerdictMark] = Field(
         default_factory=list,
         description=(
@@ -740,6 +771,15 @@ class ModelEditRequest(BaseModel):
             "not something we get the last word on. `checkpoint` and `other` "
             "are not offered: the first is a `file_kind` and the second is the "
             "classifier's shrug, which an empty list already says."
+        ),
+    )
+    suggest_kind: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Whether to offer the kind the model's workflows load it as "
+            "(`suggested_kind` on the row). `false` is \"Don't suggest a "
+            'kind", `true` takes that back. Any `file_kind` write already '
+            "stops the offer, as a person deciding what the file is."
         ),
     )
 
@@ -1665,8 +1705,10 @@ def _to_response(
     marks: dict[int, list[dict]],
     character_names: dict[int, str],
     hidden: set[int],
+    suggestions: Optional[dict[int, KindSuggestion]] = None,
 ) -> ModelResponse:
     counts = picture_counts.get(int(row["id"]), {})
+    suggestion = (suggestions or {}).get(int(row["id"]))
     attached = attachments.get(row["sha256"] or "", [])
     # A person's name stands in only on something a prompt calls up. A VAE can
     # be attached to a person too, and it has no trigger word to default.
@@ -1724,6 +1766,10 @@ def _to_response(
         pictures_verified=counts.get("verified", 0),
         pictures_by_filename=counts.get("by_filename", 0),
         hidden=int(row["id"]) in hidden,
+        suggested_kind=suggestion.kind if suggestion else None,
+        suggested_by=suggestion.workflows if suggestion else 0,
+        suggested_fields=list(suggestion.fields) if suggestion else [],
+        kind_decided=bool(row["file_kind_decided"]),
         set_verdicts=[
             ModelSetVerdictMark(**mark) for mark in marks.get(int(row["id"]), [])
         ],
@@ -1798,6 +1844,12 @@ def create_router(server) -> APIRouter:
         marks = fetch_model_marks(server.hub)
         character_names = fetch_character_names(server.vault)
         hidden = set(hidden_model_ids(server.hub, server.vault.library_uuid))
+        # Only the kinds a suggestion can re-file, so a list of adapters asks
+        # the hub nothing more.
+        suggestions = kind_suggestions(
+            server.hub,
+            [int(row["id"]) for row in rows if row["file_kind"] in REFILEABLE_KINDS],
+        )
         return [
             _to_response(
                 row,
@@ -1808,6 +1860,7 @@ def create_router(server) -> APIRouter:
                 marks,
                 character_names,
                 hidden,
+                suggestions,
             )
             for row in rows
         ]
@@ -1935,6 +1988,7 @@ def create_router(server) -> APIRouter:
             fetch_model_marks(server.hub),
             fetch_character_names(server.vault),
             set(hidden_model_ids(server.hub, server.vault.library_uuid)),
+            kind_suggestions(server.hub, [int(row["id"])]),
         )
 
     @router.get(
@@ -2144,8 +2198,8 @@ def create_router(server) -> APIRouter:
             "Four of the shelf's verbs on one route, because all of them "
             "write a curated column and differ only in which one: **Rename** "
             "(`display_name`, one id), **Set base model** (`base_model`), "
-            "**Set kind** (`kind`, `file_kind`, `capabilities`) and **Set "
-            "trigger words** (`trigger_words`). Only the "
+            "**Set kind** (`kind`, `file_kind`, `capabilities`, "
+            "`suggest_kind`) and **Set trigger words** (`trigger_words`). Only the "
             "fields present in the body are written, so setting a base model "
             "across a selection cannot blank the names in it.\n\n"
             "Every column here is upserted with `COALESCE` by the folder "
@@ -2163,8 +2217,9 @@ def create_router(server) -> APIRouter:
         # `capabilities` rides with the columns and is not one: it is the
         # complete set for a second table, and `update_models` splits it back
         # out. Named here rather than added to `CURATABLE_FIELDS`, which is what
-        # the UPDATE's column list is built from.
-        writable = (*CURATABLE_FIELDS, "capabilities")
+        # the UPDATE's column list is built from. `suggest_kind` likewise: it
+        # writes the owner's mark, not a curated column.
+        writable = (*CURATABLE_FIELDS, "capabilities", "suggest_kind")
         sent = [field for field in writable if field in payload.model_fields_set]
         if not sent:
             raise HTTPException(
@@ -2205,6 +2260,10 @@ def create_router(server) -> APIRouter:
         ):
             raise HTTPException(
                 status_code=400, detail=f"file_kind must be one of {list(FILE_KINDS)}."
+            )
+        if "suggest_kind" in changes and changes["suggest_kind"] is None:
+            raise HTTPException(
+                status_code=400, detail="suggest_kind must be true or false."
             )
         if "file_kind" in changes and changes["file_kind"] is None:
             # Every file is *something*, and `unknown` is how the shelf says so.
