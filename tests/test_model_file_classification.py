@@ -186,6 +186,48 @@ class TestFileClassification:
         assert not has_vae_markers(names)
         assert classify_model_file(names, 40_000_000) == FILE_UNKNOWN
 
+    @pytest.mark.parametrize(
+        "header",
+        [
+            # flan-t5-xxl / t5xxl, encoder only: 4.9 B parameters
+            {"encoder.embed_tokens.weight": _tensor([32128, 4096])},
+            {"shared.weight": _tensor([256384, 4096])},  # umt5_xxl
+            {"text_model.embeddings.token_embedding.weight": _tensor([49408, 768])},
+            # Qwen 2.5-VL 7B, as Qwen-Image loads it
+            {"model.embed_tokens.weight": _tensor([152064, 3584])},
+        ],
+    )
+    def test_a_token_table_makes_a_text_encoder_at_checkpoint_scale(
+        self, header, tmp_path
+    ):
+        # A text encoder downloaded into a flat folder: the folder says
+        # nothing, and a T5's parameter count clears the checkpoint threshold.
+        folder = tmp_path / "Downloads"
+        folder.mkdir()
+        path = _write_safetensors(folder / "encoder.safetensors", header)
+        assert (
+            classify_model_file(list(header), 4_900_000_000, path, header)
+            == FILE_TEXT_ENCODER
+        )
+        info = describe_adapter(path)
+        assert info is not None
+        assert info.file_kind == FILE_TEXT_ENCODER
+
+    @pytest.mark.parametrize(
+        "table",
+        [
+            # SD3.5 bakes its T5 in under `text_encoders.`
+            ("text_encoders.t5xxl.transformer.shared.weight", [32128, 4096]),
+            # Lumina 2 bakes its Gemma in the same way
+            ("text_encoders.gemma2_2b.model.embed_tokens.weight", [256000, 2304]),
+        ],
+    )
+    def test_a_token_table_under_a_prefix_is_a_checkpoints_own(self, table):
+        header = {table[0]: _tensor(table[1])}
+        assert classify_model_file(list(header), 8_000_000_000, "", header) == (
+            FILE_CHECKPOINT
+        )
+
     def test_a_checkpoint_is_not_a_controlnet(self):
         names = [
             "model.diffusion_model.input_blocks.0.0.weight",

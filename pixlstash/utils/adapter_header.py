@@ -206,6 +206,12 @@ _CLIP_WIDTHS = {768: "clip_l", 1024: "clip_h", 1280: "clip_g"}
 _T5_VOCABS = {32128: "t5", 256384: "umt5"}
 _T5_XXL_WIDTH = 4096
 
+# The token table of a decoder-only language model in the Hugging Face layout:
+# the Qwen 2.5-VL, Gemma, Llama and Mistral encoders newer image models load.
+# No diffusion model keeps a tensor by this name at the top level, and a
+# checkpoint bundling one keeps it under a prefix.
+_LM_TOKEN_TABLE = "model.embed_tokens.weight"
+
 
 @dataclass(frozen=True)
 class AdapterInfo:
@@ -537,6 +543,25 @@ def family_from_header(header: dict) -> Optional[str]:
     conv_in = _valid_shape(header.get("decoder.conv_in.weight"))
     if conv_in is not None and len(conv_in) == 4:
         return f"vae_{conv_in[1]}ch"
+    return _text_encoder_family(header)
+
+
+def has_text_encoder_markers(header: dict) -> bool:
+    """Return whether *header* holds a text encoder's token table.
+
+    A CLIP, T5 or UMT5 one as :func:`family_from_header` reads it, or a
+    language model's (:data:`_LM_TOKEN_TABLE`), which names no family. At the
+    top level only: a checkpoint keeps its encoders under a prefix, which never
+    matches.
+    """
+    if _text_encoder_family(header) is not None:
+        return True
+    table = _valid_shape(header.get(_LM_TOKEN_TABLE))
+    return table is not None and len(table) == 2
+
+
+def _text_encoder_family(header: dict) -> Optional[str]:
+    """``clip_l``/``clip_h``/``clip_g``/``t5_xxl``/``umt5_xxl``, or ``None``."""
     for name in (
         "text_model.embeddings.token_embedding.weight",
         "token_embedding.weight",
@@ -588,7 +613,9 @@ def role_from_folder(path: str) -> Optional[str]:
     return _ROLE_FOLDERS.get(_normalise_folder(folder))
 
 
-def classify_model_file(tensor_names, param_count: int, path: str = "") -> str:
+def classify_model_file(
+    tensor_names, param_count: int, path: str = "", header: Optional[dict] = None
+) -> str:
     """Return what a file *is*, from its tensor names, parameter count and location.
 
     The rule is deliberately asymmetric, and the order below is the ranking of
@@ -601,8 +628,11 @@ def classify_model_file(tensor_names, param_count: int, path: str = "") -> str:
        LoRA. ControlNet markers (:func:`has_controlnet_markers`) come next, on
        the same footing: a ControlNet in ``diffusion_models/`` is a ControlNet.
        So do VAE markers (:func:`has_vae_markers`), which is what files a VAE
-       downloaded into a flat folder as a VAE.
-    2. **The directory**, when it names a role. A text encoder carries no
+       downloaded into a flat folder as a VAE, and a text encoder's token
+       table (:func:`has_text_encoder_markers`), which is what keeps a T5
+       downloaded there from clearing the checkpoint threshold.
+    2. **The directory**, when it names a role. A text encoder of a layout
+       :func:`has_text_encoder_markers` does not know (a T5 of another width) carries no
        marker to find, nor does a VAE of a layout :data:`_VAE_TENSORS` does not
        know (a Wan one), so the layout the user (or their launcher) already
        maintains is the best evidence there is. It outranks the parameter count
@@ -625,6 +655,8 @@ def classify_model_file(tensor_names, param_count: int, path: str = "") -> str:
         path: Where the file lives. Optional - omitting it drops rule 2 and
             leaves the pre-existing behaviour, which is what a caller holding
             only a header should get.
+        header: The parsed header, for the shapes a token table is told by.
+            Optional: a file with no header to read has no table either.
 
     Returns:
         ``"adapter"``, ``"vae"``, ``"text_encoder"``, ``"controlnet"``,
@@ -636,6 +668,8 @@ def classify_model_file(tensor_names, param_count: int, path: str = "") -> str:
         return FILE_CONTROLNET
     if has_vae_markers(tensor_names):
         return FILE_VAE
+    if header is not None and has_text_encoder_markers(header):
+        return FILE_TEXT_ENCODER
     role = role_from_folder(path) if path else None
     if role is not None:
         return role
@@ -774,7 +808,7 @@ def describe_adapter(path: str) -> Optional[AdapterInfo]:
         kind=detect_adapter_kind(tensor_names),
         tensor_count=len(tensor_names),
         is_adapter=has_adapter_markers(tensor_names),
-        file_kind=classify_model_file(tensor_names, param_count, path),
+        file_kind=classify_model_file(tensor_names, param_count, path, header),
         param_count=param_count,
         base_model=base_model,
         trigger_words=_trigger_words_from_tag_frequency(

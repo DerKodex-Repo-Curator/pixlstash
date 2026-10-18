@@ -1054,6 +1054,60 @@ class TestComponentRoleBackfill:
         ]
         assert hub.execute("PRAGMA user_version").fetchone()[0] == CURRENT_DATA_VERSION
 
+    def test_a_data_v20_hub_refiles_a_text_encoder_by_its_tensors(self, hub, tmp_path):
+        # Data version 21: a T5 downloaded into a flat folder cleared the
+        # parameter count and was a `checkpoint`, and a CLIP there `unknown`.
+        # Their token tables say what they are. A checkpoint carrying its T5
+        # under a prefix is left as it is.
+        apply_migrations(hub)
+        hub.execute("PRAGMA user_version = 20")
+        folder_id = add_folder(hub, str(tmp_path))
+
+        def shelved(name, table, shape, file_kind):
+            header = {table: {"dtype": "F16", "shape": shape}}
+            blob = json.dumps(header).encode()
+            (tmp_path / name).write_bytes(struct.pack("<Q", len(blob)) + blob)
+            model_id = add_model(hub, file_kind=file_kind, sha256=name, kind=None)
+            add_file(hub, model_id, folder_id, name)
+            return model_id
+
+        t5 = shelved(
+            "flan-t5-xxl_fp8.safetensors",
+            "encoder.embed_tokens.weight",
+            [32128, 4096],
+            "checkpoint",
+        )
+        clip = shelved(
+            "clip_l.safetensors",
+            "text_model.embeddings.token_embedding.weight",
+            [49408, 768],
+            "unknown",
+        )
+        qwen = shelved(
+            "qwen_2.5_vl_7b.safetensors",
+            "model.embed_tokens.weight",
+            [152064, 3584],
+            "checkpoint",
+        )
+        sd35 = shelved(
+            "sd3.5_large.safetensors",
+            "text_encoders.t5xxl.transformer.shared.weight",
+            [32128, 4096],
+            "checkpoint",
+        )
+        hub.commit()
+
+        apply_migrations(hub)
+
+        kinds = dict(hub.execute("SELECT id, file_kind FROM model").fetchall())
+        assert [kinds[t5], kinds[clip], kinds[qwen], kinds[sd35]] == [
+            "text_encoder",
+            "text_encoder",
+            "text_encoder",
+            "checkpoint",
+        ]
+        assert hub.execute("PRAGMA user_version").fetchone()[0] == CURRENT_DATA_VERSION
+
     def test_a_fresh_hub_records_the_backfill_as_done(self, hub):
         apply_migrations(hub)
 

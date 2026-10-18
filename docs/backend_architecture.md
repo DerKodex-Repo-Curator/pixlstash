@@ -10667,7 +10667,15 @@ answer:
   `.safetensors` VAE is told by its tensors the way a ControlNet is
   (`has_vae_markers`: a top-level `encoder.conv_in.weight` and
   `decoder.conv_in.weight`), so one downloaded into a flat folder is a VAE
-  rather than `unknown`; hub data version 19 re-files those. A GGUF or a
+  rather than `unknown`; hub data version 19 re-files those. A `.safetensors`
+  text encoder is told by its top-level token table (`has_text_encoder_markers`):
+  CLIP-L/H/G or XXL T5/UMT5, by the rule `family_from_header` names it by, or
+  a language model's `model.embed_tokens.weight` (Qwen 2.5-VL, Gemma, Llama,
+  Mistral), which names no family. So a T5 or Qwen downloaded into a flat
+  folder is a text encoder rather than a `checkpoint` by parameter count; hub
+  data version 21 re-files the `checkpoint` and `unknown` rows whose present
+  copy carries one. A T5 of another width has no such rule and still needs a
+  role folder. A GGUF or a
   `.pth` outside a role folder is `unknown`, which the
   shelf shows and the owner can correct; it is never guessed into `checkpoint`.
 
