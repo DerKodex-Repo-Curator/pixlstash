@@ -1533,6 +1533,7 @@ const workflowId = computed({
     if (!key || key === activeKey.value) return;
     const hadCard = Boolean(card.value);
     activeKey.value = key;
+    followLora(key);
     void switchCard(key, hadCard);
   },
 });
@@ -2525,9 +2526,9 @@ const seedOptions = [
  * no stack members to switch between any more.
  */
 /**
- * Create with LoRA's narrowing, for the LoRA the first added row carries (or
- * the first one attached, before the owner changes it): see
- * `utils/loraWorkflows.js`.
+ * Create with LoRA's narrowing: against every LoRA attached to the person or
+ * set while the first added row holds one of them, else against the LoRA that
+ * row holds. See `utils/loraWorkflows.js`.
  */
 const loraFits = computed(() => {
   if (!loraSource.value) return null;
@@ -2538,11 +2539,11 @@ const loraFits = computed(() => {
   if (!sha && attachedLoras.value.length) return null;
   // A LoRA neither list names narrows nothing: every workflow is then an
   // "unknown" fit, rather than one judged against a different attached LoRA.
-  const lora =
-    attachedLoras.value.find((row) => row.sha256 === sha) ||
-    adapters.value.find((row) => row.sha256 === sha) ||
-    null;
-  return { lora, ...fitWorkflows(cards.value, lora, handMadeSets.value) };
+  const attached = attachedLoras.value.some((row) => row.sha256 === sha);
+  const loras = attached
+    ? attachedLoras.value
+    : adapters.value.filter((row) => row.sha256 === sha).slice(0, 1);
+  return { loras, ...fitWorkflows(cards.value, loras, handMadeSets.value) };
 });
 
 /** What the narrowing left out, said rather than hidden without a word. */
@@ -2552,11 +2553,14 @@ const loraFitNote = computed(() => {
   if (!attachedLoras.value.length) {
     return `No LoRA is attached to ${loraSource.value.name}. Assign one from the Models shelf, or add one below.`;
   }
-  if (!fits.lora) {
+  if (!fits.loras.length) {
     return "This LoRA is not on the Models shelf, so every workflow is listed.";
   }
-  if (!fits.lora.base_model_family) {
-    return "This LoRA has no base model recorded, so every workflow is listed.";
+  const known = fits.loras.filter((lora) => lora.base_model_family);
+  if (!known.length) {
+    return fits.loras.length > 1
+      ? "These LoRAs have no base model recorded, so every workflow is listed."
+      : "This LoRA has no base model recorded, so every workflow is listed.";
   }
   const parts = [];
   if (fits.clash.length) {
@@ -2566,10 +2570,30 @@ const loraFitNote = computed(() => {
     parts.push(`${fits.needsPicture.length} that start from a picture`);
   }
   if (!fits.match.length && !fits.unknown.length) {
-    return `None of your workflows is for ${fits.lora.base_model || "this base model"}.`;
+    const models = [...new Set(known.map((lora) => lora.base_model).filter(Boolean))];
+    return `None of your workflows is for ${models.join(" or ") || "this base model"}.`;
   }
   return parts.length ? `Not listed: ${parts.join(", ")}.` : "";
 });
+
+/**
+ * Create with LoRA: the attached LoRA the run adds follows the workflow. A
+ * person with a LoRA for each of two base models is offered both models'
+ * workflows, and picking one must load the LoRA made for it, so a row holding
+ * an attached LoRA that does not match *key*'s checkpoint takes the first that
+ * does and no other row holds. A row that already matches, or a workflow
+ * nothing free matches, is left be.
+ */
+function followLora(key) {
+  const row = addedLoras.value[0];
+  const entry = loraFits.value?.match.find((fit) => fit.card.id === key);
+  if (!row || !entry || entry.loras.some((lora) => lora.sha256 === row.sha256)) return;
+  if (!attachedLoras.value.some((lora) => lora.sha256 === row.sha256)) return;
+  // Never a file another row already holds: one loader asked for twice.
+  const held = new Set(addedLoras.value.map((other) => other.sha256));
+  const free = entry.loras.find((lora) => !held.has(lora.sha256));
+  if (free) row.sha256 = free.sha256;
+}
 
 const workflowOptions = computed(() => {
   const fits = loraFits.value;
@@ -2577,12 +2601,15 @@ const workflowOptions = computed(() => {
     // Matches first, then the workflows whose base model nobody has read,
     // said so: they may fit, and hiding them would hide every workflow on a
     // model the shelf has not identified.
-    const known = Boolean(fits.lora?.base_model_family);
+    const known = fits.loras.some((lora) => lora.base_model_family);
     return [
       ...fits.match.map((entry) => ({ value: entry.card.id, label: entry.card.name })),
       ...fits.unknown.map((entry) => ({
         value: entry.card.id,
-        label: known ? `${entry.card.name} (base model not known)` : entry.card.name,
+        label:
+          known && !entry.checkpoint?.base_model_family
+            ? `${entry.card.name} (base model not known)`
+            : entry.card.name,
       })),
     ];
   }
@@ -4361,7 +4388,8 @@ function openInWorkflows() {
 
 /**
  * Create with LoRA: the LoRAs attached to the person or set, and the workflow
- * sets that rank the picker. The first attached LoRA starts as an added row.
+ * sets that rank the picker. The first attached LoRA starts as an added row,
+ * and `followLora` swaps it for the one the workflow picked is for.
  * Read as `AdapterTray` reads them: both attachable file kinds, since the
  * route's `file_kind` takes one.
  */
@@ -4618,6 +4646,7 @@ async function load() {
       (loraSource.value ? workflowOptions.value[0]?.value : "") ||
       "";
     activeKey.value = key;
+    followLora(key);
     if (key) await loadCard(key, ask);
     if (!mine()) return;
     prompt.value = props.source?.emptyPrompt ? "" : basePrompt.value;
