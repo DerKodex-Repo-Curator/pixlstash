@@ -9752,26 +9752,26 @@ def create_router(server) -> APIRouter:
             else None
         )
 
-        def through_pack(node_id, widget, value, filename, info):
+        def through_pack(node_id, widget, value, filename, info, fix_kind):
             """The PixlStash loader a run would load *filename* through in
             *node_id*'s place, by the run's own rule, or None."""
-            if row_of is not None:
+            if fix_kind == FILE_CHECKPOINT and row_of is not None:
                 return _checkpoint_off_the_shelf(
                     graph, node_id, widget, filename, info, row_of
                 )
             plan, _refusal = run_service.plan_pixlstash_swap(
                 graph,
                 node_id,
-                kind,
+                fix_kind,
                 {value: filename},
                 info,
-                _shelf_digest(_hub(), kind),
+                _shelf_digest(_hub(), fix_kind),
             )
             return plan["class_type"] if plan is not None else None
 
         def loadable(candidates, info, log=True):
             """The candidates every loader naming the file can load, given *info*."""
-            for cls, widget, value, _fix_kind, node_id in loaders:
+            for cls, widget, value, fix_kind, node_id in loaders:
                 options = listed_options(info, cls, widget)
                 if options is not None:
                     # Listed by this loader, or loadable through a PixlStash
@@ -9781,7 +9781,9 @@ def create_router(server) -> APIRouter:
                         if listed_as(c.filename, options):
                             kept.append(c)
                             continue
-                        loader = through_pack(node_id, widget, value, c.filename, info)
+                        loader = through_pack(
+                            node_id, widget, value, c.filename, info, fix_kind
+                        )
                         if loader is not None:
                             kept.append(c.model_copy(update={"loader": loader}))
                     candidates = kept
