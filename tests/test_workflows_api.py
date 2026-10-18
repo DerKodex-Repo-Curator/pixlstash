@@ -16049,6 +16049,63 @@ def test_a_shelf_checkpoint_comfyui_does_not_list_is_offered_and_run_off_the_she
             _unshelve(conn, [digest])
 
 
+def test_a_shelf_checkpoint_fix_skips_a_twin_loader_the_pack_cannot_stand_in_for(
+    runnable, monkeypatch
+):
+    """Two loaders name the fixed file; one casts its weights (fp8), which
+    the pack's checkpoint loader cannot. Only the other loads the shelf's
+    replacement. Wrong if the casting one is left naming the replacement,
+    which this ComfyUI does not list.
+    """
+    unlisted, digest = "test-chroma-unlisted.safetensors", _h("chroma-unlisted")
+    embedded = json.loads(json.dumps(RUN_DOCUMENT))
+    embedded["1"]["inputs"]["ckpt_name"] = _SHELF_FILENAME
+    embedded["2"]["inputs"]["lora_name"] = "add_detail.safetensors"
+    embedded["3"]["inputs"].update({"steps": 20, "cfg": 7.0, "seed": 1})
+    twin = {
+        "class_type": "UNETLoader",
+        "inputs": {"unet_name": _SHELF_FILENAME, "weight_dtype": "fp8_e4m3fn"},
+    }
+    embedded["9"] = twin
+    monkeypatch.setattr(
+        workflows_routes,
+        "_load_embedded_api_prompt",
+        lambda server, picture_id, object_info=None: (
+            json.loads(json.dumps(embedded)),
+            [],
+        ),
+    )
+    info = json.loads(json.dumps(RUN_OBJECT_INFO))
+    info["UNETLoader"] = {
+        "input": {"required": {"unet_name": [[_SHELF_FILENAME], {}]}},
+        "output": ["MODEL"],
+    }
+    info["PixlStashCheckpointLoader"] = ID_LOADER_OBJECT_INFO[
+        "PixlStashCheckpointLoader"
+    ]
+    runnable.monkeypatch.setattr(
+        workflows_routes, "_read_object_info", lambda url: (info, None)
+    )
+    with runnable.server.hub.transaction() as conn:
+        _shelve_with_copy(conn, "checkpoint", unlisted, digest)
+        conn.execute(
+            "INSERT INTO workflow_model_fix (topology_hash, slot_label, was_norm, "
+            "now_norm, was_name, now_name, slot_kind) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'checkpoint')",
+            (RUN_TOPOLOGY, "l", _SHELF_FILENAME, unlisted, _SHELF_FILENAME, unlisted),
+        )
+    try:
+        r = runnable.owner.post(f"{API}/workflows/run", json={"workflow_id": RUN_WF})
+        assert r.json()["status"] == "success", r.json()
+        submitted = runnable.submitted[-1]["graph"]
+        assert submitted["1"]["class_type"] == "PixlStashCheckpointLoader"
+        assert submitted["9"] == twin
+    finally:
+        with runnable.server.hub.transaction() as conn:
+            conn.execute("DELETE FROM workflow_model_fix")
+            _unshelve(conn, [digest])
+
+
 def test_a_missing_checkpoint_is_offered_its_own_base_model_first(cloneable):
     """A replacement of another base model would not match the LoRAs around it.
 

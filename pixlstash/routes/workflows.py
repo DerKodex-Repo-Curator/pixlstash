@@ -4025,24 +4025,35 @@ def create_router(server) -> APIRouter:
                 if miss["reason"] == "not_on_comfyui"
             }
             if kind == FILE_CHECKPOINT and unlisted:
-                held = {
-                    value: unlisted[value]
+                # Per loader: a twin naming the same file that the pack's
+                # loader cannot stand in for (an fp8 cast) keeps it.
+                held = [
+                    (node_id, widget, value)
                     for node_id, _cls, widget, value in iter_model_fields_api(graph)
                     if value in unlisted
                     and _loads_off_the_shelf(
                         request, graph, node_id, widget, unlisted[value], object_info
                     )
-                }
-                if held:
+                ]
+                for node_id, widget, value in held:
                     kind_done += apply_filename_swap(
-                        graph,
-                        held,
+                        {node_id: graph[node_id]},
+                        {value: unlisted[value]},
                         None,
-                        fields=lambda cls, widget: (
-                            model_fix_kind(cls, widget) == FILE_CHECKPOINT
-                        ),
+                        fields=lambda _cls, field, widget=widget: field == widget,
                     )[0]
-                    kind_missed = [m for m in kind_missed if m["was"] not in held]
+                # Still missed while any loader of this kind names the file.
+                still_named = {
+                    value
+                    for _node, cls, widget, value in iter_model_fields_api(graph)
+                    if model_fix_kind(cls, widget) == FILE_CHECKPOINT
+                }
+                written = {value for _node, _widget, value in held}
+                kind_missed = [
+                    m
+                    for m in kind_missed
+                    if m["was"] not in written or m["was"] in still_named
+                ]
             done += kind_done
             missed += _swap_in_pixlstash_loaders(
                 card, graph, kind, swaps, kind_missed, object_info, swapped
