@@ -2894,6 +2894,7 @@ function typePrompt(text) {
     const word = person.trigger;
     if (!word) continue;
     const name = String(person.name || "").trim();
+    let swapped = false;
     // Not for a person unpicked by hand: their word would run without their LoRA.
     if (
       name &&
@@ -2907,12 +2908,14 @@ function typePrompt(text) {
         if (caret >= span.end) caret += word.length - (span.end - span.start);
         // Edited inside the name: the caret goes after the word, not into it.
         else if (caret > span.start) caret = span.start + word.length;
+        swapped = true;
       }
     }
     if (
       !chosenPersonIds.value.includes(person.id) &&
       !unpickedIds.has(person.id) &&
-      wordSpans(next, word).some((hit) => past(hit) && own(hit, word))
+      // A swapped name was typed past, wherever the caret now sits after it.
+      (swapped || wordSpans(next, word).some((hit) => past(hit) && own(hit, word)))
     ) {
       pickPerson(person.id);
     }

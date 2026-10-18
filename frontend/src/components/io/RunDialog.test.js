@@ -3883,6 +3883,8 @@ describe("the person a workflow run alone is of", () => {
         await flushPromises();
         expect(wrapper.vm.prompt).toBe("ohwxwoman smiling");
         expect(focus).toHaveBeenCalledWith(9);
+        // The word is in the prompt, so its LoRA is on the run.
+        expect(picked(wrapper)).toBe(true);
       });
     });
 
