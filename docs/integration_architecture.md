@@ -870,8 +870,9 @@ Seven rules the client must not re-derive:
    address (`core:<label>/<widget>`). Each group carries `workflow_id` and
    `flags: [{code, address, was, now, ...}]`, facts rather than reasons:
    `family_mismatch` (a model for another family or modality than the one it
-   replaced, still run) and `model_not_applied` (ComfyUI cannot load it; the
-   loader keeps its file), and `prompt_not_applied` with its `side` (a
+   replaced, still run) and `model_not_applied` (ComfyUI cannot load it,
+   not even off the shelf through a ComfyUI-PixlStash loader; the loader
+   keeps its file), and `prompt_not_applied` with its `side` (a
    `prompt` or `negative` the request sent that the graph has no place for;
    said, never dropped). Each resolved group also carries `prompt:
    {positive_settable, negative_settable, positive_text}`: whether a prompt

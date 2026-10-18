@@ -1010,8 +1010,6 @@ _WORKFLOW_ID_RE = re.compile(WORKFLOW_ID_PATTERN)
 # resolves as a path.
 _UPLOAD_EXTENSION_RE = re.compile(r"^\.[a-z0-9]{1,8}$")
 _PIXEL_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
-# The stock loaders Open in ComfyUI puts the pack's digest loaders in for.
-_PACK_MODEL_LOADERS = {"VAELoader": FILE_VAE, "CLIPLoader": FILE_TEXT_ENCODER}
 # The name `_upload_files` gives a hashed picture, read back for its content:
 # a loader still holding one says what its run loaded (`_made_from`).
 _UPLOAD_NAME_RE = re.compile(
@@ -3118,6 +3116,21 @@ def _checkpoint_off_the_shelf(
         shelf_uuid="trial",
     )
     return node["class_type"] if swapped else None
+
+
+def _digest_swap_kind(class_type: str) -> str | None:
+    """The slot kind a PixlStash digest loader may stand in for *class_type*
+    by (``run_service.PIXLSTASH_SWAP_LOADERS``), or None.
+
+    Read off its model fields, not its name, so ``DualCLIPLoader`` answers as
+    ``CLIPLoader`` does: ``run_service.plan_pixlstash_swap`` refuses whatever
+    the swap would lose, as it does for the offer.
+    """
+    kinds = {
+        model_fix_kind(class_type, field) for field in model_filename_fields(class_type)
+    }
+    kind = kinds.pop() if len(kinds) == 1 else None
+    return kind if kind in run_service.PIXLSTASH_SWAP_LOADERS else None
 
 
 def _holds_class(graph: dict, class_type: str) -> bool:
@@ -5317,9 +5330,9 @@ def create_router(server) -> APIRouter:
         replaces is flagged ``family_mismatch`` and still loaded (#1620 Q3): a
         family table not knowing a base model is no reason to refuse a run. One
         ComfyUI cannot load is flagged ``model_not_applied`` and the loader
-        keeps its file, which ``judge`` then checks like any other, unless it
-        is a checkpoint the run loads off the shelf (:func:`_loads_off_the_shelf`,
-        given *request*): that one is written unlisted.
+        keeps its file, which ``judge`` then checks like any other, unless the
+        run loads it off the shelf (:func:`_loads_off_the_shelf`; a checkpoint
+        only given *request*): that one is written unlisted.
         """
         if not models:
             return []
@@ -8357,20 +8370,32 @@ def create_router(server) -> APIRouter:
         filename: str,
         object_info: dict | None,
     ) -> bool:
-        """Whether a run loads checkpoint *filename* at *node_id* off the shelf.
+        """Whether a run loads *filename* at *node_id* off the shelf.
 
         For a file ComfyUI does not list: written in all the same, the run
-        swaps the pack's checkpoint loader in for it
-        (:func:`_swap_in_shelf_loaders`), the rule ``?replacing=`` offers
-        such a checkpoint by. Only with ComfyUI on this computer, since that
-        loader reads the file and cannot fetch one.
+        swaps the pack's loader in for it (:func:`_swap_in_shelf_loaders`),
+        the rule ``?replacing=`` offers such a file by. A VAE or a text
+        encoder by digest, which that loader fetches when it has to; a
+        checkpoint by shelf row, only with ComfyUI on this computer, since
+        that loader reads the file and cannot fetch one.
         """
         node = graph.get(node_id)
+        if object_info is None or not isinstance(node, dict):
+            return False
+        kind = model_fix_kind(node.get("class_type", ""), widget)
+        if kind in run_service.PIXLSTASH_SWAP_LOADERS:
+            plan, _refusal = run_service.plan_pixlstash_swap(
+                graph,
+                node_id,
+                kind,
+                {node["inputs"][widget]: filename},
+                object_info,
+                _shelf_digest(_hub(), kind),
+            )
+            return plan is not None
         return (
             request is not None
-            and object_info is not None
-            and isinstance(node, dict)
-            and model_fix_kind(node.get("class_type", ""), widget) == FILE_CHECKPOINT
+            and kind == FILE_CHECKPOINT
             and _comfyui_is_here(request)
             and _checkpoint_off_the_shelf(
                 graph,
@@ -8470,7 +8495,7 @@ def create_router(server) -> APIRouter:
         # loader would lose, no GGUF).
         for node_id, node in list(graph.items()):
             was = node.get("class_type") if isinstance(node, dict) else None
-            kind = _PACK_MODEL_LOADERS.get(was)
+            kind = _digest_swap_kind(str(was or ""))
             if kind is None:
                 continue
             plan, _refusal = run_service.plan_pixlstash_swap(
@@ -8520,10 +8545,11 @@ def create_router(server) -> APIRouter:
         """Load each model file this ComfyUI lacks off the shelf.
 
         For a run: a ``CheckpointLoaderSimple``, ``UNETLoader``,
-        ``ControlNetLoader``, ``UpscaleModelLoader``, ``VAELoader`` or
-        ``CLIPLoader`` naming a file ComfyUI does not list becomes the pack's
-        loader on the shelf's copy of that file, the swap *Open in ComfyUI*
-        makes (:func:`_with_pack_nodes`), on the same terms. A checkpoint or
+        ``ControlNetLoader``, ``UpscaleModelLoader``, VAE or text-encoder
+        loader (``CLIPLoader``, ``DualCLIPLoader``) naming a file ComfyUI does
+        not list becomes the pack's loader on the shelf's copy of that file,
+        the swap *Open in ComfyUI* makes (:func:`_with_pack_nodes`), on the
+        same terms. A checkpoint or
         diffusion model by the shelf's row, only where the shelf holds one copy
         and ComfyUI is on this computer to read it, since that loader cannot
         fetch its file; a ControlNet, an upscaler, a VAE or a CLIP by digest,
@@ -8543,12 +8569,12 @@ def create_router(server) -> APIRouter:
             )
         }
         swapped = []
-        # A VAE or a CLIP by digest, as `_with_pack_nodes` swaps one in: the
-        # only two classes in `_PACK_MODEL_LOADERS`, and `targets` holds only
-        # the files ComfyUI does not list.
+        # A VAE or a CLIP by digest, on the rule a pick of one is written by
+        # (`_loads_off_the_shelf`): any loader of that kind, a dual CLIP too.
+        # `targets` holds only the files ComfyUI does not list.
         for item in targets:
             was = item.get("class_type")
-            kind = _PACK_MODEL_LOADERS.get(was)
+            kind = _digest_swap_kind(str(was or ""))
             if kind is None:
                 continue
             node_id = str(item.get("node_id"))

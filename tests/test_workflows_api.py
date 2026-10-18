@@ -18926,6 +18926,90 @@ def test_a_shelf_checkpoint_comfyui_does_not_list_is_saved_and_run_off_the_shelf
             _unshelve(conn, [digest])
 
 
+def test_a_shelf_text_encoder_comfyui_does_not_list_is_saved_and_run_off_the_shelf(
+    saving,
+):
+    """Not only a checkpoint: a text encoder only the shelf holds, picked at a
+    dual CLIP loader's second slot, is saved as picked, and the run loads both
+    of the loader's files through the pack's CLIP loader by digest.
+
+    Wrong if the save is refused as `not_on_comfyui` with the pack's loader
+    in ComfyUI, if it is saved without it, or if the run submits the dual
+    loader still naming a file this ComfyUI does not list.
+    """
+    clip_l, old_t5 = "test-clip-l.safetensors", "test-t5-missing.safetensors"
+    new_t5 = "test-t5-shelf-only.safetensors"
+    l_digest, t5_digest = _h("clip-l-listed"), _h("t5-shelf-only")
+    graph = json.loads(json.dumps(CHAIN_DOCUMENT))
+    graph["8"] = {
+        "class_type": "DualCLIPLoader",
+        "inputs": {"clip_name1": clip_l, "clip_name2": old_t5, "type": "flux"},
+    }
+    graph["6"]["inputs"]["clip"] = ["8", 0]
+    manual = workflows_routes.store_manual_workflow(
+        saving.server.hub, "Dual CLIP", graph, "import"
+    )
+    with saving.server.hub.transaction() as conn:
+        _shelve_with_copy(conn, "text_encoder", clip_l, l_digest)
+        _shelve_with_copy(conn, "text_encoder", new_t5, t5_digest)
+    info = json.loads(json.dumps(CHAIN_OBJECT_INFO))
+    listed = [[clip_l, old_t5], {}]
+    info["DualCLIPLoader"] = {
+        "input": {
+            "required": {
+                "clip_name1": listed,
+                "clip_name2": listed,
+                "type": [["flux"], {}],
+            }
+        },
+        "output": ["CLIP"],
+    }
+    saving.monkeypatch.setattr(
+        workflows_routes,
+        "_read_object_info",
+        lambda url, **_: (json.loads(json.dumps(info)), None),
+    )
+    detail = saving.owner.get(f"{API}/workflows/{manual}").json()
+    (address,) = [
+        m["address"]
+        for m in detail["card"]["default_recipe"]["models"]
+        if m["address"].endswith("/clip_name2")
+    ]
+    changes = {"models": [{"address": address, "filename": new_t5}]}
+    try:
+        # Without the pack's loader nothing can load it.
+        r = _save(saving, manual, changes=changes)
+        assert r.status_code == 409, r.text
+        assert "not_on_comfyui" in r.json()["detail"], r.text
+
+        info["PixlStashCLIPLoader"] = {
+            "input": {
+                "required": {"clip_sha256": ["STRING", {}], "type": [["flux"], {}]},
+                "optional": {"clip_sha256_2": ["STRING", {}]},
+            },
+            "output": ["CLIP"],
+        }
+        r = _save(saving, manual, changes=changes)
+        assert r.status_code == 200, r.text
+        last = _versions_of(saving, manual)[-1]
+        assert last[2]["8"]["inputs"]["clip_name2"] == new_t5
+
+        r = saving.owner.post(f"{API}/workflows/run", json={"workflow_id": manual})
+        assert r.json()["status"] == "success", r.json()
+        loader = saving.submitted[-1]["graph"]["8"]
+        assert loader == {
+            "class_type": "PixlStashCLIPLoader",
+            "inputs": {
+                "clip_sha256": l_digest,
+                "clip_sha256_2": t5_digest,
+                "type": "flux",
+            },
+        }, loader
+    finally:
+        with saving.server.hub.transaction() as conn:
+            _unshelve(conn, [l_digest, t5_digest])
+
+
 def test_changes_made_before_another_version_are_save_as_new_only(saving):
     """A set applied to a graph it was not made against gives a graph nobody chose."""
     _put_changes(saving, saving.manual, **SKIP_FIVE)
