@@ -3808,6 +3808,26 @@ describe("the person a workflow run alone is of", () => {
         expect(wrapper.vm.prompt).toBe("a photo of ohwx, Mira smiling");
       });
 
+      it("leaves a name inside a longer person's name to that person", async () => {
+        listCharacters.mockResolvedValue([
+          { id: 7, name: "Mira" },
+          { id: 9, name: "Mira Vale" },
+        ]);
+        listAdapters.mockImplementation(async ({ fileKind } = {}) =>
+          fileKind
+            ? []
+            : [
+                { ...MIRA, trigger_words: ["ohwx"] },
+                { ...MIRA, sha256: "v".repeat(64), attachments: of(9), trigger_words: ["mvx"] },
+              ],
+        );
+        const wrapper = await mountRun(fromCard);
+        await typePrompt(wrapper, "a photo of Mira Vale, smiling");
+        expect(wrapper.vm.prompt).toBe("a photo of mvx, smiling");
+        expect(picked(wrapper)).toBe(false);
+        expect(tile(wrapper, 9).attributes("aria-checked")).toBe("true");
+      });
+
       it("keeps the name where the trigger word holds it", async () => {
         const wrapper = await mountRun(fromCard);
         await typePrompt(wrapper, "a photo of Mira V");

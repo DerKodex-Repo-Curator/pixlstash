@@ -2757,7 +2757,7 @@ function personWord(id) {
   const sha256 =
     row?.sha256 ??
     personFits.value.people.find((person) => person.id === id)?.loras[0]?.sha256;
-  return triggerWord(shelf.find((entry) => entry.sha256 === sha256));
+  return sha256 ? triggerWord(shelf.find((entry) => entry.sha256 === sha256)) : "";
 }
 
 /** What an added row is called, by whose it is or by where it stands. */
@@ -2877,12 +2877,24 @@ function typePrompt(text) {
   let caret = live ? live.start : text.length;
   let next = text;
   const past = (span) => span.end !== caret && span.end < next.length;
+  const terms = personTiles.value
+    .flatMap((person) => [person.name, person.trigger])
+    .map((term) => String(term || "").trim())
+    .filter(Boolean);
+  // A hit of *term* that is its own, not part of a longer name or word typed
+  // round it: "Mira" in "Mira Vale", when Mira Vale is somebody too.
+  const own = (span, term) =>
+    !terms.some(
+      (other) =>
+        other.length > term.length &&
+        wordSpans(next, other).some((hit) => hit.start <= span.start && hit.end >= span.end),
+    );
   for (const person of personTiles.value) {
     const word = person.trigger;
     if (!word) continue;
     const name = String(person.name || "").trim();
     if (name && !namesWord(word, name) && !namesWord(next, word)) {
-      const span = wordSpans(next, name).find(past);
+      const span = wordSpans(next, name).find((hit) => past(hit) && own(hit, name));
       if (span) {
         next = next.slice(0, span.start) + word + next.slice(span.end);
         if (caret >= span.end) caret += word.length - (span.end - span.start);
@@ -2891,7 +2903,7 @@ function typePrompt(text) {
     if (
       !chosenPersonIds.value.includes(person.id) &&
       !unpickedIds.has(person.id) &&
-      wordSpans(next, word).some(past)
+      wordSpans(next, word).some((hit) => past(hit) && own(hit, word))
     ) {
       pickPerson(person.id);
     }
@@ -4463,6 +4475,8 @@ function layOwn() {
 async function dropLoras() {
   loras.value = [];
   addedLoras.value = [];
+  // Taken off on purpose, as a tile's press would: typing does not put them back.
+  personIds.value.forEach((picked) => unpickedIds.add(picked));
   personIds.value = [];
   await runPreflight();
 }
