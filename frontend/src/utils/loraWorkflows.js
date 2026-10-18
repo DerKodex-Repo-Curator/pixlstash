@@ -37,18 +37,20 @@ export function nameKey(value) {
 }
 
 /**
- * The digests of every checkpoint a hand-made workflow set puts beside *sha256*.
+ * The digests of every checkpoint a hand-made workflow set puts beside one of
+ * *sha256s*.
  *
  * @param {Array<Object>} handMade - `fetchWorkflowSets().hand_made`.
- * @param {string} sha256 - the LoRA's digest.
+ * @param {Array<string>} sha256s - the LoRAs' digests.
  * @returns {Set<string>}
  */
-export function pairedCheckpoints(handMade, sha256) {
+export function pairedCheckpoints(handMade, sha256s) {
   const paired = new Set();
-  if (!sha256) return paired;
+  const wanted = new Set((sha256s || []).filter(Boolean));
+  if (!wanted.size) return paired;
   for (const set of handMade || []) {
     const members = set.members || [];
-    if (!members.some((m) => m.slot === "lora" && m.sha256 === sha256))
+    if (!members.some((m) => m.slot === "lora" && wanted.has(m.sha256)))
       continue;
     for (const member of members) {
       if (member.slot === "checkpoint" && member.sha256)
@@ -59,14 +61,19 @@ export function pairedCheckpoints(handMade, sha256) {
 }
 
 /**
- * How one workflow card fits one LoRA.
+ * How one workflow card fits the LoRAs a person or a set has attached.
  *
  * `fit` is one of:
- *   - `match`         - the checkpoint's base-model family is the LoRA's.
- *   - `unknown`       - one side has no known family, so nothing says either
- *                       way; offered after the matches, never hidden.
- *   - `clash`         - both families are known and differ.
+ *   - `match`         - the checkpoint's base-model family is one LoRA's.
+ *   - `unknown`       - no LoRA matches and, for one of them, a side has no
+ *                       known family, so nothing says either way; offered
+ *                       after the matches, never hidden.
+ *   - `clash`         - every family is known and none is the checkpoint's.
  *   - `needs_picture` - the workflow makes a picture FROM a picture.
+ *
+ * Every LoRA counts, not only the first: a person with a Z-Image LoRA and a
+ * Krea 2 LoRA is offered both base models' workflows, and `loras` names the
+ * ones that match, for the run to load the right one.
  *
  * Both sides read `base_model_family`, the shelf's identified base model with
  * filename guesses included: a LoRA the shelf shows as Krea 2 narrows to Krea 2
@@ -74,27 +81,39 @@ export function pairedCheckpoints(handMade, sha256) {
  * LoRA loader does not matter: the run adds the LoRA in a loader of its own
  * (`add_loras`).
  *
- * `paired` is a hand-made workflow set naming this LoRA and this checkpoint;
- * `usedBefore` is the LoRA among the ones this workflow's kept pictures used.
+ * `paired` is a hand-made workflow set naming one of the LoRAs and this
+ * checkpoint; `usedBefore` is one of them among the ones this workflow's kept
+ * pictures used.
  *
  * @param {Object} card - a `GET /workflows` card.
- * @param {Object} lora - a shelf row (`listAdapters`).
- * @param {Set<string>} paired - `pairedCheckpoints(...)` for this LoRA.
+ * @param {Array<Object>} loras - shelf rows (`listAdapters`).
+ * @param {Set<string>} paired - `pairedCheckpoints(...)` for these LoRAs.
  */
-export function workflowFit(card, lora, paired = new Set()) {
+export function workflowFit(card, loras, paired = new Set()) {
   const checkpoint = checkpointModel(card);
+  const usedKeys = new Set(
+    (card.recipe_values?.loras || []).map((value) => nameKey(value.name)),
+  );
+  const fits = loras.map((lora) => familyFit(checkpoint, lora));
   const base = {
     card,
     checkpoint,
+    loras: loras.filter((_, index) => fits[index] === "match"),
     paired: Boolean(checkpoint?.sha256 && paired.has(checkpoint.sha256)),
-    usedBefore: (card.recipe_values?.loras || []).some(
-      (value) => nameKey(value.name) === nameKey(lora?.filename),
+    usedBefore: loras.some(
+      (lora) => lora?.filename && usedKeys.has(nameKey(lora.filename)),
     ),
   };
   if (card.type && !OFFERED_TYPES.has(card.type)) {
     return { ...base, fit: "needs_picture" };
   }
-  return { ...base, fit: familyFit(checkpoint, lora) };
+  // No LoRA at all says nothing either way, as one with no family does.
+  const fit = fits.includes("match")
+    ? "match"
+    : fits.includes("clash") && !fits.includes("unknown")
+      ? "clash"
+      : "unknown";
+  return { ...base, fit };
 }
 
 /** `match`, `unknown` or `clash`: one checkpoint and one LoRA, by base-model family. */
@@ -160,15 +179,23 @@ export function fitPeople(card, loras, characters) {
 }
 
 /**
- * Every card, fitted against *lora*: the matches and the unknowns each ranked
- * by a hand-made pairing first, then prior use, then the server's order.
+ * Every card, fitted against *loras* (see {@link workflowFit}): the matches
+ * and the unknowns each ranked by a hand-made pairing first, then prior use,
+ * then the server's order.
  *
+ * @param {Array<Object>} cards - `GET /workflows` cards.
+ * @param {Array<Object>} loras - shelf rows; empty narrows nothing.
+ * @param {Array<Object>} handMade - `fetchWorkflowSets().hand_made`.
  * @returns {{match: Array<Object>, unknown: Array<Object>, clash: Array<Object>,
  *   needsPicture: Array<Object>}}
  */
-export function fitWorkflows(cards, lora, handMade) {
-  const paired = pairedCheckpoints(handMade, lora?.sha256);
-  const fits = (cards || []).map((card) => workflowFit(card, lora, paired));
+export function fitWorkflows(cards, loras, handMade) {
+  const own = (loras || []).filter(Boolean);
+  const paired = pairedCheckpoints(
+    handMade,
+    own.map((lora) => lora.sha256),
+  );
+  const fits = (cards || []).map((card) => workflowFit(card, own, paired));
   const score = (entry) => (entry.paired ? 2 : 0) + (entry.usedBefore ? 1 : 0);
   // `sort` is stable, so ties keep the server's order.
   const ranked = (fit) =>

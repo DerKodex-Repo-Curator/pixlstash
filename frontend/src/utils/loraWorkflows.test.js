@@ -62,7 +62,7 @@ describe("fitWorkflows", () => {
         card("wan", { type: "video" }),
         card("wan-sdxl", { type: "video", family: "sdxl" }),
       ],
-      LORA,
+      [LORA],
       [],
     );
     expect(ids(match)).toEqual(["krea", "untyped", "wan"]);
@@ -72,19 +72,49 @@ describe("fitWorkflows", () => {
   });
 
   it("offers a workflow with no LoRA loader: the run adds one", () => {
-    const { match } = fitWorkflows([card("bare", { loras: 0 })], LORA, []);
+    const { match } = fitWorkflows([card("bare", { loras: 0 })], [LORA], []);
     expect(ids(match)).toEqual(["bare"]);
   });
 
   it("narrows nothing for a LoRA whose base model is not known", () => {
     const { match, unknown, clash } = fitWorkflows(
       [card("krea"), card("sdxl", { family: "sdxl" })],
-      { ...LORA, base_model_family: null },
+      [{ ...LORA, base_model_family: null }],
       [],
     );
     expect(match).toEqual([]);
     expect(clash).toEqual([]);
     expect(ids(unknown)).toEqual(["krea", "sdxl"]);
+  });
+
+  it("offers every attached LoRA's base model, naming the LoRA that fits", () => {
+    const zimage = {
+      sha256: "b".repeat(64),
+      filename: "example-subject-zit.safetensors",
+      base_model_family: "zimage",
+    };
+    const { match, clash } = fitWorkflows(
+      [
+        card("zit", { family: "zimage" }),
+        card("sdxl", { family: "sdxl" }),
+        card("krea"),
+      ],
+      // The first attached LoRA is not the only one asked.
+      [zimage, LORA],
+      [],
+    );
+    expect(ids(match)).toEqual(["zit", "krea"]);
+    expect(match.map((entry) => entry.loras.map((lora) => lora.sha256))).toEqual(
+      [[zimage.sha256], [LORA.sha256]],
+    );
+    expect(ids(clash)).toEqual(["sdxl"]);
+  });
+
+  it("narrows nothing with no LoRA to fit against", () => {
+    const { match, unknown, clash } = fitWorkflows([card("krea")], [], []);
+    expect(match).toEqual([]);
+    expect(clash).toEqual([]);
+    expect(ids(unknown)).toEqual(["krea"]);
   });
 
   it("ranks a hand-made pairing first, then prior use, then server order", () => {
@@ -102,7 +132,7 @@ describe("fitWorkflows", () => {
         card("used", { used: ["example-subject-v2"] }),
         card("paired", { sha256: CKPT }),
       ],
-      LORA,
+      [LORA],
       handMade,
     );
     expect(ids(match)).toEqual(["paired", "used", "first"]);
@@ -122,7 +152,7 @@ describe("pairedCheckpoints", () => {
         ],
       },
     ];
-    expect([...pairedCheckpoints(sets, LORA.sha256)]).toEqual(["d".repeat(64)]);
+    expect([...pairedCheckpoints(sets, [LORA.sha256])]).toEqual(["d".repeat(64)]);
   });
 });
 

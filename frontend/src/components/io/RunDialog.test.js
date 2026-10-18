@@ -3109,6 +3109,45 @@ describe("Create with LoRA", () => {
     expect(wrapper.vm.handMadeSets.map((set) => set.id)).toEqual([11]);
   });
 
+  it("offers every attached LoRA's base model and loads the one picked for", async () => {
+    const ZIT = `auto:${"f".repeat(64)}`;
+    const ZIT_LORA = {
+      sha256: "m".repeat(64),
+      filename: "example-subject-zit.safetensors",
+      base_model: "Z-Image Turbo",
+      base_model_family: "zimage",
+    };
+    listWorkflowCards.mockResolvedValue({
+      cards: [
+        { id: ZIT, name: "ZIT portrait", type: "txt2img", models: model("zimage") },
+        { id: SDXL, name: "SDXL portrait", type: "txt2img", models: model("sdxl") },
+        { id: KREA, name: "Krea portrait", type: "txt2img", models: model("krea2") },
+      ],
+    });
+    // The Z-Image LoRA is attached first: it must not hide the Krea 2 ones.
+    listAdapters.mockImplementation(async ({ fileKind, characterId } = {}) =>
+      characterId && fileKind === "adapter" ? [ZIT_LORA, PERSON_LORA] : [],
+    );
+    const wrapper = await mountRun(fromPerson);
+    expect(wrapper.vm.workflowOptions.map((o) => o.value)).toEqual([ZIT, KREA]);
+    expect(wrapper.text()).toContain("Not listed: 1 for another base model.");
+    expect(wrapper.vm.addedLoras[0].sha256).toBe(ZIT_LORA.sha256);
+
+    wrapper.vm.workflowId = KREA;
+    await flushPromises();
+    // The row takes the LoRA made for the workflow picked, and stays theirs.
+    expect(wrapper.vm.addedLoras.map((row) => [row.sha256, row.person])).toEqual([
+      [PERSON_LORA.sha256, 3],
+    ]);
+    expect(wrapper.vm.workflowOptions.map((o) => o.value)).toEqual([ZIT, KREA]);
+    await wrapper.vm.submit();
+    const body = runWorkflowCard.mock.calls[0][0];
+    expect(body.workflow_id).toBe(KREA);
+    expect(body.add_loras).toEqual([
+      { sha256: PERSON_LORA.sha256, strength_model: 1 },
+    ]);
+  });
+
   it("never narrows by an attached LoRA other than the one on the run", async () => {
     const wrapper = await mountRun(fromPerson);
     wrapper.vm.addedLoras[0].sha256 = "z".repeat(64);
