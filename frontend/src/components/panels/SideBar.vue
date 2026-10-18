@@ -20,6 +20,7 @@ import FolderTreeNode from "../editors/FolderTreeNode.vue";
 import FolderEditor from "../editors/FolderEditor.vue";
 import FolderBrowser from "../editors/FolderBrowser.vue";
 import AppButton from "../widgets/AppButton.vue";
+import ComfyuiIcon from "../widgets/ComfyuiIcon.vue";
 import Tooltip from "../widgets/Tooltip.vue";
 import AppDialog from "../widgets/AppDialog.vue";
 import AppInput from "../widgets/AppInput.vue";
@@ -6134,7 +6135,7 @@ defineExpose({
                 :text="isReadOnly ? READ_ONLY_WORKFLOWS_HINT : 'Workflows'"
                 activator="parent"
               />
-              <v-icon>mdi-sitemap-outline</v-icon>
+              <ComfyuiIcon />
             </button>
           </div>
 
@@ -6761,7 +6762,7 @@ defineExpose({
                   activator="parent"
                 />
                 <span class="sidebar-list-icon sidebar-list-icon--toplevel"
-                  ><v-icon size="18">mdi-sitemap-outline</v-icon></span
+                  ><ComfyuiIcon :size="16" /></span
                 >
                 <span class="sidebar-list-label">Workflows</span>
               </button>

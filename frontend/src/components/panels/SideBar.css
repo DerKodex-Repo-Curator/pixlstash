@@ -1251,7 +1251,9 @@
 }
 
 .sidebar-list-icon .v-icon,
-.sidebar-collapsed-item .v-icon {
+.sidebar-list-icon svg,
+.sidebar-collapsed-item .v-icon,
+.sidebar-collapsed-item svg {
   color: rgb(var(--v-theme-sidebar-text));
 }
 
@@ -1262,6 +1264,14 @@
   font-size: calc(var(--sidebar-thumb-size) * 0.92) !important;
   width: calc(var(--sidebar-thumb-size) * 0.92) !important;
   height: calc(var(--sidebar-thumb-size) * 0.92) !important;
+}
+
+/* An inline SVG mark (Workflows' ComfyUI logomark) is cropped to its own edge,
+   with none of an MDI glyph's internal margin, so it takes a smaller box to
+   read the same size as the line-art icons beside it. */
+.sidebar-collapsed-item svg {
+  width: calc(var(--sidebar-thumb-size) * 0.75);
+  height: calc(var(--sidebar-thumb-size) * 0.75);
 }
 
 .sidebar-list-label {
