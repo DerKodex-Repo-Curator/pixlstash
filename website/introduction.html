@@ -15,7 +15,12 @@
       href="https://fonts.googleapis.com/css2?family=Tiny5&family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <script>try{if(localStorage.getItem('pixlstash-theme')==='light')document.documentElement.setAttribute('data-theme','light')}catch(e){}</script>
+    <script>
+      try {
+        if (localStorage.getItem("pixlstash-theme") === "light")
+          document.documentElement.setAttribute("data-theme", "light");
+      } catch (e) {}
+    </script>
     <link rel="stylesheet" href="pixlstash.css" />
     <style>
       .shell {
@@ -142,7 +147,7 @@
         <div class="page-hero">
           <h1>Getting started with PixlStash</h1>
           <p>
-            Nine short clips covering your first import, exporting a training
+            Ten short clips covering your first import, exporting a training
             dataset, and driving PixlStash from ComfyUI.
           </p>
         </div>
@@ -305,10 +310,34 @@
             </div>
           </div>
 
-          <!-- 08 ComfyUI Face Search -->
+          <!-- 08 Connect ComfyUI -->
           <div class="feature feature--reverse">
             <div class="feature-text">
               <span class="feature-number">08. ComfyUI</span>
+              <h2>Connect ComfyUI and install our nodes</h2>
+              <p>
+                In Settings › ComfyUI, one click finds the ComfyUI running on
+                this computer, <strong>installs the PixlStash nodes</strong>
+                into it and links the two apps, with no token to copy. The nodes
+                are how ComfyUI reads your library and sends new pictures back,
+                so do this before you run a workflow.
+              </p>
+            </div>
+            <div class="video-card">
+              <video
+                src="assets/LinkingComfyUIAndCharacter.mp4"
+                autoplay
+                loop
+                muted
+                playsinline
+              ></video>
+            </div>
+          </div>
+
+          <!-- 09 ComfyUI Face Search -->
+          <div class="feature">
+            <div class="feature-text">
+              <span class="feature-number">09. ComfyUI</span>
               <h2>Search faces from ComfyUI</h2>
               <p>
                 Use the PixlStash ComfyUI nodes to search your library for
@@ -327,10 +356,10 @@
             </div>
           </div>
 
-          <!-- 09 ComfyUI Outpaint -->
-          <div class="feature">
+          <!-- 10 ComfyUI Outpaint -->
+          <div class="feature feature--reverse">
             <div class="feature-text">
-              <span class="feature-number">09. ComfyUI</span>
+              <span class="feature-number">10. ComfyUI</span>
               <h2>Outpaint PixlStash images</h2>
               <p>
                 A ready-made ComfyUI node and workflow lets you load an image,
