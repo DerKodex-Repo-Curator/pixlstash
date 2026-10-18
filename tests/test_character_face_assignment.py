@@ -590,6 +590,18 @@ def test_the_pairing_is_the_best_overall_not_the_best_pair_first(library):
     }
 
 
+def test_a_person_not_in_the_picture_is_not_handed_a_stranger(library):
+    """Both people's LoRAs ran, but only a's face and a bystander's came out."""
+    a = _person(library, "a", ALONG_X)
+    b = _person(library, "b", ALONG_Y)
+    like_a, stranger = _group(
+        library, (NEAR_X, SMALL_BBOX), (_vec(0, 0, 1, 0, 0, 0, 0, 0), LARGE_BBOX)
+    )
+    assert match_faces_to_characters(library, [like_a, stranger], [a, b]) == {
+        like_a.id: a
+    }
+
+
 def test_a_named_face_and_its_person_are_left_out(library):
     a = _person(library, "a", ALONG_X)
     b = _person(library, "b", ALONG_Y)

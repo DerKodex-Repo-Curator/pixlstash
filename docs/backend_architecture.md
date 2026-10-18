@@ -2551,8 +2551,9 @@ extracted. **Two or more** are matched to the faces by likeness
 face nobody names by their reference faces
 (`select_reference_faces_for_character`), and the pairing taken is the one
 whose likenesses sum highest (`scipy.optimize.linear_sum_assignment`), one
-face per person; a face already naming somebody, and that somebody, are left
-out. A person with no reference faces cannot be told apart: one such person
+face per person and none below `MIN_MATCH_LIKENESS`, so a person the run
+loaded but did not draw is not handed a stranger; a face already naming
+somebody, and that somebody, are left out. A person with no reference faces cannot be told apart: one such person
 left over gets the largest face nobody took, two or more get none. A picture
 already extracted is matched at once; one not yet extracted gets a
 `picture_pending_person` row per person (`PicturePendingPerson`, a vault

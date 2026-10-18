@@ -32,6 +32,13 @@ from pixlstash.pixl_logging import get_logger
 
 logger = get_logger(__name__)
 
+# The least likeness at which ``match_faces_to_characters`` takes a face for
+# a person: below it the face is somebody else's, and a person loaded into a
+# run but not drawn would otherwise be handed a stranger.
+# ponytail: a judgement on ArcFace cosines (another identity sits near 0, the
+# same one well above), not measured on generated faces; tune it here.
+MIN_MATCH_LIKENESS = 0.4
+
 
 def select_reference_faces_for_character(
     session: Session,
@@ -273,6 +280,8 @@ def match_faces_to_characters(
     likenesses sum highest: two people who look alike are not both handed the
     face that looks most like either. A person gets at most one face, a face
     at most one person, and a person some face already names is left out.
+    No face is taken below ``MIN_MATCH_LIKENESS``: a person who is not in the
+    picture is not handed whoever is.
 
     A person with no reference faces cannot be told apart by likeness. When
     exactly one is left over they get the largest face nobody took, the rule
@@ -308,9 +317,14 @@ def match_faces_to_characters(
         # picture of several people ever needs it.
         from scipy.optimize import linear_sum_assignment
 
-        person_idx, face_idx = linear_sum_assignment(np.array(rows), maximize=True)
+        scores = np.array(rows)
+        # Too unlike to count is never worth a pairing, so it cannot pull the
+        # optimum away from the pairs that are.
+        allowed = np.where(scores >= MIN_MATCH_LIKENESS, scores, -1.0e3)
+        person_idx, face_idx = linear_sum_assignment(allowed, maximize=True)
         for p, f in zip(person_idx, face_idx, strict=True):
-            pairs[candidates[f].id] = scored_people[p]
+            if scores[p, f] >= MIN_MATCH_LIKENESS:
+                pairs[candidates[f].id] = scored_people[p]
 
     unscored = [cid for cid in people if cid not in scored_people]
     left = [face for face in free if face.id not in pairs]
