@@ -2244,6 +2244,10 @@ _COMFYUI_SCOPE_REQUESTS = {
     ("GET", f"{API}/sort_mechanisms"): (f"{API}/sort_mechanisms", None),
     ("GET", f"{API}/pictures"): (f"{API}/pictures", None),
     ("GET", f"{API}/pictures/count"): (f"{API}/pictures/count", None),
+    ("GET", f"{API}/pictures/comfyui_models"): (
+        f"{API}/pictures/comfyui_models",
+        None,
+    ),
     ("GET", f"{API}/pictures/thumbnails/{{id}}.webp"): (
         f"{API}/pictures/thumbnails/{_NO_ROW}.webp",
         None,
