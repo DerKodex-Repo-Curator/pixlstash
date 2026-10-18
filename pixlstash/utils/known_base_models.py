@@ -994,10 +994,14 @@ _REVISION_RE = re.compile(r"rev\d+", re.IGNORECASE)
 # Digits a version's number runs to: Qwen's `2511`, not `sdxl123456789`.
 _VERSION_DIGITS = 4
 # A version opening a token (`1.0`, `2511`). What follows must be packaging
-# (`0.9vae`, a size its base's names carry: `14B`), so `2xMoreDetailed` is a
-# fine-tune.
+# (`0.9vae`), so `2xMoreDetailed` is a fine-tune.
 _VERSION_RE = re.compile(
     rf"\d{{1,{_VERSION_DIGITS}}}(?!\d)(?:\.\d{{1,{_VERSION_DIGITS}}}(?!\d))*"
+)
+# A size, resolution or step count (`22b`, `1600M`, `1024px`, `4steps`):
+# packaging.
+_SIZE_RE = re.compile(
+    rf"\d{{1,{_VERSION_DIGITS}}}(?:\.\d+)?(?:[bm]|px|steps?)", re.IGNORECASE
 )
 # A precision anywhere in a name (`seedvr2_7b_int8_convrot`), where the shelf's
 # own quant parser only strips one at the end.
@@ -1107,6 +1111,7 @@ def _is_release(canonical: str, tokens: list[str], vocabulary: frozenset[str]) -
                     )
                 )
                 or _REVISION_RE.fullmatch(token)
+                or _SIZE_RE.fullmatch(token)
                 or _norm(token) in vocabulary
                 or _norm(token) in ROLE_WORDS
                 or _norm(token) in _SPEED_WORDS
@@ -1124,8 +1129,9 @@ def _initials(words: list[str]) -> str:
 
     The first letters of the first two words that open with a letter, or the
     first two letters of the only one; a ``v1.0`` is a version, not a word.
-    With no word opening with a letter, the first word's first two
-    characters (2X for ``2xMoreDetailed``); ``""`` with no word at all.
+    With no word opening with a letter, the first two characters of the
+    first that opens with a number and then a letter (2X for
+    ``2xMoreDetailed``), else ``""``.
     """
     significant = [
         word
@@ -1142,7 +1148,8 @@ def _initials(words: list[str]) -> str:
         return (lettered[0][0] + lettered[1][0]).upper()
     if lettered:
         return "".join(ch for ch in lettered[0] if ch.isalpha())[:2].upper()
-    return words[0][:2].upper() if words else ""
+    digit_led = [word for word in words if re.match(r"\d+[^\W\d_]", word)]
+    return digit_led[0][:2].upper() if digit_led else ""
 
 
 def _own_line(name: str, vocabulary: frozenset[str]) -> Optional[str]:
