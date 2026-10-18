@@ -6253,6 +6253,14 @@ def test_workflows_that_disagree_offer_nothing(shelf_env, gguf_encoder):
     assert row["suggested_by"] == 0
 
 
+def test_a_load_in_any_other_slot_disagrees(shelf_env, gguf_encoder):
+    """Every workflow that loads it, not every one that loads it as a kind."""
+    server = shelf_env.server
+    _seed_loader(server, "r-te", "clip_name", "t5-xxl-q8_0.gguf", "CLIPLoader")
+    _seed_loader(server, "r-lora", "lora_name", "t5-xxl-q8_0.gguf", "LoraLoader")
+    assert _unclassified(shelf_env)[gguf_encoder]["suggested_kind"] is None
+
+
 def test_a_vision_loader_is_not_a_text_encoder_and_disagrees(shelf_env, gguf_encoder):
     """`clip_name` on a CLIP Vision loader names an image encoder."""
     server = shelf_env.server

@@ -2269,6 +2269,8 @@ def update_models(hub, ids: list[int], changes: dict) -> list[int]:
     (``file_kind_decided``), whatever kind they picked, so a workflow loading
     it as another kind is no longer offered (#1962). ``suggest_kind`` writes
     that mark alone: ``False`` is "don't suggest", ``True`` takes it back.
+    Sent beside ``file_kind`` it decides the mark, which is how an Undo puts
+    back a kind and the offer together.
 
     ``capabilities`` is the one entry that is not a column. It is the complete
     set for every id, written to ``model_capability``: replaced wholesale rather

@@ -1231,6 +1231,7 @@ import {
   useComfyuiOpen,
 } from "../../composables/useComfyuiOpen";
 import { useWorkflowPictures } from "../../composables/useWorkflowPictures";
+import { useModelShelfStore } from "../../stores/useModelShelfStore";
 import { useNoticeStore } from "../../stores/useNoticeStore";
 import { useSidebarStore } from "../../stores/useSidebarStore";
 import { useRunDialogStore } from "../../stores/useRunDialogStore";
@@ -1892,6 +1893,9 @@ async function fileOffered(row, changes) {
       ? `Filed ${row.savedLabel} as ${fileKindLabel(changes.file_kind)} on your shelf.`
       : "The shelf will not suggest a kind for it.",
   });
+  // A shelf already read shows the old kind until it is read again.
+  const shelf = useModelShelfStore();
+  if (shelf.loaded) void shelf.fetchRows();
   if (selectedKey.value !== key) return;
   await loadDetail(key, { quiet: true });
   // The menu goes with the offer it answered; the row's own control takes

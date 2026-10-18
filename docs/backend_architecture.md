@@ -10844,7 +10844,8 @@ Unclassified. A recorded workflow that loads the file says what it is, and
   picks a kind.
 - **Only when the evidence agrees.** Every load of the model is mapped through
   `workflow_identity.model_fix_kind`, and a suggestion exists only when there is
-  exactly one kind and it is one of `OFFERED_KINDS` (VAE, text encoder). A
+  exactly one kind and it is one of `OFFERED_KINDS` (VAE, text encoder). A load
+  in a slot `model_fix_kind` does not file (a LoRA, an upscaler) disagrees. A
   `clip_name` takes its loader's class from the topology's recorded slots
   (`workflow_topology_core.slots`): a vision loader's is an image encoder, and a
   graph holding both kinds of CLIP loader, or whose slots were never recorded,
@@ -10855,7 +10856,8 @@ Unclassified. A recorded workflow that loads the file says what it is, and
 - **The owner's say is `model.file_kind_decided`.** Any `file_kind` write over
   `PATCH /models` sets it, the kind already stored included: picking a kind is
   deciding it. `suggest_kind: false` ("Don't suggest a kind") sets it alone and
-  `suggest_kind: true` clears it. The suggestion is still computed for a decided
+  `suggest_kind: true` clears it; sent beside `file_kind`, `suggest_kind` decides
+  the mark (an Undo puts back a kind and the offer together). The suggestion is still computed for a decided
   row, so the shelf can offer "Suggest a kind again".
 - **The Workflow tab gets the same offer**, on `GET /workflows/{id}` as
   `kind_offers`: `loader_offers` hands a default-recipe loader its model's

@@ -669,7 +669,8 @@ Rules neither side may drift from:
    whether a person has decided its kind. The client offers the suggestion
    only while `kind_decided` is false. Any `file_kind` write on `PATCH /models`
    sets it; `suggest_kind: false` sets it alone and `suggest_kind: true`
-   clears it (`null` is a 400).
+   clears it (`null` is a 400); sent beside `file_kind`, `suggest_kind`
+   decides the mark.
 
 ### 2.3 The `/workflows` contract
 

@@ -11,7 +11,8 @@ recorded workflows already store which field names which file
 **An offer, never a write.** Nothing here touches ``model.file_kind``; the shelf
 shows the kind beside the one it holds and the owner files it. And only when the
 evidence agrees: every recorded workflow that loads the model loads it as the
-same kind. One that loads it as a vision encoder, or whose loader class cannot
+same kind. One that loads it in another slot (a LoRA, an upscaler) or as a
+vision encoder, or whose loader class cannot
 be read, disagrees.
 
 ``model.file_kind_decided`` is the owner's say: set by any kind they pick and
@@ -51,6 +52,9 @@ REFILEABLE_KINDS = (FILE_CHECKPOINT, FILE_UNKNOWN)
 # not a kind anything is filed as, so it only ever disagrees.
 _NOT_A_TEXT_ENCODER = "clip_vision"
 _UNREAD = "unread"
+# A load in a slot ``model_fix_kind`` does not file (a LoRA, a ControlNet, an
+# upscaler): a kind of its own as far as agreeing goes, so it only disagrees.
+_OTHER_SLOT = "other_slot"
 
 
 @dataclass(frozen=True)
@@ -119,7 +123,9 @@ def kind_suggestions(hub, model_ids: Iterable[int]) -> dict[int, KindSuggestion]
             tuple(batch),
         ):
             widget = row["widget_name"]
-            if SHA256_FIELD_RE.search(widget) or not model_fix_kind("", widget):
+            # A digest names the file by its bytes, through a PixlStash loader
+            # that only lists shelf models of its own kind already.
+            if SHA256_FIELD_RE.search(widget):
                 continue
             loads.append(
                 (owner[row["normalized_filename"]], row["structural_hash"], widget)
@@ -212,7 +218,7 @@ def _loaded_as(recipe: str, widget: str, slots: str) -> str:
     """
     kind = model_fix_kind("", widget)
     if kind != FILE_TEXT_ENCODER:
-        return kind
+        return kind or _OTHER_SLOT
     if not slots:
         return _UNREAD
     try:
