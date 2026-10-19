@@ -1265,11 +1265,23 @@ def test_a_face_near_many_different_people_is_not_one_person():
     hub = _unit(0)
     strangers = [0.6 * hub + 0.8 * _unit(i) for i in range(1, 17)]
     faces = [hub] + strangers + [_unit(i) for i in range(17, 20)]
-    assert _dominant_identity_count(faces) == 1
+    # The largest coherent group is a pair: the hub and any one stranger.
+    assert _dominant_identity_count(faces) == 2
 
     # The same twenty with the strangers made one person still counts them all.
     twin = 0.6 * hub + 0.8 * _unit(1)
     assert _dominant_identity_count([hub] + [twin] * 16 + faces[17:]) == 17
+
+
+def test_a_face_bridging_two_look_alike_groups_does_not_merge_them():
+    """Review on #1994: two groups of nine, 0.36 apart, both 0.60 from one
+    bridging face. Each member matches 10 of the 19, which cleared a
+    "more than half" coherence rule and read as "one face, 19 of 20"."""
+    bridge = _unit(0)
+    left = [0.6 * bridge + 0.8 * _unit(1)] * 9
+    right = [0.6 * bridge + 0.8 * _unit(2)] * 9
+    faces = [bridge] + left + right + [_unit(3)]
+    assert _dominant_identity_count(faces) == 10, "one group plus the bridge"
 
 
 def test_the_face_majority_is_where_it_says_it_is():

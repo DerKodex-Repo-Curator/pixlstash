@@ -154,6 +154,13 @@ FACE_MAJORITY_PCT = 80
 # Upgrade path if it proves noisy: agglomerative clustering over the folder.
 SAME_IDENTITY_COSINE = 0.45
 
+#: Share of a face group a member must match to count as that group's person.
+#: Above half on purpose: when one face bridges two look-alike groups, each
+#: member matches its own group plus the bridge, just over half of the union,
+#: so "more than half" let two people read as one. At seventy the smaller
+#: group always falls out. Integer arithmetic, as for `FACE_MAJORITY_PCT`.
+_GROUP_COHERENCE_PCT = 70
+
 #: Wall-clock budget for one whole read. The face signal has a per-batch
 #: timeout, but a per-batch timeout multiplied by 20,000 folders is weeks, so
 #: the bound that actually holds has to be on the read: 180 s per batch over
@@ -1473,17 +1480,22 @@ def _largest_face(faces) -> Optional[np.ndarray]:
 def _dominant_identity_count(embeddings: list[np.ndarray]) -> int:
     """How many of these faces are the same person as the most common one.
 
-    A medoid vote: the face with the most others within ``SAME_IDENTITY_COSINE``
-    of it (itself included) names the group. A face then counts only if it
-    also matches more than half of that group, not just the medoid: one
-    average-looking face near sixteen different people is a hub, not a person,
-    and on its own vote reads "one face, 17 of 20" (#1988). O(n²) over at most
-    ``SAMPLED_PER_FOLDER`` vectors, so 400 dot products per folder.
+    Each face proposes a group: the faces within ``SAME_IDENTITY_COSINE`` of it
+    (itself included). A member counts only if it matches at least
+    ``_GROUP_COHERENCE_PCT`` of that group, not just the face that proposed it,
+    and the best-scoring group wins. Matching the proposer alone is how one
+    average-looking face near sixteen strangers read as "one face, 17 of 20"
+    (#1988); matching just over half is how one face bridging two look-alike
+    groups of nine read as 19 of 20 (review on #1994). O(n³) over at most
+    ``SAMPLED_PER_FOLDER`` vectors, which is 8,000 comparisons per folder.
     """
     if not embeddings:
         return 0
     matrix = np.stack(embeddings)
     same = (matrix @ matrix.T) >= SAME_IDENTITY_COSINE
-    group = same[same.sum(axis=1).argmax()]
-    support = same[np.ix_(group, group)].sum(axis=1)
-    return int((support * 2 > group.sum()).sum())
+    best = 0
+    for group in same:
+        support = same[np.ix_(group, group)].sum(axis=1)
+        coherent = support * 100 >= _GROUP_COHERENCE_PCT * group.sum()
+        best = max(best, int(coherent.sum()))
+    return best

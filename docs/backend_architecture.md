@@ -7439,10 +7439,12 @@ L2-normalised, so identity comparison is a dot product and the whole folder is
 one `n×n` matrix over at most 20 vectors — 400 products, nothing. The threshold
 is set where a **missed** Person costs the owner one dropdown and a **wrong**
 one costs them trust in every other row on the screen. The identity itself is a
-medoid vote, not a clustering library: the sampled face with the most others
-within the threshold of it names the group, and a face counts only if it also
-matches more than half of that group. Without that second test one
-average-looking face near many different people read as one person (#1988). That is the number the
+group vote, not a clustering library: every sampled face proposes the group of
+faces within the threshold of it, a member counts only if it matches at least
+`_GROUP_COHERENCE_PCT = 70` of that group, and the best group wins. Matching
+the proposer alone let one average-looking face near many different people
+read as one person (#1988); matching just over half let one face bridging two
+look-alike groups merge them. That is the number the
 evidence string says out loud (`"one face, 19 of 20"`).
 
 The sample is **evenly spaced through the folder's sorted filenames**, never the
