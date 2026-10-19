@@ -1187,7 +1187,8 @@ def test_a_stored_workflow_whose_file_stays_is_still_deleted(
 
     monkeypatch.setattr(os, "remove", stuck)
     with caplog.at_level(logging.WARNING):
-        assert call.delete("flow")["status"] == "success"
+        result = call.delete("flow")
+    assert result["status"] == "success"
     (leftover,) = os.listdir(user_dir)
     assert leftover.startswith("flow.json.")
     assert leftover.endswith(comfyui_module.DELETING_SUFFIX)
