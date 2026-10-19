@@ -438,11 +438,8 @@ def hub(tmp_path):
     A module that needs a different ``hub`` (a raw sqlite connection, a shared
     server's hub) defines its own, which overrides this one.
     """
-    database = HubDatabase(str(tmp_path / "hub.db"))
-    try:
+    with HubDatabase(str(tmp_path / "hub.db")) as database:
         yield database
-    finally:
-        database.close()
 
 
 @pytest.fixture
