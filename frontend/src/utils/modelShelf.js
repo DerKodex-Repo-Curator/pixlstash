@@ -10,7 +10,6 @@
 //   * A missing value is still rendered. "Base model not set" occupies the same
 //     slot in the same type as a real value; a blank cell is the failure mode.
 
-import { plural } from "./lockedDelete";
 import { ICON_CARDS, SET_COLORS } from "./setAppearance";
 
 // The precision a file was stored at, written into its name. Mirrors the
@@ -1623,32 +1622,35 @@ export function companionsSentences(companions, count) {
   }
   const said = [];
   const { in_use = [], orphaned = [], shared = [], unknown = [] } = companions;
+  // Not lockedDelete's `plural`: tests/test_comfyui_pack_model_mark.py runs this
+  // file in Node beside setAppearance.js alone, so it imports nothing else.
+  const plural = (items, one, many) => (items.length === 1 ? one : many);
   if (in_use.length) {
     said.push(
-      `${nameList(in_use)} ${plural(in_use.length, "is", "are")} still used by models you are keeping.`,
+      `${nameList(in_use)} ${plural(in_use, "is", "are")} still used by models you are keeping.`,
     );
   }
   if (orphaned.length) {
     said.push(
       `In the workflows PixlStash has read, ${nameList(orphaned)} ran only with ` +
-        `models you are deleting; ${plural(orphaned.length, "it stays", "they stay")} on disk.`,
+        `models you are deleting; ${plural(orphaned, "it stays", "they stay")} on disk.`,
     );
     const unrecorded = companions.unrecorded ?? 0;
     if (unrecorded) {
       said.push(
         `${unrecorded === 1 ? "1 other base model has" : `${unrecorded} other base models have`} ` +
-          `no workflow on record and may still need ${plural(orphaned.length, "it", "them")}.`,
+          `no workflow on record and may still need ${plural(orphaned, "it", "them")}.`,
       );
     }
   }
   if (shared.length) {
     said.push(
-      `${nameList(shared)} ${plural(shared.length, "is", "are")} still used by other models.`,
+      `${nameList(shared)} ${plural(shared, "is", "are")} still used by other models.`,
     );
   }
   if (unknown.length) {
     said.push(
-      `Whether ${nameList(unknown)} ${plural(unknown.length, "is", "are")} still needed ` +
+      `Whether ${nameList(unknown)} ${plural(unknown, "is", "are")} still needed ` +
         "is unknown: another file on the shelf has the same name.",
     );
   }
