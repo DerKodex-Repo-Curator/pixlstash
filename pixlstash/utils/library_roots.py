@@ -215,7 +215,7 @@ def refuse_path_inside_a_library(
             )
 
 
-def _overlaps(path: str, root: str) -> bool:
+def paths_overlap(path: str, root: str) -> bool:
     """Whether *path* and *root* cover any of the same files, either way round."""
     return path_is_within(path, root) or path_is_within(root, path)
 
@@ -255,13 +255,13 @@ def refuse_overlapping_folder(
             overlaps a library, a watch folder or a reference folder.
     """
     for root in _roots_or_503(lambda: library_folders(server, vault), path):
-        if _overlaps(path, root):
+        if paths_overlap(path, root):
             raise HTTPException(status_code=409, detail=FOLDER_OVERLAPS_LIBRARY_DETAIL)
     excluded = canonical_path(exclude) if exclude else None
     for root in _roots_or_503(lambda: watch_and_reference_folders(vault), path):
         if excluded is not None and canonical_path(root) == excluded:
             continue
-        if _overlaps(path, root):
+        if paths_overlap(path, root):
             raise HTTPException(
                 status_code=409, detail=folder_overlaps_folder_detail(root)
             )

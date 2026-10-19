@@ -104,6 +104,7 @@ from pixlstash.tasks.base_task import TaskStatus
 from pixlstash.tasks.model_folder_scan_task import ModelFolderScanTask
 from pixlstash.utils.adapter_header import FILE_ENGINE
 from pixlstash.utils.host_path_utils import is_absolute_host_path, normalize_host_path
+from pixlstash.utils.library_roots import paths_overlap
 from pixlstash.utils.path_utils import path_is_within
 from pixlstash.utils.reference_folder_validator import (
     validate_reference_folder_accessible,
@@ -556,7 +557,7 @@ def _validate_folder_conflicts(server, path: str) -> None:
         HTTPException: 409 if the path overlaps something already registered.
     """
     image_root = getattr(server.vault, "image_root", "") or ""
-    if path_is_within(path, image_root) or path_is_within(image_root, path):
+    if paths_overlap(path, image_root):
         raise HTTPException(
             status_code=409,
             detail="Path overlaps the PixlStash data folder.",
