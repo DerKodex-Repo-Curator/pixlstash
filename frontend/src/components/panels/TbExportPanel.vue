@@ -127,23 +127,23 @@
     </div>
 
     <div class="tbm-section">
-      <button
-        class="tbm-action tbm-action--primary tbm-action--lg tbm-action--full"
-        type="button"
+      <AppButton
+        variant="primary"
+        icon-left="tray-arrow-down"
+        block
         @click="onExport"
       >
-        <v-icon size="18">mdi-tray-arrow-down</v-icon>
         Export
-      </button>
-      <button
-        class="tbm-action tbm-action--outline tbm-action--lg tbm-action--full tb-export-folder-btn"
-        type="button"
-        title="Write straight into a folder on this machine, then open it - no ZIP or download step"
+      </AppButton>
+      <AppButton
+        class="tb-export-folder-btn"
+        icon-left="folder-download-outline"
+        block
+        tooltip="Write straight into a folder on this machine, then open it - no ZIP or download step"
         @click="folderBrowserOpen = true"
       >
-        <v-icon size="18">mdi-folder-download-outline</v-icon>
         Export to Folder…
-      </button>
+      </AppButton>
     </div>
 
     <FolderBrowser
@@ -159,6 +159,7 @@
 import { computed, ref } from "vue";
 import { useExportStore } from "../../stores/useExportStore";
 import FolderBrowser from "../editors/FolderBrowser.vue";
+import AppButton from "../widgets/AppButton.vue";
 
 const emit = defineEmits(["confirm-export", "confirm-export-folder"]);
 

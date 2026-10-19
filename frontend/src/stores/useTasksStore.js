@@ -2,6 +2,8 @@ import { computed, reactive, ref } from "vue";
 import { defineStore } from "pinia";
 import { isReadOnly } from "../utils/apiClient";
 import { getWorkerProgress } from "../api/workers";
+import { abortRun } from "../api/comfyui";
+import { useNoticeStore } from "./useNoticeStore";
 
 // Adaptive poll cadence (ms). Fast while the Tasks tab is open or something is
 // actively running; slow when the app is merely idle-watching for new work.
@@ -27,11 +29,13 @@ const SERIES_WINDOW_SECONDS = 120;
  * Tasks-tab indicator, and the app-wide stats-sidebar activity light all read
  * the same state, and so we never poll the endpoint from two places at once.
  *
- * Two kinds of work are merged into one `activeEntries` list:
+ * Three kinds of work are merged into one `activeEntries` list:
  *  - backend workers (quality scoring, tagging, embeddings, faces, likeness…),
  *    fetched from /workers/progress;
- *  - ComfyUI runs, which are frontend-driven (ComfyUiRunner talks to ComfyUI's
- *    own WebSocket) and push their progress in via setComfyuiRun / clearComfyuiRun.
+ *  - ComfyUI runs in flight, which the backend follows and reports in the same
+ *    poll (`runs`), so a run's row is there on every view and in every tab,
+ *    whoever started it;
+ *  - the async import, which is frontend-driven (ImageImporter).
  */
 export const useTasksStore = defineStore("tasks", () => {
   // ── Backend worker state ──────────────────────────────────────────────────
@@ -45,48 +49,33 @@ export const useTasksStore = defineStore("tasks", () => {
   const lastActiveAtByWorker = new Map();
   const lastProgressAtByWorker = new Map();
 
-  // ── ComfyUI run state (frontend-driven) ───────────────────────────────────
-  // runId → { status, percent, message, label }
-  const comfyuiRuns = reactive({});
-  // Abort callbacks, keyed by runId. Kept out of reactive state (they're plain
-  // functions, never rendered) so the Tasks-tab row can abort a run that lives
-  // in a different component (ComfyUiRunner inside ImageGrid / ImageOverlay).
-  const comfyuiAbortHandlers = new Map();
+  // ── ComfyUI runs (backend-reported) ───────────────────────────────────────
+  // The runs in flight as the last poll listed them, oldest first:
+  // [{ prompt_id, label, workflow_id, status: "queued" | "running", percent }].
+  const comfyuiRuns = ref([]);
 
-  function setComfyuiRun(runId, run) {
-    if (!runId) return;
-    comfyuiRuns[runId] = {
-      status: run?.status || "running",
-      percent: Number(run?.percent) || 0,
-      message: run?.message || "ComfyUI running…",
-      label: run?.label || "ComfyUI",
-    };
-  }
-
-  function clearComfyuiRun(runId) {
-    if (runId && runId in comfyuiRuns) delete comfyuiRuns[runId];
-  }
-
-  function registerComfyuiAbort(runId, handler) {
-    if (runId && typeof handler === "function") {
-      comfyuiAbortHandlers.set(runId, handler);
+  /**
+   * Stop ComfyUI: the run in progress is interrupted and its queue emptied,
+   * which is every run in flight, whichever tab or tool started it. Each
+   * then ends as stopped, and the next poll drops it.
+   */
+  async function abortComfyuiRuns() {
+    try {
+      await abortRun();
+    } catch (e) {
+      console.warn("tasks: ComfyUI could not be told to stop", e);
+      useNoticeStore().error("ComfyUI could not be told to stop.", {
+        key: "comfyui-abort-failed",
+      });
     }
-  }
-
-  function unregisterComfyuiAbort(runId) {
-    comfyuiAbortHandlers.delete(runId);
-  }
-
-  function abortComfyuiRun(runId) {
-    const handler = comfyuiAbortHandlers.get(runId);
-    if (handler) handler();
+    nudge();
   }
 
   // ── Import run state (frontend-driven, #459) ──────────────────────────────
   // The async import (ImageImporter) surfaces its server-side Phase B here as a
-  // determinate task row, mirroring the ComfyUI run pattern: the two-phase
-  // dialog auto-hides at the safe transition and the import continues as just
-  // another entry in the Tasks tab. runId → { status, percent, message, label,
+  // determinate task row: the two-phase dialog auto-hides at the safe
+  // transition and the import continues as just another entry in the Tasks
+  // tab. runId → { status, percent, message, label,
   // current, total, abortable }.
   //
   // `abortable` is the honest gate for the Tasks-tab cancel affordance: it is
@@ -174,13 +163,29 @@ export const useTasksStore = defineStore("tasks", () => {
       .map(([key, snapshot]) => ({ kind: "worker", key, snapshot }));
   });
 
-  const comfyuiEntries = computed(() =>
-    Object.entries(comfyuiRuns).map(([key, run]) => ({
-      kind: "comfyui",
-      key,
-      run,
-    })),
-  );
+  // One row for the runs in flight, not one each: ComfyUI works through them
+  // one at a time, and the row's abort stops them all. It names the run
+  // ComfyUI is on (the first in line until one starts) and counts the rest.
+  const comfyuiEntries = computed(() => {
+    const runs = comfyuiRuns.value;
+    if (!runs.length) return [];
+    const front = runs.find((run) => run.status === "running") || runs[0];
+    const state =
+      front.status === "running" ? "ComfyUI running…" : "ComfyUI queued…";
+    const behind = runs.length - 1;
+    return [
+      {
+        kind: "comfyui",
+        key: "comfyui",
+        run: {
+          status: front.status,
+          percent: Number(front.percent) || 0,
+          label: front.label || "ComfyUI",
+          message: behind ? `${state} ${behind} more queued` : state,
+        },
+      },
+    ];
+  });
 
   const importEntries = computed(() =>
     Object.entries(importRuns).map(([key, run]) => ({
@@ -236,21 +241,41 @@ export const useTasksStore = defineStore("tasks", () => {
     const lastTime = Number(last?.t || 0);
     if (!lastTime) return 0;
     const cutoff = lastTime - RATE_AVERAGE_WINDOW_SECONDS;
-    const first = samples.find((s) => Number(s?.t || 0) >= cutoff);
+    // `current` is total minus what is still to do, so queuing work (a retag
+    // puts N pictures back in the queue) or deleting pictures drops it. Measure
+    // from the most recent drop: a window straddling it nets out negative and
+    // read 0.00/s for a full minute while the worker was busy.
+    let start = 0;
+    for (let i = samples.length - 1; i > 0; i -= 1) {
+      if (Number(samples[i].current || 0) < Number(samples[i - 1].current || 0)) {
+        start = i;
+        break;
+      }
+    }
+    const first = samples
+      .slice(start)
+      .find((s) => Number(s?.t || 0) >= cutoff);
     if (!first || first === last) return 0;
     const elapsed = lastTime - Number(first.t || 0);
     const done = Number(last.current || 0) - Number(first.current || 0);
-    // `done` goes negative when pictures are deleted under a running worker,
-    // and the window is briefly shorter than one batch when polling starts
-    // mid-batch; both read as no measurement rather than as a wrong one.
+    // The window is briefly shorter than one batch when polling starts
+    // mid-batch, or right after a drop; that reads as no measurement rather
+    // than as a wrong one.
     if (elapsed <= 0 || done <= 0) return 0;
     return done / elapsed;
   }
 
   // ── Polling ───────────────────────────────────────────────────────────────
   const tasksTabOpen = ref(false);
+  // A count, not a flag: more than one inspector can host the Tasks panel, so
+  // a boolean would let one panel's unmount drop the cadence back to idle
+  // while another is still on screen. Today the two hosts are `v-if`/`v-else`
+  // siblings and cannot overlap, but the panel is shared on purpose and the
+  // model-detail and duplicates-evidence panes are next to take it.
+  let openPanels = 0;
   function setTasksTabOpen(open) {
-    tasksTabOpen.value = Boolean(open);
+    openPanels = Math.max(0, openPanels + (open ? 1 : -1));
+    tasksTabOpen.value = openPanels > 0;
     // Opening the tab should switch to the fast cadence immediately rather than
     // waiting out the current idle interval.
     if (tasksTabOpen.value && polling) reschedule(true);
@@ -276,6 +301,7 @@ export const useTasksStore = defineStore("tasks", () => {
       const progress = await getWorkerProgress();
       const workers = progress?.workers || {};
       systemUsage.value = progress?.process || progress?.system || null;
+      comfyuiRuns.value = Array.isArray(progress?.runs) ? progress.runs : [];
       const now = Date.now() / 1000;
       nowSeconds.value = now;
       const nextSeries = { ...series.value };
@@ -383,11 +409,7 @@ export const useTasksStore = defineStore("tasks", () => {
     series,
     // comfyui runs
     comfyuiRuns,
-    setComfyuiRun,
-    clearComfyuiRun,
-    registerComfyuiAbort,
-    unregisterComfyuiAbort,
-    abortComfyuiRun,
+    abortComfyuiRuns,
     // import runs (#459)
     importRuns,
     setImportRun,

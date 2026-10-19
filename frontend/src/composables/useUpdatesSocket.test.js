@@ -35,8 +35,14 @@ vi.mock("../stores/useDedupStore", () => ({
   useDedupStore: () => ({ applyPictureEvent }),
 }));
 
+/** The deps the socket handed the realtime sync, for its view classifier. */
+let realtimeDeps = null;
+
 vi.mock("./useGridRealtimeSync", () => ({
-  useGridRealtimeSync: () => ({ handleMessage, flushNow: vi.fn() }),
+  useGridRealtimeSync: (deps) => {
+    realtimeDeps = deps;
+    return { handleMessage, flushNow: vi.fn() };
+  },
 }));
 
 vi.mock("../utils/fullRestoreTransition", () => ({
@@ -60,6 +66,8 @@ import { useNoticeStore } from "../stores/useNoticeStore";
 import { useWsStore } from "../stores/useWsStore";
 import { useTasksStore } from "../stores/useTasksStore";
 import { useGridStore } from "../stores/useGridStore";
+import { useWorkflowsStore } from "../stores/useWorkflowsStore";
+import { useModelShelfStore } from "../stores/useModelShelfStore";
 // The real ones: the apiClient mock below spreads `importOriginal`, so a test
 // can drive an actual session transition rather than a stand-in for one.
 import { API_BASE_URL, notifySessionReset } from "../utils/apiClient";
@@ -558,5 +566,181 @@ describe("the view-changed pill while the tagger runs", () => {
     host.unmount();
     host = null;
     expect(wsStore.sortChangedExternalIds).toEqual([]);
+  });
+});
+
+describe("useUpdatesSocket: text read from a picture (#1197)", () => {
+  it("never counts as a change to the view", () => {
+    connect();
+    expect(realtimeDeps.pictureChangeAffectsView(["ocr_text"])).toBe(false);
+    // The control: an unknown field still does.
+    expect(realtimeDeps.pictureChangeAffectsView(["tags"])).toBe(true);
+  });
+
+  it("signals the lightbox with the pictures whose text changed", () => {
+    connect();
+    const wsStore = useWsStore();
+    receive({
+      type: "pictures_changed",
+      change_kind: "updated",
+      picture_ids: [7],
+      fields: ["ocr_text"],
+    });
+    expect(wsStore.wsTextUpdate).toEqual({ key: 1, pictureIds: [7] });
+    receive({
+      type: "pictures_changed",
+      change_kind: "updated",
+      picture_ids: [7],
+      fields: ["detections"],
+    });
+    expect(wsStore.wsTextUpdate.key).toBe(1);
+  });
+});
+
+// The wire that carries an undo of a rotate from the socket to the open
+// lightbox. Without it the overlay's watcher is never triggered at all, and
+// nothing that tests the overlay by setting its prop would notice (#1419).
+describe("useUpdatesSocket: a picture was turned (#1419)", () => {
+  it("signals the lightbox with the pictures that were turned", () => {
+    connect();
+    const wsStore = useWsStore();
+    receive({
+      type: "pictures_changed",
+      change_kind: "updated",
+      picture_ids: [7],
+      fields: ["orientation", "pixels"],
+    });
+    expect(wsStore.wsOrientationUpdate).toEqual({ key: 1, pictureIds: [7] });
+  });
+
+  // The narrowing that keeps background work out of the lightbox. Three
+  // producers rewrite a file's bytes without turning it: the thumbnail
+  // regeneration task (`["pixels"]`, up to 64 ids a batch, streaming for the
+  // length of an import) and the layout move route and its task
+  // (`["file_path", "pixels"]`). The overlay's <img> URL is built from the
+  // picture id, the format and the orientation, so none of them touch it.
+  it("stays put for a thumbnail regeneration, which turns nothing", () => {
+    connect();
+    const wsStore = useWsStore();
+    receive({
+      type: "pictures_changed",
+      change_kind: "updated",
+      picture_ids: [7],
+      fields: ["pixels"],
+    });
+    expect(wsStore.wsOrientationUpdate.key).toBe(0);
+  });
+
+  it("stays put for a layout move, which turns nothing either", () => {
+    connect();
+    const wsStore = useWsStore();
+    receive({
+      type: "pictures_changed",
+      change_kind: "updated",
+      picture_ids: [7],
+      fields: ["file_path", "pixels"],
+    });
+    expect(wsStore.wsOrientationUpdate.key).toBe(0);
+  });
+
+  it("stays put for a change that did not rewrite the file", () => {
+    connect();
+    const wsStore = useWsStore();
+    receive({
+      type: "pictures_changed",
+      change_kind: "updated",
+      picture_ids: [7],
+      fields: ["detections"],
+    });
+    expect(wsStore.wsOrientationUpdate.key).toBe(0);
+  });
+
+  it("advances the key per frame, so two turns are two signals", () => {
+    connect();
+    const wsStore = useWsStore();
+    const frame = {
+      type: "pictures_changed",
+      change_kind: "updated",
+      picture_ids: [7],
+      fields: ["orientation", "pixels"],
+    };
+    receive(frame);
+    receive(frame);
+    expect(wsStore.wsOrientationUpdate.key).toBe(2);
+  });
+
+  it("never reloads the grid or raises the view-changed pill for a turn", () => {
+    connect();
+    expect(
+      realtimeDeps.pictureChangeAffectsView(["orientation", "pixels"]),
+    ).toBe(false);
+    // The control: an unknown field still does.
+    expect(realtimeDeps.pictureChangeAffectsView(["tags"])).toBe(true);
+  });
+});
+
+describe("useUpdatesSocket: models_arrived", () => {
+  it("hands the arrival to the shelf store", () => {
+    connect();
+    const arrived = vi.spyOn(useModelShelfStore(), "onModelsArrived");
+    receive({ type: "models_arrived", model_ids: [4] });
+    expect(arrived).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("useUpdatesSocket: workflows_changed (#1696)", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("delivers a burst once, a second later, with every rename and the recipes bump", async () => {
+    vi.useFakeTimers();
+    connect();
+    const store = useWorkflowsStore();
+    const changed = vi.spyOn(store, "onWorkflowsChanged");
+    store.selectedKeys = ["auto:a"];
+    const epoch = store.recipesEpoch;
+
+    receive({ type: "workflows_changed", reason: "regrouped", keys: [], renamed: { "auto:a": "auto:b" } });
+    receive({ type: "workflows_changed", reason: "recipes", keys: [], renamed: {} });
+    receive({ type: "workflows_changed", reason: "regrouped", keys: [], renamed: { "auto:b": "auto:c" } });
+    await vi.advanceTimersByTimeAsync(999);
+    expect(changed).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(changed).toHaveBeenCalledTimes(1);
+    expect(changed.mock.calls[0][0]).toEqual({
+      reason: "recipes",
+      renamed: { "auto:a": "auto:b", "auto:b": "auto:c" },
+    });
+    // Both halves land: the rename is followed even though the reason the
+    // burst carries is "recipes", and the Recipes tab is told.
+    expect(store.selectedKeys).toEqual(["auto:c"]);
+    expect(store.recipesEpoch).toBe(epoch + 1);
+  });
+
+  it("skips this tab's own echo", async () => {
+    vi.useFakeTimers();
+    connect();
+    useWsStore().clientId = "this-tab";
+    const changed = vi.spyOn(useWorkflowsStore(), "onWorkflowsChanged");
+
+    receive({ type: "workflows_changed", reason: "changed", keys: [], renamed: {}, origin_client_id: "this-tab" });
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(changed).not.toHaveBeenCalled();
+
+    receive({ type: "workflows_changed", reason: "changed", keys: [], renamed: {}, origin_client_id: "other-tab" });
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(changed).toHaveBeenCalledTimes(1);
+  });
+
+  it("delivers nothing once the socket's host is gone", async () => {
+    vi.useFakeTimers();
+    connect();
+    const changed = vi.spyOn(useWorkflowsStore(), "onWorkflowsChanged");
+
+    receive({ type: "workflows_changed", reason: "changed", keys: [], renamed: {} });
+    host.unmount();
+    host = null;
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(changed).not.toHaveBeenCalled();
   });
 });

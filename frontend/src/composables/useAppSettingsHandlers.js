@@ -1,7 +1,6 @@
 import { nextTick } from "vue";
 import { patchUserConfig } from "../api/config";
 import { useGridStore } from "../stores/useGridStore";
-import { useSidebarStore } from "../stores/useSidebarStore";
 import { useUserPrefsStore } from "../stores/useUserPrefsStore";
 
 /**
@@ -16,18 +15,11 @@ import { useUserPrefsStore } from "../stores/useUserPrefsStore";
  * @param {object} deps
  * @param {import("vue").Ref} deps.gridContainer - the grid, for the few
  *   actions it exposes imperatively.
- * @param {import("vue").Ref} deps.statsSidebarRef - the stats panel, for the
- *   Tasks-tab deep link.
  * @param {Function} deps.pushAppRoute - navigate (viewing a project is the
  *   one control here that does move the grid).
  */
-export function useAppSettingsHandlers({
-  gridContainer,
-  statsSidebarRef,
-  pushAppRoute,
-}) {
+export function useAppSettingsHandlers({ gridContainer, pushAppRoute }) {
   const gridStore = useGridStore();
-  const sidebarStore = useSidebarStore();
   const userPrefsStore = useUserPrefsStore();
 
   // Explicit "view this project" entry click → navigate. useViewStore (watching
@@ -80,12 +72,15 @@ export function useAppSettingsHandlers({
     );
   }
 
-  // Open the stats sidebar and focus its Tasks tab. Shared by the thumbnail-mode
-  // "View progress" notice action and the ThumbnailUpgradeBanner's link, so both
-  // use the same statsSidebarRef.focusTasksTab() plumbing.
-  function focusTasksTabPanel() {
-    sidebarStore.statsOpen = true;
-    nextTick(() => statsSidebarRef.value?.focusTasksTab?.());
+  // The set twin (#1489), from the sidebar's set context menu.
+  function handleSuggestPicturesForSet(pictureSet) {
+    if (pictureSet?.id == null) return;
+    nextTick(() =>
+      gridContainer.value?.suggestPicturesForSet?.({
+        id: pictureSet.id,
+        name: pictureSet.name,
+      }),
+    );
   }
 
   return {
@@ -94,6 +89,6 @@ export function useAppSettingsHandlers({
     handleUpdateCheckForUpdates,
     handleEmptyScrapheapFromSidebar,
     handleSuggestPicturesForCharacter,
-    focusTasksTabPanel,
+    handleSuggestPicturesForSet,
   };
 }

@@ -120,6 +120,9 @@ const OP_ICONS = {
   // the same glyph the menu item and the confirm button carry, so the operation
   // is named identically at all three moments.
   "stack.keep_cover_only": "mdi-layers-minus",
+  // Its own glyph, not the layers family: it states that the picture could be
+  // made again rather than how much of the stack goes (`lead-designer`).
+  "stack.keep_recipes_only": "mdi-image-refresh",
 };
 
 /** Substring rules applied when `OP_ICONS` has no exact entry. Order matters. */
@@ -153,6 +156,7 @@ const DESTRUCTIVE_RULES = [
   // caught by /scrapheap/ because the op type describes what the user asked
   // for, not where the pictures went.
   /keep_cover_only/,
+  /keep_recipes_only/,
 ];
 
 /**
@@ -471,6 +475,116 @@ export const useOperationStore = defineStore("operation", () => {
     reconcileGhostsWithReceipt(entry);
     receipt.value = entry;
     armReceiptTimer(entry.durationMs);
+  }
+
+  /**
+   * Whether a screen that narrates local receipts is showing. Set by that
+   * screen (the model shelf's list tab); off, a local receipt is neither raised
+   * nor kept, so its Undo can never act where nothing shows it.
+   */
+  let localReceiptHost = false;
+
+  /**
+   * Mark a local-receipt screen as showing or gone. Going retires a live local
+   * receipt: its Undo means nothing on another screen.
+   *
+   * @param {boolean} on
+   */
+  function setLocalReceiptHost(on) {
+    localReceiptHost = Boolean(on);
+    if (!localReceiptHost && receipt.value?.local) dismissReceipt();
+  }
+
+  /**
+   * Raise a receipt for a write that is not in the operation log.
+   *
+   * The model shelf's workflow sets live in the hub, not the library, so there
+   * is no operation row to narrate - but a receipt reads the same wherever it
+   * is raised, so the pill is this one rather than a second system. The write
+   * brings its own way back: `undo` resolves false when it failed (and said
+   * so), and `redo` redoes the write and raises its own receipt. Never `+N`:
+   * on the grid that means Undo takes the whole batch back, and a local Undo
+   * reverts one write.
+   *
+   * Dropped when no host screen is showing: a write that lands after the
+   * reader left must not put its pill, or its Undo, on the grid.
+   *
+   * @param {Object} options
+   * @param {string} options.summary - what just happened, worded for the user.
+   * @param {string} options.icon - the mdi glyph for the action.
+   * @param {boolean} [options.destructive=false] - earns the longer window.
+   * @param {Function} options.undo - `() => Promise<boolean>`.
+   * @param {Function} options.redo - `() => Promise<*>`, null when it failed.
+   */
+  function showLocalReceipt({
+    summary,
+    icon,
+    destructive = false,
+    undo,
+    redo,
+  }) {
+    if (!localReceiptHost) return;
+    receiptKey += 1;
+    showReceipt({
+      key: receiptKey,
+      mode: "did",
+      operationId: null,
+      batchId: null,
+      opType: "",
+      icon,
+      summary: String(summary ?? "").replace(/\.$/, ""),
+      note: "",
+      targetCount: 0,
+      mergedCount: 0,
+      steps: 1,
+      destructive,
+      undoable: true,
+      durationMs: destructive ? DESTRUCTIVE_RECEIPT_MS : RECEIPT_MS,
+      local: { undo, redo },
+    });
+  }
+
+  /**
+   * Take the live local receipt's action: Undo flips it to "Undone" with Redo,
+   * Redo raises the write's own receipt again.
+   *
+   * The countdown is held while the call is out, so an undo that outlasts the
+   * window is still narrated. An undo that raised a receipt of its own
+   * (undoing a create goes through the delete verb) keeps that one up: it
+   * carries the way back.
+   *
+   * @returns {Promise<void>}
+   */
+  async function takeLocalReceiptAction() {
+    const entry = receipt.value;
+    if (!entry?.local || busy.value) return;
+    busy.value = true;
+    // A hover or focus already holding it keeps holding it afterwards.
+    const heldByReader = receiptPaused;
+    pauseReceipt();
+    try {
+      if (entry.mode === "undone") {
+        const done = await entry.local.redo();
+        if (!done && receipt.value === entry) dismissReceipt();
+        return;
+      }
+      const ok = await entry.local.undo();
+      if (receipt.value !== entry) return;
+      if (!ok || !localReceiptHost) {
+        dismissReceipt();
+        return;
+      }
+      receiptKey += 1;
+      showReceipt({
+        ...entry,
+        key: receiptKey,
+        mode: "undone",
+        durationMs: RECEIPT_MS,
+      });
+    } finally {
+      busy.value = false;
+      if (receipt.value === entry && !heldByReader) resumeReceipt();
+    }
   }
 
   /**
@@ -1092,6 +1206,9 @@ export const useOperationStore = defineStore("operation", () => {
     undoTo,
     undoBatchById,
     showReceipt,
+    showLocalReceipt,
+    takeLocalReceiptAction,
+    setLocalReceiptHost,
     buildReceipt,
     noteNextReceipt,
     dismissReceipt,

@@ -45,9 +45,9 @@
       role="alert"
     >
       <span>Projects couldn’t load. Importing without one still works.</span>
-      <button type="button" class="tb-import-retry" @click="fetchProjects">
+      <AppButton size="sm" class="tb-import-retry" @click="fetchProjects">
         Retry
-      </button>
+      </AppButton>
     </div>
 
     <div class="tb-import-tabs" role="tablist">
@@ -103,14 +103,12 @@
         @change="onLocalChange"
       />
       <div class="tb-import-actions">
-        <button
-          class="tbm-action tbm-action--outline"
-          type="button"
+        <AppButton
+          icon-left="file-plus-outline"
           @click="openLocalPicker"
         >
-          <v-icon size="16">mdi-file-plus-outline</v-icon>
           Choose files
-        </button>
+        </AppButton>
       </div>
     </div>
 
@@ -163,6 +161,7 @@ import {
   isSupportedImportFile,
   IMPORT_FILE_ACCEPT,
 } from "../../utils/media.js";
+import AppButton from "../widgets/AppButton.vue";
 
 const props = defineProps({
   backendUrl: { type: String, default: () => API_BASE_URL },
@@ -376,9 +375,9 @@ function triggerLocalImport(files) {
   max-width: 48%;
   flex-shrink: 0;
 }
+/* Height from the base (--control-h); only width and type are local. */
 .tb-import-project .tbm-select {
   width: 100%;
-  min-height: 34px;
   font-size: var(--text-sm);
   font-weight: var(--weight-semibold);
   text-overflow: ellipsis;
@@ -402,24 +401,14 @@ function triggerLocalImport(files) {
 }
 
 .tb-import-project-status--error {
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
 }
 
 .tb-import-retry {
   flex-shrink: 0;
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-sm);
-  color: inherit;
-  font: inherit;
-  font-weight: var(--weight-semibold);
 }
 
-.tb-import-retry:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-}
-
-/* Tabs - accent underline on the active tab. */
+/* Tabs - an olive underline marks the active tab; its words stay ink. */
 .tb-import-tabs {
   display: flex;
   gap: var(--space-6);
@@ -440,16 +429,13 @@ function triggerLocalImport(files) {
   white-space: nowrap;
   transition: color var(--dur-1) var(--ease-standard);
 }
-.tb-import-tab:focus-visible {
-  outline: none;
-  box-shadow: inset var(--focus-ring);
-}
 .tb-import-tab:hover {
+  background: var(--hover-wash);
   color: rgb(var(--v-theme-on-panel));
 }
 .tb-import-tab--active {
-  color: rgb(var(--v-theme-accent));
-  border-bottom-color: rgb(var(--v-theme-accent));
+  color: var(--active-text);
+  border-bottom-color: var(--selected-ink);
   font-weight: var(--weight-semibold);
 }
 
@@ -469,8 +455,8 @@ function triggerLocalImport(files) {
     background var(--dur-1) var(--ease-standard);
 }
 .tb-import-dropzone.is-dragging {
-  border-color: rgb(var(--v-theme-primary));
-  background: rgba(var(--v-theme-primary), 0.08);
+  border-color: var(--active-bar);
+  background: var(--active-wash);
 }
 .tb-import-dropzone-icon {
   color: rgba(var(--v-theme-on-panel), 0.5);

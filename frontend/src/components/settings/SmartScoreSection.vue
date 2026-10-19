@@ -300,7 +300,7 @@ watch(
       <div class="smart-score-filter-toggle">
         <v-switch
           v-model="applyTagFilter"
-          color="accent"
+          color="primary"
           density="compact"
           hide-details
           :disabled="applyTagFilterLoading"
@@ -356,10 +356,10 @@ watch(
 }
 
 .smart-score-status--error {
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
 }
 
 .smart-score-status--success {
-  color: rgb(var(--v-theme-accent));
+  color: rgb(var(--v-theme-on-surface));
 }
 </style>

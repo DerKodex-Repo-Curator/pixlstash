@@ -3,28 +3,36 @@
 The graph a recipe replays is **file metadata**: whoever made the image authored
 it, and PixlStash's premise is importing images from elsewhere. Replaying it
 executes it on the owner's ComfyUI, bounded only by which node packs are
-installed. Three controls make that a decision rather than an accident, and all
-three are asserted here at the HTTP boundary, because a control that only exists
-in the dialog is not a control:
+installed. Two of the three controls are asserted here at the HTTP boundary,
+because a control that only exists in the dialog is not a control:
 
 1. ``GET /comfyui/pictures/{id}/recipe`` discloses the distinct ``class_type``
    list, so the owner can see what they are approving.
-2. ``POST /comfyui/run_recipe`` **refuses** when the pre-flight could not run
-   (ComfyUI unreachable ⇒ nothing about the graph was inspected) unless the
-   caller sends an explicit ``allow_unchecked`` acknowledgement.
-3. The read endpoint reports whether the source file came from *outside* this
+2. The read endpoint reports whether the source file came from *outside* this
    instance, which is what turns "an embedded workflow" into "someone else's
    embedded workflow".
 
-Both directions throughout: the refusal must fire without the flag AND the run
-must still succeed with it, since over-blocking is its own regression.
+The third is the refusal on the run itself. It used to be ``POST
+/comfyui/run_recipe``, which #1410 retired; ``POST /workflows/run`` carries it
+now, and ``tests/test_workflows_api.py`` asserts it in both directions -- the
+refusal must fire without ``allow_unchecked`` AND the run must still succeed
+with it, since over-blocking is its own regression.
+
+The B5 classes at the foot of the file cover the same endpoint's *extended*
+read - the negative prompt, the sampler settings, the LoRA strengths, the
+workflow, and the A1111 branch - plus the picture-list filter that resolves
+a workflow to the variants that made its pictures.
 """
 
 import gc
+import hashlib
 import io
 import json
 import os
+import sqlite3
 import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi.testclient import TestClient
@@ -32,8 +40,16 @@ from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
 import pixlstash.routes.comfyui as comfyui_module
-from pixlstash.db_models import Picture
+from pixlstash.services.workflow_hash import (
+    topology_hash as api_topology_hash,
+    ui_topology_hash,
+)
+from pixlstash.db_models import Picture, Project
+from pixlstash.hub.workflow_cards import CORE_RULE_VERSION, auto_workflow_id
+from pixlstash.db_models.generation import Generation, GenerationInput
 from pixlstash.server import Server
+from pixlstash.services.model_shelf_service import shelf_uuid
+from pixlstash.services.workflow_identity import WORKFLOW_KEY_VERSION
 from tests.authz_guard import no_spa_fallback  # noqa: F401
 from tests.utils import upload_pictures_and_wait
 
@@ -153,21 +169,6 @@ def _comfyui_unreachable(monkeypatch):
     monkeypatch.setattr(comfyui_module, "fetch_object_info", boom)
 
 
-def _capture_submissions(monkeypatch) -> list[dict]:
-    """Stub the ComfyUI submit + output import; return the captured graphs."""
-    submitted: list[dict] = []
-
-    def fake_submit(base_url, graph, client_id):
-        submitted.append(graph)
-        return {"prompt_id": "test-prompt-1"}
-
-    monkeypatch.setattr(comfyui_module, "_submit_comfyui_prompt", fake_submit)
-    monkeypatch.setattr(
-        comfyui_module, "_process_comfyui_outputs", lambda *a, **kw: None
-    )
-    return submitted
-
-
 def _clear_origin_fields(server, pic_id: int) -> None:
     """Make *pic_id* look like this instance generated it.
 
@@ -212,6 +213,17 @@ class TestRecipeDisclosesNodeClasses:
         # free of the non-node bookkeeping key the sanitizer drops.
         assert body["node_classes"] == EXPECTED_CLASSES
         assert body["node_count"] == 5
+        # The count the distinct list hides: a second pass of one class.
+        assert body["node_class_counts"] == {
+            "CLIPTextEncode": 2,
+            "CheckpointLoaderSimple": 1,
+            "KSampler": 1,
+            "SaveImage": 1,
+        }
+        # This map is too sparse to type the chain, and says so rather than
+        # calling it straight.
+        assert body["lora_chain"]["branches"] is None
+        assert body["lora_chain"]["refusal"]
 
     def test_the_class_list_survives_an_unreachable_comfyui(self, env, monkeypatch):
         """The disclosure is read from the file, not from ComfyUI.
@@ -262,138 +274,1338 @@ class TestRecipeReportsSourceOrigin:
         assert "/home/someone" not in json.dumps(body)
 
 
-class TestRunRecipeRefusesPixlStashNodes:
-    """A ComfyUI-PixlStash graph is a cycle, and its ids are frozen.
+def test_generate_variants_judges_each_pixlstash_node_on_its_own(env, monkeypatch):
+    """A saver and the digest loaders do not stop a variant; the picture
+    loader does (#1521), because it would not read this picture."""
+    server, client, _pic_id = env
+    _comfyui_reachable(monkeypatch)
+    graph = json.loads(json.dumps(RECIPE_GRAPH))
+    graph["9"] = {
+        "class_type": "PixlStashPictureSaver",
+        "inputs": {"filename_prefix": "v", "images": ["3", 0]},
+    }
+    graph["10"] = {"class_type": "PixlStashVAELoader", "inputs": {"vae_sha256": "a"}}
+    graph["11"] = {
+        "class_type": "PixlStashAdapterLoader",
+        "inputs": {"adapter_sha256": "b", "model": ["4", 0]},
+    }
+    runs = _upload_one(client, "pack-ok.png", _recipe_png_bytes(graph, (1, 2, 3)))
+    body = client.get(f"{API}/comfyui/pictures/{runs}/recipe").json()
+    assert body["available"] is True, body
+    assert body["pixlstash_nodes"] == [], body
 
-    The loaders serialise a choice as ``"<name> #<id>"``, so replaying the file
-    re-applies whatever project / set / character / picture id was current when
-    it was written - ids that may name a deleted project, or one that now lives
-    in a different library. Before this refusal that surfaced as a raw SQLite
-    FOREIGN KEY error from the saver's own import, *after* the images had
-    already been imported.
+    graph["12"] = {
+        "class_type": "PixlStashPictureLoader",
+        "inputs": {"picture_ids": ""},
+    }
+    refused = _upload_one(client, "pack-no.png", _recipe_png_bytes(graph, (4, 5, 6)))
+    body = client.get(f"{API}/comfyui/pictures/{refused}/recipe").json()
+    assert body["available"] is False, body
+    assert body["reason"] == "pixlstash_nodes"
+    assert [(n["node_id"], n["why"]) for n in body["pixlstash_nodes"]] == [
+        ("12", "picks_its_own_picture")
+    ], body
+
+    # Ids that say they are this library's and this shelf's are what a graph
+    # opened in ComfyUI from here holds (#1912): a variant of its picture runs.
+    graph["12"]["inputs"] = {"picture_ids": "1", "library": server.vault.library_uuid}
+    graph["13"] = {
+        "class_type": "PixlStashCheckpointLoader",
+        "inputs": {"checkpoint_id": "1", "shelf": shelf_uuid(server.hub)},
+    }
+    own = _upload_one(client, "pack-own.png", _recipe_png_bytes(graph, (7, 8, 9)))
+    body = client.get(f"{API}/comfyui/pictures/{own}/recipe").json()
+    assert (body["available"], body["pixlstash_nodes"]) == (True, []), body
+
+    # Another library's and another shelf's are not.
+    graph["12"]["inputs"]["library"] = "another-library"
+    graph["13"]["inputs"]["shelf"] = "another-shelf"
+    other = _upload_one(client, "pack-other.png", _recipe_png_bytes(graph, (1, 1, 2)))
+    body = client.get(f"{API}/comfyui/pictures/{other}/recipe").json()
+    assert sorted((n["node_id"], n["why"]) for n in body["pixlstash_nodes"]) == [
+        ("12", "picks_its_own_picture"),
+        ("13", "per_hub_checkpoint"),
+    ], body
+
+
+# ── The extended read (B5): the rest of the recipe, and the workflow filters ──
+
+# A graph that actually carries what the extended read reports: both prompts
+# wired to a sampler, a LoRA at two strengths, and the five sampler settings.
+FULL_GRAPH = {
+    "3": {
+        "class_type": "KSampler",
+        "inputs": {
+            "seed": 42,
+            "steps": 25,
+            "cfg": 7.5,
+            "sampler_name": "euler",
+            "scheduler": "normal",
+            "denoise": 1.0,
+            "model": ["5", 0],
+            # Through a node that carries BOTH sides, so the walk has to
+            # follow the one it started on rather than whichever it meets.
+            "positive": ["8", 0],
+            "negative": ["8", 1],
+        },
+    },
+    "4": {
+        "class_type": "CheckpointLoaderSimple",
+        "inputs": {"ckpt_name": "sd_xl_base_1.0.safetensors"},
+    },
+    "5": {
+        "class_type": "LoraLoader",
+        "inputs": {
+            "lora_name": "example-style.safetensors",
+            "strength_model": 0.8,
+            "strength_clip": 0.6,
+            "model": ["4", 0],
+            "clip": ["4", 1],
+        },
+    },
+    "6": {
+        "class_type": "CLIPTextEncode",
+        "inputs": {"text": "a castle on a hill", "clip": ["5", 1]},
+    },
+    "7": {
+        "class_type": "CLIPTextEncode",
+        "inputs": {"text": "blurry, watermark", "clip": ["5", 1]},
+    },
+    "8": {
+        "class_type": "ControlNetApplyAdvanced",
+        "inputs": {
+            "positive": ["6", 0],
+            "negative": ["7", 0],
+            "strength": 1.0,
+        },
+    },
+    "9": {
+        "class_type": "SaveImage",
+        "inputs": {"filename_prefix": "ComfyUI", "images": ["3", 0]},
+    },
+}
+
+# One A1111 generation, written the way the web UI writes it: the prompts on
+# their own lines, the fields on the last one, a LoRA as a prompt tag.
+A1111_PARAMETERS = (
+    "a castle on a hill <lora:example-style:0.8>\n"
+    "Negative prompt: blurry, watermark\n"
+    "Steps: 25, Sampler: Euler a, CFG scale: 7, Seed: 4242, Size: 512x768, "
+    "Model hash: 0123456789, Model: sd_xl_base_1.0"
+)
+
+
+def _a1111_png_bytes(parameters: str, colour: tuple[int, int, int]) -> bytes:
+    """A PNG carrying A1111 infotext in its ``parameters`` text chunk."""
+    img = Image.new("RGB", (256, 256), colour)
+    meta = PngInfo()
+    meta.add_text("parameters", parameters)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", pnginfo=meta)
+    return buf.getvalue()
+
+
+def _upload_one(client, name: str, data: bytes) -> int:
+    """Import one picture and return its id."""
+    st = upload_pictures_and_wait(
+        client, [("file", (name, data, "image/png"))], timeout_s=60
+    )
+    assert st["status"] == "completed", st
+    r = client.get(f"{API}/pictures")
+    assert r.status_code == 200, r.text
+    return max(p["id"] for p in r.json())
+
+
+# ===========================================================================
+# The Recipe section's read (#1313)
+#
+# `GET /comfyui/pictures/{id}/workflow` carries what the lightbox's Recipe
+# section shows beside the graph it already served. Asserted here rather than in
+# a suite of its own because this module already imports a picture whose file
+# carries a real API `prompt` chunk, which is the expensive half; the graph
+# reading itself is unit-tested in `tests/test_picture_recipe.py`.
+# ===========================================================================
+
+
+SHELF_CHECKPOINT_SHA = "c" * 64
+
+
+def _shelf_checkpoint(server) -> None:
+    """Put the recipe's own checkpoint on the shelf, named but not hashed alike.
+
+    Named rather than digest-matched on purpose: the graph says
+    ``ckpt_name``, so the match is by name and the badge must stay off.
     """
-
-    @staticmethod
-    def _pixlstash_env(env, monkeypatch):
-        """Re-answer the recipe read with a graph that carries a pack node."""
-        import pixlstash.utils.comfyui_utilities as utils
-
-        graph = dict(RECIPE_GRAPH)
-        graph["11"] = {
-            "class_type": "PixlStashPictureSaver",
-            "inputs": {"filename_prefix": "v", "pixlstash_project": ["12", 0]},
-        }
-        graph["12"] = {
-            "class_type": "PixlStashProjectLoader",
-            "inputs": {"pixlstash_project": "Gone #6"},
-        }
-        monkeypatch.setattr(utils, "find_comfy_api_prompt", lambda *a, **kw: graph)
-        monkeypatch.setattr(
-            comfyui_module, "find_comfy_api_prompt", lambda *a, **kw: graph
+    with server.hub.transaction() as conn:
+        conn.execute(
+            "INSERT INTO model (file_kind, filename, sha256, provenance) "
+            "VALUES ('checkpoint', ?, ?, 'scanned')",
+            ("sd_xl_base_1.0.safetensors", SHELF_CHECKPOINT_SHA),
         )
 
-    def test_run_is_refused_and_nothing_is_submitted(self, env, monkeypatch):
-        server, client, pic_id = env
-        self._pixlstash_env(env, monkeypatch)
-        submitted = _capture_submissions(monkeypatch)
-        r = client.post(f"{API}/comfyui/run_recipe", json={"picture_id": pic_id})
-        assert r.status_code == 400, r.text
-        assert "PixlStash nodes" in r.json()["detail"]
-        assert submitted == []
 
-    def test_the_recipe_read_says_so_before_the_user_commits(self, env, monkeypatch):
-        # The dialog has to be able to offer "copy it into ComfyUI" instead,
-        # which it cannot do if the refusal only arrives on submit.
+def _shelf_model_id(server) -> int:
+    row = server.hub.fetchall(
+        "SELECT id FROM model WHERE filename = 'sd_xl_base_1.0.safetensors'"
+    )
+    assert row, "the shelf checkpoint was not written"
+    return row[0]["id"]
+
+
+def _topology_hash(server, pic_id: int) -> str:
+    """The topology the scan filed for *pic_id*, waited for.
+
+    Polled rather than read once, and read BEFORE the request that is asserted
+    against it. The extraction pass stamps this column in the background, so a
+    single read taken after the response compares two different moments: the
+    route honestly answered `null` for a picture not yet filed, and the column
+    was written while the assertion was being set up. That passed or failed on
+    how busy the machine was - it went red only when `tests/test_migrations.py`
+    ran first and slowed the scan down. `_variant_of` below waits for the same
+    pass for the same reason.
+    """
+    for _ in range(120):
+        pics = server.vault.db.run_immediate_read_task(
+            Picture.find, id=pic_id, select_fields=["id", "workflow_topology_hash"]
+        )
+        value = getattr(pics[0], "workflow_topology_hash", None) if pics else None
+        if value:
+            return value
+        time.sleep(0.5)
+    raise AssertionError(f"the workflow scan never filed picture {pic_id}")
+
+
+def _second_picture(client) -> int:
+    """One more imported picture, to stand in as a run's input."""
+    files = [
+        (
+            "file",
+            (
+                "input-recipe.png",
+                _recipe_png_bytes(RECIPE_GRAPH, (30, 60, 90)),
+                "image/png",
+            ),
+        )
+    ]
+    st = upload_pictures_and_wait(client, files, timeout_s=60)
+    assert st["status"] == "completed", st
+    r = client.get(f"{API}/pictures")
+    assert r.status_code == 200, r.text
+    return max(p["id"] for p in r.json())
+
+
+def _variant_of(server, pic_id: int) -> str:
+    """The variant the import filed for *pic_id*, waited for.
+
+    Read rather than written: the extraction pass owns
+    ``picture.workflow_structural_hash`` and would overwrite a hand-written
+    one, so a test that needs a picture on a card has to card the variant the
+    picture actually has.
+    """
+    for _ in range(120):
+        pics = server.vault.db.run_immediate_read_task(
+            Picture.find, id=pic_id, select_fields=["id", "workflow_structural_hash"]
+        )
+        value = getattr(pics[0], "workflow_structural_hash", None) if pics else None
+        if value:
+            return value
+        time.sleep(0.5)
+    raise AssertionError(f"picture {pic_id} was never filed under a variant")
+
+
+def _core(name: str) -> str:
+    """A stand-in core hash: 64 hex, like the real one."""
+    return hashlib.sha256(name.encode("utf-8")).hexdigest()
+
+
+CORE_SHARED = _core("core-shared")
+CORE_OTHER = _core("core-other")
+# A manual group's id: 32 hex, a uuid's.
+MANUAL_ID = _core("manual-group")[:32]
+
+
+def _card_picture(server, pic_id: int, key: str, core: str) -> str:
+    """Put *pic_id*'s variant on card *key*, and its topology in the automatic
+    workflow ``auto:<core>``.
+
+    The rows the card pass derives, written directly with the names this test
+    can assert on. Content-addressed rows (the topology and the recipe) are the
+    pipeline's own and are left alone.
+    """
+    structural = _variant_of(server, pic_id)
+    row = server.hub.fetchone(
+        "SELECT topology_hash FROM workflow_recipe WHERE structural_hash = ?",
+        (structural,),
+    )
+    assert row is not None, f"the hub filed no recipe for {structural}"
+    with server.hub.transaction() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO workflow_variant "
+            "(structural_hash, topology_hash, workflow_key, key_version) "
+            "VALUES (?, ?, ?, ?)",
+            (structural, row["topology_hash"], key, WORKFLOW_KEY_VERSION),
+        )
+        # Hand-picked like the key: the empty family set, whatever the
+        # pipeline derived, so the workflow is the one this test names.
+        conn.execute(
+            "INSERT OR REPLACE INTO workflow_variant_family "
+            "(structural_hash, families) VALUES (?, '')",
+            (structural,),
+        )
+        conn.execute(
+            # `specials` and `traits` are written even though this row is a stand-in:
+            # NULL means "no pass has read this topology", so the live backfill
+            # finder would pick the variant straight back up and overwrite the
+            # hand-picked key and core hash this helper exists to install.
+            "INSERT OR REPLACE INTO workflow_topology_core "
+            "(topology_hash, core_hash, core_version, workflow_type, slots, "
+            "specials, traits) VALUES (?, ?, ?, NULL, '[]', '', '')",
+            (row["topology_hash"], core, CORE_RULE_VERSION),
+        )
+    return structural
+
+
+class TestRecipeReadsTheWholeRecipe:
+    def test_a_comfyui_graph_reports_prompts_settings_and_strengths(
+        self, env, monkeypatch
+    ):
+        server, client, _ = env
+        # Deliberately with ComfyUI down: none of these fields comes from it,
+        # and the dialog has to be able to describe the recipe regardless.
+        _comfyui_unreachable(monkeypatch)
+        pic = _upload_one(client, "full.png", _recipe_png_bytes(FULL_GRAPH, (9, 9, 90)))
+
+        r = client.get(f"{API}/comfyui/pictures/{pic}/recipe")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["source"] == "comfyui"
+        assert body["positive_prompt"] == "a castle on a hill"
+        assert body["negative_prompt"] == "blurry, watermark"
+        assert body["settings"] == {
+            "steps": 25,
+            "cfg": 7.5,
+            "sampler_name": "euler",
+            "scheduler": "normal",
+            "denoise": 1.0,
+        }
+        assert body["models"] == ["sd_xl_base_1.0.safetensors"]
+        assert [(s["node_id"], s["strengths"]) for s in body["lora_slots"]] == [
+            ("5", {"model": 0.8, "clip": 0.6})
+        ]
+
+    def test_a_graph_with_no_sampler_settings_reports_none_not_a_guess(
+        self, env, monkeypatch
+    ):
         server, client, pic_id = env
-        self._pixlstash_env(env, monkeypatch)
-        r = client.get(f"{API}/comfyui/pictures/{pic_id}/recipe")
+        _comfyui_unreachable(monkeypatch)
+        # RECIPE_GRAPH's sampler names no conditioning and no cfg/scheduler.
+        body = client.get(f"{API}/comfyui/pictures/{pic_id}/recipe").json()
+        assert body["negative_prompt"] is None
+        assert body["settings"] == {"steps": 20}
+
+    def test_an_a1111_picture_answers_from_its_infotext(self, env, monkeypatch):
+        server, client, _ = env
+        _comfyui_unreachable(monkeypatch)
+        pic = _upload_one(
+            client, "a1111.png", _a1111_png_bytes(A1111_PARAMETERS, (200, 40, 40))
+        )
+
+        r = client.get(f"{API}/comfyui/pictures/{pic}/recipe")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # Readable, but not submittable to ComfyUI: there is no graph to run.
+        assert body["available"] is False
+        assert body["reason"] == "a1111"
+        assert body["source"] == "a1111"
+        assert body["positive_prompt"] == "a castle on a hill"
+        assert body["negative_prompt"] == "blurry, watermark"
+        assert body["seed"] == 4242
+        assert body["models"] == ["sd_xl_base_1.0.safetensors"]
+        assert body["loras"] == ["example-style.safetensors"]
+        assert [s["strengths"] for s in body["lora_slots"]] == [{"model": 0.8}]
+        # No node is named: the reduction's ids are in no graph, and there is
+        # no replay to send one back to.
+        assert [s["node_id"] for s in body["lora_slots"]] == [None]
+        # A value that is wholly a number is reported as one, so `steps` is a
+        # number on BOTH branches rather than a string on this one; anything
+        # else stays the text A1111 wrote.
+        assert body["settings"] == {
+            "steps": 25,
+            "sampler": "Euler a",
+            "cfg_scale": 7,
+            "size": "512x768",
+        }
+        # The consent fields are about what would execute, and nothing would.
+        assert body["node_classes"] == []
+        assert body["node_count"] == 0
+
+    def test_a_picture_with_neither_is_still_no_prompt_chunk(self, env, monkeypatch):
+        """The control: the A1111 branch must not answer for a plain photo."""
+        server, client, _ = env
+        _comfyui_unreachable(monkeypatch)
+        buf = io.BytesIO()
+        Image.new("RGB", (256, 256), (7, 7, 7)).save(buf, format="PNG")
+        pic = _upload_one(client, "plain.png", buf.getvalue())
+
+        body = client.get(f"{API}/comfyui/pictures/{pic}/recipe").json()
+        assert body["reason"] == "no_prompt_chunk"
+        assert body["source"] == "comfyui"
+
+    def test_the_workflow_id_is_the_workflow_of_the_variants_topology(
+        self, env, monkeypatch
+    ):
+        """Automatic by its core, and a manual placement wins; the card key
+        is internal and never on the wire (#1623)."""
+        server, client, pic_id = env
+        _comfyui_unreachable(monkeypatch)
+        structural = _card_picture(server, pic_id, "key-alpha", CORE_OTHER)
+
+        body = client.get(f"{API}/comfyui/pictures/{pic_id}/recipe").json()
+        assert body["workflow_id"] == auto_workflow_id(CORE_OTHER, "")
+        assert "workflow_key" not in body
+
+        topology = server.hub.fetchone(
+            "SELECT topology_hash FROM workflow_variant WHERE structural_hash = ?",
+            (structural,),
+        )["topology_hash"]
+        with server.hub.transaction() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO workflow_group (workflow_id, kind) "
+                "VALUES (?, 'manual')",
+                (MANUAL_ID,),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO workflow_group_member "
+                "(topology_hash, workflow_id) VALUES (?, ?)",
+                (topology, MANUAL_ID),
+            )
+        try:
+            body = client.get(f"{API}/comfyui/pictures/{pic_id}/recipe").json()
+            assert body["workflow_id"] == MANUAL_ID
+        finally:
+            with server.hub.transaction() as conn:
+                conn.execute(
+                    "DELETE FROM workflow_group_member WHERE workflow_id = ?",
+                    (MANUAL_ID,),
+                )
+                conn.execute(
+                    "DELETE FROM workflow_group WHERE workflow_id = ?", (MANUAL_ID,)
+                )
+
+    def test_a_picture_the_hub_has_no_workflow_for_gets_no_id(self, env):
+        """The other direction: the read reports a workflow, never invents one."""
+        server, _client, _pic_id = env
+        assert comfyui_module._picture_workflow(server, 10**9)["workflow_id"] is None
+
+
+class TestPictureListWorkflowFilters:
+    """Both directions: the workflow's own pictures, and nobody else's."""
+
+    def _two_carded_pictures(
+        self, server, client, beta_core: str = CORE_SHARED
+    ) -> tuple[int, int]:
+        alpha = _upload_one(
+            client, "alpha.png", _recipe_png_bytes(FULL_GRAPH, (1, 2, 3))
+        )
+        beta = _upload_one(
+            client, "beta.png", _a1111_png_bytes(A1111_PARAMETERS, (3, 2, 1))
+        )
+        _card_picture(server, alpha, "key-alpha", CORE_SHARED)
+        _card_picture(server, beta, "key-beta", beta_core)
+        return alpha, beta
+
+    def _ids(self, client, query: str) -> set[int]:
+        r = client.get(f"{API}/pictures{query}")
+        assert r.status_code == 200, r.text
+        return {p["id"] for p in r.json()}
+
+    def test_a_workflow_lists_its_own_pictures_and_only_those(self, env):
+        server, client, pic_id = env
+        alpha, beta = self._two_carded_pictures(server, client, CORE_OTHER)
+
+        assert self._ids(client, "?workflow=" + auto_workflow_id(CORE_SHARED, "")) == {
+            alpha
+        }
+        assert self._ids(client, "?workflow=" + auto_workflow_id(CORE_OTHER, "")) == {
+            beta
+        }
+        # The control: without the filter all three are there, so the two
+        # assertions above are narrowing rather than describing an empty grid.
+        assert {alpha, beta, pic_id} <= self._ids(client, "")
+
+    def test_several_workflows_list_any_of_their_pictures(self, env):
+        """`workflow` is repeatable and OR'd (#1797), like `comfyui_model`."""
+        server, client, pic_id = env
+        alpha, beta = self._two_carded_pictures(server, client, CORE_OTHER)
+        shared = auto_workflow_id(CORE_SHARED, "")
+        other = auto_workflow_id(CORE_OTHER, "")
+
+        assert self._ids(client, f"?workflow={shared}&workflow={other}") == {
+            alpha,
+            beta,
+        }
+        # One that matches nothing takes nothing away from the other.
+        assert self._ids(
+            client, f"?workflow={shared}&workflow=auto:{_core('nobody')}"
+        ) == {alpha}
+        assert pic_id not in self._ids(client, f"?workflow={shared}&workflow={other}")
+
+    def test_an_automatic_workflow_lists_every_card_sharing_its_core_hash(self, env):
+        server, client, _pic_id = env
+        alpha, beta = self._two_carded_pictures(server, client)
+
+        assert self._ids(client, "?workflow=" + auto_workflow_id(CORE_SHARED, "")) == {
+            alpha,
+            beta,
+        }
+
+    def test_a_manual_group_lists_the_topologies_it_holds(self, env):
+        """Placed by hand, a topology leaves its automatic workflow."""
+        server, client, _pic_id = env
+        alpha, beta = self._two_carded_pictures(server, client)
+        topology = server.hub.fetchone(
+            "SELECT topology_hash FROM workflow_variant WHERE workflow_key = ?",
+            ("key-alpha",),
+        )["topology_hash"]
+        with server.hub.transaction() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO workflow_group (workflow_id, kind) "
+                "VALUES (?, 'manual')",
+                (MANUAL_ID,),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO workflow_group_member "
+                "(topology_hash, workflow_id) VALUES (?, ?)",
+                (topology, MANUAL_ID),
+            )
+        try:
+            assert self._ids(client, f"?workflow={MANUAL_ID}") == {alpha}
+            assert self._ids(
+                client, "?workflow=" + auto_workflow_id(CORE_SHARED, "")
+            ) == {beta}
+            assert self._ids(
+                client,
+                f"?workflow={MANUAL_ID}&workflow=" + auto_workflow_id(CORE_SHARED, ""),
+            ) == {alpha, beta}
+        finally:
+            with server.hub.transaction() as conn:
+                conn.execute(
+                    "DELETE FROM workflow_group_member WHERE workflow_id = ?",
+                    (MANUAL_ID,),
+                )
+                conn.execute(
+                    "DELETE FROM workflow_group WHERE workflow_id = ?", (MANUAL_ID,)
+                )
+
+    def test_a_workflow_combines_with_the_model_filter(self, env):
+        """Filtering a workflow's pictures by a recipe value (#1623): the two
+        narrow each other, as every pair of filters on this route does.
+
+        The env picture loads the same checkpoint but is in another workflow,
+        so the model filter alone lists it and the pair must not; beta is in
+        the workflow but its A1111 infotext is not a ComfyUI model record, so
+        the workflow alone lists it and the pair must not either.
+        """
+        server, client, pic_id = env
+        alpha, beta = self._two_carded_pictures(server, client)
+        model = "sd_xl_base_1.0.safetensors"
+
+        assert {pic_id, alpha} <= self._ids(client, f"?comfyui_model={model}")
+        assert beta in self._ids(
+            client, "?workflow=" + auto_workflow_id(CORE_SHARED, "")
+        )
+        assert self._ids(
+            client,
+            "?workflow="
+            + auto_workflow_id(CORE_SHARED, "")
+            + f"&comfyui_model={model}",
+        ) == {alpha}
+        assert (
+            self._ids(
+                client,
+                "?workflow="
+                + auto_workflow_id(CORE_SHARED, "")
+                + "&comfyui_model=nobody.safetensors",
+            )
+            == set()
+        )
+
+    def test_the_resolved_parameter_name_is_not_reachable_from_the_query(self, env):
+        """`Picture.find` declares it now, so a client must not be able to send it.
+
+        Unpopped it reaches `PredicateFilter` as a bare string and 500s on its
+        `List[str]`. It could never widen anything - it only adds an IN - but a
+        reachable 500 is its own bug.
+        """
+        server, client, pic_id = env
+
+        r = client.get(f"{API}/pictures?workflow_structural_hashes=abc")
+        assert r.status_code == 200, r.text
+        assert pic_id in {p["id"] for p in r.json()}, "and it filtered nothing"
+
+    def test_an_empty_parameter_is_a_filter_not_the_absence_of_one(self, env):
+        """`?workflow=` names no workflow, so it must not answer with everything."""
+        server, client, _pic_id = env
+        self._two_carded_pictures(server, client)
+
+        assert self._ids(client, "?workflow=") == set()
+
+    def test_a_workflow_nothing_was_made_with_lists_nothing(self, env):
+        """The direction that fails open if the empty list reads as no filter."""
+        server, client, _ = env
+        self._two_carded_pictures(server, client)
+
+        assert self._ids(client, f"?workflow=auto:{_core('nobody')}") == set()
+        assert self._ids(client, "?workflow=key-alpha") == set()
+        # The old parameters are gone: neither filters anything any more.
+        assert self._ids(client, "?workflow_key=key-alpha") == self._ids(client, "")
+
+
+class TestTheFieldsThatCannotBeRendered:
+    """Pure functions, no server: what a crafted file must not be able to do."""
+
+    def test_an_a1111_weight_that_is_not_a_finite_number_gives_no_strength(self):
+        """`<lora:x:inf>` parses as a float and cannot be rendered.
+
+        `allow_nan=False` is the renderer's default, so reporting it would turn
+        the read into a 500 for a share-token holder. A weight that is not a
+        single finite number gives nothing rather than something of another
+        shape - `strengths` is numbers on both branches or it is absent.
+        """
+        for weight in ("inf", "-inf", "nan", "0.8,0.5", "", None, "heavy"):
+            assert comfyui_module._a1111_strengths(weight) == {}, weight
+        assert comfyui_module._a1111_strengths("0.8") == {"model": 0.8}
+
+    def test_the_workflow_filter_fails_closed_when_the_hub_cannot_answer(self):
+        """A filter that cannot be resolved lists nothing, never everything.
+
+        The dangerous direction: widening a grid that was asked for one
+        workflow back to the whole library reads as the filter working.
+        """
+        from pixlstash.routes.pictures._listing import _resolve_workflow_filter
+
+        class _NoHub:
+            hub = None
+
+        class _BrokenHub:
+            class hub:  # noqa: N801 - a stand-in, not a class being defined
+                @staticmethod
+                def fetchall(*_a, **_kw):
+                    raise sqlite3.OperationalError("the hub is not answering")
+
+        assert _resolve_workflow_filter(_NoHub(), {"workflow": "k"}) == []
+        assert _resolve_workflow_filter(_BrokenHub(), {"workflow": "k"}) == []
+        # The control: no filter asked for is still no filter, not an empty one.
+        assert _resolve_workflow_filter(_NoHub(), {}) is None
+
+
+def _lock_input(server, pic_id: int, input_id: int, pixel_sha: str):
+    """Record that *pic_id*'s run loaded *input_id* at node 7, position 0.
+
+    The ``generation`` row is merged rather than inserted: the workflow scan has
+    already written one for a picture whose file carries an API prompt graph,
+    which is every picture in this module.
+    """
+
+    def write(session):
+        session.merge(Generation(picture_id=pic_id, seed="12345"))
+        session.commit()
+        session.merge(
+            GenerationInput(
+                picture_id=pic_id,
+                node_ref="7",
+                position=0,
+                pixel_sha=pixel_sha,
+                input_picture_id=input_id,
+            )
+        )
+        session.commit()
+
+    server.vault.db.run_task(write)
+
+
+def _bin(server, picture_id: int):
+    def write(session):
+        picture = session.get(Picture, picture_id)
+        picture.deleted = True
+        session.add(picture)
+        session.commit()
+
+    server.vault.db.run_task(write)
+
+
+def test_the_recipe_read_carries_the_models_settings_and_topology(env):
+    server, client, pic_id = env
+    _shelf_checkpoint(server)
+    # Before the request, not after: see `_topology_hash`.
+    topology = _topology_hash(server, pic_id)
+
+    r = client.get(f"{API}/comfyui/pictures/{pic_id}/recipe?preflight=false")
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    slots = {slot["name"]: slot for slot in body["model_slots"]}
+    assert set(slots) == {"sd_xl_base_1.0.safetensors"}
+    assert slots["sd_xl_base_1.0.safetensors"]["model_id"] == _shelf_model_id(server)
+    # Matched by name, so it is a file called that and nothing stronger.
+    assert slots["sd_xl_base_1.0.safetensors"]["verified"] is False
+
+    assert body["settings"] == {"steps": 20}
+    # The graph's bytes are the OTHER route's job now: one read says what the
+    # picture was made with, the other hands over what ComfyUI can open.
+    assert "workflow" not in body
+    graph = client.get(f"{API}/comfyui/pictures/{pic_id}/workflow").json()
+    assert graph["workflow"]["4"]["class_type"] == "CheckpointLoaderSimple"
+    # And the key the "Open in Workflows" link navigates by, which the scan
+    # wrote when it filed this picture.
+    assert body["topology_hash"] == topology
+    # An import is not lineage: nothing ran here, so no `generation_input` row
+    # exists and none is invented.
+    assert body["inputs"] == []
+
+
+def test_the_resolution_lock_names_what_a_run_loaded_until_it_is_gone(env):
+    """Both states in one environment: a `Server` boot is the expensive part of
+    this module and neither half needs its own."""
+    server, client, pic_id = env
+    input_id = _second_picture(client)
+    _lock_input(server, pic_id, input_id, "d" * 64)
+
+    r = client.get(f"{API}/comfyui/pictures/{pic_id}/recipe?preflight=false")
+    assert r.status_code == 200, r.text
+    assert r.json()["inputs"] == [
+        {
+            "node_ref": "7",
+            "position": 0,
+            "pixel_sha": "d" * 64,
+            "input_picture_id": input_id,
+        }
+    ]
+
+    # Deleting the source does not unmake what was made from it - but the grid
+    # can no longer show it, so the id must not be offered as if it could.
+    _bin(server, input_id)
+    r = client.get(f"{API}/comfyui/pictures/{pic_id}/recipe?preflight=false")
+    assert r.status_code == 200, r.text
+    row = r.json()["inputs"][0]
+    assert row["input_picture_id"] is None and row["pixel_sha"] == "d" * 64
+
+
+def test_a_scoped_token_is_served_the_graph_but_never_the_library(env):
+    """The filename and the strength are in the graph it is already being
+    served. Which row of the owner's shelf that file is, and which OTHER
+    picture a run loaded, are not - the second is an id the gate refuses this
+    token on every other route, plus a content hash of it."""
+    server, client, pic_id = env
+    _shelf_checkpoint(server)
+    input_id = _second_picture(client)
+    _lock_input(server, pic_id, input_id, "d" * 64)
+
+    r = client.post(
+        f"{API}/users/me/token",
+        json={
+            "description": "recipe scope probe",
+            "scope": "READ",
+            "resource_type": "picture",
+            "resource_id": pic_id,
+        },
+    )
+    assert r.status_code == 200, r.text
+    scoped = TestClient(server.api)
+    scoped.headers.update({"Authorization": f"Bearer {r.json()['token']}"})
+
+    # The positive control: the credential is live and in scope for this route,
+    # so what it does NOT get below is a refusal rather than a dead token.
+    r = scoped.get(f"{API}/comfyui/pictures/{pic_id}/recipe?preflight=false")
+    assert r.status_code == 200, r.text
+    scoped_body = r.json()
+    slot = scoped_body["model_slots"][0]
+    assert slot["name"] == "sd_xl_base_1.0.safetensors"
+    assert slot["model_id"] is None and slot["verified"] is False
+    assert scoped_body["inputs"] == []
+
+    # And the control on the other side: this token really is refused that
+    # picture everywhere else, which is what makes serving its id here a leak.
+    assert scoped.get(f"{API}/pictures/{input_id}/metadata").status_code == 403
+
+    # The owner, on the same picture, does get both - over-blocking would be
+    # its own regression.
+    owner_body = client.get(
+        f"{API}/comfyui/pictures/{pic_id}/recipe?preflight=false"
+    ).json()
+    assert owner_body["model_slots"][0]["model_id"] == _shelf_model_id(server)
+    assert owner_body["inputs"][0]["input_picture_id"] == input_id
+
+
+def test_the_lightbox_read_asks_comfyui_nothing(env, monkeypatch):
+    """`?preflight=false` is the whole reason one read can serve both callers.
+
+    The Recipe tab re-reads on every filmstrip step, so a ComfyUI round-trip per
+    arrow-key is not affordable; the Remix dialog keeps the pre-flight because
+    it is about to run the thing. Asserted by making the call explode: if the
+    route still reaches for `/object_info`, this test says so.
+    """
+    _server, client, pic_id = env
+    asked = []
+
+    def boom(url):
+        asked.append(url)
+        raise AssertionError("the lightbox read must not ask ComfyUI anything")
+
+    monkeypatch.setattr(comfyui_module, "fetch_object_info", boom)
+
+    r = client.get(f"{API}/comfyui/pictures/{pic_id}/recipe?preflight=false")
+    assert r.status_code == 200, r.text
+    assert asked == []
+    # And it says so rather than implying the graph passed a check it skipped.
+    assert r.json()["preflight"]["checked"] is False
+
+    # The control: the default still asks, so the flag is doing the work and
+    # the Remix dialog's pre-flight has not been quietly switched off.
+    _comfyui_reachable(monkeypatch)
+    r = client.get(f"{API}/comfyui/pictures/{pic_id}/recipe")
+    assert r.status_code == 200, r.text
+    assert r.json()["preflight"]["checked"] is True
+
+
+# ── The editor graph ────────────────────────────────────────────────────────
+#
+# A ComfyUI picture does not always carry the API `prompt` chunk: a file
+# exported from the editor, or re-saved by a node that writes only `workflow`,
+# carries the editor's own serialisation instead. Those pictures used to answer
+# `no_prompt_chunk` - the same answer as a holiday photo - and so lost their
+# whole recipe and the offer to run it again.
+#
+# They are now converted against ComfyUI's own `/object_info`, exactly or not
+# at all. The conversion itself is covered in
+# `tests/test_comfyui_ui_graph_conversion.py`; what is asserted here is the
+# route's half: that the picture answers like an API-chunk one when the
+# rebuild works, that it still fills in the recipe and names the reason when it
+# does not, and that a run submits the rebuilt graph rather than the file's.
+
+# Declares the wiring as well as the widgets, so the rebuilt graph is a real
+# graph and not a set of loose values.
+EDITOR_OBJECT_INFO = {
+    "CheckpointLoaderSimple": {
+        "input": {"required": {"ckpt_name": [["sd_xl_base_1.0.safetensors"], {}]}},
+        "input_order": {"required": ["ckpt_name"]},
+    },
+    "CLIPTextEncode": {
+        "input": {"required": {"text": ["STRING", {"multiline": True}]}},
+        "input_order": {"required": ["text"]},
+    },
+    "KSampler": {
+        "input": {
+            "required": {
+                "model": ["MODEL", {}],
+                "seed": ["INT", {"default": 0, "control_after_generate": True}],
+                "steps": ["INT", {"default": 20}],
+                "positive": ["CONDITIONING", {}],
+            }
+        },
+        "input_order": {"required": ["model", "seed", "steps", "positive"]},
+    },
+    "SaveImage": {
+        "input": {
+            "required": {
+                "images": ["IMAGE", {}],
+                "filename_prefix": ["STRING", {}],
+            }
+        },
+        "input_order": {"required": ["images", "filename_prefix"]},
+    },
+}
+
+# The same picture as RECIPE_GRAPH, in the editor's serialisation: widgets in a
+# positional array with the control-after-generate row between the seed and the
+# steps, and wires in a link table.
+EDITOR_GRAPH = {
+    "last_node_id": 9,
+    "last_link_id": 3,
+    "nodes": [
+        {
+            "id": 4,
+            "type": "CheckpointLoaderSimple",
+            "mode": 0,
+            "inputs": [],
+            "outputs": [{"name": "MODEL", "type": "MODEL", "links": [1]}],
+            "widgets_values": ["sd_xl_base_1.0.safetensors"],
+        },
+        {
+            "id": 6,
+            "type": "CLIPTextEncode",
+            "mode": 0,
+            "inputs": [],
+            "outputs": [{"name": "CONDITIONING", "type": "CONDITIONING", "links": [2]}],
+            "widgets_values": ["a cat in a hat"],
+        },
+        {
+            "id": 3,
+            "type": "KSampler",
+            "mode": 0,
+            "inputs": [
+                {"name": "model", "type": "MODEL", "link": 1},
+                {"name": "positive", "type": "CONDITIONING", "link": 2},
+            ],
+            "outputs": [{"name": "LATENT", "type": "LATENT", "links": [3]}],
+            "widgets_values": [12345, "randomize", 20],
+        },
+        {
+            "id": 9,
+            "type": "SaveImage",
+            "mode": 0,
+            "inputs": [{"name": "images", "type": "IMAGE", "link": 3}],
+            "outputs": [],
+            "widgets_values": ["ComfyUI"],
+        },
+    ],
+    "links": [
+        [1, 4, 0, 3, 0, "MODEL"],
+        [2, 6, 0, 3, 1, "CONDITIONING"],
+        [3, 3, 0, 9, 0, "IMAGE"],
+    ],
+}
+
+# What the editor graph above must rebuild into, in full. Asserted whole rather
+# than field by field: the failure this guards against is a value landing on
+# the wrong input, which a spot-check of two fields would not see.
+EXPECTED_REBUILD = {
+    "4": {
+        "inputs": {"ckpt_name": "sd_xl_base_1.0.safetensors"},
+        "class_type": "CheckpointLoaderSimple",
+        "_meta": {"title": "CheckpointLoaderSimple"},
+    },
+    "6": {
+        "inputs": {"text": "a cat in a hat"},
+        "class_type": "CLIPTextEncode",
+        "_meta": {"title": "CLIPTextEncode"},
+    },
+    "3": {
+        "inputs": {
+            "model": ["4", 0],
+            "seed": 12345,
+            "steps": 20,
+            "positive": ["6", 0],
+        },
+        "class_type": "KSampler",
+        "_meta": {"title": "KSampler"},
+    },
+    "9": {
+        "inputs": {"images": ["3", 0], "filename_prefix": "ComfyUI"},
+        "class_type": "SaveImage",
+        "_meta": {"title": "SaveImage"},
+    },
+}
+
+
+def _editor_png_bytes(
+    graph: dict, colour: tuple[int, int, int], parameters: str | None = None
+) -> bytes:
+    """A PNG carrying *graph* in the ``workflow`` chunk and nothing else.
+
+    Deliberately no ``prompt`` chunk: this is the file the whole section is
+    about, and adding one would let the route answer from it instead.
+
+    ``parameters`` adds A1111 infotext beside the editor graph. Real files do
+    carry both - several "save with metadata" nodes write it - and that
+    combination is the one where the picture's STORED topology describes a
+    reading the Recipe tab is not showing.
+    """
+    img = Image.new("RGB", (256, 256), colour)
+    meta = PngInfo()
+    meta.add_text("workflow", json.dumps(graph))
+    if parameters is not None:
+        meta.add_text("parameters", parameters)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", pnginfo=meta)
+    return buf.getvalue()
+
+
+def _stored_topology(server, pic_id: int) -> str | None:
+    """The picture's own `workflow_topology_hash`, waited for.
+
+    The extraction pass is asynchronous, and the point of the test that uses
+    this is that the column holds a value the read must NOT report - so a null
+    read here would make that test pass for the wrong reason.
+    """
+    for _ in range(120):
+        pics = server.vault.db.run_immediate_read_task(
+            Picture.find, id=pic_id, select_fields=["id", "workflow_topology_hash"]
+        )
+        value = getattr(pics[0], "workflow_topology_hash", None) if pics else None
+        if value:
+            return value
+        time.sleep(0.5)
+    return None
+
+
+@pytest.fixture(scope="module")
+def editor_env():
+    """A server holding one picture whose only graph is the editor's.
+
+    Module-scoped: standing the server up costs more than every assertion in
+    this section put together, and none of them changes the picture it yields.
+    Two of them import a SECOND picture into it, which is why the assertions
+    here name ids rather than counting rows.
+    """
+    temp_dir = tempfile.TemporaryDirectory()
+    config_path = os.path.join(temp_dir.name, "server-config.json")
+    with open(config_path, "w") as fh:
+        fh.write(json.dumps({"port": 8000}))
+    server = Server(config_path)
+    server.__enter__()
+    try:
+        client = TestClient(server.api, raise_server_exceptions=True)
+        r = client.post(
+            f"{API}/login",
+            json={"username": "owner", "password": "example-owner-password"},
+        )
+        assert r.status_code == 200, r.text
+        files = [
+            (
+                "file",
+                (
+                    "editor-only.png",
+                    _editor_png_bytes(EDITOR_GRAPH, (40, 160, 90)),
+                    "image/png",
+                ),
+            )
+        ]
+        st = upload_pictures_and_wait(client, files, timeout_s=60)
+        assert st["status"] == "completed", st
+        r = client.get(f"{API}/pictures")
+        assert r.status_code == 200, r.text
+        picture_ids = [p["id"] for p in r.json()]
+        assert picture_ids, "The editor-graph picture did not import"
+        yield server, client, picture_ids[0]
+    finally:
+        server.__exit__(None, None, None)
+        temp_dir.cleanup()
+        gc.collect()
+
+
+def _editor_comfyui_reachable(monkeypatch):
+    monkeypatch.setattr(
+        comfyui_module, "fetch_object_info", lambda url: dict(EDITOR_OBJECT_INFO)
+    )
+
+
+class TestAnEditorGraphIsRecognised:
+    def test_it_answers_like_a_picture_that_carried_the_api_chunk(
+        self, editor_env, monkeypatch
+    ):
+        _server, client, pic_id = editor_env
+        _editor_comfyui_reachable(monkeypatch)
+        r = client.get(f"{API}/comfyui/pictures/{pic_id}/recipe?preflight=false")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # Not `no_prompt_chunk`, which is what this picture used to answer.
+        assert body["available"] is True, body
+        assert body["reason"] is None
+        assert body["source"] == "comfyui"
+        assert body["converted_from_editor_graph"] is True
+        assert body["conversion_problems"] == []
+        # Named for the chunk it came out of, so a reader can tell a rebuilt
+        # graph from the one ComfyUI executed.
+        assert body["summary"] == "Editor Workflow · 4 nodes"
+        assert body["positive_prompt"] == "a cat in a hat"
+        assert body["seed"] == 12345
+        assert body["seed_text"] == "12345"
+        assert body["settings"]["steps"] == 20
+        assert body["models"] == ["sd_xl_base_1.0.safetensors"]
+        assert body["node_classes"] == EXPECTED_CLASSES
+        assert body["seed_inputs"], "a rebuilt graph must still offer a new seed"
+        # The map was read to REBUILD the graph, not to judge it. `?preflight=
+        # false` asked for no check, and a verdict from a map up to a minute
+        # old is not one this answer may report as made.
+        assert body["preflight"]["checked"] is False
+
+    def test_the_editor_read_does_ask_comfyui_even_with_preflight_off(
+        self, editor_env, monkeypatch
+    ):
+        """The one exception to `?preflight=false` costing no network.
+
+        Without `/object_info` there is nothing to report about an editor
+        graph at all - not merely nothing to judge - so the flag cannot switch
+        this read off. Asserted rather than assumed, because the sibling test
+        above asserts the opposite for an API-chunk picture and the two
+        contracts have to be told apart.
+        """
+        _server, client, pic_id = editor_env
+        asked = []
+
+        def counted(url):
+            asked.append(url)
+            return dict(EDITOR_OBJECT_INFO)
+
+        monkeypatch.setattr(comfyui_module, "fetch_object_info", counted)
+        r = client.get(f"{API}/comfyui/pictures/{pic_id}/recipe?preflight=false")
+        assert r.status_code == 200, r.text
+        assert len(asked) == 1
+        # And the second read is served from the cache, which is what makes
+        # walking the filmstrip affordable.
+        r = client.get(f"{API}/comfyui/pictures/{pic_id}/recipe?preflight=false")
+        assert r.status_code == 200, r.text
+        assert len(asked) == 1, "the map must be reused, not re-fetched per step"
+
+    def test_a_rebuild_that_cannot_be_exact_still_reports_the_recipe(
+        self, editor_env, monkeypatch
+    ):
+        """The distinction the whole change turns on.
+
+        "Nothing here was made in ComfyUI" and "this is a ComfyUI picture
+        PixlStash cannot hand back to ComfyUI" are two different answers, and
+        only the second one is true of this file.
+        """
+        _server, client, pic_id = editor_env
+        partial = {
+            k: v for k, v in EDITOR_OBJECT_INFO.items() if k != "CheckpointLoaderSimple"
+        }
+        monkeypatch.setattr(comfyui_module, "fetch_object_info", lambda url: partial)
+        r = client.get(f"{API}/comfyui/pictures/{pic_id}/recipe?preflight=false")
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["available"] is False
-        assert body["reason"] == "pixlstash_nodes"
+        assert body["reason"] == "editor_graph"
+        assert body["source"] == "comfyui"
+        assert body["converted_from_editor_graph"] is False
+        # Both: the class this ComfyUI does not have, and the input that is
+        # therefore wired to nothing. Each names a different thing to look at.
+        assert body["conversion_problems"] == [
+            "this ComfyUI has no node class 'CheckpointLoaderSimple'",
+            "KSampler (node 3) has its 'model' input wired to something that "
+            "does not run",
+        ]
+        # The recipe itself is still there: read off the editor graph, which is
+        # what the file actually says.
+        assert body["summary"] == "Editor Workflow · 4 nodes · 3 links"
+        assert body["positive_prompt"] == "a cat in a hat"
+        assert body["models"] == ["sd_xl_base_1.0.safetensors"]
 
-
-class TestRunRecipeRefusesAnUncheckedPreflight:
-    def test_refuses_without_the_override(self, env, monkeypatch):
-        server, client, pic_id = env
+    def test_an_unreachable_comfyui_is_a_refusal_not_a_guess(
+        self, editor_env, monkeypatch
+    ):
+        _server, client, pic_id = editor_env
         _comfyui_unreachable(monkeypatch)
-        submitted = _capture_submissions(monkeypatch)
-        r = client.post(f"{API}/comfyui/run_recipe", json={"picture_id": pic_id})
-        assert r.status_code == 400, r.text
-        detail = r.json()["detail"]
-        assert "could not reach ComfyUI" in detail
-        assert "has not been inspected" in detail
-        # The refusal is a refusal: nothing reached ComfyUI.
-        assert submitted == []
-
-    def test_a_false_override_is_not_an_override(self, env, monkeypatch):
-        server, client, pic_id = env
-        _comfyui_unreachable(monkeypatch)
-        submitted = _capture_submissions(monkeypatch)
-        r = client.post(
-            f"{API}/comfyui/run_recipe",
-            json={"picture_id": pic_id, "allow_unchecked": False},
-        )
-        assert r.status_code == 400, r.text
-        assert submitted == []
-
-    def test_only_the_literal_true_is_consent(self, env, monkeypatch):
-        """R3b: consent is the JSON boolean ``true`` and nothing else. The
-        string ``"false"`` is truthy in Python, and ``"true"``/``1``/``[true]``
-        are the sibling spellings a lenient cast would also let through."""
-        server, client, pic_id = env
-        _comfyui_unreachable(monkeypatch)
-        submitted = _capture_submissions(monkeypatch)
-        for value in ("false", "true", 1, "yes", [True], {"v": True}):
-            for key in ("allow_unchecked", "allowUnchecked"):
-                r = client.post(
-                    f"{API}/comfyui/run_recipe",
-                    json={"picture_id": pic_id, key: value},
-                )
-                assert r.status_code == 400, (
-                    f"{key}={value!r} must not read as consent: {r.text}"
-                )
-        assert submitted == []
-
-    def test_the_explicit_override_runs_it(self, env, monkeypatch):
-        server, client, pic_id = env
-        _comfyui_unreachable(monkeypatch)
-        submitted = _capture_submissions(monkeypatch)
-        r = client.post(
-            f"{API}/comfyui/run_recipe",
-            json={"picture_id": pic_id, "allow_unchecked": True},
-        )
+        r = client.get(f"{API}/comfyui/pictures/{pic_id}/recipe?preflight=false")
         assert r.status_code == 200, r.text
-        assert r.json()["prompts"][0]["prompt_id"] == "test-prompt-1"
-        assert len(submitted) == 1
-        # What ran is what was disclosed: the same class set, and none of the
-        # non-node bookkeeping keys.
-        assert sorted({node["class_type"] for node in submitted[0].values()}) == sorted(
-            EXPECTED_CLASSES
-        )
-        assert "pixlstash_output_nodes" not in submitted[0]
+        body = r.json()
+        # **Its own reason.** "This workflow cannot be rebuilt" and "start
+        # ComfyUI" send the reader to two different places, and the first read
+        # as permanent when it was said about the second.
+        assert body["reason"] == "comfyui_unreachable"
+        assert body["conversion_problems"] == [
+            "PixlStash could not ask ComfyUI which nodes it has"
+        ]
+        assert body["positive_prompt"] == "a cat in a hat"
 
-    def test_the_camel_case_spelling_is_accepted_too(self, env, monkeypatch):
-        server, client, pic_id = env
-        _comfyui_unreachable(monkeypatch)
-        _capture_submissions(monkeypatch)
-        r = client.post(
-            f"{API}/comfyui/run_recipe",
-            json={"picture_id": pic_id, "allowUnchecked": True},
-        )
-        assert r.status_code == 200, r.text
+    def test_a_graph_this_comfyui_cannot_read_keeps_the_other_reason(
+        self, editor_env, monkeypatch
+    ):
+        """The control for the split above: a reachable ComfyUI that is missing
+        a node pack is a fact about the file, not about the machine."""
+        _server, client, pic_id = editor_env
+        partial = {
+            k: v for k, v in EDITOR_OBJECT_INFO.items() if k != "CheckpointLoaderSimple"
+        }
+        monkeypatch.setattr(comfyui_module, "fetch_object_info", lambda url: partial)
+        body = client.get(
+            f"{API}/comfyui/pictures/{pic_id}/recipe?preflight=false"
+        ).json()
+        assert body["reason"] == "editor_graph"
 
-    def test_a_reachable_comfyui_needs_no_override(self, env, monkeypatch):
-        """The gate is on *unchecked*, not on recipes in general.
+    def test_a_comfyui_that_is_down_is_not_asked_again_per_arrow_key(
+        self, editor_env, monkeypatch
+    ):
+        """The failure is cached too, and that is an availability rule.
 
-        A pre-flight that actually ran and passed is the normal path and must
-        stay a single click; requiring the acknowledgement here would train the
-        user to tick it without reading, which is the failure mode the control
-        exists to avoid.
+        `OBJECT_INFO_TIMEOUT_S` is 15 seconds and this route is synchronous, so
+        a ComfyUI that is merely not running would otherwise hold one worker
+        thread per filmstrip step for 15 seconds each - enough presses and
+        nothing else in the API gets a thread.
         """
-        server, client, pic_id = env
-        _comfyui_reachable(monkeypatch)
-        submitted = _capture_submissions(monkeypatch)
-        r = client.post(f"{API}/comfyui/run_recipe", json={"picture_id": pic_id})
-        assert r.status_code == 200, r.text
-        assert len(submitted) == 1
+        _server, client, pic_id = editor_env
+        attempts = []
+
+        def boom(url):
+            attempts.append(url)
+            raise RuntimeError(f"Could not reach ComfyUI at {url}")
+
+        monkeypatch.setattr(comfyui_module, "fetch_object_info", boom)
+        for _ in range(4):
+            r = client.get(f"{API}/comfyui/pictures/{pic_id}/recipe?preflight=false")
+            assert r.status_code == 200, r.text
+            assert r.json()["reason"] == "comfyui_unreachable"
+        assert len(attempts) == 1, "a ComfyUI that is down must be asked once"
+
+        # The control: forgetting the cache asks again, so the caching is what
+        # made the count 1 and not some other refusal short-circuiting it.
+        comfyui_module._forget_cached_object_info()
+        client.get(f"{API}/comfyui/pictures/{pic_id}/recipe?preflight=false")
+        assert len(attempts) == 2
+
+
+def test_cached_readers_arriving_together_fetch_the_map_once(monkeypatch):
+    """Selecting a workflow asks several routes at once, on a cold cache too.
+
+    Each used to read the map for itself; now the first reads it and the rest
+    wait for its answer, which is the one object the cache holds.
+    """
+    fetches = []
+
+    def slow(url):
+        fetches.append(url)
+        # Long enough that every thread below is asking before this answers.
+        time.sleep(0.2)
+        return {"KSampler": {}}
+
+    monkeypatch.setattr(comfyui_module, "fetch_object_info", slow)
+    url = "http://127.0.0.1:8188"
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        answers = list(
+            pool.map(
+                lambda _: comfyui_module._read_object_info(url, cached=True),
+                range(4),
+            )
+        )
+    assert answers == [({"KSampler": {}}, None)] * 4
+    assert len(fetches) == 1, fetches
+
+
+def test_a_read_made_now_is_the_callers_own_and_never_the_cached_map(monkeypatch):
+    """A run edits the map it is handed, so it is never the one being drawn from.
+
+    The control for the cached readers sharing one object: a read without
+    ``cached`` neither takes that object nor leaves its own in its place.
+    """
+    monkeypatch.setattr(
+        comfyui_module, "fetch_object_info", lambda url: {"KSampler": {}}
+    )
+    url = "http://127.0.0.1:8188"
+    drawn = comfyui_module._read_object_info(url, cached=True)[0]
+    mine = comfyui_module._read_object_info(url)[0]
+    assert mine is not drawn
+    mine["Edited"] = {}
+    assert comfyui_module._read_object_info(url, cached=True)[0] is drawn
+    assert "Edited" not in drawn
+
+
+class TestTheOpenLinkNamesTheWorkflowOnScreen:
+    """`topology_hash` is what the Recipe tab's *Open* navigates by.
+
+    It has to name the graph the tab is SHOWING. The stored
+    `picture.workflow_topology_hash` does not: the extraction pass writes it
+    from the API `prompt` chunk or from A1111 infotext, and an editor-graph
+    picture answered from neither - so Open sent the reader to a workflow they
+    were never shown, or was not offered at all.
+    """
+
+    def test_it_is_the_rebuilt_graph_s_own_topology(self, editor_env, monkeypatch):
+        _server, client, pic_id = editor_env
+        _editor_comfyui_reachable(monkeypatch)
+        body = client.get(
+            f"{API}/comfyui/pictures/{pic_id}/recipe?preflight=false"
+        ).json()
+        assert body["converted_from_editor_graph"] is True
+        # Keyed by the ordinary API path, so it is the SAME value the same
+        # workflow saved in API format would report - which is what makes Open
+        # land on the card those siblings are on.
+        assert body["topology_hash"] == api_topology_hash(EXPECTED_REBUILD)
+        # And it is offered at all, which is what the button's `v-if` needs.
+        assert body["topology_hash"]
+
+    def test_a_refused_rebuild_still_names_its_editor_graph(
+        self, editor_env, monkeypatch
+    ):
+        _server, client, pic_id = editor_env
+        partial = {k: v for k, v in EDITOR_OBJECT_INFO.items() if k != "KSampler"}
+        monkeypatch.setattr(comfyui_module, "fetch_object_info", lambda url: partial)
+        body = client.get(
+            f"{API}/comfyui/pictures/{pic_id}/recipe?preflight=false"
+        ).json()
+        assert body["reason"] == "editor_graph"
+        # No rebuild to key, so the editor serialisation is keyed directly.
+        assert body["topology_hash"] == ui_topology_hash(EDITOR_GRAPH)
+
+    def test_it_is_never_the_topology_of_the_a1111_text_beside_it(
+        self, editor_env, monkeypatch
+    ):
+        """The case that made Open open nothing.
+
+        This file carries BOTH an editor graph and A1111 infotext. The
+        extraction pass files the A1111 reduction, so the picture's stored
+        topology is that reduction's - a different workflow from the one the
+        Recipe tab draws. Following it lands the reader nowhere useful.
+        """
+        _server, client, _pic_id = editor_env
+        _editor_comfyui_reachable(monkeypatch)
+        both = _upload_one(
+            client,
+            "editor-and-a1111.png",
+            _editor_png_bytes(EDITOR_GRAPH, (70, 30, 120), A1111_PARAMETERS),
+        )
+        stored = _stored_topology(_server, both)
+        body = client.get(
+            f"{API}/comfyui/pictures/{both}/recipe?preflight=false"
+        ).json()
+        # The tab is showing the editor graph, so that is what Open must name.
+        assert body["converted_from_editor_graph"] is True
+        assert body["topology_hash"] == api_topology_hash(EXPECTED_REBUILD)
+        # The control: the column really does hold something else, so this test
+        # is about a substitution that happens and not about two nulls.
+        assert stored is not None
+        assert body["topology_hash"] != stored
+
+
+def test_a_scoped_token_cannot_ask_which_projects_exist(env, monkeypatch):
+    """The recipe read checks a pack loader's project only for the owner.
+
+    A share link reads this route, and an answer that turned on whether
+    project N exists would tell it about projects outside its scope.
+    """
+    server, client, _pic_id = env
+    _comfyui_reachable(monkeypatch)
+
+    def write(session):
+        project = Project(name="Recipe probe 1521")
+        session.add(project)
+        session.commit()
+        return project.id
+
+    project_id = server.vault.db.run_task(write)
+    graph = json.loads(json.dumps(RECIPE_GRAPH))
+    graph["10"] = {
+        "class_type": "PixlStashProjectLoader",
+        "inputs": {"pixlstash_project": f"Recipe probe 1521 #{project_id}"},
+    }
+    pic = _upload_one(client, "probe.png", _recipe_png_bytes(graph, (7, 8, 9)))
+
+    # The owner: the project exists, so the variant is offered.
+    body = client.get(f"{API}/comfyui/pictures/{pic}/recipe").json()
+    assert body["available"] is True, body
+
+    r = client.post(
+        f"{API}/users/me/token",
+        json={
+            "description": "project probe",
+            "scope": "READ",
+            "resource_type": "picture",
+            "resource_id": pic,
+        },
+    )
+    assert r.status_code == 200, r.text
+    scoped = TestClient(server.api)
+    scoped.headers.update({"Authorization": f"Bearer {r.json()['token']}"})
+    r = scoped.get(f"{API}/comfyui/pictures/{pic}/recipe")
+    assert r.status_code == 200, r.text
+    # The same answer an absent project would get: nothing to tell them apart.
+    assert r.json()["available"] is False
+    assert [n["why"] for n in r.json()["pixlstash_nodes"]] == ["not_in_library"]
+
+    # The picture list names its library to the owner and to nobody else
+    # (#1912): a share link has no use for it.
+    r = client.get(f"{API}/pictures")
+    assert r.headers["X-PixlStash-Library"] == server.vault.library_uuid
+    r = scoped.get(f"{API}/pictures")
+    assert r.status_code == 200, r.text
+    assert "X-PixlStash-Library" not in r.headers

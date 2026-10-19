@@ -32,8 +32,30 @@ const AppDialogStub = {
     "<div><slot name='header-right'/><slot/><slot name='footer'/></div>",
 };
 
+// The one tooltip surface, reduced to what a test can read: the tip's text as
+// `data-tip`, on the activator element or on a marker inside the parent. A
+// describing tip claims its activator's `aria-describedby`, as the real one does.
+const TooltipStub = {
+  name: "Tooltip",
+  props: ["text", "shortcut", "location", "disabled", "describe", "activator"],
+  template: `<slot
+      v-if="$slots.activator"
+      name="activator"
+      :props="{
+        'data-tip': text || undefined,
+        'aria-describedby': describe === false ? undefined : 'tooltip-stub',
+      }"
+    /><span v-else-if="text" class="tip" :data-tip="text" />`,
+};
+
 const globalOpts = {
-  global: { stubs: { "v-icon": true, AppDialog: AppDialogStub } },
+  global: {
+    stubs: {
+      Tooltip: TooltipStub,
+      "v-icon": true,
+      AppDialog: AppDialogStub,
+    },
+  },
 };
 
 // Three copies with a different winner per column: biggest picture, biggest
@@ -480,6 +502,24 @@ describe("DedupCompareDialog: the wheel", () => {
     wrapper.vm.toggleZoomPixels();
     await wrapper.vm.$nextTick();
     expect(wrapper.vm.zoomLevel()).toBeCloseTo(0.5, 5);
+    wrapper.unmount();
+  });
+
+  it("the Fit / Actual pixels radios follow the snap stop and snap on click", async () => {
+    const wrapper = mountDialog();
+    wrapper.vm.openZoom(0);
+    await wrapper.vm.$nextTick();
+    await primeZoom(wrapper);
+    const radios = () =>
+      Array.from(
+        zoomEl().querySelectorAll('[aria-label="Zoom"] [role="radio"]'),
+      ).map((r) => r.getAttribute("aria-checked"));
+    expect(radios()).toEqual(["true", "false"]);
+
+    zoomEl().querySelectorAll('[aria-label="Zoom"] [role="radio"]')[1].click();
+    await wrapper.vm.$nextTick();
+    expect(wrapper.vm.zoomLevel()).toBe(1);
+    expect(radios()).toEqual(["false", "true"]);
     wrapper.unmount();
   });
 });
@@ -1613,10 +1653,10 @@ describe("DedupCompareDialog: mixed mode asks a different question", () => {
       "94%",
       "89%",
     ]);
-    expect(match(cards[0]).attributes("title")).toContain(
+    expect(match(cards[0]).attributes("data-tip")).toContain(
       "Closest match 97%, to picture #8",
     );
-    const strangerTitle = match(cards[3]).attributes("title");
+    const strangerTitle = match(cards[3]).attributes("data-tip");
     expect(strangerTitle).toContain("Closest match 89%, to picture #9");
     expect(strangerTitle).toContain("below your threshold");
     expect(strangerTitle).not.toContain("matches nothing");
@@ -1636,7 +1676,7 @@ describe("DedupCompareDialog: mixed mode asks a different question", () => {
     const cards = mountMixed({ mixedStack: alone }).findAll(".dc-card");
     const cell = cellOf(cards[3], "Match").find(".dc-val");
     expect(cell.text()).toBe("–");
-    expect(cell.attributes("title")).toContain("nothing to compare this");
+    expect(cell.attributes("data-tip")).toContain("nothing to compare this");
   });
 
   it("chips the gap on the stranger's Match value and nowhere else", () => {
@@ -1666,7 +1706,7 @@ describe("DedupCompareDialog: mixed mode asks a different question", () => {
       ".dc-card",
     );
     expect(
-      cellOf(cards[3], "Match").find(".dc-val").attributes("title"),
+      cellOf(cards[3], "Match").find(".dc-val").attributes("data-tip"),
     ).toContain("has not been analysed yet");
   });
 });

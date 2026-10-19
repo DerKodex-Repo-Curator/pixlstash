@@ -102,10 +102,10 @@
         v-if="zoom.box"
         type="button"
         class="rs-zoom-fit"
-        title="Show the whole image"
         @click.stop="fitZoom"
       >
-        <v-icon size="15">mdi-fit-to-page-outline</v-icon>
+        <Tooltip text="Show the whole image" activator="parent" />
+        <v-icon size="16">mdi-fit-to-page-outline</v-icon>
         Whole image
       </button>
     </div>
@@ -130,6 +130,7 @@ import ReviewSessionView from "../reviews/ReviewSessionView.vue";
 import ReviewArchivedReceipt from "../reviews/ReviewArchivedReceipt.vue";
 import NewReviewDialog from "../reviews/NewReviewDialog.vue";
 import TbTagPanel from "../panels/TbTagPanel.vue";
+import Tooltip from "../widgets/Tooltip.vue";
 import { useNoticeStore } from "../../stores/useNoticeStore";
 import { useReviewSessionsStore } from "../../stores/useReviewSessionsStore";
 import { useSelectionStore } from "../../stores/useSelectionStore";
@@ -544,7 +545,7 @@ onUnmounted(() => {
   position: fixed;
   /* Anchor below the desktop title bar (0px in a browser). */
   inset: var(--titlebar-h) 0 0 0;
-  z-index: 4000;
+  z-index: var(--z-modal);
   background: rgba(var(--v-theme-scrim), 0.82);
   display: flex;
   align-items: stretch;
@@ -552,10 +553,23 @@ onUnmounted(() => {
 }
 
 .rs-shell {
+  /* Amber on a dark panel keeps the bright amber in both themes (#1413). */
+  --v-theme-accent: var(--v-theme-dark-surface-accent);
   display: flex;
   width: 100%;
   background: rgb(var(--v-theme-dark-surface));
   color: rgb(var(--v-theme-on-dark-surface));
+}
+
+/* Every surface of the review overlay stays dark in both themes, so the global
+   focus ring keeps its width and gap but takes the on-dark ink: the theme's
+   ink is near-black in light and would vanish here. One rule for the rail, the
+   board, the session and its cards, so no child paints its own. The tag panel
+   (`.rs-tag-apply`) is a themed surface and keeps the global colour. */
+.rs-shell :deep(:focus-visible),
+.rs-keys :focus-visible,
+.rs-zoom :focus-visible {
+  outline-color: rgb(var(--v-theme-on-dark-surface));
 }
 
 /* Positioning anchor only now - the visible bottom-right "Apply tags" button
@@ -566,23 +580,25 @@ onUnmounted(() => {
   position: fixed;
   right: 18px;
   bottom: 76px;
-  z-index: 4210;
+  z-index: var(--z-dropdown);
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 8px;
+  gap: var(--space-3);
 }
 
 .rs-keys-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 4400;
+  z-index: var(--z-modal);
   display: flex;
   align-items: center;
   justify-content: center;
   background: rgba(0, 0, 0, 0.45);
 }
 .rs-keys {
+  /* Amber on a dark panel keeps the bright amber in both themes (#1413). */
+  --v-theme-accent: var(--v-theme-dark-surface-accent);
   width: 380px;
   max-width: calc(100vw - 32px);
   padding: 20px;
@@ -595,20 +611,20 @@ onUnmounted(() => {
 .rs-keys-title {
   font-size: 15px;
   font-weight: var(--weight-bold);
-  margin-bottom: 12px;
+  margin-bottom: var(--space-4);
 }
 .rs-keys-list {
   display: grid;
   grid-template-columns: auto 1fr;
-  gap: 8px 14px;
+  gap: var(--space-3) 14px;
   font-size: var(--text-sm);
   margin: 0 0 14px;
 }
 .rs-keys-list kbd {
   font-family: var(--font-mono, monospace);
-  font-size: 11px;
+  font-size: var(--text-2xs);
   padding: 1px 6px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   border: 1px solid rgba(var(--v-theme-on-dark-surface), 0.3);
   background: rgba(var(--v-theme-on-dark-surface), 0.08);
   white-space: nowrap;
@@ -619,7 +635,7 @@ onUnmounted(() => {
 }
 .rs-keys-close {
   height: 30px;
-  padding: 0 12px;
+  padding: 0 var(--space-4);
   border-radius: var(--radius-sm);
   font-size: var(--text-2xs);
   font-weight: var(--weight-semibold);
@@ -631,7 +647,7 @@ onUnmounted(() => {
 .rs-zoom {
   position: fixed;
   inset: var(--titlebar-h) 0 0 0;
-  z-index: 4250;
+  z-index: var(--z-drawer);
   overflow: auto;
   background: rgba(0, 0, 0, 0.92);
   cursor: zoom-out;
@@ -649,11 +665,11 @@ onUnmounted(() => {
   bottom: 18px;
   left: 50%;
   transform: translateX(-50%);
-  padding: 5px 12px;
-  border-radius: 999px;
+  padding: 5px var(--space-4);
+  border-radius: var(--radius-pill);
   background: rgba(0, 0, 0, 0.65);
   color: rgba(255, 255, 255, 0.85);
-  font-size: 12px;
+  font-size: var(--text-xs);
   pointer-events: none;
   white-space: nowrap;
   transition: opacity var(--dur-3) var(--ease-standard);
@@ -671,7 +687,7 @@ onUnmounted(() => {
   height: 30px;
   padding: 0 11px;
   border-radius: var(--radius-sm);
-  font-size: 12px;
+  font-size: var(--text-xs);
   font-weight: var(--weight-semibold);
   border: 1px solid rgba(255, 255, 255, 0.3);
   background: rgba(0, 0, 0, 0.65);

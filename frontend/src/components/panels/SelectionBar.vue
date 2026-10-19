@@ -59,105 +59,13 @@
               </label>
 
               <div class="plugin-menu-actions">
-                <button
-                  class="stack-btn"
-                  type="button"
+                <AppButton
+                  variant="primary"
+                  icon-left="play"
                   :disabled="!selectedPluginName || !selectedImageIds.length"
                   @click="runSelectedPlugin"
+                  >Run</AppButton
                 >
-                  <v-icon size="16">mdi-play</v-icon>
-                  <span>Run</span>
-                </button>
-              </div>
-            </div>
-          </div>
-        </v-menu>
-      </div>
-      <div
-        v-if="selectedCount > 0 && !isScrapheapView && !isReadOnly"
-        class="plugin-run-controls"
-        @keydown.esc="handleComfyuiMenuEsc"
-      >
-        <v-menu
-          v-if="props.comfyuiConfigured"
-          v-model="comfyuiMenuOpen"
-          :close-on-content-click="false"
-          location-strategy="connected"
-          location="bottom end"
-          origin="top end"
-          transition="scale-transition"
-        >
-          <template #activator="{ props: menuProps }">
-            <div
-              v-bind="menuProps"
-              class="hidden-panel-activator"
-              aria-hidden="true"
-            ></div>
-          </template>
-          <div class="plugin-menu-panel">
-            <div class="plugin-menu-header">
-              Edit selected images with ComfyUI
-            </div>
-            <div class="plugin-menu-body">
-              <div v-if="comfyuiWorkflowLoading" class="plugin-menu-note">
-                Loading workflows...
-              </div>
-              <div v-else>
-                <div v-if="comfyuiWorkflowError" class="plugin-menu-error">
-                  {{ comfyuiWorkflowError }}
-                </div>
-                <template v-if="validComfyWorkflows.length">
-                  <label class="plugin-menu-label">Workflow</label>
-                  <select
-                    v-model="comfyuiSelectedWorkflow"
-                    class="plugin-run-select"
-                  >
-                    <option
-                      v-for="workflow in validComfyWorkflows"
-                      :key="workflow.name"
-                      :value="workflow.name"
-                    >
-                      {{ workflow.display_name || workflow.name }}
-                    </option>
-                  </select>
-
-                  <template v-if="showComfyuiCaptionInput">
-                    <label class="plugin-menu-label">Caption</label>
-                    <textarea
-                      v-model="comfyuiCaption"
-                      class="plugin-menu-textarea"
-                      rows="6"
-                      placeholder="Optional caption for {{caption}}"
-                      @keydown.stop
-                    ></textarea>
-                  </template>
-
-                  <label class="plugin-menu-checkbox-row">
-                    <input v-model="stackI2IOutputs" type="checkbox" />
-                    <span>Stack new images with the originals</span>
-                  </label>
-
-                  <div class="plugin-menu-actions">
-                    <button
-                      class="stack-btn"
-                      type="button"
-                      :disabled="!canRunComfyWorkflow"
-                      @click="runSelectedComfyWorkflow"
-                    >
-                      <v-icon size="16">mdi-play</v-icon>
-                      <span>{{ comfyuiRunLoading ? "Running" : "Run" }}</span>
-                    </button>
-                  </div>
-                </template>
-                <div v-else class="plugin-menu-note">
-                  No valid workflows found.
-                </div>
-                <div v-if="comfyuiRunError" class="plugin-menu-error">
-                  {{ comfyuiRunError }}
-                </div>
-                <div v-if="comfyuiRunSuccess" class="plugin-menu-success">
-                  {{ comfyuiRunSuccess }}
-                </div>
               </div>
             </div>
           </div>
@@ -190,23 +98,23 @@
                  The count rides in the accessible name so it is read on focus,
                  which is why selecting images one at a time needs no live
                  region of its own. -->
-            <button
+            <AppBarButton
               v-bind="menuProps"
-              class="stack-btn"
-              type="button"
+              class="selection-menu-trigger"
+              shape="round"
+              icon="image-multiple-outline"
+              chevron
               :disabled="selectedCount === 0 && selectedFaceCount === 0"
-              :title="triggerTitle"
+              :tooltip="triggerTitle"
               :aria-label="triggerTitle"
               aria-haspopup="menu"
               :aria-expanded="selectionMenuOpen ? 'true' : 'false'"
               aria-keyshortcuts="S"
             >
-              <v-icon size="20">mdi-image-multiple-outline</v-icon>
               <!-- Never truncated by the ladder: a count is the blast radius of
                    everything else in this half. -->
               <span class="bar-btn-apply-label">{{ selectionCountLabel }}</span>
-              <v-icon size="18" class="bar-btn-chevron">mdi-menu-down</v-icon>
-            </button>
+            </AppBarButton>
           </template>
           <SelectionMenu
             ref="selectionMenuRef"
@@ -222,11 +130,10 @@
             :has-plugin-options="pluginOptions.length > 0"
             :selected-sort="props.selectedSort"
             :selected-group-name="props.selectedGroupName"
-            :selected-multiple-stack-ids="props.selectedMultipleStackIds"
+            :stack-edit="props.stackEdit"
             :keep-cover-only-stack-count="props.keepCoverOnlyStackCount"
             :keep-cover-only-lock-reason="props.keepCoverOnlyLockReason"
             :rotate-block-reason="props.rotateBlockReason"
-            :show-remove-from-stack="props.showRemoveFromStack"
             @close="selectionMenuOpen = false"
             @set-project="$emit('set-project', $event)"
             @add-to-character="$emit('add-to-character', $event)"
@@ -235,12 +142,16 @@
             @remove-from-stack="$emit('remove-from-stack')"
             @create-stack="$emit('create-stack')"
             @dissolve-stacks="$emit('dissolve-stacks')"
+            @stack-move="$emit('stack-move', $event)"
+            @open-stack="$emit('open-stack')"
             @create-stacks-from-groups="$emit('create-stacks-from-groups')"
             @open-tag-input="openTagInput()"
             @auto-tag="$emit('auto-tag', $event)"
             @generate-description="$emit('generate-description', $event)"
             @open-plugin-panel="openPluginPanel()"
-            @open-comfyui-panel="openComfyuiPanel()"
+            @make-more="$emit('make-more')"
+            @run-workflow="$emit('run-workflow')"
+            @edit-with-comfyui="$emit('edit-with-comfyui')"
             @reverse-image-search="$emit('reverse-image-search')"
             @segment="$emit('segment')"
             @rotate-left="$emit('rotate-left')"
@@ -248,6 +159,7 @@
             @remove-from-group="$emit('remove-from-group')"
             @keep-cover-only="$emit('keep-cover-only')"
             @delete-selected="$emit('delete-selected')"
+            @move-to-library="$emit('move-to-library', $event)"
           />
         </v-menu>
         <div v-if="!isScrapheapView && !isReadOnly" class="plugin-run-controls">
@@ -261,8 +173,9 @@
           >
             <template #activator="{ props: menuProps }">
               <div
-                v-bind="menuProps"
-                ref="tagBtnRef"
+                v-bind="
+                  withRef(menuProps, (el) => (tagBtnRef = el))
+                "
                 class="hidden-panel-activator"
                 aria-hidden="true"
               ></div>
@@ -277,64 +190,61 @@
             />
           </v-menu>
         </div>
-        <button
+        <AppBarButton
           v-if="
             selectedCount > 0 &&
             !isScrapheapView &&
             !isReadOnly &&
             impossibleSources.length > 0
           "
-          class="stack-btn clear-impossible-btn"
-          type="button"
-          :disabled="clearingImpossible"
-          :title="`Strip the impossible tags from the ${selectedCount} selected picture(s)`"
+          class="clear-impossible-btn"
+          shape="round"
+          icon="tag-off-outline"
+          :loading="clearingImpossible"
+          :tooltip="`Strip the impossible tags from the ${selectedCount} selected picture(s)`"
           @click="$emit('clear-impossible-tags')"
         >
-          <v-icon size="18">mdi-tag-off-outline</v-icon>
           <span class="clear-impossible-label">{{
             clearingImpossible ? "Clearing…" : "Clear impossible tags"
           }}</span>
-        </button>
-        <button
-          class="clear-btn"
-          type="button"
+        </AppBarButton>
+        <AppBarButton
+          icon="selection-off"
+          shape="round"
           :disabled="!hasSelection"
-          :title="clearTitle"
-          :aria-label="clearTitle"
+          :tooltip="clearTitle"
           :aria-keyshortcuts="ownsEscape ? 'Escape' : undefined"
           @click="$emit('clear-selection')"
-        >
-          <v-icon size="20" color="primary">mdi-selection-off</v-icon>
-        </button>
+        />
         <!-- Separated from Clear selection by its own group gap. Two identical
-             40px transparent icon buttons 8px apart, one of them destructive,
-             is the adjacency this pill can least afford - and Delete now also
+             32px (48px on touch) transparent icon buttons 8px apart, one of
+             them destructive, is the adjacency this pill can least afford - and Delete now also
              sits in the same surface as the bulk Assign write. -->
-        <button
+        <AppBarButton
           class="delete-btn"
-          type="button"
+          shape="round"
+          icon="delete"
+          danger
           :disabled="!hasSelection || isReadOnly"
-          :title="deleteTitle"
-          :aria-label="deleteTitle"
+          :tooltip="deleteTitle"
           @click="$emit('delete-selected')"
-        >
-          <v-icon size="20" color="error">mdi-delete</v-icon>
-        </button>
+        />
     </div>
     <!-- /selection-ctx-bar -->
   </div>
 </template>
 
 <script setup>
+import { withRef } from "../../utils/withRef.js";
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
-import { API_BASE_URL, isReadOnly } from "../../utils/apiClient";
-import { listWorkflows, runImageToImage } from "../../api/comfyui";
+import { isReadOnly } from "../../utils/apiClient";
 import { useGenStackPrefsStore } from "../../stores/useGenStackPrefsStore";
 import SelectionMenu from "./SelectionMenu.vue";
 import TbTagPanel from "./TbTagPanel.vue";
 import PluginParametersUI from "../widgets/PluginParametersUI.vue";
+import AppBarButton from "../widgets/AppBarButton.vue";
+import AppButton from "../widgets/AppButton.vue";
 import { isEditableElement } from "../../utils/dom.js";
-import { errorDetail } from "../../utils/apiError";
 
 const props = defineProps({
   selectedCount: Number,
@@ -349,16 +259,14 @@ const props = defineProps({
    */
   ownsEscape: { type: Boolean, default: true },
   scrapheapPicturesId: { type: String, required: true },
-  backendUrl: { type: String, default: () => API_BASE_URL },
   selectedImageIds: { type: Array, default: () => [] },
   selectedMediaSupport: {
     type: Object,
     default: () => ({ hasImages: false, hasVideos: false }),
   },
-  comfyuiClientId: { type: String, default: "" },
   comfyuiConfigured: { type: Boolean, default: false },
-  showRemoveFromStack: { type: Boolean, default: false },
-  selectedMultipleStackIds: { type: Array, default: () => [] },
+  // What the selection is as far as stacks go (see EditStackMenu's `target`).
+  stackEdit: { type: Object, default: null },
   // Forwarded straight to SelectionMenu: Keep cover only lives in the overflow
   // only, never as a top-level pill button.
   keepCoverOnlyStackCount: { type: Number, default: 0 },
@@ -382,15 +290,17 @@ const emit = defineEmits([
   "remove-from-group",
   "keep-cover-only",
   "delete-selected",
+  "move-to-library",
   "set-project",
   "add-to-character",
   "remove-from-character",
   "create-stack",
   "remove-from-stack",
   "dissolve-stacks",
+  "stack-move",
+  "open-stack",
   "create-stacks-from-groups",
   "run-plugin",
-  "comfyui-run",
   "tags-applied",
   "auto-tag",
   "generate-description",
@@ -400,6 +310,9 @@ const emit = defineEmits([
   "rotate-right",
   "selection-menu-open",
   "clear-impossible-tags",
+  "make-more",
+  "run-workflow",
+  "edit-with-comfyui",
 ]);
 
 const isScrapheapView = computed(() => {
@@ -486,41 +399,18 @@ function handleSelectionMenuHotkey(event) {
 onMounted(() => window.addEventListener("keydown", handleSelectionMenuHotkey));
 onUnmounted(() => {
   window.removeEventListener("keydown", handleSelectionMenuHotkey);
-  clearComfyuiCloseTimer();
 });
 
 watch(selectionMenuOpen, (open) => emit("selection-menu-open", open));
 
 const pluginParameters = ref({});
-const comfyuiMenuOpen = ref(false);
-const comfyuiWorkflows = ref([]);
-const comfyuiWorkflowLoading = ref(false);
-const comfyuiWorkflowError = ref("");
-const comfyuiSelectedWorkflow = ref("");
-const comfyuiCaption = ref("");
-const comfyuiRunLoading = ref(false);
-const comfyuiRunError = ref("");
-const comfyuiRunSuccess = ref("");
 
 // Remembered "stack outputs with originals" prefs (persisted in localStorage).
 const genStackPrefs = useGenStackPrefsStore();
-const stackI2IOutputs = computed({
-  get: () => genStackPrefs.stackI2IOutputs,
-  set: (val) => genStackPrefs.setStackI2IOutputs(val),
-});
 const stackFilterOutputs = computed({
   get: () => genStackPrefs.stackFilterOutputs,
   set: (val) => genStackPrefs.setStackFilterOutputs(val),
 });
-
-// Auto-close timer for the I2I menu after a successful queue.
-let comfyuiCloseTimer = null;
-function clearComfyuiCloseTimer() {
-  if (comfyuiCloseTimer !== null) {
-    clearTimeout(comfyuiCloseTimer);
-    comfyuiCloseTimer = null;
-  }
-}
 
 const activePluginSchema = computed(() => {
   if (!selectedPluginName.value) return null;
@@ -564,11 +454,11 @@ watch(pluginMenuOpen, (isOpen) => {
   pluginParameters.value = {};
 });
 
-// The plugin-run-controls and comfyui-run-controls divs use v-if. If either
+// The plugin-run-controls div uses v-if. If the
 // menu is open when the v-if condition transitions to false (e.g. selection
 // cleared by ESC before Vuetify can emit update:modelValue), the VMenu
 // unmounts without resetting the ref, leaving it true. The watcher below
-// resets each ref whenever the hosting condition goes false so the panel
+// resets the ref whenever the hosting condition goes false so the panel
 // does not auto-reopen when the condition becomes true again.
 const showPluginControls = computed(
   () =>
@@ -580,119 +470,6 @@ const showPluginControls = computed(
 watch(showPluginControls, (shown) => {
   if (!shown) pluginMenuOpen.value = false;
 });
-
-const showComfyuiControls = computed(
-  () => props.selectedCount > 0 && !isScrapheapView.value && !isReadOnly.value,
-);
-watch(showComfyuiControls, (shown) => {
-  if (!shown) comfyuiMenuOpen.value = false;
-});
-
-const validComfyWorkflows = computed(() => {
-  if (!Array.isArray(comfyuiWorkflows.value)) return [];
-  return comfyuiWorkflows.value.filter(
-    (workflow) => workflow?.workflow_type === "i2i",
-  );
-});
-
-const selectedComfyWorkflow = computed(() =>
-  (comfyuiWorkflows.value || []).find(
-    (workflow) => workflow?.name === comfyuiSelectedWorkflow.value,
-  ),
-);
-
-const showComfyuiCaptionInput = computed(() => {
-  const missing = Array.isArray(
-    selectedComfyWorkflow.value?.missing_placeholders,
-  )
-    ? selectedComfyWorkflow.value.missing_placeholders
-    : [];
-  return !missing.includes("{{caption}}");
-});
-
-const canRunComfyWorkflow = computed(() => {
-  if (comfyuiRunLoading.value) return false;
-  if (!props.backendUrl) return false;
-  if (
-    !Array.isArray(props.selectedImageIds) ||
-    !props.selectedImageIds.length
-  ) {
-    return false;
-  }
-  return !!comfyuiSelectedWorkflow.value;
-});
-
-watch(comfyuiMenuOpen, async (isOpen) => {
-  if (!isOpen) return;
-  // A freshly-opened menu must never inherit a pending close from a prior run.
-  clearComfyuiCloseTimer();
-  comfyuiRunError.value = "";
-  comfyuiRunSuccess.value = "";
-  await fetchComfyWorkflows();
-  if (!comfyuiSelectedWorkflow.value && validComfyWorkflows.value.length) {
-    comfyuiSelectedWorkflow.value = String(validComfyWorkflows.value[0].name);
-  }
-});
-
-async function fetchComfyWorkflows() {
-  if (comfyuiWorkflowLoading.value) return;
-  comfyuiWorkflowLoading.value = true;
-  comfyuiWorkflowError.value = "";
-  try {
-    const body = await listWorkflows();
-    const workflows = body?.workflows;
-    comfyuiWorkflows.value = Array.isArray(workflows) ? workflows : [];
-  } catch (err) {
-    comfyuiWorkflowError.value =
-      errorDetail(err) || err?.message || String(err);
-    comfyuiWorkflows.value = [];
-  } finally {
-    comfyuiWorkflowLoading.value = false;
-  }
-}
-
-async function runSelectedComfyWorkflow() {
-  if (!canRunComfyWorkflow.value) return;
-  comfyuiRunLoading.value = true;
-  comfyuiRunError.value = "";
-  comfyuiRunSuccess.value = "";
-  try {
-    const pictureIds = (
-      Array.isArray(props.selectedImageIds) ? props.selectedImageIds : []
-    )
-      .map((id) => Number(id))
-      .filter((id) => Number.isFinite(id) && id > 0);
-    if (!pictureIds.length) return;
-
-    const payload = {
-      picture_ids: pictureIds,
-      workflow_name: comfyuiSelectedWorkflow.value,
-      caption: comfyuiCaption.value || "",
-      client_id: props.comfyuiClientId || undefined,
-      stack: stackI2IOutputs.value,
-    };
-    const body = await runImageToImage(payload);
-    const prompts = Array.isArray(body?.prompts) ? body.prompts : [];
-    emit("comfyui-run", {
-      prompts,
-      pictureIds,
-      pictureId: pictureIds[0] ?? null,
-    });
-    comfyuiRunSuccess.value = prompts.length
-      ? `Queued ${prompts.length} run(s) in ComfyUI.`
-      : "Queued in ComfyUI.";
-    // Show the success message briefly, then close the menu.
-    clearComfyuiCloseTimer();
-    comfyuiCloseTimer = setTimeout(() => {
-      comfyuiCloseTimer = null;
-      comfyuiMenuOpen.value = false;
-    }, 1200);
-  } catch (err) {
-    comfyuiRunError.value = errorDetail(err) || err?.message || String(err);
-  } finally {
-    comfyuiRunLoading.value = false;
-  }
-}
 
 function runSelectedPlugin() {
   if (!selectedPluginName.value) return;
@@ -715,21 +492,11 @@ function handlePluginMenuEsc(event) {
   pluginMenuOpen.value = false;
 }
 
-function handleComfyuiMenuEsc(event) {
-  if (!comfyuiMenuOpen.value) return;
-  event.preventDefault();
-  event.stopPropagation();
-  if (typeof event.stopImmediatePropagation === "function") {
-    event.stopImmediatePropagation();
-  }
-  comfyuiMenuOpen.value = false;
-}
-
 // ── Bulk tag ──────────────────────────────────────────────────────────────────
 const tagMenuOpen = ref(false);
 const tagBtnRef = ref(null);
 
-// Same guard as the plugin/comfyui menus above. The whole half is unmounted by
+// Same guard as the plugin menu above. The whole half is unmounted by
 // GridActionPill the moment the selection empties. If ESC clears the selection
 // before Vuetify emits update:modelValue, the menu unmounts with tagMenuOpen
 // still true and auto-reopens on the next selection. Reset it when it hides.
@@ -761,14 +528,7 @@ function openPluginPanel() {
   });
 }
 
-function openComfyuiPanel() {
-  if (comfyuiMenuOpen.value) return;
-  nextTick(() => {
-    comfyuiMenuOpen.value = true;
-  });
-}
-
-defineExpose({ openTagInput, openPluginPanel, openComfyuiPanel });
+defineExpose({ openTagInput, openPluginPanel });
 </script>
 
 <style scoped>
@@ -785,88 +545,10 @@ defineExpose({ openTagInput, openPluginPanel, openComfyuiPanel });
   gap: var(--space-3);
 }
 
-.clear-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  color: rgb(var(--v-theme-on-background));
-  padding: 0;
-  width: 40px;
-  height: 40px;
-  border-radius: var(--radius-sm);
-  font-family: inherit;
-  flex-shrink: 0;
-}
-.clear-btn:hover:not(:disabled) {
-  background: rgba(var(--v-theme-on-background), 0.12);
-}
-.clear-btn:disabled {
-  border-color: transparent;
-  color: rgb(var(--v-theme-on-background));
-  opacity: 0.35;
-  cursor: default;
-}
-/* Solid `warning` fill, so it is one of the few places `on-warning` is the right
-   token. It is now authored (main.js) rather than Vuetify-derived: light
-   #23211d on #b8861f = 4.95:1, dark #1b1b1b on #db7900 = 5.53:1. It used to
-   resolve to #fff at 3.25:1 / 3.11:1 - a small white label under the 4.5 floor. */
-.remove-btn {
-  background: rgb(var(--v-theme-warning));
-  color: rgb(var(--v-theme-on-warning));
-  border: none;
-  padding: var(--space-1) var(--space-4);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  font-size: var(--text-sm);
-  line-height: var(--leading-snug);
-}
-.remove-btn:hover {
-  filter: brightness(1.3);
-}
+/* 8px here plus the run's own 8px gap = the --space-5 group gap that keeps the
+   destructive control off its neighbour's elbow. */
 .delete-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  /* 8px here plus the run's own 8px gap = the --space-5 group gap that keeps
-     the destructive control off its neighbour's elbow. */
   margin-left: var(--space-3);
-  color: rgb(var(--v-theme-on-background));
-  padding: 0;
-  width: 40px;
-  height: 40px;
-  border-radius: var(--radius-sm);
-  font-family: inherit;
-  flex-shrink: 0;
-}
-.delete-btn:hover:not(:disabled) {
-  background: rgba(var(--v-theme-on-background), 0.12);
-}
-.delete-btn:disabled {
-  border-color: transparent;
-  color: rgb(var(--v-theme-on-background));
-  opacity: 0.35;
-  cursor: default;
-}
-.stack-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: rgb(var(--v-theme-on-background));
-  padding: 0 10px;
-  border-radius: var(--radius-sm);
-  font-size: var(--text-base);
-  font-family: inherit;
-  height: 40px;
-  white-space: nowrap;
-}
-.stack-btn:hover:not(:disabled) {
-  background: rgba(var(--v-theme-on-background), 0.12);
-}
-.stack-btn:disabled {
-  opacity: 0.35;
-  cursor: default;
 }
 
 /* Hidden panel activators - zero-size but remain in DOM for menu positioning */
@@ -886,7 +568,7 @@ defineExpose({ openTagInput, openPluginPanel, openComfyuiPanel });
 .plugin-run-controls {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-3);
 }
 
 .plugin-menu-panel {
@@ -900,32 +582,32 @@ defineExpose({ openTagInput, openPluginPanel, openComfyuiPanel });
 }
 
 .plugin-menu-header {
-  font-size: 0.9rem;
+  font-size: var(--text-base);
   font-weight: 600;
   color: rgb(var(--v-theme-on-surface));
-  padding: 10px 12px;
+  padding: 10px var(--space-4);
   border-bottom: 1px solid rgba(var(--v-theme-on-surface), 0.12);
 }
 
 .plugin-menu-body {
-  padding: 10px 12px;
+  padding: 10px var(--space-4);
 }
 
 .plugin-menu-label {
   display: block;
-  font-size: 0.78rem;
+  font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  margin-bottom: 4px;
+  margin-bottom: var(--space-2);
   opacity: 0.9;
 }
 
 .plugin-menu-checkbox-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-top: 12px;
-  font-size: 0.85rem;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  font-size: var(--text-base);
   cursor: pointer;
 }
 
@@ -934,47 +616,19 @@ defineExpose({ openTagInput, openPluginPanel, openComfyuiPanel });
 }
 
 .plugin-menu-actions {
-  margin-top: 12px;
+  margin-top: var(--space-4);
   display: flex;
   justify-content: flex-end;
 }
 
 .plugin-run-select {
-  height: 32px;
+  height: var(--control-h-bar);
   width: 100%;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   border: 1px solid rgba(var(--v-theme-primary), 0.4);
   background: rgba(var(--v-theme-background), 0.7);
   color: rgb(var(--v-theme-on-background));
-  padding: 0 8px;
-}
-
-.plugin-menu-textarea {
-  width: 100%;
-  border-radius: 4px;
-  border: 1px solid rgba(var(--v-theme-primary), 0.4);
-  background: rgba(var(--v-theme-background), 0.7);
-  color: rgb(var(--v-theme-on-background));
-  padding: 8px;
-  resize: vertical;
-  min-height: 160px;
-}
-
-.plugin-menu-note {
-  font-size: 0.82rem;
-  opacity: 0.85;
-}
-
-.plugin-menu-error {
-  margin-top: 8px;
-  color: rgb(var(--v-theme-error));
-  font-size: 0.8rem;
-}
-
-.plugin-menu-success {
-  margin-top: 8px;
-  color: rgb(var(--v-theme-success));
-  font-size: 0.8rem;
+  padding: 0 var(--space-3);
 }
 
 .bar-btn-apply-label {
@@ -983,7 +637,7 @@ defineExpose({ openTagInput, openPluginPanel, openComfyuiPanel });
   flex-shrink: 1;
 }
 
-.bar-btn-chevron {
+:deep(.bar-btn-chevron) {
   flex-shrink: 0;
 }
 
@@ -997,13 +651,10 @@ defineExpose({ openTagInput, openPluginPanel, openComfyuiPanel });
 }
 
 @media (hover: none) and (pointer: coarse) {
-  .stack-btn,
-  .clear-btn,
-  .delete-btn {
+  .bar-btn {
     height: var(--bar-height);
   }
-  .clear-btn,
-  .delete-btn {
+  .bar-btn--icon {
     width: var(--bar-height);
   }
 }

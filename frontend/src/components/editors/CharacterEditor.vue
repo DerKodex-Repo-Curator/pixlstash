@@ -2,7 +2,7 @@
   <AppDialog
     :open="open"
     :title="isExisting ? 'Edit person' : 'New person'"
-    :width="isExisting ? 720 : 480"
+    :size="isExisting ? 'lg' : 'md'"
     @close="emit('close')"
   >
     <!-- Two columns rather than one tall stack, so the form stops outgrowing
@@ -80,13 +80,16 @@
                   }"
                   :aria-pressed="isThumbnail(pic)"
                   :aria-label="`Use reference image ${index + 1} as the thumbnail`"
-                  :title="
-                    isThumbnail(pic)
-                      ? 'This is the thumbnail - click to go back to the automatic choice'
-                      : 'Use this as the thumbnail'
-                  "
                   @click="toggleThumbnail(pic)"
                 >
+                  <Tooltip
+                    :text="
+                      isThumbnail(pic)
+                        ? 'This is the thumbnail - click to go back to the automatic choice'
+                        : 'Use this as the thumbnail'
+                    "
+                    activator="parent"
+                  />
                   <img
                     :src="
                       appendShareToken(
@@ -107,10 +110,14 @@
                 <button
                   type="button"
                   class="ref-picture-zoom"
-                  :title="`Preview reference image ${index + 1}`"
                   :aria-label="`Preview reference image ${index + 1}`"
                   @click="previewPic = pic"
                 >
+                  <Tooltip
+                    :text="`Preview reference image ${index + 1}`"
+                    activator="parent"
+                    :describe="false"
+                  />
                   <v-icon size="14">mdi-magnify</v-icon>
                 </button>
               </div>
@@ -148,8 +155,8 @@
            dialog out from under a leave transition still playing. Same reason
            the id comes from the latched local copy: the host nulls the prop on
            the way out. Spans both columns: its cards auto-fill at 180px, so a
-           full-width row holds three of them instead of one (670px of inner
-           width - 720 less the border and the --space-6 padding - against a
+           full-width row holds three of them instead of one (686px of inner
+           width - 720 less the border and the --space-5 padding - against a
            180px minimum track and a --space-3 gap). -->
       <AdapterTray
         v-if="openCount > 0"
@@ -173,7 +180,7 @@
     </template>
   </AppDialog>
 
-  <Teleport to="body">
+  <StackLayer :open="!!previewPic">
     <div
       v-if="previewPic"
       class="ref-preview-overlay"
@@ -190,7 +197,7 @@
         @click="previewPic = null"
       />
     </div>
-  </Teleport>
+  </StackLayer>
 </template>
 
 <script setup>
@@ -211,6 +218,8 @@ import AppInput from "../widgets/AppInput.vue";
 import AppTextarea from "../widgets/AppTextarea.vue";
 import AppSelect from "../widgets/AppSelect.vue";
 import StarRatingOverlay from "../widgets/StarRatingOverlay.vue";
+import Tooltip from "../widgets/Tooltip.vue";
+import StackLayer from "../widgets/StackLayer.vue";
 import AdapterTray from "../widgets/AdapterTray.vue";
 import { errorDetail } from "../../utils/apiError";
 
@@ -227,7 +236,7 @@ const props = defineProps({
 
 // An existing person is the only case with a right column: reference images are
 // `v-if`'d on the id and the adapter tray renders nothing without one. Creating
-// therefore keeps the 480 single-column dialog rather than a 720 one with an
+// therefore keeps the `md` single-column dialog rather than an `lg` one with an
 // empty half. Written by the watcher below rather than computed off the prop -
 // see the note there for why the close path must not recompute it.
 const isExisting = ref(false);
@@ -361,7 +370,7 @@ async function fetchReferencePictures(characterId, requestId) {
 // `character` in the same tick they set `open` false
 // (`SideBar.closeCharacterEditor`) while Vuetify keeps the body mounted for the
 // leave transition, so anything recomputed here plays out on screen: the dialog
-// would snap 720 → 480 and lose its right column, and emptying the list would
+// would snap lg → md and lose its right column, and emptying the list would
 // put "No reference images yet" under a person who has them, for the length of
 // the animation. Leave the closing dialog exactly as the user last saw it; the
 // next open recomputes everything before it is visible.
@@ -369,8 +378,8 @@ watch(
   () => [props.open, props.character?.id],
   ([isOpen, charId]) => {
     // The preview is the one exception to "change nothing on the way out", and
-    // it is an exception because it is not part of the dialog: it is teleported
-    // to <body> at z-index 9999 and covers the whole app. Left up, it outlives
+    // it is an exception because it is not part of the dialog: it is a layer of
+    // its own on the overlay stack, above the dialog, and covers the whole app. Left up, it outlives
     // the dialog that owned it - Ctrl+Enter saves and closes from underneath an
     // open preview, and the Escape that would dismiss it goes with the dialog's
     // own listener, so the scrim strands with only a mouse click to clear it.
@@ -578,8 +587,8 @@ onUnmounted(() => document.removeEventListener("keydown", handleKeydown));
 }
 
 /* Vuetify caps the dialog at `calc(100% - 48px)`, so it stops being 720 wide
-   below a 768px viewport and each column falls under the ~300px the fields
-   want (299px at a 720px viewport). 720 is where that is unambiguous. Drop to
+   below a 768px viewport and each column closes in on the ~300px the fields
+   want (~307px at a 720px viewport). 720 is where that is unambiguous. Drop to
    the single column the editor has always had - and give the reference block
    back the rule that separates it from the fields stacked above it there. */
 @media (max-width: 720px) {
@@ -664,11 +673,6 @@ onUnmounted(() => document.removeEventListener("keydown", handleKeydown));
   cursor: pointer;
 }
 
-.ref-picture-pick:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-}
-
 /* The selected vocabulary from §11 of the design manual, in the form ImageGrid
    already uses for a selected picture: an --active-bar edge. `outline` rather
    than a border so the 80px box does not resize as the pin moves. */
@@ -745,18 +749,8 @@ onUnmounted(() => document.removeEventListener("keydown", handleKeydown));
   font: inherit;
   color: rgb(var(--v-theme-accent));
   text-decoration: underline;
-  cursor: pointer;
-}
-
-.ref-pin-reset:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
   border-radius: var(--radius-sm);
-}
-
-.ref-picture-zoom:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
+  cursor: pointer;
 }
 
 .ref-preview-overlay {
@@ -764,7 +758,6 @@ onUnmounted(() => document.removeEventListener("keydown", handleKeydown));
   /* Below the desktop title bar (0px in a browser) so the window controls stay
      usable; the preview image centres within the reduced box. */
   inset: var(--titlebar-h) 0 0 0;
-  z-index: 9999;
   background: rgba(var(--v-theme-scrim), 0.82);
   display: flex;
   align-items: center;

@@ -138,15 +138,6 @@ async function mountGrid() {
       config: {
         compilerOptions: { isCustomElement: (tag) => tag.startsWith("v-") },
       },
-      // The shallow stub has no `maybeRefreshOverlayForComfyui`, which the
-      // insert path calls through a template ref; without it the call rejects
-      // and vitest reports an unhandled error next to a passing assertion.
-      stubs: {
-        ComfyUiRunner: {
-          template: "<div />",
-          methods: { maybeRefreshOverlayForComfyui: () => {} },
-        },
-      },
     },
     props: { backendUrl: "/api/v1" },
   });

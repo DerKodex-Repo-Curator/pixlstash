@@ -15,9 +15,13 @@ cannot interleave their way past them.
 
 from __future__ import annotations
 
+import contextlib
+import json
 import os
 import secrets
+import shutil
 import sqlite3
+import threading
 import uuid as uuid_module
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -32,11 +36,87 @@ logger = get_logger(__name__)
 
 VAULT_FILENAME = "vault.db"
 
+#: What a library's database is called while its first import is still running.
+#:
+#: A folder holds ``vault.db`` only once the owner's answer took - a brand new
+#: empty library, or a first import that finished - so an import the owner
+#: aborts, or one a crash interrupts, leaves the folder exactly as PixlStash
+#: found it. Hidden, because the import walk and the library-root scan prune
+#: dot-entries, so the file can never be mistaken for content.
+TEMP_VAULT_FILENAME = ".vault.db.importing"
+
+#: Name of the library a discarded import lands on.
+SCRATCH_LIBRARY_NAME = "PixlStash"
+
+#: Everything PixlStash itself writes into a library's folder, beside the
+#: database, that is not one of the owner's pictures.
+#:
+#: Two callers need it and neither can reach the other's module: the discard
+#: (`library_switch_service`) and the start-up sweep (`hub.bootstrap`), which
+#: import each other's neighbours. It lives here for the same reason
+#: :data:`VAULT_FILENAME` does - these are the names PixlStash puts in a folder
+#: it was pointed at, and "the folder is exactly as we found it" is a claim
+#: about this list being complete.
+#:
+#: ``.pixlstash-thumbnails`` is spelled out rather than imported from
+#: ``image_utils``: that module pulls in OpenCV and PIL, and this one is on the
+#: CLI's and start-up's path. A test asserts the two agree.
+LIBRARY_MADE_ENTRIES = (
+    "snapshots",
+    "tmp",
+    ".pixlstash-thumbnails",
+    ".ref_thumbs",
+    ".staging",
+)
+
+
+def library_made_entries_present(folder: str) -> tuple[str, ...]:
+    """The :data:`LIBRARY_MADE_ENTRIES` already in *folder*, before an import.
+
+    A folder that was a library once (a restored backup, a vault the owner
+    deleted by hand) still holds its old ``snapshots/`` and thumbnail caches.
+    Those are not this import's to delete when it is abandoned, so the names
+    present at the start are recorded and kept.
+    """
+    return tuple(
+        name
+        for name in LIBRARY_MADE_ENTRIES
+        if os.path.lexists(os.path.join(folder, name))
+    )
+
+
+def remove_library_made_entries(library: Library) -> None:
+    """Delete what an abandoned first import wrote into its folder.
+
+    Named entries only, never a sweep of whatever looks generated - this runs
+    on a folder full of the owner's pictures, and a symlink one of these names
+    points at is left alone. Entries that were there before the import began
+    are kept, and so is everything when that was never recorded.
+    """
+    if library.pending_import_kept is None:
+        logger.warning(
+            "Not removing PixlStash's folders from %s: which of them were there "
+            "before its import began was not recorded, so none is assumed ours.",
+            library.path,
+        )
+        return
+    for name in LIBRARY_MADE_ENTRIES:
+        if name in library.pending_import_kept:
+            continue
+        path = os.path.join(library.path, name)
+        if not os.path.isdir(path) or os.path.islink(path):
+            continue
+        try:
+            shutil.rmtree(path)
+        except OSError as exc:
+            logger.warning("Could not remove %s: %s", path, exc)
+
+
 # Every registry read selects the same columns, in the order
 # :meth:`LibraryRegistry._row_to_library` expects.
 _LIBRARY_COLUMNS = (
     "id, uuid, vault_uuid, settings_salt, identity_migration_state, name, path, created_at, attached_at, "
-    "detached_at, attached, is_active, notes"
+    "detached_at, attached, is_active, notes, pending_import_at, pending_import_kept"
 )
 
 # Tables every PixlStash vault has. ``alembic_version`` proves it went through
@@ -85,6 +165,18 @@ class ActiveLibraryError(LibraryError):
     """The operation is refused because the library is the active one."""
 
 
+class LibraryOverlapError(LibraryError):
+    """The folder overlaps a registered library's watch or reference folder."""
+
+
+#: Held across the overlap check and the write for every registration a library
+#: folder and a watch or reference folder can collide on (#1223): the library
+#: verbs here and the watch and reference folder routes. Without it two
+#: requests each pass the other's check and both write. In-process only: a CLI
+#: process racing a running server is not serialised.
+FOLDER_OVERLAP_LOCK = threading.RLock()
+
+
 def new_library_uuid() -> str:
     """Return a fresh identity for a library.
 
@@ -112,11 +204,25 @@ class Library:
     attached: bool = True
     detached_at: Optional[str] = None
     notes: Optional[str] = None
+    pending_import_at: Optional[str] = None
+    #: The :data:`LIBRARY_MADE_ENTRIES` the folder already held when its first
+    #: import began, which an abandoned import must not delete. None when that
+    #: was not recorded (a row older than the record), which keeps them all.
+    pending_import_kept: Optional[tuple[str, ...]] = None
+
+    @property
+    def vault_filename(self) -> str:
+        """What this library's database file is called right now.
+
+        The temporary name until its first import finishes; ``vault.db``
+        thereafter, and for every library that was not made by an import.
+        """
+        return TEMP_VAULT_FILENAME if self.pending_import_at else VAULT_FILENAME
 
     @property
     def vault_path(self) -> str:
-        """Path of this library's ``vault.db``."""
-        return os.path.join(self.path, VAULT_FILENAME)
+        """Path of this library's database file."""
+        return os.path.join(self.path, self.vault_filename)
 
     @property
     def is_reachable(self) -> bool:
@@ -138,8 +244,8 @@ def resolve_path(folder: str) -> str:
     return os.path.realpath(os.path.abspath(os.path.expanduser(folder)))
 
 
-def validate_vault_folder(folder: str) -> str:
-    """Check that *folder* holds a usable vault and return its ``vault.db`` path.
+def validate_vault_folder(folder: str, *, filename: str = VAULT_FILENAME) -> str:
+    """Check that *folder* holds a usable vault and return its database path.
 
     Opened read-only and inspected through ``sqlite_master`` only: this must not
     migrate, write to, or otherwise touch a foreign vault, and it must not read
@@ -149,17 +255,22 @@ def validate_vault_folder(folder: str) -> str:
     pre-Alembic one it will stamp and upgrade - see
     :data:`_LEGACY_VAULT_MARKER_TABLES`.
 
+    Args:
+        filename: The database file to check, for a library whose first import
+            has not finished and whose database is therefore still under
+            :data:`TEMP_VAULT_FILENAME`. Defaults to the permanent name.
+
     Raises:
-        NotAVaultError: No folder, no ``vault.db``, unreadable, or missing the
+        NotAVaultError: No folder, no database file, unreadable, or missing the
             marker tables.
     """
     if not os.path.isdir(folder):
         raise NotAVaultError(f"{folder} is not a folder.")
 
-    vault_path = os.path.join(folder, VAULT_FILENAME)
+    vault_path = os.path.join(folder, filename)
     if not os.path.isfile(vault_path):
         raise NotAVaultError(
-            f"No {VAULT_FILENAME} in {folder}. Pick the folder that contains "
+            f"No {filename} in {folder}. Pick the folder that contains "
             f"it, or use `create` to start an empty library."
         )
 
@@ -247,6 +358,78 @@ def read_vault_uuid(folder: str) -> Optional[str]:
         conn.close()
 
 
+def read_vault_folder_roots(folder: str) -> list[str]:
+    """The watch (import) and reference folders the library at *folder* records.
+
+    Read-only, straight from the vault file, so the answer covers every
+    registered library rather than only the one the server has open.
+
+    Returns:
+        The folders as stored; empty when the folder holds no vault file (an
+        unplugged drive) or one that is not a database, neither of which
+        anything can be reading right now.
+
+    Raises:
+        LibraryError: The vault could not be read just now (locked, busy). This
+            list is a blocklist, so "could not read" must refuse, not permit.
+    """
+    vault_path = next(
+        (
+            path
+            for path in (
+                os.path.join(folder, VAULT_FILENAME),
+                os.path.join(folder, TEMP_VAULT_FILENAME),
+            )
+            if os.path.isfile(path)
+        ),
+        None,
+    )
+    if vault_path is None:
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{vault_path}?mode=ro", uri=True, timeout=5)
+        try:
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            return [
+                row[0]
+                for table in ("import_folder", "reference_folder")
+                if table in tables
+                for row in conn.execute(f"SELECT folder FROM {table}")
+                if row[0]
+            ]
+        finally:
+            conn.close()
+    except sqlite3.OperationalError as exc:
+        # Locked, busy, unreadable right now: the vault may be perfectly good
+        # and in use, so its folders are unknown rather than absent.
+        logger.warning(
+            "Could not read the watch and reference folders of %s: %s",
+            vault_path,
+            exc,
+        )
+        raise LibraryError(
+            f"Could not read the watch and reference folders of the library at "
+            f"{folder}, so this folder cannot be shown to be outside them. Try "
+            "again in a moment."
+        ) from exc
+    except sqlite3.DatabaseError as exc:
+        # Not a database at all: PixlStash cannot open this library either, so
+        # nothing is watching or scanning its folders. Refusing here would let
+        # one broken folder block every library add.
+        logger.warning(
+            "Ignoring the watch and reference folders of %s, which is not a "
+            "readable database: %s",
+            vault_path,
+            exc,
+        )
+        return []
+
+
 def _fingerprints_match(recorded: Optional[str], observed: Optional[str]) -> bool:
     """True when a re-attached folder is provably the library we saw before.
 
@@ -272,7 +455,12 @@ class LibraryRegistry:
         """Filesystem path of the hub this registry reads."""
         return self._hub.path
 
-    def list_libraries(self, *, include_detached: bool = False) -> list[Library]:
+    def list_libraries(
+        self,
+        *,
+        include_detached: bool = False,
+        include_pending_import: bool = True,
+    ) -> list[Library]:
         """Return the attached libraries, active first, then by name.
 
         Args:
@@ -280,8 +468,19 @@ class LibraryRegistry:
                 tokens survive a detach. Off by default: a detached library is
                 not part of this installation as far as the UI and the CLI are
                 concerned.
+            include_pending_import: Return libraries whose first import has not
+                finished. **On by default, and deliberately**: most callers ask
+                this question to decide whether a folder is spoken for -
+                :meth:`overlapping`, the folder inspection behind
+                ``POST /libraries``, the library-roots containment check - and
+                a pending library's folder is as spoken for as any other. Only
+                what the owner is *shown* passes False, because a library that
+                does not exist yet is not one they can pick.
         """
-        where = "" if include_detached else "WHERE attached = 1 "
+        clauses = [] if include_detached else ["attached = 1"]
+        if not include_pending_import:
+            clauses.append("pending_import_at IS NULL")
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
         rows = self._hub.fetchall(
             f"SELECT {_LIBRARY_COLUMNS} FROM library {where}"
             "ORDER BY is_active DESC, name COLLATE NOCASE"
@@ -410,8 +609,52 @@ class LibraryRegistry:
                 overlaps.append(library)
         return overlaps
 
+    def refuse_overlapping_watch_or_reference_folder(self, folder: str) -> None:
+        """Refuse *folder* when it equals, sits inside or contains a watch or
+        reference folder of any registered library, detached included (#1223).
+
+        A watch folder imports everything below it and a reference folder scans
+        it, so a library there would have its pictures imported, or deleted
+        after import, by another subsystem.
+
+        Raises:
+            LibraryOverlapError: It overlaps one; the message names the library.
+            LibraryError: A library's vault could not be read.
+        """
+        resolved = os.path.normcase(resolve_path(folder))
+        for library in self.list_libraries(include_detached=True):
+            for root in read_vault_folder_roots(library.path):
+                other = os.path.normcase(resolve_path(root))
+                if _is_within(resolved, other) or _is_within(other, resolved):
+                    raise LibraryOverlapError(
+                        "This folder overlaps a watch or reference folder of "
+                        f'the library "{library.name}". A library cannot sit '
+                        "inside one of those, or contain one. Choose another "
+                        "folder, or remove that watch or reference folder first."
+                    )
+
+    @contextlib.contextmanager
+    def _folder_overlap_guard(self, folder: str, enabled: bool):
+        """Hold :data:`FOLDER_OVERLAP_LOCK` and refuse an overlap, when *enabled*.
+
+        Off only for the verbs no person aims: start-up registering its own
+        library, the scratch library a discard lands on, and a restore putting
+        back what an archive held. A refusal there wedges boot or a discard.
+        """
+        if not enabled:
+            yield
+            return
+        with FOLDER_OVERLAP_LOCK:
+            self.refuse_overlapping_watch_or_reference_folder(folder)
+            yield
+
     def attach(
-        self, folder: str, name: str | None = None, *, unique_name: bool = True
+        self,
+        folder: str,
+        name: str | None = None,
+        *,
+        unique_name: bool = True,
+        check_folder_overlap: bool = True,
     ) -> Library:
         """Register an existing library folder.
 
@@ -434,17 +677,22 @@ class LibraryRegistry:
             NotAVaultError: The folder is not a vault.
             LibraryExistsError: The path is already registered, or the name is
                 and *unique_name* is set.
+            LibraryOverlapError: The folder overlaps a registered library's watch
+                or reference folder (skipped when *check_folder_overlap* is off).
         """
-        resolved = resolve_path(folder)
-        validate_vault_folder(resolved)
-        return self._register(
-            resolved, name or os.path.basename(resolved), unique_name=unique_name
-        )
+        with self._folder_overlap_guard(folder, check_folder_overlap):
+            resolved = resolve_path(folder)
+            validate_vault_folder(resolved)
+            return self._register(
+                resolved, name or os.path.basename(resolved), unique_name=unique_name
+            )
 
     def register_pending(
         self,
         folder: str,
         name: str | None = None,
+        *,
+        pending_import: bool = False,
     ) -> Library:
         """Register a folder whose vault does not exist yet.
 
@@ -452,11 +700,24 @@ class LibraryRegistry:
         moments later, so requiring one here would be a chicken-and-egg failure.
         Everything else goes through :meth:`attach` or :meth:`create`, both of
         which insist on a real vault.
+
+        Args:
+            pending_import: The folder already holds pictures the owner has not
+                answered for, so the vault about to be created goes under
+                :data:`TEMP_VAULT_FILENAME`. The desktop's first run reaches
+                this path rather than ``POST /libraries``: it writes the chosen
+                folder into ``server-config.json`` and lets start-up register
+                it, so without this the whole temporary-vault rule would apply
+                to Settings and not to first run.
         """
         resolved = resolve_path(folder)
         return self._register(
             resolved,
             name or os.path.basename(resolved),
+            pending_import=pending_import,
+            # Start-up registers before the vault exists, so nothing of ours
+            # is in the folder yet.
+            kept=library_made_entries_present(resolved),
             # Start-up must not die on a name. `bootstrap._register_first_library`
             # passes the hardcoded "Library 1" and does not catch
             # LibraryExistsError, so refusing here would turn a duplicate label -
@@ -464,58 +725,108 @@ class LibraryRegistry:
             unique_name=False,
         )
 
-    def create(self, folder: str, name: str | None = None) -> Library:
+    def create(
+        self,
+        folder: str,
+        name: str | None = None,
+        *,
+        pending_import: bool = False,
+        check_folder_overlap: bool = True,
+    ) -> Library:
         """Create a folder, initialise a fresh vault in it, and register it.
 
         The vault is built by the same code the server runs at startup, so a
         created library is indistinguishable from one the server made.
 
+        Args:
+            pending_import: Build the vault under :data:`TEMP_VAULT_FILENAME`
+                and mark the row pending, for a library that only exists if a
+                first import finishes. The folder gets no ``vault.db`` until
+                :meth:`finish_pending_import` renames it there, so an aborted
+                import leaves nothing behind.
+
         Raises:
             LibraryExistsError: The path or name is already registered, or the
                 folder already holds a vault (use ``attach``).
+            LibraryOverlapError: The folder overlaps a registered library's watch
+                or reference folder (skipped when *check_folder_overlap* is off).
         """
-        resolved = resolve_path(folder)
-        vault_path = os.path.join(resolved, VAULT_FILENAME)
-        if os.path.exists(vault_path):
-            raise LibraryExistsError(
-                f"{resolved} already contains a {VAULT_FILENAME}. Use `attach` "
-                "to register it."
+        with self._folder_overlap_guard(folder, check_folder_overlap):
+            resolved = resolve_path(folder)
+            filename = TEMP_VAULT_FILENAME if pending_import else VAULT_FILENAME
+            vault_path = os.path.join(resolved, filename)
+            if os.path.exists(os.path.join(resolved, VAULT_FILENAME)):
+                raise LibraryExistsError(
+                    f"{resolved} already contains a {VAULT_FILENAME}. Use `attach` "
+                    "to register it."
+                )
+            # Either an import running right now - a second process, the CLI - or
+            # one that died without its row, which the startup sweep clears. Refuse
+            # rather than open it: this registry cannot tell the two apart, and the
+            # live one is holding that file.
+            if os.path.exists(vault_path):
+                raise LibraryExistsError(
+                    f"{resolved} is already being imported, or holds a {filename} "
+                    "left by an import that did not finish."
+                )
+
+            # Before anything is written. `_register` would refuse the name at the
+            # end anyway, but by then the vault exists, and a refused `create` that
+            # leaves a vault behind turns the folder into an `attach` case the owner
+            # never asked for.
+            cleaned = (name or "").strip() or os.path.basename(resolved)
+            self._refuse_duplicate_name(cleaned)
+            # Before the vault opens: opening it creates `snapshots/` and `tmp/`.
+            kept = library_made_entries_present(resolved)
+
+            # Every MISSING component 0700, not only the leaf (W21: makedirs'
+            # mode stops at the leaf, so a deep new path left 0775 intermediates
+            # under umask 002 and the guarded open refused them). Existing
+            # directories keep their modes: `POST /libraries` starts a library in a
+            # folder of pictures the owner already had, and narrowing that folder to
+            # 0700 behind their back takes read access away from every other account
+            # and every other program that had it. Nothing needs it - the vault file
+            # itself is created 0600, and `TrustedSQLiteLocation` refuses only a
+            # group/world-*writable* directory, which the startup permission scan
+            # offers to repair with the owner's consent (`startup_permissions.py`).
+            # `mkdir(mode=0o700)` is not raised by a umask, so what this call
+            # creates is 0700 without a chmod after it.
+            mkdir_private(Path(resolved))
+
+            # Local import: pulls in the ORM and the image stack (numpy, PIL), which
+            # `list`, `attach` and `detach` have no use for. Importing it at module
+            # scope would make every CLI invocation pay for the one verb that needs
+            # it. Sanctioned by CLAUDE.md's startup-time exception.
+            from pixlstash.database import VaultDatabase
+
+            logger.info("Initialising a new vault at %s", vault_path)
+            vault = VaultDatabase(vault_path)
+            try:
+                registered = self._register(
+                    resolved, cleaned, pending_import=pending_import, kept=kept
+                )
+            finally:
+                vault.close()
+            return registered
+
+    def finish_pending_import(self, name_or_id: str | int) -> Library:
+        """Clear the pending mark: this library's first import finished.
+
+        Called by the promotion, *after* the database file has been renamed onto
+        :data:`VAULT_FILENAME`. In that order, because :attr:`Library.vault_path`
+        reads the mark to decide which file it means: clearing it first would
+        point every reader at a ``vault.db`` that does not exist yet.
+        """
+        library = self.get(name_or_id)
+        with self._hub.transaction() as conn:
+            conn.execute(
+                "UPDATE library SET pending_import_at = NULL WHERE id = ?",
+                (library.id,),
             )
-
-        # Before anything is written. `_register` would refuse the name at the
-        # end anyway, but by then the vault exists, and a refused `create` that
-        # leaves a vault behind turns the folder into an `attach` case the owner
-        # never asked for.
-        cleaned = (name or "").strip() or os.path.basename(resolved)
-        self._refuse_duplicate_name(cleaned)
-
-        # Every MISSING component 0700, not only the leaf (W21: makedirs'
-        # mode stops at the leaf, so a deep new path left 0775 intermediates
-        # under umask 002 and the guarded open refused them). Existing
-        # directories keep their modes: `POST /libraries` starts a library in a
-        # folder of pictures the owner already had, and narrowing that folder to
-        # 0700 behind their back takes read access away from every other account
-        # and every other program that had it. Nothing needs it - the vault file
-        # itself is created 0600, and `TrustedSQLiteLocation` refuses only a
-        # group/world-*writable* directory, which the startup permission scan
-        # offers to repair with the owner's consent (`startup_permissions.py`).
-        # `mkdir(mode=0o700)` is not raised by a umask, so what this call
-        # creates is 0700 without a chmod after it.
-        mkdir_private(Path(resolved))
-
-        # Local import: pulls in the ORM and the image stack (numpy, PIL), which
-        # `list`, `attach` and `detach` have no use for. Importing it at module
-        # scope would make every CLI invocation pay for the one verb that needs
-        # it. Sanctioned by CLAUDE.md's startup-time exception.
-        from pixlstash.database import VaultDatabase
-
-        logger.info("Initialising a new vault at %s", vault_path)
-        vault = VaultDatabase(vault_path)
-        try:
-            registered = self._register(resolved, cleaned)
-        finally:
-            vault.close()
-        return registered
+        logger.info(
+            "Library %s (id=%d) finished its first import", library.name, library.id
+        )
+        return self.get(library.id)
 
     def record_legacy_preparation(
         self, resolved_path: str, payload_digest: str, name: str = "Library 1"
@@ -650,6 +961,85 @@ class LibraryRegistry:
         )
         return self.by_uuid(library.uuid)
 
+    def scratch_folder(self) -> str:
+        """Where a session goes when the folder it was using is given back.
+
+        Beside **this** hub, because the scratch library is the app's and not
+        the owner's: a discard has just handed their folder back, and landing
+        them in another folder of theirs would be picking one for them. Derived
+        from the hub in use rather than from the platform default, so a hub in
+        a temporary directory - a test, a second install - gets its own scratch
+        folder instead of reaching into the real one.
+
+        It is also the server's default ``image_root``, so on most installs
+        this is the library start-up already made and nothing new appears.
+        """
+        return os.path.join(os.path.dirname(self.hub_path), "images")
+
+    def forget(self, name_or_id: str | int, *, allow_active: bool = False) -> None:
+        """Delete a registration outright, for a library that never existed.
+
+        The counterpart to :meth:`detach`, which keeps the row precisely so an
+        attached-again folder revives its uuid and share links. There is
+        nothing here to revive: a discarded first import was never a library,
+        holds no share links, and a revived row would come back still pending.
+
+        The uuid is not reused - ``library_uuid_issued`` keeps every one this
+        hub ever minted - so a later library in the same folder gets a new
+        identity, which is what it is.
+
+        Args:
+            allow_active: Forget it even though it is marked active. For the
+                start-up sweep alone, which runs before any vault is opened -
+                and where the active row is exactly what needs forgetting,
+                because the desktop's first run makes the folder it asked about
+                the active library before the owner has answered.
+
+        Raises:
+            ActiveLibraryError: It is the active library and *allow_active* is
+                False. Move off it first; deleting the row underneath an open
+                vault would leave the server serving a library it cannot name.
+        """
+        library = self.get(name_or_id)
+        if library.is_active and not allow_active:
+            raise ActiveLibraryError(
+                f'Cannot forget "{library.name}": it is the active library.'
+            )
+        with self._hub.transaction() as conn:
+            # Its ghosts go with it: nothing could ever cover them again, and a
+            # registration that no longer exists cannot be erased by name.
+            conn.execute(
+                "DELETE FROM workflow_picture_ghost WHERE library_uuid = ?",
+                (library.uuid,),
+            )
+            # And its instances, the prompts and parameters, for the same reason.
+            conn.execute(
+                "DELETE FROM workflow_recipe_instance WHERE library_uuid = ?",
+                (library.uuid,),
+            )
+            # And its workflow setups, whose Fixed inputs name its pictures by
+            # content hash.
+            conn.execute(
+                "DELETE FROM workflow_picture_input WHERE library_uuid = ?",
+                (library.uuid,),
+            )
+            # And its hidden overrides, workflows, sets and models alike: they name
+            # nothing this library can reach once its registration is gone.
+            conn.execute(
+                "DELETE FROM workflow_group_hidden WHERE library_uuid = ?",
+                (library.uuid,),
+            )
+            conn.execute(
+                "DELETE FROM workflow_set_hidden WHERE library_uuid = ?",
+                (library.uuid,),
+            )
+            conn.execute(
+                "DELETE FROM model_hidden WHERE library_uuid = ?",
+                (library.uuid,),
+            )
+            conn.execute("DELETE FROM library WHERE id = ?", (library.id,))
+        logger.info("Forgot the registration for %s at %s", library.name, library.path)
+
     def set_active(self, name_or_id: str | int) -> Library:
         """Mark a library active and every other inactive, atomically.
 
@@ -664,7 +1054,13 @@ class LibraryRegistry:
         logger.info("Active library is now %s (id=%d)", library.name, library.id)
         return self.get(library.id)
 
-    def relocate(self, name_or_id: str | int, new_folder: str) -> Library:
+    def relocate(
+        self,
+        name_or_id: str | int,
+        new_folder: str,
+        *,
+        check_folder_overlap: bool = True,
+    ) -> Library:
         """Point an existing library at a folder that has moved.
 
         The registration keeps its uuid, so every token stamped with it keeps
@@ -675,44 +1071,47 @@ class LibraryRegistry:
         Raises:
             NotAVaultError: The new folder does not hold a vault.
             LibraryExistsError: Another library is registered at that path.
+            LibraryOverlapError: The folder overlaps a registered library's watch
+                or reference folder (skipped when *check_folder_overlap* is off).
         """
-        library = self.get(name_or_id)
-        resolved = resolve_path(new_folder)
-        validate_vault_folder(resolved)
+        with self._folder_overlap_guard(new_folder, check_folder_overlap):
+            library = self.get(name_or_id)
+            resolved = resolve_path(new_folder)
+            validate_vault_folder(resolved)
 
-        clash = self._find_by_path(resolved)
-        if clash is not None and clash.id != library.id:
-            raise LibraryExistsError(
-                f'{resolved} is already registered as "{clash.name}".'
-            )
+            clash = self._find_by_path(resolved)
+            if clash is not None and clash.id != library.id:
+                raise LibraryExistsError(
+                    f'{resolved} is already registered as "{clash.name}".'
+                )
 
-        fingerprint = read_vault_uuid(resolved)
-        if not _fingerprints_match(library.vault_uuid, fingerprint):
-            logger.warning(
-                "Relocating %s to %s, where the library carries a different "
-                "fingerprint (%s, expected %s). Proceeding because the move was "
-                "explicit, but the tokens stamped for this library will now "
-                "serve the content at the new path.",
+            fingerprint = read_vault_uuid(resolved)
+            if not _fingerprints_match(library.vault_uuid, fingerprint):
+                logger.warning(
+                    "Relocating %s to %s, where the library carries a different "
+                    "fingerprint (%s, expected %s). Proceeding because the move was "
+                    "explicit, but the tokens stamped for this library will now "
+                    "serve the content at the new path.",
+                    library.name,
+                    resolved,
+                    fingerprint,
+                    library.vault_uuid,
+                )
+
+            with self._hub.transaction() as conn:
+                conn.execute(
+                    "UPDATE library SET path = ?, vault_uuid = COALESCE(?, vault_uuid) "
+                    "WHERE id = ?",
+                    (resolved, fingerprint, library.id),
+                )
+            logger.info(
+                "Library %s (uuid=%s) moved from %s to %s",
                 library.name,
+                library.uuid,
+                library.path,
                 resolved,
-                fingerprint,
-                library.vault_uuid,
             )
-
-        with self._hub.transaction() as conn:
-            conn.execute(
-                "UPDATE library SET path = ?, vault_uuid = COALESCE(?, vault_uuid) "
-                "WHERE id = ?",
-                (resolved, fingerprint, library.id),
-            )
-        logger.info(
-            "Library %s (uuid=%s) moved from %s to %s",
-            library.name,
-            library.uuid,
-            library.path,
-            resolved,
-        )
-        return self.get(library.id)
+            return self.get(library.id)
 
     def rename(self, name_or_id: str | int, new_name: str) -> Library:
         """Change a library's label.
@@ -744,6 +1143,8 @@ class LibraryRegistry:
         identity_migration_state: str = "not_required",
         recovered_uuid: str | None = None,
         unique_name: bool = True,
+        pending_import: bool = False,
+        kept: tuple[str, ...] = (),
     ) -> Library:
         """Register a library, reviving a previously detached row when it fits.
 
@@ -760,6 +1161,8 @@ class LibraryRegistry:
                 :meth:`register_pending`, whose caller is start-up: a duplicate
                 name is a nuisance there and a failed boot is not, so the
                 start-up path records what it was given.
+            kept: With *pending_import*, the entries an abandoned import must
+                leave in the folder (:func:`library_made_entries_present`).
         """
         cleaned = name.strip() or os.path.basename(resolved_path)
         fingerprint = read_vault_uuid(resolved_path)
@@ -772,7 +1175,14 @@ class LibraryRegistry:
 
         if existing is not None:
             if _fingerprints_match(existing.vault_uuid, fingerprint):
-                return self._revive(existing, cleaned, fingerprint, unique_name)
+                return self._revive(
+                    existing,
+                    cleaned,
+                    fingerprint,
+                    unique_name,
+                    pending_import=pending_import,
+                    kept=kept,
+                )
             # Before the UPDATE below, not after. That UPDATE commits, and it
             # renames the detached row's path to something `_find_by_path` can
             # never match again - so a refusal after it would strand that row's
@@ -823,7 +1233,8 @@ class LibraryRegistry:
                 cursor = conn.execute(
                     "INSERT INTO library (uuid, vault_uuid, settings_salt, "
                     "identity_migration_state, name, path, created_at, "
-                    "attached_at, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "attached_at, is_active, pending_import_at, pending_import_kept) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         library_uuid,
                         fingerprint,
@@ -838,6 +1249,8 @@ class LibraryRegistry:
                         now,
                         now,
                         1 if first_library else 0,
+                        now if pending_import else None,
+                        json.dumps(list(kept)) if pending_import else None,
                     ),
                 )
                 library_id = int(cursor.lastrowid)
@@ -917,6 +1330,9 @@ class LibraryRegistry:
         name: str,
         fingerprint: Optional[str],
         unique_name: bool = True,
+        *,
+        pending_import: bool = False,
+        kept: tuple[str, ...] = (),
     ) -> Library:
         """Re-attach a detached row, keeping its uuid and its tokens.
 
@@ -925,6 +1341,11 @@ class LibraryRegistry:
                 start-up registration takes when the folder is provably the same
                 library, so it is on that path too and must honour the flag for
                 the same reason.
+            pending_import, kept: As :meth:`_register`'s, and written over the
+                row's own: a pending folder has no ``vault.db`` and so no
+                fingerprint, which matches any detached row without one. The
+                old row's pending state describes a previous attempt (or none),
+                not the database this registration just built.
         """
         now = datetime.now(timezone.utc).isoformat()
         with self._hub.transaction() as conn:
@@ -935,9 +1356,17 @@ class LibraryRegistry:
                 self._refuse_duplicate_name(name, except_id=existing.id, conn=conn)
             conn.execute(
                 "UPDATE library SET attached = 1, detached_at = NULL, "
-                "attached_at = ?, name = ?, vault_uuid = COALESCE(?, vault_uuid) "
+                "attached_at = ?, name = ?, vault_uuid = COALESCE(?, vault_uuid), "
+                "pending_import_at = ?, pending_import_kept = ? "
                 "WHERE id = ?",
-                (now, name, fingerprint, existing.id),
+                (
+                    now,
+                    name,
+                    fingerprint,
+                    now if pending_import else None,
+                    json.dumps(list(kept)) if pending_import else None,
+                    existing.id,
+                ),
             )
         logger.info(
             "Re-attached library %s (uuid=%s) at %s; %d token(s) are live again",
@@ -1040,6 +1469,12 @@ class LibraryRegistry:
             attached=bool(row["attached"]),
             is_active=bool(row["is_active"]),
             notes=row["notes"],
+            pending_import_at=row["pending_import_at"],
+            pending_import_kept=(
+                tuple(json.loads(row["pending_import_kept"]))
+                if row["pending_import_kept"] is not None
+                else None
+            ),
         )
 
 

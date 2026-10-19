@@ -20,19 +20,19 @@ export class GridPage {
     this.thumbnails = page.locator('.thumbnail-card')
     this.thumbnailImages = page.locator('.thumbnail-img')
     // Toolbar buttons (titles are stable, verified in Toolbar.vue).
-    this.searchButton = page.locator('button[title="Search (F)"]').first()
+    this.searchButton = page.locator('button[aria-label="Search"]').first()
     // Sort is a split-button: .bar-split-menu opens the sort popover
     // (.gb-sort-panel); the in-popover ghost button flips the direction.
     this.sortMenuButton = page.locator('.bar-split-menu').first()
     this.sortDirectionButton = page.locator('.gb-sort-panel .tbm-ghost').first()
-    this.viewMenuButton = page.locator('button[title="View options"]').first()
+    this.viewMenuButton = page.locator('button[aria-label="View options"]').first()
     this.columnsSlider = page.locator('.gb-columns-slider')
-    // Expand/Collapse-all live in the View popover as .tbm-action buttons.
+    // Expand/Collapse-all live in the View popover as AppButtons.
     this.expandAllStacksButton = page
-      .locator('.tbm-action', { hasText: 'Expand all' })
+      .locator('.app-btn', { hasText: 'Expand all' })
       .first()
     this.collapseAllStacksButton = page
-      .locator('.tbm-action', { hasText: 'Collapse all' })
+      .locator('.app-btn', { hasText: 'Collapse all' })
       .first()
     // Search popover (.gb-search-panel) opened from the toolbar search icon.
     this.searchOverlay = page.locator('.gb-search-panel')
@@ -40,21 +40,21 @@ export class GridPage {
     this.searchHistoryChips = page.locator('.gb-recent-row')
     // Right-click context menu (§3.5) — ImageGridContextMenu.vue.
     this.contextMenu = page.locator('.image-ctx-menu')
-    // Selection ▾ dropdown — SelectionBar.vue's activator (`.stack-btn` inside
+    // Selection ▾ dropdown — SelectionBar.vue's activator (`.selection-menu-trigger` inside
     // `.selection-ctx-bar`) opening SelectionMenu.vue's `.selection-menu-panel`.
     // The activator is disabled until something is selected.
-    this.selectionMenuButton = page.locator('.selection-ctx-bar .stack-btn')
+    this.selectionMenuButton = page.locator('.selection-ctx-bar .selection-menu-trigger')
     this.selectionMenuPanel = page.locator('.selection-menu-panel')
     this.selectionCountLabel = page.locator(
       '.selection-ctx-bar .bar-btn-apply-label',
     )
-    // Statistics sidebar — toggled from the toolbar. Its title flips with state
-    // ("Show"/"Hide stats sidebar"), so target the (single) chart-bar button by
-    // icon, which is stable across both states.
-    this.statsToggle = page.locator('.bar-btn:has(.mdi-chart-bar)').first()
+    // Statistics sidebar — toggled from the toolbar. Its name is fixed ("Stats
+    // and tasks"; open is `aria-pressed`), and while tasks run it is prefixed
+    // with their count, so match the end of it.
+    this.statsToggle = page.getByRole('button', { name: /Stats and tasks$/ })
     this.statsSidebar = page.locator('.stats-sidebar')
-    this.statsContent = page.locator('.stats-sidebar-content')
-    this.statsTabs = page.locator('.stats-tab-btn')
+    this.statsContent = page.locator('.stats-sidebar .inspector-content')
+    this.statsTabs = page.locator('.stats-sidebar .inspector-tab')
     // Boolean set-operation toolbar (appears when >1 set/character selected).
     this.multiSelectToolbar = page.locator('.multi-select-toolbar')
     this.multiSelectMode = page.locator('.multi-select-toolbar__mode')
@@ -156,7 +156,7 @@ export class GridPage {
   async openSortMenu() {
     await this.sortMenuButton.click()
     await expect(
-      this.page.locator('.gb-sort-panel .tbm-toggle').first(),
+      this.sortOptions().first(),
     ).toBeVisible()
   }
 
@@ -166,10 +166,15 @@ export class GridPage {
     await expect(this.columnsSlider).toBeVisible()
   }
 
-  sortOption(label) {
+  /** The sort-order radios (OptionRows), not the Group strictness buttons. */
+  sortOptions() {
     return this.page
-      .locator('.gb-sort-panel .tbm-toggle', { hasText: label })
-      .first()
+      .getByRole('radiogroup', { name: 'Sort order' })
+      .getByRole('radio')
+  }
+
+  sortOption(label) {
+    return this.sortOptions().filter({ hasText: label }).first()
   }
 
   /** Right-click a card (first by default) to open the context menu. */
@@ -179,9 +184,17 @@ export class GridPage {
     await expect(this.contextMenu).toBeVisible()
   }
 
-  /** A context-menu action item by its visible label. */
+  /**
+   * A context-menu action item by its visible label. The Project / Person / Set
+   * flyout rows are `.ctx-item` too and sit (hidden) before the actions, and so
+   * is each flyout's own trigger (`.ate-btn.ctx-item`), whose label is the
+   * assigned entity's name. Both are excluded or a set named like an action
+   * would match first.
+   */
   contextMenuItem(label) {
-    return this.contextMenu.locator('.ctx-item', { hasText: label }).first()
+    return this.contextMenu
+      .locator('.ctx-item:not(.ate-menu .ctx-item):not(.ate-btn)', { hasText: label })
+      .first()
   }
 
   /**

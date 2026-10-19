@@ -2,7 +2,7 @@
   <div class="vmenu" role="group" aria-label="Which decisions to show">
     <div class="vm-head">
       <v-icon size="16">mdi-filter-outline</v-icon>
-      <span class="vm-title">Show</span>
+      <span class="section-label">Show</span>
       <span class="vm-sp"></span>
       <span class="vm-count">{{ groupCountLabel }}</span>
     </div>
@@ -15,9 +15,9 @@
       :class="{ 'vrow--on': verdict.enabled }"
       :disabled="isLast(verdict)"
       :aria-pressed="verdict.enabled"
-      :title="reasonFor(verdict)"
       @click="emit('toggle', verdict.id, !verdict.enabled)"
     >
+      <Tooltip :text="reasonFor(verdict)" activator="parent" />
       <span class="cbox" :class="{ 'cbox--on': verdict.enabled }">
         <v-icon v-if="verdict.enabled" size="14">mdi-check</v-icon>
       </span>
@@ -54,6 +54,8 @@
 // turning it back on would add rather than the zero its own exclusion produced.
 
 import { computed } from "vue";
+
+import Tooltip from "./Tooltip.vue";
 
 const props = defineProps({
   /**
@@ -141,14 +143,6 @@ function formatCount(value) {
   align-items: center;
   gap: var(--space-2);
   padding: var(--space-2) var(--space-3);
-}
-
-.vm-title {
-  font-size: var(--text-2xs);
-  font-weight: var(--weight-semibold);
-  text-transform: uppercase;
-  letter-spacing: var(--tracking-label);
-  color: rgba(var(--v-theme-on-surface), 0.5);
 }
 
 .vm-sp {

@@ -12,13 +12,13 @@ import {
   VProgressLinear,
   VProgressCircular,
   VIcon,
-  VTextField,
 } from "vuetify/components";
 import { useSnapshotsStore } from "../../stores/useSnapshotsStore";
 import { formatUserDate } from "../../utils/utils";
 import { relativeDate } from "../../utils/snapshots";
 import AppInput from "../widgets/AppInput.vue";
 import AppButton from "../widgets/AppButton.vue";
+import Tooltip from "../widgets/Tooltip.vue";
 import SettingsSection from "./SettingsSection.vue";
 import SettingsInfoCard from "./SettingsInfoCard.vue";
 import { errorDetail } from "../../utils/apiError";
@@ -177,7 +177,7 @@ function handleRestore(cp) {
   <div class="snapshots-section">
     <!-- ── Active job banner ─────────────────────────────────────────────── -->
     <div v-if="activeJob" class="snapshot-job-banner">
-      <v-progress-linear indeterminate color="accent" />
+      <v-progress-linear indeterminate color="accent" rounded="pill" />
       <span class="snapshot-job-label">
         <v-icon size="16">mdi-restore</v-icon>
         {{
@@ -196,7 +196,7 @@ function handleRestore(cp) {
           label="Automatic snapshots"
           density="compact"
           hide-details
-          color="accent"
+          color="primary"
           @update:model-value="handleToggleDailySnapshots($event)"
         />
       </div>
@@ -213,7 +213,7 @@ function handleRestore(cp) {
           @enter="handleCreate"
         />
         <AppButton
-          variant="primary_green"
+          variant="primary"
           icon-left="camera"
           :disabled="!!activeJob || creating"
           @click="handleCreate"
@@ -261,14 +261,20 @@ function handleRestore(cp) {
           <span
             v-if="!cp.is_compatible"
             class="kind-pill kind-pill--incompatible"
-            title="Schema version is newer than the live database; restore not supported."
           >
+            <Tooltip
+              text="Schema version is newer than the live database; restore not supported."
+              activator="parent"
+            />
             incompatible
           </span>
           <span
             class="snapshot-created-at"
-            :title="formatUserDate(cp.created_at, 'iso')"
           >
+            <Tooltip
+              :text="formatUserDate(cp.created_at, 'iso')"
+              activator="parent"
+            />
             {{ relativeDate(cp.created_at) }}
           </span>
         </div>
@@ -276,15 +282,12 @@ function handleRestore(cp) {
         <!-- Label (inline edit or display) -->
         <div class="snapshot-row-label">
           <template v-if="editingLabel[cp.id] !== undefined">
-            <v-text-field
+            <AppInput
               v-model="editingLabel[cp.id]"
-              density="compact"
-              variant="outlined"
-              hide-details
               autofocus
+              aria-label="Snapshot label"
               class="snapshot-edit-field"
-              :loading="savingLabel[cp.id]"
-              @keydown.enter="saveLabel(cp.id)"
+              @enter="saveLabel(cp.id)"
               @keydown.esc="cancelEditing(cp.id)"
               @blur="saveLabel(cp.id)"
             />
@@ -296,32 +299,39 @@ function handleRestore(cp) {
             v-else
             class="snapshot-label-text"
             :class="{ 'snapshot-label-text--empty': !cp.label }"
-            title="Double-click to rename"
             @dblclick="!activeJob && startEditing(cp)"
           >
+            <Tooltip text="Double-click to rename" activator="parent" />
             {{ cp.label || "—" }}
           </span>
         </div>
 
         <!-- Stats -->
         <div class="snapshot-row-stats">
-          <span title="Pictures">
+          <span>
+            <Tooltip text="Pictures" activator="parent" />
             <v-icon size="13">mdi-image-multiple-outline</v-icon>
             {{ cp.picture_count }}
           </span>
-          <span v-if="cp.picture_set_count" title="Sets">
+          <span v-if="cp.picture_set_count">
+            <Tooltip text="Sets" activator="parent" />
             <v-icon size="13">mdi-folder-multiple-outline</v-icon>
             {{ cp.picture_set_count }}
           </span>
-          <span v-if="cp.project_count" title="Projects">
+          <span v-if="cp.project_count">
+            <Tooltip text="Projects" activator="parent" />
             <v-icon size="13">mdi-briefcase-outline</v-icon>
             {{ cp.project_count }}
           </span>
-          <span v-if="cp.character_count" title="Characters">
+          <span v-if="cp.character_count">
+            <Tooltip text="Characters" activator="parent" />
             <v-icon size="13">mdi-account-multiple-outline</v-icon>
             {{ cp.character_count }}
           </span>
-          <span title="Size">{{ humanBytes(cp.byte_size) }}</span>
+          <span>
+            <Tooltip text="Size" activator="parent" />
+            {{ humanBytes(cp.byte_size) }}
+          </span>
         </div>
 
         <!-- Actions -->
@@ -332,7 +342,7 @@ function handleRestore(cp) {
             icon-left="restore"
             icon-only
             :disabled="!!activeJob || !cp.is_compatible"
-            :title="
+            :tooltip="
               !cp.is_compatible
                 ? 'Restore not available: snapshot schema is newer than live DB'
                 : 'Restore everything from this snapshot'
@@ -344,7 +354,7 @@ function handleRestore(cp) {
             size="sm"
             icon-left="delete-outline"
             icon-only
-            title="Delete"
+            tooltip="Delete"
             :disabled="!!activeJob || deletingId === cp.id"
             @click="handleDelete(cp)"
           />
@@ -471,21 +481,29 @@ function handleRestore(cp) {
   padding: 0 var(--space-2);
   border-radius: var(--radius-pill);
   white-space: nowrap;
-  color: rgba(var(--v-theme-on-surface), 0.6);
+  color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
   background: color-mix(in oklab, currentColor 16%, transparent);
 }
 
+/* The kind's hue rides on the wash; the word stays ink (§4: these four fills are
+   never small text on a canvas). */
+.kind-pill--DAILY,
+.kind-pill--MANUAL,
+.kind-pill--WEEKLY {
+  color: rgb(var(--v-theme-on-surface));
+  background: color-mix(in oklab, rgb(var(--kind-hue)) 16%, transparent);
+}
 .kind-pill--DAILY {
-  color: rgb(var(--v-theme-tertiary));
+  --kind-hue: var(--v-theme-tertiary);
 }
 .kind-pill--MANUAL {
-  color: rgb(var(--v-theme-accent));
+  --kind-hue: var(--v-theme-accent);
 }
 .kind-pill--WEEKLY {
-  color: rgb(var(--v-theme-secondary));
+  --kind-hue: var(--v-theme-secondary);
 }
 .kind-pill--incompatible {
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
 }
 
 .snapshot-created-at {
@@ -545,13 +563,13 @@ function handleRestore(cp) {
 /* ── Inline status ─────────────────────────────────────────────────────── */
 .snapshot-inline-error {
   font-size: var(--text-xs);
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
   margin-top: var(--space-2);
 }
 
 .snapshot-inline-success {
   font-size: var(--text-xs);
-  color: rgb(var(--v-theme-success));
+  color: rgb(var(--v-theme-surface-success));
   margin-top: var(--space-2);
 }
 

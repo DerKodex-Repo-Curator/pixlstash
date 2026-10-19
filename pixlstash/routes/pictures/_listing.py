@@ -1,12 +1,14 @@
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Literal
 
 from fastapi import (
     Depends,
     HTTPException,
     Query,
     Request,
+    Response,
 )
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import (
@@ -15,6 +17,11 @@ from sqlalchemy import (
 from sqlmodel import Session, select
 
 from pixlstash.database import DBPriority
+from pixlstash.hub import workflow_cards
+from pixlstash.hub.workflow_card_reads import (
+    run_filed_workflow_ids,
+    variants_in_workflows,
+)
 from pixlstash.db_models import (
     Face,
     Picture,
@@ -37,7 +44,13 @@ from pixlstash.utils.service.filter_helpers import (
     project_membership_exists_clause,
     project_unassigned_clause,
 )
-from pixlstash.utils.query.predicate_filter import PredicateFilter, is_truthy_flag
+from pixlstash.utils.query.predicate_filter import (
+    NOT_MADE_BY,
+    ONLY_MADE_BY,
+    RUN_VARIANT,
+    PredicateFilter,
+    is_truthy_flag,
+)
 
 from ._helpers import (
     _enrich_scrapheap_retention,
@@ -251,6 +264,14 @@ class PictureListFilters:
             description="Character filter: a character id, or 'UNASSIGNED'.",
             examples=["42"],
         ),
+        unassigned_by: Literal["character", "set"] | None = Query(
+            None,
+            description=(
+                "With character_id=UNASSIGNED, narrow 'unassigned' to one half: "
+                "'character' (no named face, sets ignored) or 'set' (in no "
+                "set, faces ignored). Omitted keeps both."
+            ),
+        ),
         character_ids: list[str] = Query(
             default=[], description="Multi-character filter (repeatable)."
         ),
@@ -279,7 +300,10 @@ class PictureListFilters:
         unscored: bool = Query(
             False,
             description=(
-                "Only pictures the user never rated: score IS NULL or score = 0."
+                "Pictures the user never rated: score IS NULL or score = 0. "
+                "With min_score/max_score, added to that range rather than "
+                "intersected with it, so a range spanning every rating "
+                "(min_score=0 or max_score=5) plus unscored is every picture."
             ),
         ),
         smart_score_bucket: str | None = Query(
@@ -333,6 +357,25 @@ class PictureListFilters:
         comfyui_lora: list[str] = Query(
             default=[], description="Filter by ComfyUI LoRA (repeatable)."
         ),
+        workflow: list[str] = Query(
+            default=[],
+            description=(
+                "Only pictures made by any of these workflows (repeatable, "
+                "OR'd), each named by its id (`auto:<core and families "
+                "digest>` or a manual group's id). Resolved to the workflows' "
+                "variants; an unknown id matches nothing."
+            ),
+        ),
+        workflow_lora: str | None = Query(
+            None,
+            description=(
+                "Only pictures whose workflow loaded this LoRA file, named by "
+                "its stored reference (`asset:<sha256>`, as "
+                "`GET /workflows/{workflow_id}/lora-summary` serves it). "
+                "Narrows `workflow`, and only exactly one; alone, beside "
+                "several workflows, or malformed, it matches nothing."
+            ),
+        ),
         reference_folder_id: str | None = Query(
             None, description="Filter by reference-folder id."
         ),
@@ -347,6 +390,145 @@ class PictureListFilters:
         # request.query_params. This dependency exists purely to document and
         # validate the query surface in OpenAPI.
         pass
+
+
+_ASSET_RE = re.compile(r"^asset:[0-9a-f]{64}$")
+
+
+def _resolve_workflow_filter(server, query_params: dict) -> list[str] | None:
+    """``workflow`` / ``workflow_lora`` as variants, or ``None``.
+
+    The workflows are in the hub and the pictures are in the vault, so there is
+    no join to write: the workflows are resolved to their variants here and the
+    listing matches ``picture.workflow_structural_hash`` against them, the way
+    the ComfyUI LoRA filter matches a name against the picture's own column.
+
+    ``workflow`` is repeatable and the workflows are OR'd, like
+    ``comfyui_model``: the keys are the union of each one's. That union is
+    exact because every automatic workflow's variants leave out the same
+    thing (the runs of every workflow whose runs file on it: the live manual
+    ones and the automatic ones the owner saved over,
+    ``run_filed_workflow_ids``), and such a workflow's own runs arrive by its
+    id, past that exclusion.
+
+    **An empty list is a filter, not the absence of one.** A workflow with no
+    filed variant - or a workflow the pictures of this library never ran - matches no
+    picture, and returning ``None`` for it would widen the grid to the whole
+    library instead. Given both, the two narrow each other, as every other pair
+    of filters on this route does. ``workflow_lora`` narrows exactly one
+    workflow; beside several it matches nothing, like a malformed one.
+
+    Args:
+        server: The running server, for the hub.
+        query_params: The parsed query params; every key is popped, so an
+            unresolved one cannot reach ``Picture.find(**query_params)``.
+            ``workflow`` is a list of ids, or one id as a string.
+
+    Returns:
+        The keys to match (``predicate_filter.workflow_keys_predicate``: the
+        ids of the named workflows whose runs file on them, and automatic
+        ones' variants with the run-filed ids whose runs the variants leave
+        out; narrowed by a LoRA, the variants that load it, a run-filed
+        workflow's own runs standing in as their variants held to its runs),
+        or ``None`` when neither param is set.
+    """
+    # Presence, not truthiness: `?workflow=` names no workflow, and dropping
+    # the filter for it would answer a request for one workflow with the whole
+    # library - the exact "no results means the filter was ignored" reading the
+    # contract tells clients is wrong. An empty value matches nothing, like any
+    # other workflow no picture was made with.
+    # Popped whatever happens: `Picture.find` now declares this name, so a
+    # client sending `?workflow_structural_hashes=abc` would otherwise reach
+    # `PredicateFilter` as a bare string and 500 on its `List[str]`. It could
+    # never widen anything - it only adds an IN, and the resolution below
+    # overwrites it whenever a real filter resolves - but a reachable 500 is
+    # its own bug. (Four sibling filters here are unpopped in the same way and
+    # are the same class; this closes the one the change adds.)
+    query_params.pop("workflow_structural_hashes", None)
+    raw = query_params.pop("workflow", None)
+    # Deduplicated, in order: a repeated id names the same workflow once.
+    workflow_ids = (
+        None
+        if raw is None
+        else list(dict.fromkeys([raw] if isinstance(raw, str) else raw))
+    )
+    lora = query_params.pop("workflow_lora", None)
+    if workflow_ids is None and lora is None:
+        return None
+    # The one workflow a LoRA may narrow, else None.
+    workflow_id = workflow_ids[0] if workflow_ids and len(workflow_ids) == 1 else None
+    hub = getattr(server, "hub", None)
+    live: list[str] = []
+    # The named workflows whose own runs are wanted (by ``run_workflow_id``),
+    # the variants wanted in every picture no run-filed workflow made, and the
+    # variants wanted only in one workflow's runs.
+    own: set[str] = set()
+    variants: set[str] = set()
+    held: set[str] = set()
+    try:
+        if hub is None:
+            raise LookupError("no hub is attached to this server")
+        if workflow_ids is not None:
+            live = run_filed_workflow_ids(hub)
+            # A manual workflow's pictures are its runs' (it is on no
+            # topology, so it has no variant); an automatic one's are its
+            # variants', less every run-filed workflow's runs, and - once the
+            # owner has saved over it - its own runs' as well.
+            own = {wid for wid in workflow_ids if wid in live}
+            variants = variants_in_workflows(hub, workflow_ids)
+        if lora is not None:
+            # Only ever a narrowing of one workflow, and only of a well-formed
+            # reference: alone it would parse every stored graph on the hub
+            # per request, and this route is open to scoped tokens.
+            if workflow_id is not None and _ASSET_RE.match(lora):
+                if workflow_id in own:
+                    # Its id is every run of it, not a variant: narrow the
+                    # variants its own runs made, and keep those to its runs.
+                    held = set(
+                        workflow_cards.variants_loading(
+                            hub, lora, _variants_run_by(server, workflow_id)
+                        )
+                    )
+                    own = set()
+                variants = set(
+                    workflow_cards.variants_loading(hub, lora, sorted(variants))
+                )
+            else:
+                own, variants = set(), set()
+    except Exception as exc:
+        # Fail closed, both for a hub that is absent and for one that will not
+        # answer: a filter that cannot be resolved must not silently widen the
+        # grid to every picture in the library, and it must not 500 a listing
+        # the rest of which is perfectly answerable from the vault.
+        logger.warning(
+            "Could not resolve the workflow filter (workflow=%r, lora=%r): "
+            "%s; listing no pictures rather than every picture.",
+            workflow_ids,
+            lora,
+            exc,
+        )
+        return []
+    keys = sorted(own | variants)
+    if held:
+        keys += [RUN_VARIANT + variant for variant in sorted(held)]
+        keys += [ONLY_MADE_BY + workflow_id]
+    if variants:
+        keys += [NOT_MADE_BY + wid for wid in live]
+    return keys
+
+
+def _variants_run_by(server, workflow_id: str) -> list[str]:
+    """The variants a run-filed workflow's own runs made, sorted."""
+    return server.vault.db.run_immediate_read_task(
+        lambda session: sorted(
+            session.exec(
+                select(Picture.workflow_structural_hash)
+                .where(Picture.run_workflow_id == workflow_id)
+                .where(Picture.workflow_structural_hash.is_not(None))
+                .distinct()
+            ).all()
+        )
+    )
 
 
 def select_pictures_for_listing(
@@ -424,6 +606,9 @@ def select_pictures_for_listing(
             picture_ids = request.query_params.getlist("id")
             if picture_ids:
                 query_params["id"] = picture_ids
+            workflows = request.query_params.getlist("workflow")
+            if workflows:
+                query_params["workflow"] = workflows
             comfyui_models = request.query_params.getlist("comfyui_model")
             if comfyui_models:
                 query_params["comfyui_models_filter"] = comfyui_models
@@ -494,6 +679,7 @@ def select_pictures_for_listing(
     offset = int(query_params.pop("offset", offset))
     limit = int(query_params.pop("limit", limit))
     character_id = _character_id(query_params.pop("character_id", None))
+    unassigned_by = query_params.pop("unassigned_by", None)
     _character_ids_raw = query_params.pop("character_ids", None)
     character_id_list: list[int] = []
     if _character_ids_raw:
@@ -536,6 +722,12 @@ def select_pictures_for_listing(
     face_filter = query_params.pop("face_filter", None)
     stack_state = query_params.pop("stack_state", None)
     impossible_sources = query_params.pop("impossible_sources", None)
+    workflow_structural_hashes = _resolve_workflow_filter(server, query_params)
+    if workflow_structural_hashes is not None:
+        # Back into ``query_params`` under the name ``Picture.find`` declares,
+        # so every ``**query_params`` site gets it; the branches that name each
+        # filter instead pass it explicitly.
+        query_params["workflow_structural_hashes"] = workflow_structural_hashes
     shared_only = bool(query_params.pop("shared_only", False))
     query_params.pop(
         "guest_session_id", None
@@ -592,7 +784,7 @@ def select_pictures_for_listing(
         if auth_user_id is not None:
 
             def _fetch_shared_ids(session: Session, uid: int) -> list[int]:
-                now = datetime.utcnow()
+                now = datetime.now(timezone.utc)
                 return list(
                     session.exec(
                         select(UserToken.resource_id).where(
@@ -697,6 +889,7 @@ def select_pictures_for_listing(
         hidden_tags_filter_value: list[str] | None = None,
         comfyui_models_filter_value: list[str] | None = None,
         comfyui_loras_filter_value: list[str] | None = None,
+        workflow_structural_hashes_value: list[str] | None = None,
         face_filter_value: str | None = None,
         stack_state_value: str | None = None,
         impossible_sources_value: list[str] | None = None,
@@ -722,6 +915,7 @@ def select_pictures_for_listing(
                 enforce_stack_assignment=True,
                 assignment_project_id=assignment_project_id,
                 assignment_unassigned_project=assignment_unassigned_project,
+                unassigned_by=unassigned_by,
             )
             query = select(Picture.id).where(
                 *unassigned_conditions,
@@ -743,6 +937,10 @@ def select_pictures_for_listing(
                 and not hidden_tags_filter_value
                 and not comfyui_models_filter_value
                 and not comfyui_loras_filter_value
+                # ``is None``, not falsiness: an empty list is a workflow
+                # filter that matches nothing, and treating it as "no filter"
+                # would widen this branch to every candidate picture.
+                and workflow_structural_hashes_value is None
                 and not face_filter_value
                 and not stack_state_value
                 and not impossible_sources_value
@@ -793,6 +991,7 @@ def select_pictures_for_listing(
             tags_confidence_below_filter=tags_confidence_below_filter_value,
             comfyui_models_filter=comfyui_models_filter_value,
             comfyui_loras_filter=comfyui_loras_filter_value,
+            workflow_structural_hashes=workflow_structural_hashes_value,
             face_filter=face_filter_value,
             stack_state=stack_state_value,
             impossible_sources=impossible_sources_value,
@@ -834,6 +1033,7 @@ def select_pictures_for_listing(
             hidden_tags_filter_value=hidden_tags,
             comfyui_models_filter_value=query_params.get("comfyui_models_filter"),
             comfyui_loras_filter_value=query_params.get("comfyui_loras_filter"),
+            workflow_structural_hashes_value=workflow_structural_hashes,
             face_filter_value=face_filter,
             stack_state_value=stack_state,
             impossible_sources_value=impossible_sources,
@@ -934,6 +1134,7 @@ def select_pictures_for_listing(
                 count_only=True,
                 project_id=unassigned_project_id,
                 only_unassigned_project=unassigned_project_only,
+                unassigned_by=unassigned_by,
                 format=format,
                 min_score=min_score,
                 max_score=max_score,
@@ -955,6 +1156,9 @@ def select_pictures_for_listing(
                 )
                 or None,
                 hidden_tags_filter=hidden_tags,
+                comfyui_models_filter=query_params.get("comfyui_models_filter"),
+                comfyui_loras_filter=query_params.get("comfyui_loras_filter"),
+                workflow_structural_hashes=workflow_structural_hashes,
                 picture_ids=(
                     [int(i) for i in query_params["id"] if str(i).isdigit()]
                     if query_params.get("id")
@@ -976,6 +1180,7 @@ def select_pictures_for_listing(
             resolution_bucket=resolution_bucket,
             project_id=unassigned_project_id,
             only_unassigned_project=unassigned_project_only,
+            unassigned_by=unassigned_by,
             tags_filter=query_params.get("tags_filter") or None,
             tags_rejected_filter=query_params.get("tags_rejected_filter") or None,
             tags_confidence_above_filter=query_params.get(
@@ -991,6 +1196,9 @@ def select_pictures_for_listing(
             stack_state=stack_state,
             impossible_sources=impossible_sources,
             file_path_prefix=file_path_prefix,
+            comfyui_models_filter=query_params.get("comfyui_models_filter"),
+            comfyui_loras_filter=query_params.get("comfyui_loras_filter"),
+            workflow_structural_hashes=workflow_structural_hashes,
             picture_ids=(
                 [int(i) for i in query_params["id"] if str(i).isdigit()]
                 if query_params.get("id")
@@ -1371,16 +1579,28 @@ def select_pictures_for_listing(
     return result
 
 
+# The response header that says which library a listing's picture ids are of
+# (#1912). An id means nothing in another library, so what keeps one where it
+# may be read back somewhere else keeps this beside it: the ComfyUI-PixlStash
+# picture picker lists through this route and writes it into its loader.
+LIBRARY_HEADER = "X-PixlStash-Library"
+
+
 def register_routes(router, server):
     @router.get(
         "/pictures",
         summary="List pictures",
-        description="Lists pictures with filtering, sort, pagination, and optional grid field projection.",
+        description=(
+            "Lists pictures with filtering, sort, pagination, and optional grid "
+            "field projection. For the owner, the `X-PixlStash-Library` "
+            "response header names the library the ids are of."
+        ),
         response_model=list[GridPicture],
         responses={400: {"description": "Invalid sort mechanism."}},
     )
     def list_pictures(
         request: Request,
+        response: Response,
         sort: str = Query(
             None,
             description="Sort mechanism. One of: DATE, IMPORTED_AT, SCORE, "
@@ -1413,6 +1633,11 @@ def register_routes(router, server):
         ),
         filters: PictureListFilters = Depends(),
     ):
+        # The owner only (ComfyUI's link key is the owner here): a share link
+        # has no use for it, and two links are not told they are one library.
+        library_uuid = getattr(server.vault, "library_uuid", None)
+        if library_uuid and server.auth.is_unscoped_owner_request(request):
+            response.headers[LIBRARY_HEADER] = library_uuid
         if fields == "grid":
             metadata_fields = list(Picture.grid_fields())
         elif fields:

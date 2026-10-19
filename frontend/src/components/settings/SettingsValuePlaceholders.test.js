@@ -18,7 +18,9 @@ import { join } from "node:path";
 
 vi.mock("../../utils/apiClient", async () => {
   const { ref } = await import("vue");
-  return { isReadOnly: ref(false) };
+  // API_BASE_URL is needed by ConnectAgentDialog, which AccountSection mounts.
+  // A wholesale mock that omits it makes the import throw, not read undefined.
+  return { isReadOnly: ref(false), API_BASE_URL: "http://127.0.0.1:9537/api/v1" };
 });
 
 vi.mock("../../api/config", () => ({
@@ -28,7 +30,6 @@ vi.mock("../../api/config", () => ({
 
 vi.mock("../../api/comfyui", () => ({
   listWorkflows: vi.fn(async () => []),
-  deleteWorkflow: vi.fn(),
   importWorkflow: vi.fn(),
 }));
 
@@ -49,6 +50,7 @@ vi.mock("../../api/users", () => ({
   createToken: vi.fn(),
   patchToken: vi.fn(),
   deleteToken: vi.fn(),
+  setTokenLibraries: vi.fn(),
   uploadWatermark: vi.fn(),
   deleteWatermark: vi.fn(),
 }));
@@ -57,13 +59,21 @@ vi.mock("../../api/pictureSets", () => ({ listPictureSets: vi.fn(async () => [])
 vi.mock("../../api/projects", () => ({ listProjects: vi.fn(async () => []) }));
 vi.mock("../../api/characters", () => ({ listCharacters: vi.fn(async () => []) }));
 vi.mock("../../utils/clipboard", () => ({ copyText: vi.fn() }));
+// One library: the token table has no "Every library" column to render.
+vi.mock("../../stores/useLibrariesStore", () => ({
+  useLibrariesStore: () => ({ libraries: [], canManage: false }),
+}));
 
 vi.mock("vuetify/components", () => ({
   VSwitch: { name: "v-switch", template: "<div><slot /></div>" },
+  // Tooltip.vue wraps VTooltip: render the activator only, as a closed tip does.
+  VTooltip: {
+    name: "VTooltip",
+    setup: (_p, { slots }) => () => slots.activator?.({ props: {} }),
+  },
 }));
 
 import AccountSection from "./AccountSection.vue";
-import WorkflowsSection from "./WorkflowsSection.vue";
 
 const EM_DASH = "—";
 
@@ -103,19 +113,6 @@ describe("a Settings readout with no value", () => {
 
     wrapper.unmount();
   });
-
-  it("shows an em dash for the ComfyUI port when none is configured", async () => {
-    const wrapper = await settle(
-      mount(WorkflowsSection, { props: { open: true }, global: { stubs } }),
-    );
-
-    const values = wrapper.findAll(".wf-host-value").map((v) => v.text());
-    expect(values).toContain("Not configured");
-    expect(values).toContain(EM_DASH);
-    expect(values).not.toContain("-");
-
-    wrapper.unmount();
-  });
 });
 
 // The sweep flattened TEN of these, across seven files. Each count in this
@@ -124,11 +121,11 @@ describe("a Settings readout with no value", () => {
 // rather than a string literal, and the first version of this regex only
 // looked between double quotes. Rather than mount seven components for one
 // glyph each, this reads the sources. Verified against c760dd05, which is
-// where every one of them lost its em dash.
+// where every one of them lost its em dash. ComfyuiHostSection.vue has since
+// left the list: its connect card has no empty readout to spell.
 describe("no value placeholder was left flattened by the em-dash sweep", () => {
   const SWEPT = [
     "components/settings/AccountSection.vue",
-    "components/settings/WorkflowsSection.vue",
     "components/settings/SnapshotsSection.vue",
     "components/widgets/RestoreConfirmDialog.vue",
     "components/panels/StatsSidebar.vue",

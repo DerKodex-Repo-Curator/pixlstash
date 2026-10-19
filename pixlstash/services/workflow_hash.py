@@ -39,6 +39,7 @@ cleanly, whereas merging shattered ones requires guessing intent.
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import json
 import re
@@ -51,7 +52,14 @@ logger = get_logger(__name__)
 
 # Stamped on every row this module's hashes key, so a change of rule is visible
 # in the data rather than inferred from a build number.
-HASH_VERSION = "v1"
+#
+# v2 (#1416): a ComfyUI-PixlStash loader's `checkpoint_id` and numbered
+# `*_sha256_N` widgets became topology assets, and a `*_sha256` value that is
+# not digest-shaped (a blank one included) stopped being one. Rows written
+# under either rule are stamped, so `WHERE hash_version = 'v1'` names the ones
+# the old rule produced -- which is what this column is for, and the only way
+# to find them later, since nothing re-keys them in place.
+HASH_VERSION = "v2"
 
 # How many refinement rounds. The spec says 3 to 4; four is taken because the
 # cost is linear in edges and the extra round is what separates nodes that are
@@ -92,9 +100,15 @@ IMAGE_EXTENSIONS = (
 )
 
 # §Unknown-node defaults rule 2 and 3: a seed is volatile, an output path names
-# where a file lands rather than what it is.
-_SEED_RE = re.compile(r"(^|_)(seed|noise_seed)$")
-_OUTPUT_PATH_RE = re.compile(r"^(output|save)_?(path|name)")
+# where a file lands rather than what it is. Both are public because
+# ``services/workflow_export.py`` has to take the same two classes out of a file
+# that leaves this machine, and two spellings of "this is an output path" would
+# be two rules that could drift.
+SEED_FIELD_RE = re.compile(r"(^|_)(seed|noise_seed)$")
+OUTPUT_PATH_RE = re.compile(r"^(output|save)_?(path|name)")
+
+# The one output-path widget everybody spells the same and no pattern catches.
+OUTPUT_PREFIX_FIELD = "filename_prefix"
 
 # Inputs that carry what a person WROTE. The extension rules below are
 # name-blind by design (§Unknown-node defaults rule 4 and 5 exist because
@@ -108,7 +122,14 @@ _OUTPUT_PATH_RE = re.compile(r"^(output|save)_?(path|name)")
 # resolves as the asset it is. Measured against the owner's libraries: not one
 # of these names currently reaches the extension test, so this closes a hole
 # without moving a single existing key.
-_TEXT_FIELD_NAMES = frozenset(
+#
+# Public, with :func:`carries_prose` below, because
+# ``services/workflow_export.py`` has to answer the same question - "did a
+# person write this?" - about a file leaving the machine, and it is the same
+# population either way. A second list there was a second list to drift:
+# copying ``workflow_bindings``'s narrower one shipped SDXL's ``text_g`` and
+# ``text_l`` straight into an exported file.
+TEXT_FIELD_NAMES = frozenset(
     {
         "text",
         "text_g",
@@ -119,7 +140,7 @@ _TEXT_FIELD_NAMES = frozenset(
         "wildcard",
     }
 )
-_TEXT_FIELD_SUFFIX_RE = re.compile(r"_(text|prompt|caption|query|search)$", re.I)
+TEXT_FIELD_SUFFIX_RE = re.compile(r"_(text|prompt|caption|query|search)$", re.I)
 
 # A filename is one path component; prose is not. A newline can never appear in
 # a filename and 255 bytes is the component limit on every filesystem
@@ -127,13 +148,43 @@ _TEXT_FIELD_SUFFIX_RE = re.compile(r"_(text|prompt|caption|query|search)$", re.I
 # real TA values trip either. They are the backstop for a prose field this
 # module has not been told about - 5,066 genuine `lora_name` and `image` values
 # DO contain spaces, which is why "has a space" is not one of these rules.
-_MAX_FILENAME_LENGTH = 255
+MAX_FILENAME_LENGTH = 255
 
 # The ComfyUI-PixlStash loaders name their asset by digest rather than by
-# filename (`lora_sha256`, `checkpoint_sha256`), so the extension rules below
+# filename (`lora_sha256`, `adapter_sha256`, `vae_sha256`, `clip_sha256`,
+# `control_net_sha256`, `upscale_model_sha256`), so the extension rules below
 # cannot see them. Without this a LoRA swap on a PixlStash node would leave the
 # recipe unchanged, which is the one error the spec calls unrecoverable.
-_SHA256_FIELD_RE = re.compile(r"(^|_)sha256$")
+#
+# A numbered suffix is ComfyUI's convention for a second slot on one node, and
+# it names a model exactly as the first does: the PixlStash CLIP loader's
+# `clip_sha256_2` is the T5 or Llama beside a clip-l, and `lora_name_2` is a
+# stacker's second LoRA. Anchoring on `sha256$` alone read the pair's second
+# encoder as a parameter and nulled it (#1416).
+SHA256_FIELD_RE = re.compile(r"(^|_)sha256(_\d+)?$")
+# What such a value must look like to name a model: the whole digest, or the
+# 10- or 12-digit prefix A1111 writes for a checkpoint or an embedding. No other
+# length, so a partial value in some other node's widget names nothing.
+DIGEST_PREFIX_RE = re.compile(r"^(?:[0-9a-f]{10}|[0-9a-f]{12}|[0-9a-f]{64})$")
+
+# The one shelf loader that cannot address its model by digest.
+# `PixlStashCheckpointLoader` takes a `checkpoint_id`, because a model's
+# `sha256` is NULL until the background hasher has read the file and a 24 GB
+# checkpoint is listable long before that, so the node's picker writes the
+# shelf's row id instead. A bare id carries no extension and is not a digest,
+# so neither rule above saw it: the structural hash did not move when the
+# checkpoint did, and every graph on that loader shared one workflow key
+# whatever it loaded (#1416).
+SHELF_ID_FIELD = "checkpoint_id"
+# The node refuses anything that is not `str.isdigit()`, so the hash rule is
+# held to the node's own contract rather than to a looser spelling of it -
+# `^\d+$` accepts a trailing newline, which `isdigit()` does not. The cap is
+# what a row id can plausibly be: SQLite's own AUTOINCREMENT ceiling is 19
+# digits and a real shelf runs to four, so 12 refuses a kilobyte of digits
+# without ever refusing a shelf. Both matter because this branch returns
+# BEFORE the newline and 255-byte guards further down, and its value is
+# written to `workflow_recipe_asset`, which is kept forever and shared.
+_MAX_SHELF_ID_LENGTH = 12
 
 # Defense in depth against a third-party node that puts a credential in a
 # widget. Nothing in the shipped ComfyUI-PixlStash suite does - its connection
@@ -160,8 +211,13 @@ UI_ONLY_CLASSES = (
     | UI_PASSTHROUGH_CLASSES
 )
 
-# `mode` 2 is muted and 4 is bypassed. Neither reaches the executed graph.
-_UI_INACTIVE_MODES = (2, 4)
+# `mode` 2 is muted and 4 is bypassed. Neither reaches the executed graph, but
+# they differ in what they leave behind: a muted node's consumers lose the edge,
+# while a bypassed node is spliced out and its consumers read what fed it
+# (`bypass_input_slot`).
+_UI_MUTED_MODE = 2
+_UI_BYPASSED_MODE = 4
+_UI_INACTIVE_MODES = (_UI_MUTED_MODE, _UI_BYPASSED_MODE)
 
 # Internal node types this module invents for a subgraph's two boundary nodes.
 # They are resolved through, never emitted.
@@ -214,7 +270,7 @@ def _digest(payload: Any) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _is_link(value: Any) -> bool:
+def is_link(value: Any) -> bool:
     """True for an API-format ``[node_id, output_slot]`` connection.
 
     **The node id must be a string, and that is load-bearing rather than
@@ -236,7 +292,19 @@ def _is_link(value: Any) -> bool:
     )
 
 
-def _normalized_filename(value: str) -> str:
+def carries_prose(widget_name: str) -> bool:
+    """True when a widget of this name holds something a person WROTE.
+
+    :data:`TEXT_FIELD_NAMES` and :data:`TEXT_FIELD_SUFFIX_RE` as one question,
+    so the reducer (which must keep prose out of a stored document) and
+    ``services/workflow_export.py`` (which must keep it out of a file leaving
+    the machine) cannot answer it differently.
+    """
+    lowered = str(widget_name or "").lower()
+    return lowered in TEXT_FIELD_NAMES or bool(TEXT_FIELD_SUFFIX_RE.search(lowered))
+
+
+def normalized_filename(value: str) -> str:
     """Lowercase basename, extension kept, directory stripped (rule 5)."""
     return value.lower().rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
 
@@ -246,23 +314,56 @@ def structural_widget_value(name: str, value: Any) -> Optional[str]:
 
     ``None`` means the widget is bucket P or V and its value is nulled. A
     returned string is a topology asset (bucket TA), normalized per rule 5.
+
+    A widget naming its model by digest (:data:`SHA256_FIELD_RE`) or by shelf
+    id (:data:`SHELF_ID_FIELD`) keeps its value rather than a normalized
+    filename: there is no filename, and both name the model as surely as one
+    does.
+
+    **Both are checked against what such a value can be, not merely against
+    the widget's name.** A digest widget keeps a digest (:data:`DIGEST_PREFIX_RE`)
+    and a shelf id keeps an id; anything else in either names no model and is
+    nulled. That covers the blank each of them holds until its Browse button
+    is clicked -- the CLIP loader's second encoder is blank on every SD and
+    SDXL graph, the common case rather than the odd one -- which used to file
+    a junk ``workflow_recipe_asset`` row and write ``asset:e3b0c442...``, the
+    digest of the empty string, into a document whose whole purpose is to say
+    which model went there. It also covers prose: these two branches return
+    above the newline and 255-byte guards below, and their values are kept
+    forever and shared, so a custom node putting a paragraph in a widget of
+    either name must not reach them.
     """
-    if _SEED_RE.search(name) or name == "filename_prefix":
+    if SEED_FIELD_RE.search(name) or name == OUTPUT_PREFIX_FIELD:
         return None
-    if _OUTPUT_PATH_RE.match(name):
+    if OUTPUT_PATH_RE.match(name):
         return None
+    if name == SHELF_ID_FIELD:
+        # An API prompt written by a script rather than by ComfyUI's frontend
+        # carries this as a JSON number, and the node executes it (it does
+        # `str(checkpoint_id or "").strip()`), so nulling it would leave #1416
+        # unfixed for that spelling. `bool` is not an id.
+        if isinstance(value, int) and not isinstance(value, bool):
+            value = str(value)
+        if not isinstance(value, str):
+            return None
+        return value if value.isdigit() and len(value) <= _MAX_SHELF_ID_LENGTH else None
     if not isinstance(value, str):
         return None
-    if _SHA256_FIELD_RE.search(name):
-        return value.lower()
-    lowered = name.lower()
-    if lowered in _TEXT_FIELD_NAMES or _TEXT_FIELD_SUFFIX_RE.search(lowered):
+    if SHA256_FIELD_RE.search(name):
+        # A digest names a model; anything else in a digest widget names
+        # nothing. `hub/workflows._model_ghost_names` already judges these
+        # values by exactly this rule, so applying it here is what stops the
+        # two disagreeing -- and it is what keeps prose, a newline or a
+        # kilobyte in a `*_sha256` widget out of the kept-forever document.
+        lowered = value.lower()
+        return lowered if DIGEST_PREFIX_RE.match(lowered) else None
+    if carries_prose(name):
         return None
-    if "\n" in value or len(value) > _MAX_FILENAME_LENGTH:
+    if "\n" in value or len(value) > MAX_FILENAME_LENGTH:
         return None
     lowered = value.lower()
     if lowered.endswith(MODEL_EXTENSIONS) or lowered.endswith(IMAGE_EXTENSIONS):
-        return _normalized_filename(value)
+        return normalized_filename(value)
     return None
 
 
@@ -275,7 +376,7 @@ def instance_widget_value(name: str, value: Any) -> Any:
 
     V is what makes one *generation* rather than one instance: a seed, and the
     output path a file happens to land at. Null them and two re-rolls of the
-    same prompt share an instance, which is the equivalence "Covered only" is
+    same prompt share an instance, which is the equivalence "While matched" is
     asking about. Keep them and every picture is its own instance and the tier
     answers nothing.
 
@@ -283,11 +384,30 @@ def instance_widget_value(name: str, value: Any) -> Any:
     drops them before bucketing, so they are absent from this key as well as
     from the stored document.
     """
-    if _SEED_RE.search(name) or name == "filename_prefix":
+    if SEED_FIELD_RE.search(name) or name == OUTPUT_PREFIX_FIELD:
         return None
-    if _OUTPUT_PATH_RE.match(name):
+    if OUTPUT_PATH_RE.match(name):
         return None
     return value
+
+
+def digests_with_prefix(value: str, sorted_digests: list[str]) -> list[str]:
+    """The digests a ``*_sha256`` value names: itself, or those it prefixes.
+
+    A ComfyUI-PixlStash loader writes all 64 digits; A1111 writes 10 or 12
+    (``services/a1111_recipe.py``). The caller reads one match as that model
+    and several as a name it cannot pin down. At most two are returned, which
+    is enough to tell the two apart. A value :data:`DIGEST_PREFIX_RE` does not
+    match (a loader left blank) names nothing.
+
+    Args:
+        value: A lowercase hex digest or prefix.
+        sorted_digests: Every candidate digest, lowercase and sorted.
+    """
+    if not DIGEST_PREFIX_RE.match(value):
+        return []
+    index = bisect.bisect_left(sorted_digests, value)
+    return [d for d in sorted_digests[index : index + 2] if d.startswith(value)]
 
 
 def asset_reference(normalized_filename: str) -> str:
@@ -347,7 +467,7 @@ def reduce_api_graph(graph: dict) -> dict[str, ReducedNode]:
             )
         for name, value in raw_inputs.items():
             name = str(name)
-            if _is_link(value):
+            if is_link(value):
                 inputs.append((name, str(value[0]), int(value[1])))
             elif SECRET_FIELD_RE.search(name):
                 # Dropped here rather than nulled, so a credential-named widget
@@ -408,16 +528,18 @@ def promote_instance_widgets(nodes: dict[str, ReducedNode]) -> dict[str, Reduced
     }
 
 
-def graph_key(nodes: dict[str, ReducedNode]) -> str:
-    """Return the order-invariant key for a reduced graph.
+def node_labels(
+    nodes: dict[str, ReducedNode], rounds: Optional[int] = REFINEMENT_ROUNDS
+) -> dict[str, str]:
+    """Each node's order-invariant label after Weisfeiler-Leman refinement.
 
-    Weisfeiler-Leman refinement over sorted neighbour lists, then a sorted
-    multiset of node descriptors. Nothing here reads a node id, so relabelling
-    every node - or nesting half of them in a subgraph - cannot change the
-    result.
+    The label depends on the node's class, its widgets and its neighbourhood
+    *rounds* hops out, never on its id, so it names "this node in this graph"
+    the same way however the file was serialised. The hashes use the default
+    and must keep it. A caller that needs nodes told apart as far as WL can
+    (the middle of a long chain) passes ``None``: refinement then stops once a
+    round splits no class, since a round can only split classes, never merge.
     """
-    if not nodes:
-        raise WorkflowGraphError("cannot key an empty graph")
     labels = {
         node_id: _digest([node.class_type, node.widgets])
         for node_id, node in nodes.items()
@@ -428,8 +550,8 @@ def graph_key(nodes: dict[str, ReducedNode]) -> str:
             if source in downstream:
                 downstream[source].append(node_id)
 
-    for _ in range(REFINEMENT_ROUNDS):
-        labels = {
+    for _ in range(len(nodes) if rounds is None else rounds):
+        refined = {
             node_id: _digest(
                 [
                     labels[node_id],
@@ -439,7 +561,23 @@ def graph_key(nodes: dict[str, ReducedNode]) -> str:
             )
             for node_id, node in nodes.items()
         }
+        if rounds is None and len(set(refined.values())) == len(set(labels.values())):
+            break
+        labels = refined
+    return labels
 
+
+def graph_key(nodes: dict[str, ReducedNode]) -> str:
+    """Return the order-invariant key for a reduced graph.
+
+    Weisfeiler-Leman refinement over sorted neighbour lists, then a sorted
+    multiset of node descriptors. Nothing here reads a node id, so relabelling
+    every node - or nesting half of them in a subgraph - cannot change the
+    result.
+    """
+    if not nodes:
+        raise WorkflowGraphError("cannot key an empty graph")
+    labels = node_labels(nodes)
     descriptors = sorted(
         json.dumps(
             [
@@ -484,10 +622,9 @@ def topology_hash(api_graph: dict) -> str:
 def instance_hash(api_graph: dict) -> str:
     """The instance key: the recipe plus one set of parameters, seed excluded.
 
-    **This is a PICTURE column, not a hub table.** Two pictures share an
-    instance exactly when they share this value, which is all "Covered only"
-    needs; storing instances hub-side is AI-toolkit Phase 2 and belongs to
-    v1.12. Nothing in v1.11 writes an instance row anywhere.
+    Two pictures share an instance exactly when they share this value, which is
+    what "While matched" asks. The parameters themselves are kept, per library,
+    as :func:`instance_document_from_reduction` in ``workflow_recipe_instance``.
     """
     return graph_key(promote_instance_widgets(reduce_api_graph(api_graph)))
 
@@ -551,6 +688,55 @@ def document_from_reduction(nodes: dict[str, ReducedNode]) -> dict:
         inputs.update({name: [source, slot] for name, source, slot in node.inputs})
         document[node_id] = {"class_type": node.class_type, "inputs": inputs}
     return document
+
+
+def instance_document_from_reduction(nodes: dict[str, ReducedNode]) -> dict:
+    """Render the instance tier as a document: the recipe's, parameters filled in.
+
+    Same shape and node ids as :func:`document_from_reduction`, with each nulled
+    parameter carrying its value instead. Seeds and output paths stay null (they
+    are the generation's), and **a model or image filename is a reference**,
+    including one nested inside a structured value (rgthree's Power Lora Loader
+    keeps ``{"lora": "name.safetensors", ...}``). The instance widgets hold raw
+    values, and keeping a filename here would put a model's name somewhere
+    forgetting it does not reach. A name with no model or image extension is
+    not recognised as one here or anywhere else.
+    """
+    document = document_from_reduction(nodes)
+    for node_id, node in nodes.items():
+        assets = dict(node.widgets)
+        inputs = document[node_id]["inputs"]
+        for name, value in node.instance_widgets:
+            if assets.get(name) is None:
+                inputs[name] = _nested_assets_as_references(name, value)
+    return document
+
+
+def _nested_assets_as_references(name: str, value: Any) -> Any:
+    """``value`` with every filename-shaped string in it swapped for a reference.
+
+    A nested value gets the rules :func:`reduce_api_graph` applies to a node's
+    own inputs, because this is the first place a nested value is STORED rather
+    than only hashed: a credential-named key is dropped, and a seed or output
+    path is nulled like its top-level counterpart. The instance hash is keyed
+    on the raw widgets and does not change.
+    """
+    if isinstance(value, dict):
+        return {
+            key: (
+                None
+                if SEED_FIELD_RE.search(str(key))
+                or str(key) == OUTPUT_PREFIX_FIELD
+                or OUTPUT_PATH_RE.match(str(key))
+                else _nested_assets_as_references(str(key), item)
+            )
+            for key, item in value.items()
+            if not SECRET_FIELD_RE.search(str(key))
+        }
+    if isinstance(value, list):
+        return [_nested_assets_as_references(name, item) for item in value]
+    asset = structural_widget_value(name, value)
+    return asset_reference(asset) if asset is not None else value
 
 
 def structural_document(api_graph: dict) -> dict:
@@ -686,16 +872,22 @@ class _UiGraph:
         self.nodes[boundary_out] = {"type": _SUBGRAPH_OUTPUT}
 
     def source_of(
-        self, key: str, slot: int, depth: int = 0
+        self, key: str, slot: int, depth: int = 0, want_type: Any = None
     ) -> Optional[tuple[str, int]]:
-        """Follow the edge into ``(key, slot)`` back to a node a key may see."""
+        """Follow the edge into ``(key, slot)`` back to a node a key may see.
+
+        *want_type* is the slot type of the input the walk started from. It is
+        carried unchanged through every hop, because a bypassed node on the
+        way picks which of its inputs to splice by the type the final
+        consumer wants, not by the type of the hop in front of it.
+        """
         edge = self.edges.get((key, slot))
         if edge is None:
             return None
-        return self.resolve_output(edge[0], edge[1], depth + 1)
+        return self.resolve_output(edge[0], edge[1], depth + 1, want_type)
 
     def resolve_output(
-        self, key: str, slot: int, depth: int = 0
+        self, key: str, slot: int, depth: int = 0, want_type: Any = None
     ) -> Optional[tuple[str, int]]:
         """Resolve an origin to a real node, stepping through everything else."""
         if depth > _MAX_RESOLVE_DEPTH:
@@ -720,8 +912,15 @@ class _UiGraph:
             raise WorkflowGraphError(
                 f"UI graph link names origin node {key}, which the file does not define"
             )
-        if node.get("mode") in _UI_INACTIVE_MODES:
+        if node.get("mode") == _UI_MUTED_MODE:
             return None
+        if node.get("mode") == _UI_BYPASSED_MODE:
+            # Before the subgraph branch, as ComfyUI orders it: a bypassed
+            # instance is spliced out through its own inputs, never entered.
+            through = bypass_input_slot(node, slot, want_type)
+            if through is None:
+                return None
+            return self.source_of(key, through, depth + 1, want_type)
         node_type = str(node.get("type", "?"))
         if node_type == _SUBGRAPH_INPUT:
             outer = node["outer_slot"]
@@ -738,7 +937,7 @@ class _UiGraph:
                 # Normal and common: the instance proxies that input as a
                 # widget rather than wiring it, so there is no edge to follow.
                 return None
-            return self.source_of(node["instance"], outer[slot], depth + 1)
+            return self.source_of(node["instance"], outer[slot], depth + 1, want_type)
         if "_definition" in node:
             outputs = node.get("outputs") or ()
             entry = outputs[slot] if slot < len(outputs) else None
@@ -757,10 +956,12 @@ class _UiGraph:
                     slot,
                 )
                 return None
-            return self.source_of(node["_boundary_out"], inner_slot, depth + 1)
+            return self.source_of(
+                node["_boundary_out"], inner_slot, depth + 1, want_type
+            )
         if node_type in UI_PASSTHROUGH_CLASSES:
             for index in range(len(node.get("inputs") or ())):
-                resolved = self.source_of(key, index, depth + 1)
+                resolved = self.source_of(key, index, depth + 1, want_type)
                 if resolved is not None:
                     return resolved
             return None
@@ -784,7 +985,7 @@ class _UiGraph:
             for index, entry in enumerate(node.get("inputs") or ()):
                 if not isinstance(entry, dict):
                     continue
-                resolved = self.source_of(key, index)
+                resolved = self.source_of(key, index, want_type=entry.get("type"))
                 if resolved is not None:
                     inputs.append(
                         (str(entry.get("name", "?")), resolved[0], resolved[1])
@@ -812,6 +1013,77 @@ def _boundary_slot_map(node: dict, definition: dict) -> list[Optional[int]]:
         outer.get(str(entry.get("name"))) if isinstance(entry, dict) else None
         for entry in (definition.get("inputs") or ())
     ]
+
+
+def bypass_input_slot(node: dict, slot: int, want_type: Any) -> Optional[int]:
+    """Which input a bypassed node splices through to its output *slot*.
+
+    ComfyUI's own rule, ported from the frontend's
+    ``ExecutableNodeDTO._getBypassSlotIndex``, because the API graph a picture
+    carries was made by that rule and the two keys have to meet. A reducer that
+    dropped the edge instead keyed one workflow two ways (#1440: a bypassed
+    ``ShowText`` between a captioner and a text encoder).
+
+    In order: any-type wants the same slot number, else the first input; then
+    the input at the same slot if its type fits both the output and the
+    consumer; then the first input of exactly the consumer's type; then the
+    first input that fits both. ``None`` when nothing fits, which is ComfyUI
+    dropping the edge too.
+
+    Args:
+        node: The bypassed node, as the UI file holds it.
+        slot: The output slot being read.
+        want_type: The type of the input the walk started from.
+    """
+    inputs = [
+        entry if isinstance(entry, dict) else {} for entry in (node.get("inputs") or ())
+    ]
+    if not inputs:
+        return None
+    if want_type in ("", "*"):
+        return slot if len(inputs) > slot else 0
+    outputs = node.get("outputs") or ()
+    output = outputs[slot] if slot < len(outputs) else None
+    output_type = output.get("type") if isinstance(output, dict) else None
+    if slot < len(inputs):
+        same = inputs[slot].get("type")
+        if _types_connect(same, output_type) and _types_connect(same, want_type):
+            return slot
+    for index, entry in enumerate(inputs):
+        if entry.get("type") == want_type:
+            return index
+    for index, entry in enumerate(inputs):
+        candidate = entry.get("type")
+        if _types_connect(candidate, output_type) and _types_connect(
+            candidate, want_type
+        ):
+            return index
+    logger.info(
+        "Bypassed node %s has no input of type %r to splice through output "
+        "slot %d; the wire is dropped, as ComfyUI drops it.",
+        node.get("id"),
+        want_type,
+        slot,
+    )
+    return None
+
+
+def _types_connect(type_a: Any, type_b: Any) -> bool:
+    """LiteGraph's ``isValidConnection``: whether two slot types may connect.
+
+    Blank and ``*`` match anything; otherwise equal, case-insensitively, with a
+    comma-separated type matching when any one of its members does.
+    """
+    if type_a in (None, "", "*", 0) or type_b in (None, "", "*", 0):
+        return True
+    if type_a == type_b:
+        return True
+    type_a, type_b = str(type_a).lower(), str(type_b).lower()
+    if "," not in type_a and "," not in type_b:
+        return type_a == type_b
+    return any(
+        _types_connect(a, b) for a in type_a.split(",") for b in type_b.split(",")
+    )
 
 
 def _subgraph_definitions(workflow: dict) -> dict[str, dict]:

@@ -110,8 +110,9 @@ to the app root), not a constant. It must be measured because the pill wraps, gr
 coarse pointers, and changes height with its own content. `56px` is the fallback for the
 first frame, and it is a measured current value, not a new design token.
 
-So: pill hidden → the stack rests at `--space-5` (16px). Pill visible → 16 + 54 + 8 =
-**78px**, i.e. the stack sits exactly `--space-3` above the pill's top edge and can never
+So: pill hidden → the stack rests at `--space-5` (16px). Pill visible → 16 + pill height + 8
+(54px tall when this was written, so **78px**; the shared `.selbar` surface of #1301 took
+4px off it, and the height is measured, so nothing here needs retuning), i.e. the stack sits exactly `--space-3` above the pill's top edge and can never
 touch it. When the pill appears while notices are on screen, the stack rises at `--dur-2`
 / `--ease-standard`; when it goes, the stack settles back.
 
@@ -340,7 +341,7 @@ shipped components had exactly that, and the fix would have broken them:
 | Site | Fill | Before | After the naive fix | Resolution |
 |---|---|---|---|---|
 | `ImageOverlay .overlay-comfy-warning` | `rgba(warning, .2)` on the lightbox | 11.38 / 12.99 | **1.41 / 1.33** | tint → `dark-surface-warning`, text → `on-dark-surface` (9.18 / 10.51) |
-| `ImageOverlay .overlay-comfy-error` | `rgba(error, .2)` on the lightbox | 12.92 / 13.89 | 12.92 / **1.24** | same (9.89 / 11.24) |
+| `ImageOverlay .overlay-comfy-error` | `rgba(error, .2)` on the lightbox | 12.92 / 13.89 | 12.92 / **1.24** | same (9.89 / 11.24); the class went with the lightbox's I2I menu in #1406, the rule did not |
 | `SideBar .sidebar-error-bubble` | `rgba(error, .8)` | 3.73 / 4.94 | 3.73 / **3.49** | fill made solid (4.86 / 4.68) |
 | `ProjectFiles .pf-file-delete:hover` | `rgba(error, .8)` | 3.59 / 4.94 | 3.59 / **3.49** | fill made solid (4.86 / 4.68) |
 
@@ -390,6 +391,19 @@ variant (§2.5) and the two `ImageOverlay` chips above. **Not** migrated: the ~4
 the light theme's `error` — a **pre-existing** failure unrelated to this change, and a
 mechanical migration large enough to want its own eyeball pass. Logged in §10.
 
+**One in-dialog exception, and it now has two tones.**
+`frontend/src/components/io/RunReasonNotice.vue` is not a toast — it sits inside the
+Run popups, several at a time for a mixed batch — and it has always drawn the status
+hue in the **glyph** as well as the rail, against the rule above. Since #1463 it also
+carries a second tone: `--surface-warning` with `mdi-alert-outline` for a statement
+about a run that IS going ahead (a LoRA left out, a missing seed node replaced), beside `--surface-error` with
+`mdi-alert-circle-outline` for a refusal. Both hues are existing tokens defined in
+both themes, and the glyph shape carries the distinction without colour, as §3 asks.
+The live region around the list follows the tone: `role="alert"` while any refusal is
+on screen, `role="status"` when only notices are. **This exception is worth a
+designer's eye rather than another copy**: a third tone here is the point at which it
+should become the host's own variants.
+
 ---
 
 ## 4. Anatomy
@@ -415,6 +429,7 @@ mechanical migration large enough to want its own eyeball pass. Logged in §10.
 | **Dismiss** | icon button, `mdi-close` at 16px, 24×24 visual box, `border-radius: var(--radius-sm)`, `color: rgba(var(--v-theme-on-surface), 0.7)` → `1` on hover, hover `background: var(--hover-wash)`, focus `box-shadow: var(--focus-ring)`, `aria-label="Dismiss notification"` |
 | **Dismiss hit area** | expanded to 40×40 with a transparent `::before` inset expansion — clears WCAG 2.5.8 (24×24) with room, without a 40px hole in the layout |
 | **Gap action→dismiss** | `var(--space-2)` |
+| **Countdown** (timed notices only) | bottom edge, full width, `var(--space-1)` (2px) tall, same hue as the rail (`--notice-status`); drains linearly (`scaleX` → 0) and pauses whenever the timer does (§6 rule 3). The store hands it the fraction left and a fresh key on every timer start, so it re-syncs after a hover, a hidden tab, a demotion or a coalesced repeat instead of trusting its own CSS clock. Sticky notices have none. Hidden under `prefers-reduced-motion`. `aria-hidden` |
 
 **Action labels name the destination, not the question.** The label is a button, so it
 reads as the thing the user gets: `Undo`, `Retry`, `Help`, `Open set`. A label phrased as
@@ -556,6 +571,8 @@ place, which is the flicker the setting exists to prevent:
   /* opacity-only cross-fade: no rise, no exit slide, no FLIP reflow */
   .notice-enter-from, .notice-leave-to { transform: none; }
   .notice-move { transition: none; }
+  /* the countdown would empty instantly under the global collapse */
+  .notice-countdown { display: none; }
 }
 ```
 
@@ -596,9 +613,11 @@ only if measured; do not build it speculatively.
   not before it.
 - Both buttons are real `<button>`s in the natural tab order, showing `--focus-ring` on
   `:focus-visible`.
-- Reaching an action by keyboard is guaranteed by the §6 rule that any notice with an
-  action is sticky. Without that rule, a keyboard-only user can be structurally unable to
-  reach an "Undo".
+- Reaching an action by keyboard is guaranteed by the §6 rule that a notice with an
+  action is sticky by default. Without that rule, a keyboard-only user can be structurally
+  unable to reach an "Undo". A caller that overrides it with an explicit timeout must only
+  do so for an action that is a shortcut to something reachable elsewhere (the run-started
+  card's "Show" opens the Tasks tab, which has its own control).
 - `:focus-within` pauses the timer, so tabbing into a notice does not race it.
 
 **Contrast, verified against the shipped themes** (WCAG floors: text 4.5:1, non-text 3:1):
@@ -714,7 +733,7 @@ moves pixels somewhere; the list is the record of where to look.
 |---|---|---|
 | 1 | handoff §6 misdescribes `SelectionBar` | **FIXED** — §6 now names both bar shapes |
 | 2 | `SelectionBar` is in `panels/`, not `widgets/` | **FIXED** — corrected in §6 and visual-language §13 |
-| 3 | hardcoded cold shadows (4 sites) | **FIXED** — pill and menu → `--elevation-3`, the three `ImageGrid` pills → `--elevation-2` |
+| 3 | hardcoded cold shadows (4 sites) | **FIXED** — pill and menu → `--elevation-3` (the pill has since moved to the shared `.selbar` at `--elevation-4`, #1301), the three `ImageGrid` pills → `--elevation-2` |
 | 4 | off-grid / `em` values in `SelectionBar` | **FIXED** except block padding — see below |
 | 5 | `.selbar-pop` raw `0.22s ease` | **FIXED** — split into decelerate-in / accelerate-out |
 | 6 | `.remove-btn` broken `on-warning` | **FIXED** — the token is now authored (4.95 / 5.53) |
@@ -726,7 +745,7 @@ moves pixels somewhere; the list is the record of where to look.
 
 **Carried, deliberately:**
 
-- **`SelectionBar`'s block padding (`6px`)** stays off-grid. It sets the pill's occupied
+- **`SelectionBar`'s block padding (`6px`)** stayed off-grid (since settled at `--space-2` by the shared `.selbar`, #1301). It sets the pill's occupied
   *height*, and that dimension belongs to the UI/UX-gated action-bar reconciliation
   (visual-language §5/§13: the 34 / 40 / 48 / 56px drift). Moving it piecemeal pre-empts
   that decision. Its inline padding, gap, radii, shadow and type are all on tokens.
@@ -744,8 +763,8 @@ moves pixels somewhere; the list is the record of where to look.
   declarations point at it; their siblings `.rs-tally-kept` / `.rs-archived-kept` already
   read `dark-surface-success`. Full rationale in `visual-language.md` §4.
 - **The 40+ raw z-index call sites.** The ladder is shipped (`--z-base` … `--z-modal`,
-  visual-language §14) so new code has a target; retrofitting the existing ones is
-  opportunistic, because each move is pixel-visible on a different screen.
+  visual-language §14) and every call site is on it (#1671), bar the filter strip's
+  `calc(var(--z-sticky) - 1)`, kept so the toolbar's divider shows over it.
 
 The original findings, kept for the evidence:
 
@@ -815,9 +834,8 @@ DOM, and its full-viewport sub-scrim would paint over the window drag region and
 **Stacking no longer depends on DOM order**, which was the actual defect: `--z-notice`
 previously *tied* the maximum and `NoticeHost` won only by being a later sibling of
 `.app-viewport`. Proven by moving the host to first child and re-checking — before the
-change the title bar won, after it the notice does, in both orders. Retrofitting the
-remaining raw z-indexes stays opportunistic per finding 10.11; four survive harmlessly,
-each verified to be inside a nested stacking context where it cannot compete.
+change the title bar won, after it the notice does, in both orders. The remaining raw
+z-indexes have since been moved onto the ladder (#1671).
 
 **`--notice-max-w: 420px`** — in `design-tokens.css`, next to `--badge-size` and
 `--bar-height`, which is the existing home for fixed component dimensions that are

@@ -17,18 +17,23 @@ Two rules under test throughout:
    could not do.
 """
 
+import json
 import re
 import sqlite3
+import struct
 import threading
 import time
 
 import pytest
 
+from pixlstash.auth import COMFYUI_SCOPE
 from pixlstash.hub.schema import (
     CURRENT_DATA_VERSION,
     CURRENT_SCHEMA_VERSION,
     _V2_MODEL,
     _V2_MODEL_FILE,
+    _backfill_base_model_canonical,
+    _reidentify_filename_guesses,
     apply_migrations,
     read_schema_version,
 )
@@ -181,6 +186,47 @@ class TestFreshHub:
             "SELECT sql FROM sqlite_master WHERE name='ix_model_hash_queue'"
         ).fetchone()[0]
         assert "WHERE sha256 IS NULL" in sql
+
+
+class TestComfyuiLinkKeysAreNarrowed:
+    """#1811: a link key minted before the ComfyUI scope was a full-access
+    token. The next open narrows it, and nothing else."""
+
+    def test_only_a_full_access_token_bound_to_an_address_is_narrowed(self, hub):
+        apply_migrations(hub)
+        hub.execute("INSERT INTO user (id) VALUES (1)")
+        hub.execute(
+            "INSERT INTO library (uuid, name, path, created_at, attached_at) "
+            "VALUES ('example-library', 'Example', '/home/me/library', '2026-10-01', "
+            "'2026-10-01')"
+        )
+        rows = {
+            "link": ("ALL", "testclient"),
+            "pending link": ("ALL", "pending"),
+            "owner": ("ALL", None),
+            "share": ("READ", None),
+        }
+        for description, (scope, bound) in rows.items():
+            hub.execute(
+                "INSERT INTO usertoken (user_id, library_uuid, token_hash, "
+                "description, scope, created_at, bound_address) "
+                "VALUES (1, 'example-library', 'example-hash', ?, ?, '2026-10-01', ?)",
+                (description, scope, bound),
+            )
+
+        hub.commit()
+
+        def scopes():
+            return dict(hub.execute("SELECT description, scope FROM usertoken"))
+
+        assert set(scopes().values()) == {"ALL", "READ"}
+        apply_migrations(hub)
+        assert scopes() == {
+            "link": COMFYUI_SCOPE,
+            "pending link": COMFYUI_SCOPE,
+            "owner": "ALL",
+            "share": "READ",
+        }
 
 
 class TestReRunIsSafe:
@@ -557,6 +603,191 @@ class TestUnknownIsFirstClass:
         ).fetchone() == (2,)
 
 
+class TestBlankRecipeAssetBackfill:
+    """Clearing the asset rows that name no model (#1416).
+
+    A shelf loader's widget is blank until Browse is clicked, and the PixlStash
+    CLIP loader's second encoder is blank on every SD and SDXL graph. Those
+    blanks used to be filed as topology assets, and the rows they left cannot
+    be reached by "forget model names not on the shelf": an empty value is not
+    a digest, so it is never a model ghost.
+    """
+
+    def _asset(self, hub, widget, name):
+        # Parents first: an asset row references its recipe, which references
+        # its topology.
+        hub.execute(
+            "INSERT OR IGNORE INTO workflow_topology "
+            "(topology_hash, hash_version, node_count, first_seen_at) "
+            "VALUES (?, 'v1', 1, '2026-09-01T00:00:00Z')",
+            ("t" * 64,),
+        )
+        hub.execute(
+            "INSERT OR IGNORE INTO workflow_recipe (structural_hash, topology_hash, "
+            "hash_version, node_count, first_seen_at) "
+            "VALUES (?, ?, 'v1', 1, '2026-09-01T00:00:00Z')",
+            ("a" * 64, "t" * 64),
+        )
+        hub.execute(
+            "INSERT OR IGNORE INTO workflow_recipe_asset "
+            "(structural_hash, widget_name, normalized_filename) VALUES (?, ?, ?)",
+            ("a" * 64, widget, name),
+        )
+
+    def test_a_blank_asset_row_is_dropped_and_a_named_one_is_kept(self, hub):
+        apply_migrations(hub)
+        hub.execute("PRAGMA user_version = 0")
+        self._asset(hub, "clip_sha256_2", "")
+        self._asset(hub, "vae_sha256", "")
+        self._asset(hub, "ckpt_name", "realvisxl.safetensors")
+        self._asset(hub, "vae_sha256", "b" * 64)
+        hub.commit()
+
+        apply_migrations(hub)
+
+        assert sorted(
+            row[0]
+            for row in hub.execute(
+                "SELECT normalized_filename FROM workflow_recipe_asset"
+            ).fetchall()
+        ) == ["b" * 64, "realvisxl.safetensors"]
+
+    def test_it_runs_once_and_does_not_refuse_a_hub_that_has_none(self, hub):
+        apply_migrations(hub)
+        assert hub.execute("PRAGMA user_version").fetchone()[0] == (
+            CURRENT_DATA_VERSION
+        )
+        # A blank filed AFTER the backfill has run stays: the step is one-shot,
+        # and the rule in `workflow_hash` is what stops new ones being written.
+        self._asset(hub, "clip_sha256_2", "")
+        hub.commit()
+        apply_migrations(hub)
+        assert (
+            hub.execute("SELECT COUNT(*) FROM workflow_recipe_asset").fetchone()[0] == 1
+        )
+
+
+class TestBaseModelCanonicalBackfill:
+    """Identifying the rows already on a shelf, from columns alone, once."""
+
+    @staticmethod
+    def _identified(conn):
+        return {
+            row[0]: (row[1], row[2])
+            for row in conn.execute(
+                "SELECT filename, base_model_canonical, base_model_source FROM model"
+            )
+        }
+
+    def test_the_columns_arrive_on_an_existing_hub(self, hub):
+        apply_migrations(hub)
+        assert {"base_model_canonical", "base_model_source"} <= column_names(
+            hub, "model"
+        )
+
+    def test_it_writes_only_exact_declared_matches_and_is_idempotent(self, hub):
+        apply_migrations(hub)
+        add_model(
+            hub, sha256="a", base_model="SDXL_Base_V1-0", filename="x.safetensors"
+        )
+        # kohya's own spelling for every SD 1.x LoRA: an exact alias, never a
+        # near-typo of an SD 2.x one.
+        add_model(hub, sha256="b", base_model="sd_v1", filename="y.safetensors")
+        # Guesses are left for the scan, which weighs the header's evidence
+        # too: a filename guess stored now would stop the header being read.
+        add_model(hub, sha256="c", filename="MyFlux2LoRA.safetensors")
+        add_model(hub, sha256="d", filename="ilxl_example_v3.safetensors")
+        add_model(hub, sha256="e", base_model="ilustrius", filename="z.safetensors")
+        add_model(
+            hub,
+            sha256="f",
+            base_model="flux2",
+            filename="w.safetensors",
+            base_model_canonical=None,
+            base_model_source="user",
+        )
+        expected = {
+            "x.safetensors": ("SDXL 1.0", "declared"),
+            "y.safetensors": ("SD 1.5", "declared"),
+            "MyFlux2LoRA.safetensors": (None, None),
+            "ilxl_example_v3.safetensors": (None, None),
+            "z.safetensors": (None, None),
+            # A person's answer - here "none of these" - is not re-guessed.
+            "w.safetensors": (None, "user"),
+        }
+
+        assert _backfill_base_model_canonical(hub) == 2
+        assert self._identified(hub) == expected
+        assert _backfill_base_model_canonical(hub) == 0
+        assert self._identified(hub) == expected
+
+    def test_apply_migrations_runs_it_on_a_data_v2_hub(self, hub):
+        apply_migrations(hub)
+        add_model(hub, sha256="a", base_model="SDXL", filename="x.safetensors")
+        hub.execute("PRAGMA user_version = 2")
+        hub.commit()
+
+        apply_migrations(hub)
+
+        assert self._identified(hub) == {"x.safetensors": ("SDXL 1.0", "declared")}
+
+
+class TestStaleFilenameGuesses:
+    """Data step 22: filename answers the token-run matcher reads differently."""
+
+    def test_it_rewrites_only_filename_answers_that_now_differ(self, hub):
+        apply_migrations(hub)
+        rows = {
+            # The #1959 cases: the old single-token answers.
+            "qwen_image_edit_2511_bf16.safetensors": ("Qwen-Image", "filename"),
+            "pony_v7_mystyle.safetensors": ("Pony Diffusion V6 XL", "filename"),
+            # Still what the matcher says: left alone.
+            "qwen_image_2512.safetensors": ("Qwen-Image", "filename"),
+            "myflux2lora.safetensors": ("FLUX.2", "filename_fuzzy"),
+            # Its own name says nothing: answered from kohya's training
+            # checkpoint name, which this step cannot see, so left alone.
+            "my_style_v2.safetensors": ("SDXL 1.0", "filename_fuzzy"),
+            # A person's or a declaration's answer is never re-guessed.
+            "pony_v7_user.safetensors": ("Pony Diffusion V6 XL", "user"),
+            "pony_v7_declared.safetensors": ("Pony Diffusion V6 XL", "declared"),
+        }
+        for n, (filename, (canonical, source)) in enumerate(rows.items()):
+            add_model(
+                hub,
+                sha256=str(n),
+                filename=filename,
+                base_model_canonical=canonical,
+                base_model_source=source,
+            )
+        expected = dict(rows)
+        expected["qwen_image_edit_2511_bf16.safetensors"] = (
+            "Qwen-Image-Edit",
+            "filename",
+        )
+        expected["pony_v7_mystyle.safetensors"] = ("Pony V7", "filename")
+
+        assert _reidentify_filename_guesses(hub) == 2
+        assert TestBaseModelCanonicalBackfill._identified(hub) == expected
+        assert _reidentify_filename_guesses(hub) == 0
+
+    def test_apply_migrations_runs_it_on_a_data_v21_hub(self, hub):
+        apply_migrations(hub)
+        add_model(
+            hub,
+            filename="pony_diffusion_v7.safetensors",
+            base_model_canonical="Pony Diffusion V6 XL",
+            base_model_source="filename",
+        )
+        hub.execute("PRAGMA user_version = 21")
+        hub.commit()
+
+        apply_migrations(hub)
+
+        assert TestBaseModelCanonicalBackfill._identified(hub) == {
+            "pony_diffusion_v7.safetensors": ("Pony V7", "filename")
+        }
+
+
 class TestComponentRoleBackfill:
     """Re-filing support files that were registered before they had kinds.
 
@@ -723,6 +954,217 @@ class TestComponentRoleBackfill:
             "SELECT file_kind FROM model WHERE id = ?", (model_id,)
         ).fetchone() == ("checkpoint",)
 
+    def test_a_data_v3_hub_refiles_an_unknown_gguf_in_unet_only(self, hub):
+        # #1607: `unet/` and `diffusion_models/` came to name `checkpoint`
+        # after the first pass had run. The second pass re-files `unknown`
+        # in those folders alone: pass 1 already did `VAE/`, so what is left
+        # there - `checkpoint` or `unknown` - is the owner's correction.
+        apply_migrations(hub)
+        hub.execute("PRAGMA user_version = 3")
+        folder_id = add_folder(hub, "/models")
+        gguf = add_model(hub, file_kind="unknown", sha256="g", kind=None)
+        add_file(hub, gguf, folder_id, "diffusion_models/flux1-dev-Q4_K_M.gguf")
+        corrected = add_model(hub, file_kind="checkpoint", sha256="k", kind=None)
+        add_file(hub, corrected, folder_id, "VAE/odd.safetensors")
+        owner_unknown = add_model(hub, file_kind="unknown", sha256="u", kind=None)
+        add_file(hub, owner_unknown, folder_id, "vae/not_a_vae.safetensors")
+        hub.commit()
+
+        apply_migrations(hub)
+
+        kinds = dict(hub.execute("SELECT id, file_kind FROM model").fetchall())
+        assert (kinds[gguf], kinds[corrected], kinds[owner_unknown]) == (
+            "checkpoint",
+            "checkpoint",
+            "unknown",
+        )
+        assert hub.execute("PRAGMA user_version").fetchone()[0] == CURRENT_DATA_VERSION
+
+    def test_a_data_v15_hub_refiles_what_sits_in_controlnet(self, hub):
+        # `controlnet/` came to name `controlnet` (data version 16). An SDXL
+        # ControlNet cleared the checkpoint threshold and an SD 1.5 one did
+        # not; both are ControlNets. A Control-LoRA there carries adapter
+        # markers and stays an adapter; a `vae/` the earlier pass left alone
+        # stays left alone.
+        apply_migrations(hub)
+        hub.execute("PRAGMA user_version = 15")
+        folder_id = add_folder(hub, "/models")
+        big = add_model(hub, file_kind="checkpoint", sha256="c", kind=None)
+        add_file(hub, big, folder_id, "ControlNet/sdxl_canny.safetensors")
+        small = add_model(hub, file_kind="unknown", sha256="s", kind=None)
+        add_file(hub, small, folder_id, "controlnet/sd15_depth.safetensors")
+        control_lora = add_model(hub, file_kind="adapter", sha256="a")
+        add_file(hub, control_lora, folder_id, "controlnet/control-lora.safetensors")
+        owner_unknown = add_model(hub, file_kind="unknown", sha256="u", kind=None)
+        add_file(hub, owner_unknown, folder_id, "vae/not_a_vae.safetensors")
+        hub.commit()
+
+        apply_migrations(hub)
+
+        kinds = dict(hub.execute("SELECT id, file_kind FROM model").fetchall())
+        assert [kinds[i] for i in (big, small, control_lora, owner_unknown)] == [
+            "controlnet",
+            "controlnet",
+            "adapter",
+            "unknown",
+        ]
+        assert hub.execute("PRAGMA user_version").fetchone()[0] == CURRENT_DATA_VERSION
+
+    def test_a_data_v17_hub_refiles_what_sits_in_upscale_models(self, hub):
+        # `upscale_models/` came to name `upscaler` (data version 18). Only a
+        # `.safetensors` one was shelved before, as `unknown`; one elsewhere
+        # stays as it was.
+        apply_migrations(hub)
+        hub.execute("PRAGMA user_version = 17")
+        folder_id = add_folder(hub, "/models")
+        upscaler = add_model(hub, file_kind="unknown", sha256="x", kind=None)
+        add_file(hub, upscaler, folder_id, "upscale_models/4x_dat.safetensors")
+        elsewhere = add_model(hub, file_kind="unknown", sha256="y", kind=None)
+        add_file(hub, elsewhere, folder_id, "misc/4x_dat_copy.safetensors")
+        hub.commit()
+
+        apply_migrations(hub)
+
+        kinds = dict(hub.execute("SELECT id, file_kind FROM model").fetchall())
+        assert [kinds[upscaler], kinds[elsewhere]] == ["upscaler", "unknown"]
+        assert hub.execute("PRAGMA user_version").fetchone()[0] == CURRENT_DATA_VERSION
+
+    def test_a_data_v16_hub_refiles_a_controlnet_by_its_tensors(self, hub, tmp_path):
+        # Data version 17: a ControlNet a launcher filed under
+        # `diffusion_models/` was a `checkpoint`, and a scan never rewrites
+        # `file_kind`, so it stayed one wherever it was moved. Its header says
+        # what it is. A real checkpoint, an adapter, a copy that is gone and a
+        # GGUF are left as they are.
+        apply_migrations(hub)
+        hub.execute("PRAGMA user_version = 16")
+        folder_id = add_folder(hub, str(tmp_path))
+        (tmp_path / "DiffusionModels").mkdir()
+
+        def shelved(name, tensor, file_kind="checkpoint", state="present"):
+            blob = json.dumps({tensor: {"dtype": "F16", "shape": [1]}}).encode()
+            (tmp_path / "DiffusionModels" / name).write_bytes(
+                struct.pack("<Q", len(blob)) + blob
+            )
+            model_id = add_model(hub, file_kind=file_kind, sha256=name, kind=None)
+            add_file(hub, model_id, folder_id, f"DiffusionModels/{name}", state)
+            return model_id
+
+        controlnet = shelved("cn.safetensors", "controlnet_blocks.0.weight")
+        unknown = shelved(
+            "sd15.safetensors", "control_model.input_hint_block.0.weight", "unknown"
+        )
+        checkpoint = shelved("ckpt.safetensors", "transformer_blocks.0.attn.weight")
+        gone = shelved(
+            "gone.safetensors", "controlnet_blocks.0.weight", state="missing"
+        )
+        gguf = shelved("cn.gguf", "controlnet_blocks.0.weight")
+        hub.commit()
+
+        apply_migrations(hub)
+
+        kinds = dict(hub.execute("SELECT id, file_kind FROM model").fetchall())
+        assert [kinds[i] for i in (controlnet, unknown, checkpoint, gone, gguf)] == [
+            "controlnet",
+            "controlnet",
+            "checkpoint",
+            "checkpoint",
+            "checkpoint",
+        ]
+        assert hub.execute("PRAGMA user_version").fetchone()[0] == CURRENT_DATA_VERSION
+
+    def test_a_data_v18_hub_refiles_a_vae_by_its_tensors(self, hub, tmp_path):
+        # Data version 19: a VAE downloaded into a flat folder was `unknown`,
+        # so a run never loaded it off the shelf. Its header says what it is.
+        # A file with one half of an autoencoder is left as it is, and so is a
+        # `checkpoint` one: only a folder or the owner could have said that.
+        apply_migrations(hub)
+        hub.execute("PRAGMA user_version = 18")
+        folder_id = add_folder(hub, str(tmp_path))
+
+        def shelved(name, tensors, file_kind="unknown"):
+            header = {t: {"dtype": "F16", "shape": [1]} for t in tensors}
+            blob = json.dumps(header).encode()
+            (tmp_path / name).write_bytes(struct.pack("<Q", len(blob)) + blob)
+            model_id = add_model(hub, file_kind=file_kind, sha256=name, kind=None)
+            add_file(hub, model_id, folder_id, name)
+            return model_id
+
+        vae = shelved(
+            "seedvr2_ema_vae_fp16.safetensors",
+            ["encoder.conv_in.weight", "decoder.conv_in.weight"],
+        )
+        half = shelved("taesd_decoder.safetensors", ["decoder.conv_in.weight"])
+        corrected = shelved(
+            "owner_says_checkpoint.safetensors",
+            ["encoder.conv_in.weight", "decoder.conv_in.weight"],
+            "checkpoint",
+        )
+        hub.commit()
+
+        apply_migrations(hub)
+
+        kinds = dict(hub.execute("SELECT id, file_kind FROM model").fetchall())
+        assert [kinds[vae], kinds[half], kinds[corrected]] == [
+            "vae",
+            "unknown",
+            "checkpoint",
+        ]
+        assert hub.execute("PRAGMA user_version").fetchone()[0] == CURRENT_DATA_VERSION
+
+    def test_a_data_v20_hub_refiles_a_text_encoder_by_its_tensors(self, hub, tmp_path):
+        # Data version 21: a T5 downloaded into a flat folder cleared the
+        # parameter count and was a `checkpoint`, and a CLIP there `unknown`.
+        # Their token tables say what they are. A checkpoint carrying its T5
+        # under a prefix is left as it is.
+        apply_migrations(hub)
+        hub.execute("PRAGMA user_version = 20")
+        folder_id = add_folder(hub, str(tmp_path))
+
+        def shelved(name, table, shape, file_kind):
+            header = {table: {"dtype": "F16", "shape": shape}}
+            blob = json.dumps(header).encode()
+            (tmp_path / name).write_bytes(struct.pack("<Q", len(blob)) + blob)
+            model_id = add_model(hub, file_kind=file_kind, sha256=name, kind=None)
+            add_file(hub, model_id, folder_id, name)
+            return model_id
+
+        t5 = shelved(
+            "flan-t5-xxl_fp8.safetensors",
+            "encoder.embed_tokens.weight",
+            [32128, 4096],
+            "checkpoint",
+        )
+        clip = shelved(
+            "clip_l.safetensors",
+            "text_model.embeddings.token_embedding.weight",
+            [49408, 768],
+            "unknown",
+        )
+        qwen = shelved(
+            "qwen_2.5_vl_7b.safetensors",
+            "model.embed_tokens.weight",
+            [152064, 3584],
+            "checkpoint",
+        )
+        sd35 = shelved(
+            "sd3.5_large.safetensors",
+            "text_encoders.t5xxl.transformer.shared.weight",
+            [32128, 4096],
+            "checkpoint",
+        )
+        hub.commit()
+
+        apply_migrations(hub)
+
+        kinds = dict(hub.execute("SELECT id, file_kind FROM model").fetchall())
+        assert [kinds[t5], kinds[clip], kinds[qwen], kinds[sd35]] == [
+            "text_encoder",
+            "text_encoder",
+            "text_encoder",
+            "checkpoint",
+        ]
+        assert hub.execute("PRAGMA user_version").fetchone()[0] == CURRENT_DATA_VERSION
+
     def test_a_fresh_hub_records_the_backfill_as_done(self, hub):
         apply_migrations(hub)
 
@@ -767,3 +1209,156 @@ class TestTombstone:
             "Clementine v3",
         )
         assert hub.execute("SELECT COUNT(*) FROM model_file").fetchone()[0] == 0
+
+
+class TestHandMadeWorkflowSets:
+    """#1520: the owner's own sets, keyed by sha256 so a member outlives its row."""
+
+    def _set(self, hub):
+        return int(
+            hub.execute(
+                "INSERT INTO model_workflow_set (created_at, updated_at) "
+                "VALUES ('t', 't')"
+            ).lastrowid
+        )
+
+    def _member(self, hub, set_id, sha256, slot):
+        hub.execute(
+            "INSERT INTO model_workflow_set_member (set_id, sha256, slot, added_at) "
+            "VALUES (?, ?, ?, 't')",
+            (set_id, sha256, slot),
+        )
+
+    def test_the_tables_arrive_on_an_existing_v2_hub(self, hub):
+        apply_migrations(hub)
+        hub.execute("DROP TABLE model_workflow_set_member")
+        hub.execute("DROP TABLE model_workflow_set_decline")
+        hub.execute("DROP TABLE model_workflow_set")
+        apply_migrations(hub)
+        assert {
+            "model_workflow_set",
+            "model_workflow_set_member",
+            "model_workflow_set_decline",
+        } <= table_names(hub)
+        assert "AUTOINCREMENT" in ddl_for(hub, "model_workflow_set")
+        assert read_schema_version(hub) == 2
+
+    def test_the_verdict_tables_arrive_and_hold_only_their_vocabulary(self, hub):
+        """The owner's set verdicts: re-created on an existing v2 hub, and the
+        CHECK keeps PixlStash's words out of the owner's columns."""
+        apply_migrations(hub)
+        hub.execute("DROP TABLE model_set_verdict")
+        hub.execute("DROP TABLE model_set_member_verdict")
+        apply_migrations(hub)
+        assert {"model_set_verdict", "model_set_member_verdict"} <= table_names(hub)
+        assert read_schema_version(hub) == 2
+        hub.execute(
+            "INSERT INTO model_set_verdict (combo_key, verdict, answered_at) "
+            "VALUES ('1,2', 'yes', 't')"
+        )
+        hub.execute(
+            "INSERT INTO model_set_member_verdict "
+            "(combo_key, model_id, verdict, answered_at) "
+            "VALUES ('1,2', 2, 'not_problem', 't')"
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            hub.execute(
+                "INSERT INTO model_set_verdict (combo_key, verdict, answered_at) "
+                "VALUES ('1,3', 'pass', 't')"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            hub.execute(
+                "INSERT INTO model_set_member_verdict "
+                "(combo_key, model_id, verdict, answered_at) "
+                "VALUES ('1,2', 1, 'yes', 't')"
+            )
+        # One answer per member per set.
+        with pytest.raises(sqlite3.IntegrityError):
+            hub.execute(
+                "INSERT INTO model_set_member_verdict "
+                "(combo_key, model_id, verdict, answered_at) "
+                "VALUES ('1,2', 2, 'problem', 't')"
+            )
+
+    def test_a_set_holds_two_checkpoints_on_a_hub_that_had_the_one_rule(self, hub):
+        """#1690: a two-model workflow's pair. An earlier build's hub carries
+        the unique index that held a set to one checkpoint; reopening drops it."""
+        apply_migrations(hub)
+        hub.execute(
+            "CREATE UNIQUE INDEX ux_model_workflow_set_checkpoint "
+            "ON model_workflow_set_member(set_id) WHERE slot = 'checkpoint'"
+        )
+        hub.commit()
+        apply_migrations(hub)
+        set_id = self._set(hub)
+        self._member(hub, set_id, "a", "checkpoint")
+        self._member(hub, set_id, "b", "checkpoint")
+        assert hub.execute(
+            "SELECT COUNT(*) FROM model_workflow_set_member "
+            "WHERE set_id = ? AND slot = 'checkpoint'",
+            (set_id,),
+        ).fetchone() == (2,)
+
+    def test_a_hub_from_before_the_cloned_mark_gains_it(self, hub):
+        """Amended into v2: a set made by an earlier build reads as not cloned."""
+        apply_migrations(hub)
+        set_id = self._set(hub)
+        hub.execute("ALTER TABLE model_workflow_set DROP COLUMN cloned")
+        hub.commit()
+        apply_migrations(hub)
+        assert hub.execute(
+            "SELECT cloned FROM model_workflow_set WHERE id = ?", (set_id,)
+        ).fetchone() == (0,)
+
+    def test_a_slot_outside_the_five_is_refused(self, hub):
+        apply_migrations(hub)
+        with pytest.raises(sqlite3.IntegrityError):
+            self._member(hub, self._set(hub), "a", "controlnet")
+
+    def test_a_member_needs_no_model_row_and_is_unique_per_set(self, hub):
+        apply_migrations(hub)
+        set_id = self._set(hub)
+        self._member(hub, set_id, "not-on-the-shelf", "lora")
+        with pytest.raises(sqlite3.IntegrityError):
+            self._member(hub, set_id, "not-on-the-shelf", "other")
+
+
+def test_a_card_move_table_without_its_target_is_replaced(hub):
+    """#1689: the move table first existed without ``new_workflow_id``; a hub
+    that opened that shape gets the current one on its next open."""
+    apply_migrations(hub)
+    hub.execute("DROP TABLE workflow_card_move")
+    hub.execute(
+        "CREATE TABLE workflow_card_move (workflow_key TEXT NOT NULL, "
+        "old_workflow_id TEXT NOT NULL, PRIMARY KEY (workflow_key, old_workflow_id))"
+    )
+    hub.commit()
+    apply_migrations(hub)
+    assert "new_workflow_id" in ddl_for(hub, "workflow_card_move")
+
+
+def test_data_v11_re_derives_only_the_cached_reference_counts(hub):
+    # The count moved from ReferenceLatent nodes to pictures: a cached one is
+    # cleared for the variant finder to fill again, and nothing else is.
+    apply_migrations(hub)
+    rows = {"t1": "two-pass,references:4", "t2": "two-pass", "t3": ""}
+    for topology, traits in rows.items():
+        hub.execute(
+            "INSERT INTO workflow_topology VALUES (?, 'v', 1, '2026-01-01')",
+            (topology,),
+        )
+        hub.execute(
+            "INSERT INTO workflow_topology_core "
+            "(topology_hash, core_hash, core_version, slots, specials, traits) "
+            "VALUES (?, 'c', 'v3', '[]', '', ?)",
+            (topology, traits),
+        )
+    hub.execute("PRAGMA user_version = 10")
+    hub.commit()
+
+    apply_migrations(hub)
+
+    assert dict(
+        hub.execute("SELECT topology_hash, traits FROM workflow_topology_core")
+    ) == {"t1": None, "t2": "two-pass", "t3": ""}
+    assert hub.execute("PRAGMA user_version").fetchone()[0] == CURRENT_DATA_VERSION

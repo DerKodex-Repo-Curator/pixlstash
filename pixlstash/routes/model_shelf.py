@@ -92,14 +92,20 @@ all of them take the **default** library pin (``library_independent`` is left at
 from __future__ import annotations
 
 import os
-from typing import Literal, Optional
+from contextlib import contextmanager
+from typing import Annotated, Literal, Optional
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from pixlstash.db_models.adapter_attachment import ENTITY_CHARACTER, ENTITY_SET
 from pixlstash.pixl_logging import get_logger
+from pixlstash.services.model_kind_suggestions import (
+    REFILEABLE_KINDS,
+    KindSuggestion,
+    kind_suggestions,
+)
 from pixlstash.services.model_shelf_service import (
     CURATABLE_CAPABILITIES,
     CURATABLE_FIELDS,
@@ -110,26 +116,71 @@ from pixlstash.services.model_shelf_service import (
     FILE_KINDS,
     UnknownAttachmentEntityError,
     attached_hashes,
+    effective_trigger_words,
     fetch_attachments,
     fetch_capabilities,
+    fetch_character_names,
+    fetch_companions,
     fetch_distinct_base_models,
     fetch_locations,
     fetch_model_by_hash,
     fetch_models,
+    fetch_picture_counts,
+    fetch_workflow_sets,
     forget_models,
+    base_model_family,
+    hidden_model_ids,
     replace_attachments,
+    served_family,
+    set_models_hidden,
+    shelf_uuid,
     update_models,
+)
+from pixlstash.services.model_workflow_sets import (
+    MAX_SET_NAME_LENGTH,
+    WorkflowSetNotFoundError,
+    WorkflowSetRefusedError,
+    add_members,
+    attach_hand_made,
+    create_set,
+    delete_set,
+    hidden_set_keys,
+    remove_members,
+    rename_set,
+    set_declines,
+    set_sets_hidden,
+)
+from pixlstash.services.workflow_set_verdicts import (
+    VerdictTargetError,
+    fetch_model_marks,
+    fetch_set_checks,
+    write_member_verdict,
+    write_set_verdict,
 )
 from pixlstash.utils.adapter_header import (
     FILE_ADAPTER,
     FILE_CHECKPOINT,
+    FILE_CONTROLNET,
     FILE_ENGINE,
     FILE_TEXT_ENCODER,
     FILE_UNKNOWN,
+    FILE_UPSCALER,
     FILE_VAE,
 )
 from pixlstash.utils.host_open import open_in_file_manager
-from pixlstash.utils.known_base_models import completions, fold
+from pixlstash.utils.image_processing.image_utils import ImageUtils
+from pixlstash.utils.known_base_models import (
+    SOURCE_DECLARED,
+    SOURCE_FILENAME,
+    SOURCE_USER,
+    completions,
+    family_label,
+    family_named,
+    fold,
+    model_tile,
+    tile_canonical,
+)
+from pixlstash.utils.model_utils import canonical_quant, derive_model_name
 from pixlstash.utils.path_utils import path_is_within
 
 logger = get_logger(__name__)
@@ -147,13 +198,17 @@ logger = get_logger(__name__)
 # hash-addressable exactly as an adapter and an ``unknown`` are, which is the
 # property this block's routes are built on. They are emphatically NOT folded
 # into ``/checkpoints`` - filing a text encoder as a base model is the defect
-# this whole kind exists to end.
+# this whole kind exists to end. ``controlnet`` likewise: a big one clears
+# the checkpoint threshold, and its own kind is what makes it fetchable here.
+# ``upscaler`` too, which the pack's Upscale Model Loader fetches by digest.
 ADAPTER_BLOCK_FILE_KINDS = (
     FILE_ADAPTER,
     FILE_UNKNOWN,
     FILE_ENGINE,
     FILE_VAE,
     FILE_TEXT_ENCODER,
+    FILE_CONTROLNET,
+    FILE_UPSCALER,
 )
 
 # Constrained here rather than validated in the handler, so an unknown key is a
@@ -174,13 +229,18 @@ class ModelLocation(BaseModel):
     relpath: str = Field(description="Path of this copy relative to the folder.")
     state: str = Field(
         description=(
-            "``present``, ``missing``, ``unreachable`` or ``not_downloaded``. "
-            "``missing`` is a fact (the folder was readable and the file was "
-            "not in it); ``unreachable`` is the absence of one (we could not "
-            "look), and only ``missing`` is something a forget/cleanup action "
-            "may act on. ``not_downloaded`` belongs to the folders PixlStash "
-            "declares rather than scans: one of its own engines that nothing "
-            "has needed yet, which is normal and not a fault."
+            "``present``, ``missing``, ``unreachable``, ``not_downloaded`` or "
+            "``removed``. ``missing`` is a fact (the folder was readable and "
+            "the file was not in it); ``unreachable`` is the absence of one (we "
+            "could not look), and only ``missing`` is something a "
+            "forget/cleanup action may act on. ``not_downloaded`` belongs to "
+            "the folders PixlStash declares rather than scans: one of its own "
+            "engines that nothing has needed yet, which is normal and not a "
+            "fault. ``removed`` is a copy the owner deleted to keep one of "
+            "several (``POST /model-files/merge``): the row outlives the file "
+            "on purpose, so the record of which files were this model - and "
+            "therefore what a recipe naming the removed one resolves to - "
+            "survives the delete. No scan re-labels it."
         )
     )
     file_mtime: Optional[int] = Field(
@@ -222,6 +282,19 @@ class ModelAttachmentRequest(ModelAttachment):
 MAX_ATTACHMENTS_PER_MODEL = 200
 
 
+class ModelSetVerdictMark(BaseModel):
+    """The owner's answer about one model in one workflow set, for its card."""
+
+    combo_key: str = Field(description="The set: its sorted member ids.")
+    names: list[str] = Field(
+        description=(
+            "The set's members in the shelf's names, base model first. A "
+            "member no longer on the shelf is left out."
+        )
+    )
+    verdict: Literal["problem", "not_problem"]
+
+
 class ModelResponse(BaseModel):
     """One row of the shelf: what the file is, where its copies are, who uses it."""
 
@@ -239,8 +312,18 @@ class ModelResponse(BaseModel):
         default=None,
         description=(
             "Full-file SHA-256, the interop identity (Civitai lookup, the ComfyUI "
-            "node). Never null for an adapter or an unknown; null for a checkpoint "
-            "MissingCheckpointHashFinder has not read yet."
+            "node). Null for a file MissingCheckpointHashFinder has not read "
+            "yet, and for a row that never gets one: see `hash_pending`."
+        ),
+    )
+    hash_pending: bool = Field(
+        default=False,
+        description=(
+            "True while `sha256` is null and the hash worker still owes one. "
+            "False beside a null `sha256` means the row never gets a hash: an "
+            "engine, or an entry in a folder PixlStash declares rather than "
+            "scans (a cached HuggingFace repo is a directory). Such a row "
+            "cannot be kept by a workflow set, now or later."
         ),
     )
     file_kind: str = Field(
@@ -294,7 +377,158 @@ class ModelResponse(BaseModel):
             "actually says."
         ),
     )
-    trigger_words: Optional[str] = None
+    base_model_canonical: Optional[str] = Field(
+        default=None,
+        description=(
+            "The known base model this row was identified as, from what the "
+            "file declares or from its filename, or the fold of what a person "
+            "typed. Stored, and what the shelf sorts and filters on. Null when "
+            "nothing matched, or when a person cleared the base model."
+        ),
+    )
+    base_model_source: Optional[str] = Field(
+        default=None,
+        description=(
+            "Where `base_model_canonical` came from, strongest first: `user`, "
+            "`declared` (the file's metadata names it exactly), `filename` (a "
+            "filename token names it exactly), `declared_fuzzy` (a near-typo "
+            "in the metadata), `filename_fuzzy` (an alias inside the "
+            "filename). The last three are guesses and the shelf says so."
+        ),
+    )
+    matched_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "For a checkpoint whose filename is simply the name of a known "
+            "base model (`flux1-dev.safetensors`), that model's label, to show "
+            "where the row has no name of its own. Never set for an adapter, "
+            "whose base model is not its name, nor from a guessed base model."
+        ),
+    )
+    mark: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "The short name a workflow card's tile prints: for a release "
+            '(`mark_band`) its name and version, `["Klein", "2"]`; for a '
+            "fine-tune or LoRA the base's name over its own initials, "
+            '`["SDXL", "JU9"]`. Null for a model of no known base model, which '
+            "keeps the generated initials. Worked out by the server "
+            "(`known_base_models.model_tile`) so every client draws the same."
+        ),
+    )
+    mark_tab: Optional[str] = Field(
+        default=None,
+        description=(
+            "The tile's tab: a role (`BASE`, `REFI`, `EDIT`, `RAW`, `HD`), or "
+            "`⚡` for a few-step model followed by a speed LoRA's step count "
+            "(`⚡4`). Null for no tab."
+        ),
+    )
+    mark_colors: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "The tile's colour, one `#rrggbb` stop or a gradient's two: the "
+            "maker's, white text clearing 4:1 on each. Null keeps the hashed hue."
+        ),
+    )
+    mark_icon: Optional[str] = Field(
+        default=None,
+        description=(
+            "The glyph a release's tile wears: its maker's LobeHub icon "
+            "(`flux`, `qwen`) or the owner's (`chroma`, `pony`, "
+            "`illustrious`), or null. Never on a LoRA or fine-tune."
+        ),
+    )
+    mark_letters: Optional[str] = Field(
+        default=None,
+        description=(
+            "The letters a release with no glyph wears in its place (`Z`, "
+            "`HI`, `Lu`), or null."
+        ),
+    )
+    mark_band: bool = Field(
+        default=False,
+        description=(
+            "Whether the tile is a release's: `mark` is then its name, printed "
+            "across a band, and its version, printed beside the glyph."
+        ),
+    )
+    family: Optional[str] = Field(
+        default=None,
+        description=(
+            "The architecture family. From `base_model` when it folds to a "
+            "known base (`sdxl`, `flux1`, ...), otherwise what the header's "
+            "tensors show for a support file (`vae_4ch`, `vae_16ch`, `clip_l`, "
+            "`clip_g`, `t5_xxl`, ...). Null when neither says. Never a group: "
+            "one T5 serves several families."
+        ),
+    )
+    base_model_family: Optional[str] = Field(
+        default=None,
+        description=(
+            "The family of the base model this row was identified as "
+            "(`base_model_canonical`, else `base_model`), **filename guesses "
+            "included**, and never a support file's tensor family. For "
+            "narrowing a list to what probably fits, such as the workflows a "
+            "LoRA can run on; `family` is the one to state as fact. Null when "
+            "no known base model is recorded."
+        ),
+    )
+    base_model_family_label: Optional[str] = Field(
+        default=None,
+        description=(
+            "What a person calls `base_model_family` (`Krea 2` for `krea2`), "
+            "the value `GET /adapters?base_model_family=` narrows by."
+        ),
+    )
+    quant: Optional[str] = Field(
+        default=None,
+        description=(
+            "The precision the file was stored at, as one canonical id "
+            "(`fp16`, `bf16`, `fp8_e4m3`, `int8`, `q4_k_m`, `mixed`), or null "
+            "where nothing records it.\n\n"
+            "**Two sources folded into one vocabulary.** The safetensors "
+            "header - the dtype holding most of the parameters, weighted by "
+            "parameter count - wherever there is one, because it is the only "
+            "thing that knows what a file called `nvfp4_awq` is actually "
+            "stored at; the filename postfix otherwise, which is the only "
+            "source a `.gguf` has. The header spells a dtype (`f16`, "
+            "`f8_e4m3`) and a filename spells a precision (`fp16`); this "
+            "serves the folded id either way, so one screen cannot read `f16` "
+            "where the next reads `FP16`.\n\n"
+            "An id, not a label: `FP8 E4M3` is display copy and belongs in the "
+            "client. A GGUF level is kept whole (`q4_k_m`), because the level "
+            "is the name a person recognises."
+        ),
+    )
+    weights_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Hash of the tensor names and shapes without their dtypes: two "
+            "rows sharing it are one model stored at different precisions. A "
+            "repack that adds tensors gets a different one."
+        ),
+    )
+    trigger_words: list[str] = Field(
+        default_factory=list,
+        description=(
+            "What to type in a prompt to call this model up. The words the "
+            "file's header or the owner recorded, most significant first; "
+            "while nothing has been set, the name of the person it is "
+            "attached to in the active library. `trigger_words_source` says "
+            "which. Empty when there is neither, and when the owner said it "
+            "needs none."
+        ),
+    )
+    trigger_words_source: Optional[str] = Field(
+        default=None,
+        description=(
+            "`recorded` when `trigger_words` came from the file or the owner, "
+            "`character` when it is a person's name standing in for a word "
+            "nobody recorded, null when the list is empty. A default is served "
+            "rather than stored, so it follows a rename and a reassignment."
+        ),
+    )
     provenance: str = Field(
         description="``external`` for anything found on disk; ``trained`` for a run we ran."
     )
@@ -351,6 +585,67 @@ class ModelResponse(BaseModel):
             "same object and the browser caches one response for all of them."
         ),
     )
+    pictures_verified: int = Field(
+        default=0,
+        description=(
+            "Pictures in the active library, Scrapheap excluded, whose workflow "
+            "loaded this model by its sha256: that exact file."
+        ),
+    )
+    pictures_by_filename: int = Field(
+        default=0,
+        description=(
+            "Further pictures whose workflow names a file with this model's "
+            "filename. Unverified: a file of that name, not necessarily this "
+            "one. Never folded into `pictures_verified`, and a picture counted "
+            "there is not counted here."
+        ),
+    )
+    hidden: bool = Field(
+        default=False,
+        description=(
+            "The ACTIVE library hides this model (`PUT /models/hidden`): its "
+            "shelf leaves the row out unless asked for the hidden ones, and "
+            "nothing that offers a model to pick offers this one. The answer "
+            "is the library's, not the machine's, and it is still served so a "
+            "recipe or a workflow that already uses the model can name it."
+        ),
+    )
+    suggested_kind: Optional[str] = Field(
+        default=None,
+        description=(
+            "The kind every recorded workflow that loads this model loads it "
+            "as (`vae` or `text_encoder`), on a model the shelf files as a "
+            "checkpoint or Unclassified. Null when no workflow loads it, when "
+            "they disagree, or when they agree with the shelf. An offer only: "
+            "nothing re-files the model until the owner does (#1962)."
+        ),
+    )
+    suggested_by: int = Field(
+        default=0,
+        description="How many workflows load it as `suggested_kind`.",
+    )
+    suggested_fields: list[str] = Field(
+        default_factory=list,
+        description="The loader fields that name it (`clip_name`, `vae_name`).",
+    )
+    kind_decided: bool = Field(
+        default=False,
+        description=(
+            "A person has decided what this file is: picked a kind, or said "
+            "not to suggest one. While true, `suggested_kind` is not offered; "
+            "it is still served so the shelf can offer to suggest again."
+        ),
+    )
+    set_verdicts: list[ModelSetVerdictMark] = Field(
+        default_factory=list,
+        description=(
+            'The owner\'s answers to "is this model a problem in this set", '
+            "one per workflow set answered about (`PUT /models/workflow-sets/"
+            "verdicts/{combo_key}/members/{model_id}`). The owner's word only, "
+            "never PixlStash's check; empty when nobody has answered."
+        ),
+    )
     locations: list[ModelLocation] = Field(
         default_factory=list,
         description="Every registered copy. Empty means every copy was forgotten.",
@@ -374,14 +669,23 @@ class AttachmentsResponse(BaseModel):
     attachments: list[ModelAttachment]
 
 
+# Ceilings on one PATCH's trigger words. The dialog sends back what it was
+# seeded with, and a file trained on tagged captions records its whole tag
+# table - thousands of entries off a large dataset - so the bounds sit well
+# above anything a person types. They exist to stop an unbounded body, not to
+# say what a trigger word is.
+MAX_TRIGGER_WORDS = 5000
+MAX_TRIGGER_WORD_LENGTH = 500
+
+
 class ModelEditRequest(BaseModel):
     """Body of ``PATCH /models``: the verbs that write a curated column.
 
     Every field is optional and **only the fields actually sent are written**,
-    which is what lets one route carry Rename, Set base model and Set kind
-    without each of them blanking the other two. A field sent explicitly as
-    ``null`` IS written: clearing a wrong base model back to "not set" is a
-    correction the owner is entitled to make.
+    which is what lets one route carry Rename, Set base model, Set kind and Set
+    trigger words without each of them blanking the others. A field sent
+    explicitly as ``null`` IS written: clearing a wrong base model back to "not
+    set" is a correction the owner is entitled to make.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -435,6 +739,23 @@ class ModelEditRequest(BaseModel):
             "re-derived away by a later scan."
         ),
     )
+    trigger_words: Optional[
+        list[Annotated[str, Field(max_length=MAX_TRIGGER_WORD_LENGTH)]]
+    ] = Field(
+        default=None,
+        max_length=MAX_TRIGGER_WORDS,
+        description=(
+            "What to type in a prompt to call the model up, most significant "
+            "first. The complete list for every id sent. Blank entries and "
+            "repeats are dropped.\n\n"
+            "**`[]` and null are different answers.** `[]` says the model needs "
+            "no trigger word, and it is stored: the row is served an empty "
+            "list whoever it is attached to, and a later scan does not put the "
+            "file's own tags back. Null puts the column back to *not set*, "
+            "where a model attached to a person is served that person's name "
+            "and the next scan may fill it from the file's header."
+        ),
+    )
     capabilities: Optional[list[str]] = Field(
         default=None,
         description=(
@@ -450,6 +771,15 @@ class ModelEditRequest(BaseModel):
             "not something we get the last word on. `checkpoint` and `other` "
             "are not offered: the first is a `file_kind` and the second is the "
             "classifier's shrug, which an empty list already says."
+        ),
+    )
+    suggest_kind: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Whether to offer the kind the model's workflows load it as "
+            "(`suggested_kind` on the row). `false` is \"Don't suggest a "
+            'kind", `true` takes that back. Any `file_kind` write already '
+            "stops the offer, as a person deciding what the file is."
         ),
     )
 
@@ -494,6 +824,29 @@ class ModelForgetRequest(BaseModel):
     )
 
 
+class ModelsHiddenRequest(BaseModel):
+    """Body of ``PUT /models/hidden``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ids: list[int] = Field(
+        min_length=1,
+        max_length=MAX_MODELS_PER_EDIT,
+        description="The models to hide or show, by hub `model.id`.",
+    )
+    hidden: bool = Field(
+        description="True hides them in this library, false shows them again."
+    )
+
+
+class ModelsHiddenResponse(BaseModel):
+    """Body of ``PUT /models/hidden``: what is hidden now."""
+
+    hidden_models: list[int] = Field(
+        description="Every model hidden in the active library, after the call."
+    )
+
+
 class ForgetRefusal(BaseModel):
     """One id the forget declined, and why."""
 
@@ -528,6 +881,673 @@ class ModelForgetResponse(BaseModel):
     )
 
 
+class ModelCompanionsRequest(BaseModel):
+    """Body of ``POST /models/companions``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ids: list[int] = Field(
+        min_length=1,
+        max_length=MAX_MODELS_PER_EDIT,
+        description="The models about to be deleted, by hub `model.id`.",
+    )
+
+
+class CompanionModel(BaseModel):
+    """One model named in a companions answer."""
+
+    model_config = ConfigDict(extra="allow")
+
+    id: int
+    name: str = Field(description="Display name, else filename.")
+
+
+class CompanionFile(CompanionModel):
+    """A support file a delete affects."""
+
+    file_size: Optional[int] = None
+    used_with: list[CompanionModel] = Field(
+        default_factory=list,
+        description="Base models staying on the shelf that ran with it.",
+    )
+
+
+class ModelCompanionsResponse(BaseModel):
+    """Body of ``POST /models/companions``."""
+
+    model_config = ConfigDict(extra="allow")
+
+    orphaned: list[CompanionFile] = Field(
+        description=(
+            "Support files whose every user a recipe records is being deleted. "
+            "Not proof nothing needs them: a kept base model no recipe names "
+            "may (see `unrecorded`). The delete does not take them."
+        )
+    )
+    shared: list[CompanionFile] = Field(
+        description="Support files a model staying on the shelf still runs with."
+    )
+    unknown: list[CompanionFile] = Field(
+        description=(
+            "Support files a recipe named only by a filename two shelf rows "
+            "share, or beside a model digest the shelf cannot yet match "
+            "because a hash is pending. Never counted as orphaned."
+        )
+    )
+    in_use: list[CompanionFile] = Field(
+        description=(
+            "Support files being deleted that a model staying on the shelf "
+            "has run with."
+        )
+    )
+    no_evidence: list[int] = Field(
+        description=(
+            "Ids being deleted that no recipe names, so nothing can be said "
+            "about what they use."
+        )
+    )
+    unrecorded: int = Field(
+        description=(
+            "Base models staying on the shelf that no recipe names, any of "
+            "which could use an `orphaned` file."
+        )
+    )
+
+
+class WorkflowSetMember(BaseModel):
+    """One model inside a combination, as the set grid draws it."""
+
+    model_config = ConfigDict(extra="allow")
+
+    id: int = Field(description="Hub `model.id`.")
+    name: str = Field(description="Display name, else filename.")
+    filename: Optional[str] = Field(
+        default=None, description="The file the shelf row was registered under."
+    )
+    kind: str = Field(description="The row's `file_kind`.")
+    file_size: Optional[int] = None
+    ambiguous: bool = Field(
+        description=(
+            "The recipe reached this model only through a basename two shelf "
+            "rows share, or beside a digest the shelf cannot yet match because "
+            "a hash is pending. Drawn as a filename-only match rather than "
+            "hidden: it is still the best answer the evidence gives."
+        )
+    )
+
+
+class WorkflowSetCover(BaseModel):
+    """One picture on a combination's cover strip.
+
+    **The two facts a thumbnail needs, not a URL.** Serving a path was the first
+    shape of this and it was wrong twice over: an ``<img src>`` never reaches the
+    Axios interceptor, so nothing prepends the API base and nothing appends a
+    share token, and the browser asked the PAGE origin for a route it does not
+    serve - every cover on the grid broken. The client builds the URL with
+    ``pictureThumbnailUrl`` (``api/pictures.js``), which is the one place that
+    path is spelled, rather than this route inventing a third copy of it beside
+    ``routes/workflows.py``'s.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    picture_id: int = Field(description="The picture to load a thumbnail for.")
+    version: str = Field(
+        description=(
+            "The cache key the picture grid's own tiles use, so a cover the "
+            "browser already holds is not fetched twice and a regenerated "
+            "bitmap is not served stale."
+        )
+    )
+
+
+class WorkflowSetMissingBase(BaseModel):
+    """A base model a combination's recipes load that the shelf does not hold."""
+
+    name: str = Field(description="The file name the recipes give, lowercased.")
+    workflow_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The workflows whose recipes load it: where it is replaced "
+            "(`PUT /workflows/{workflow_id}/model-fix`)."
+        ),
+    )
+
+
+class WorkflowSetCombination(BaseModel):
+    """One set of files a picture proves ran together."""
+
+    model_config = ConfigDict(extra="allow")
+
+    key: str = Field(
+        description=(
+            "The member ids, sorted and comma-joined, then `+` and the missing "
+            "base names as a JSON list when there are any."
+        )
+    )
+    models: list[WorkflowSetMember] = Field(
+        description=(
+            "Every member, the file the set is named after first: checkpoint, "
+            "then unclassified, then VAE, text encoder, adapter, engine."
+        )
+    )
+    missing: list[WorkflowSetMissingBase] = Field(
+        default_factory=list,
+        description=(
+            "Base models (checkpoint or diffusion file) the recipes load that "
+            "no shelf row answers to. A combination with no on-shelf base is "
+            "named after these; one with neither is listed but is no set. A "
+            "name the "
+            "owner replaced with a model fix resolves to the replacement and "
+            "is not listed."
+        ),
+    )
+    recipes: int = Field(
+        description=(
+            "How many recipes resolve to exactly this set of shelf rows. Two "
+            "graphs that differ in wiring but name the same files are two "
+            "recipes and one combination; a recipe naming a file this shelf no "
+            "longer holds is counted here for the members it does resolve."
+        )
+    )
+    history_runs: int = Field(
+        0,
+        description=(
+            "Finished ComfyUI runs whose models resolve to exactly this set, "
+            "as recorded from `GET /history` (nothing reads the history "
+            "since the pull of ComfyUI's saved workflows was removed, so the "
+            "count no longer grows) and counted "
+            "apart from recipes. Hub-wide, not library-scoped: ComfyUI's "
+            "history belongs to the machine."
+        ),
+    )
+    picture_count: int = Field(
+        description="Kept pictures in the active library those recipes made."
+    )
+    covers: list[WorkflowSetCover] = Field(
+        default_factory=list, description="Up to three cover thumbnails, best first."
+    )
+    covered_by: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Ids of the hand-made sets holding every model of this combination "
+            "on the shelf. The combination is still listed: the grid hides a "
+            "covered one, Works with reads them all."
+        ),
+    )
+
+
+# The slot vocabulary, spelled as the hub's CHECK spells it.
+WorkflowSetSlot = Literal["checkpoint", "text_encoder", "vae", "lora", "other"]
+
+
+class HandMadeSetMember(BaseModel):
+    """One member of a hand-made workflow set."""
+
+    model_config = ConfigDict(extra="allow")
+
+    sha256: str = Field(description="What the member IS; a set holds bytes, not rows.")
+    slot: WorkflowSetSlot
+    label: Optional[str] = Field(
+        default=None, description="The model's name when it was added."
+    )
+    on_shelf: bool = Field(
+        description=(
+            "A shelf row holds these bytes now. False after the file was "
+            "forgotten or deleted; it reconnects when the same file returns."
+        )
+    )
+    id: Optional[int] = Field(default=None, description="Hub `model.id`, if on shelf.")
+    name: str = Field(description="Display name, else filename, else the label.")
+    filename: Optional[str] = None
+    kind: Optional[str] = Field(default=None, description="`file_kind`, if on shelf.")
+    base_model: Optional[str] = None
+    file_size: Optional[int] = None
+
+
+class MergeOfferModel(BaseModel):
+    """A model the merge offer would add to a hand-made set (#1523)."""
+
+    id: int = Field(description="Hub `model.id`; add it by this.")
+    sha256: str = Field(description="What Keep separate records.")
+    name: str
+    kind: str = Field(description="`file_kind`.")
+    slot: WorkflowSetSlot = Field(description="The slot it would land in.")
+    picture_count: int = Field(
+        description="Kept pictures in the active library that used it."
+    )
+    recipes: int = Field(description="Recipes, in any library, that used it.")
+
+
+class MergeOffer(BaseModel):
+    """The pictures' set a hand-made set could take in by adding models (#1523)."""
+
+    head_id: int = Field(description="The file the pictures' set is named after.")
+    head_name: str
+    picture_count: int = Field(
+        description="Kept pictures in the active library that would join."
+    )
+    recipes: int = Field(description="Recipes, in any library, that would join.")
+    covers: list[WorkflowSetCover] = Field(default_factory=list)
+    models: list[MergeOfferModel] = Field(
+        description="What the merge adds, by slot, most pictures first."
+    )
+
+
+class HandMadeSet(BaseModel):
+    """A workflow set the owner put together (#1520)."""
+
+    model_config = ConfigDict(extra="allow")
+
+    id: int
+    name: Optional[str] = Field(default=None, description="Null when unnamed.")
+    created_at: str
+    updated_at: str
+    cloned: bool = Field(
+        default=False,
+        description="Copied from a set from pictures on purpose (see the create).",
+    )
+    incomplete: bool = Field(description="The set has no checkpoint member.")
+    checkpoint_ids: list[int] = Field(
+        default_factory=list,
+        description=(
+            "The on-shelf `model.id`s of its checkpoints, in member order; "
+            "two for a two-model workflow such as a Wan 2.2 high/low pair."
+        ),
+    )
+    picture_count: int = Field(
+        description="Kept pictures of the combinations this set covers."
+    )
+    recipes: int = Field(description="Recipes of the combinations this set covers.")
+    covers: list[WorkflowSetCover] = Field(default_factory=list)
+    members: list[HandMadeSetMember] = Field(
+        description="Checkpoint, text encoders, VAEs, LoRAs, others; by name within."
+    )
+    declined: list[str] = Field(
+        default_factory=list,
+        description="Sha256s the owner kept out of the merge offer (#1523).",
+    )
+    offer: Optional[MergeOffer] = Field(
+        default=None,
+        description=(
+            "Models recipes used with this set's checkpoint that it lacks, and "
+            "the pictures that would join if they were added. Derived per "
+            "request; nothing joins without the owner adding them (#1523)."
+        ),
+    )
+    kept_separate: int = Field(
+        default=0,
+        description="Kept pictures here the offer leaves out because of `declined`.",
+    )
+
+
+class WorkflowSetMemberRequest(BaseModel):
+    """A member to add: a shelf model by id, or a file by sha256.
+
+    The sha256 form is the undo path: it puts back a member whose file is no
+    longer on the shelf, so it needs the slot and label the delete returned.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    model_id: Optional[int] = Field(default=None, description="Hub `model.id`.")
+    sha256: Optional[str] = Field(
+        default=None, pattern=r"^[0-9a-fA-F]{64}$", description="A full digest."
+    )
+    slot: Optional[WorkflowSetSlot] = Field(
+        default=None,
+        description=(
+            "Required with `sha256`. With `model_id` it defaults from the "
+            "file's kind; `checkpoint` is accepted for a checkpoint or an "
+            "unclassified file only."
+        ),
+    )
+    label: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="With `sha256` only: the name to keep for it.",
+    )
+
+    @model_validator(mode="after")
+    def _one_address(self):
+        if (self.model_id is None) == (self.sha256 is None):
+            raise ValueError("Name a member by exactly one of model_id or sha256.")
+        if self.sha256 is not None and self.slot is None:
+            raise ValueError("A member named by sha256 needs its slot.")
+        if self.model_id is not None and self.label is not None:
+            raise ValueError("A label goes with sha256; a model_id brings its own.")
+        return self
+
+
+class WorkflowSetCreateRequest(BaseModel):
+    """Body of ``POST /models/workflow-sets``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: Optional[str] = Field(
+        default=None,
+        max_length=MAX_SET_NAME_LENGTH,
+        description="Trimmed; blank or null leaves the set unnamed.",
+    )
+    members: list[WorkflowSetMemberRequest] = Field(
+        default_factory=list,
+        max_length=MAX_MODELS_PER_EDIT,
+        description="May be empty: an empty set is a set.",
+    )
+    cloned: bool = Field(
+        default=False,
+        description=(
+            "The set is a copy of a set from pictures, made on purpose. Served "
+            "back on the set; the client never swaps such a set for the set "
+            "from pictures it matches."
+        ),
+    )
+
+
+class WorkflowSetRenameRequest(BaseModel):
+    """Body of ``PATCH /models/workflow-sets/{set_id}``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: Optional[str] = Field(
+        max_length=MAX_SET_NAME_LENGTH,
+        description="Trimmed; blank or null clears the name.",
+    )
+
+
+class WorkflowSetMembersRequest(BaseModel):
+    """Body of ``POST /models/workflow-sets/{set_id}/members``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    members: list[WorkflowSetMemberRequest] = Field(
+        min_length=1, max_length=MAX_MODELS_PER_EDIT
+    )
+
+
+# A member's digest as the remove route takes it: exactly 64 characters.
+Digest = Annotated[str, StringConstraints(min_length=64, max_length=64)]
+
+
+class WorkflowSetRemoveRequest(BaseModel):
+    """Body of ``POST /models/workflow-sets/{set_id}/members/remove``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Each item a full-length digest: a malformed one is a 422 rather than a
+    # string that silently matches nothing. Length, not a hex pattern: the
+    # members it names already exist, so this only has to reject what cannot
+    # be one of them, and the add path's hex check guards what goes in.
+    sha256: list[Digest] = Field(
+        min_length=1,
+        max_length=MAX_MODELS_PER_EDIT,
+        description=(
+            "Members to take out, by full digest. One not in the set is ignored."
+        ),
+    )
+
+
+class WorkflowSetDeclinesRequest(BaseModel):
+    """Body of ``PUT /models/workflow-sets/{set_id}/declines``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sha256: list[Digest] = Field(
+        max_length=MAX_MODELS_PER_EDIT,
+        description="The whole list; empty offers the merge again.",
+    )
+
+
+class WorkflowSetDeclinesResponse(BaseModel):
+    """Body of ``PUT /models/workflow-sets/{set_id}/declines``."""
+
+    set: HandMadeSet
+    previous: list[str] = Field(description="The list before; putting it undoes.")
+
+
+# A workflow set's key as the grid draws it: a combination's sorted member
+# model ids comma-joined, or `hand:<id>` for a hand-made set.
+SetKey = Annotated[str, StringConstraints(min_length=1, max_length=1000)]
+
+
+class WorkflowSetHiddenRequest(BaseModel):
+    """Body of ``PUT /models/workflow-sets/hidden``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    keys: list[SetKey] = Field(
+        max_length=5000,
+        description="The sets to hide or show, each by the key the grid draws it under.",
+    )
+    hidden: bool = Field(
+        description="True hides them in this library, false shows them again."
+    )
+
+
+class WorkflowSetHiddenResponse(BaseModel):
+    """Body of ``PUT /models/workflow-sets/hidden``: what is hidden now."""
+
+    hidden_sets: list[str] = Field(
+        description="Every set hidden in the active library, after the call."
+    )
+
+
+class SetVerdictRequest(BaseModel):
+    """Body of ``PUT /models/workflow-sets/verdicts/{combo_key}``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    verdict: Literal["yes", "no"]
+
+
+class SetVerdictResponse(BaseModel):
+    """Body of the set-verdict PUT and DELETE."""
+
+    combo_key: str
+    verdict: Optional[Literal["yes", "no"]] = Field(
+        description="As stored now; null after a DELETE."
+    )
+    previous: Optional[Literal["yes", "no"]] = Field(
+        description="The verdict before; writing it back (or deleting) undoes."
+    )
+
+
+class MemberVerdictRequest(BaseModel):
+    """Body of ``PUT /models/workflow-sets/verdicts/{combo_key}/members/{model_id}``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    verdict: Literal["problem", "not_problem"]
+
+
+class MemberVerdictResponse(BaseModel):
+    """Body of the member-verdict PUT and DELETE."""
+
+    combo_key: str
+    model_id: int
+    verdict: Optional[Literal["problem", "not_problem"]] = Field(
+        description="As stored now; null after a DELETE."
+    )
+    previous: Optional[Literal["problem", "not_problem"]] = Field(
+        description="The verdict before; writing it back (or deleting) undoes."
+    )
+
+
+class RemovedWorkflowSetMember(BaseModel):
+    """What a remove took out, shaped for putting it back."""
+
+    sha256: str
+    slot: WorkflowSetSlot
+    label: Optional[str] = None
+
+
+class WorkflowSetDeleteResponse(BaseModel):
+    """Body of ``DELETE /models/workflow-sets/{set_id}``."""
+
+    deleted: HandMadeSet = Field(
+        description="The set as it was, members included, for an undo to re-post."
+    )
+
+
+class WorkflowSetMembersResponse(BaseModel):
+    """Body of ``POST /models/workflow-sets/{set_id}/members``."""
+
+    set: HandMadeSet
+    added: list[str] = Field(
+        description="The sha256s actually inserted; members already there are not."
+    )
+
+
+class WorkflowSetRemoveResponse(BaseModel):
+    """Body of ``POST /models/workflow-sets/{set_id}/members/remove``."""
+
+    set: HandMadeSet
+    removed: list[RemovedWorkflowSetMember]
+
+
+class WorkflowSetEvidence(BaseModel):
+    """What PixlStash's check counted for one set."""
+
+    together: int = Field(
+        description=(
+            "Kept pictures in the active library whose recipe used EVERY "
+            "member together (the recipe may have used more)."
+        )
+    )
+    checked: int = Field(
+        description="Of those, the ones with a prompt-match score (not unscored, not -1)."
+    )
+    passing: int = Field(
+        description="Of the checked, the ones that look like their prompt at all."
+    )
+
+
+class WorkflowSetSuspect(BaseModel):
+    """A member whose pictures fail the check far more often than the set's without it."""
+
+    model_id: int
+    with_failed: int = Field(
+        description="Checked pictures made with the whole set that fail the check."
+    )
+    with_total: int = Field(
+        description="Checked pictures made with the whole set (= `evidence.checked`)."
+    )
+    without_failed: int = Field(
+        description="Checked pictures with every other member but not this one that fail."
+    )
+    without_total: int = Field(
+        description="Checked pictures with every other member but not this one."
+    )
+    verdict: Optional[Literal["problem", "not_problem"]] = Field(
+        default=None, description="The owner's answer, null while unanswered."
+    )
+
+
+class WorkflowSetMemberVerdict(BaseModel):
+    """The owner's answer about one member of a set, suspect or not."""
+
+    model_id: int
+    verdict: Literal["problem", "not_problem"]
+
+
+class WorkflowSetCheck(BaseModel):
+    """PixlStash's check and the owner's verdicts for one set of members."""
+
+    combo_key: str = Field(
+        description=(
+            "The sorted member model ids, comma-joined. The join key: a client "
+            "computes it from the members it draws and looks the set up here. "
+            "A verdict belongs to this exact key."
+        )
+    )
+    member_ids: list[int]
+    evidence: WorkflowSetEvidence
+    check: Literal["none", "pending", "too_few", "pass", "fail", "unavailable"] = Field(
+        description=(
+            "`none`: no picture used them all. `pending`: some are still to be "
+            "scored. `unavailable`: none is scored and none will be (no "
+            "scorer running, or no prompt). `too_few`: fewer than 3 checked. "
+            "`pass` / `fail`: at least half of the checked look like their "
+            "prompt, or fewer than half."
+        )
+    )
+    verdict: Optional[Literal["yes", "no"]] = Field(
+        default=None,
+        description='The owner\'s answer to "does this set produce sensible output".',
+    )
+    suspects: list[WorkflowSetSuspect] = Field(
+        default_factory=list, description="Strongest first."
+    )
+    member_verdicts: list[WorkflowSetMemberVerdict] = Field(
+        default_factory=list,
+        description=(
+            "Every member answered about, suspect today or not: an answer is "
+            "never dropped because the counts moved."
+        ),
+    )
+
+
+class WorkflowSetsResponse(BaseModel):
+    """Body of ``GET /models/workflow-sets``."""
+
+    model_config = ConfigDict(extra="allow")
+
+    combinations: list[WorkflowSetCombination] = Field(
+        description=(
+            "Every distinct set of shelf models a kept picture or a stored "
+            "ComfyUI run proves ran together, most pictures first. A model appears in every set it "
+            "has run in; membership is not exclusive and is stored nowhere."
+        )
+    )
+    no_set: list[int] = Field(
+        description=(
+            "Ids that are in none of the combinations above, which is a "
+            "narrower statement than it looks: it means **no kept picture in "
+            "this library and no stored ComfyUI run used them with a base "
+            "model** (a checkpoint or diffusion file, on the shelf or named "
+            "by the recipe). A recipe on the hub may name "
+            "one - from another library, or from pictures since deleted - and "
+            "this says nothing about that. **Not a verdict** either way: it "
+            "rules nothing out about what the file works with. Engines are "
+            "excluded, because no generation graph can load one and their "
+            "absence from a recipe means nothing at all. Returned so the grid "
+            "can draw them rather than quietly omitting them. An on-shelf "
+            "member of a hand-made set is not listed here either."
+        )
+    )
+    hand_made: list[HandMadeSet] = Field(
+        default_factory=list,
+        description="The owner's own workflow sets, newest first.",
+    )
+    set_checks: list[WorkflowSetCheck] = Field(
+        default_factory=list,
+        description=(
+            "PixlStash's check and the owner's verdicts for every set the grid "
+            "draws: one per evidence card (the union of the members of the "
+            "uncovered combinations sharing a head) and one per hand-made set "
+            "(its on-shelf members), deduplicated by `combo_key`."
+        ),
+    )
+    hidden_sets: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Set keys the active library hides, so the grid can leave them "
+            "out. A key is the shelf's own - a combination's sorted member "
+            "ids, or `hand:<id>` for a hand-made set - and the answer is the "
+            "library's, not the machine's: the same set is shown in another "
+            "library that has not hidden it."
+        ),
+    )
+    hidden_models: list[int] = Field(
+        default_factory=list,
+        description=(
+            "The models (hub `model.id`) the active library hides, so the grid "
+            "can leave them out of the cards and trays this payload draws "
+            "without reading the model lists first."
+        ),
+    )
+
+
 class ModelOpenLocationResponse(BaseModel):
     """Body of ``POST /models/{model_id}/open-location``."""
 
@@ -552,6 +1572,14 @@ class CheckpointListResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     checkpoints: list[ModelResponse]
+    shelf: str = Field(
+        description=(
+            "This shelf's own id. A row `id` means nothing on another "
+            "PixlStash, so whatever keeps one where it may be read back "
+            "somewhere else (the ComfyUI-PixlStash checkpoint loader, in a "
+            "picture's workflow) keeps this beside it."
+        )
+    )
 
 
 def _present_copy(locations: list[dict]) -> Optional[str]:
@@ -594,22 +1622,129 @@ def _present_copy(locations: list[dict]) -> Optional[str]:
     return None
 
 
+def _cover_strip(covers) -> list[WorkflowSetCover]:
+    """A set card's cover strip: a picture and the cache key for its bitmap.
+
+    No path. The cache key is the one the picture grid's own tiles use
+    (``routes/pictures/_thumbnails.py``), and the client puts it through
+    ``pictureThumbnailUrl`` - which is where that URL is spelled once, with the
+    API base and the share token an ``<img src>`` cannot get for itself.
+    """
+    return [
+        WorkflowSetCover(
+            picture_id=cover.picture_id,
+            version=ImageUtils.thumbnail_cache_version(
+                cover.thumbnail_width,
+                cover.thumbnail_height,
+                cover.orientation,
+                file_path=cover.file_path,
+            ),
+        )
+        for cover in covers
+    ]
+
+
+def _hand_made_set(entry: dict) -> HandMadeSet:
+    """One ``attach_hand_made`` entry as the response model."""
+    offer = entry.get("offer")
+    return HandMadeSet(
+        **{
+            key: value for key, value in entry.items() if key not in ("covers", "offer")
+        },
+        covers=_cover_strip(entry["covers"]),
+        offer=(
+            MergeOffer(**{**offer, "covers": _cover_strip(offer["covers"])})
+            if offer
+            else None
+        ),
+    )
+
+
+@contextmanager
+def _workflow_set_errors():
+    """The set service's refusals as HTTP answers."""
+    try:
+        yield
+    # Logged at info, not warning: these are answers to the owner's request
+    # (a set that is gone, a second checkpoint), not faults of the server, but
+    # the log should still say what was refused and why.
+    except WorkflowSetNotFoundError as exc:
+        logger.info("Workflow set request answered 404: %s", exc)
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except WorkflowSetRefusedError as exc:
+        logger.info("Workflow set request refused (409): %s", exc)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _matched_name(row: dict) -> Optional[str]:
+    """The known base model a checkpoint's filename simply IS, or ``None``.
+
+    Only when the name the shelf would derive from the filename folds exactly
+    to the row's own identified base model, and that identification is not a
+    guess: a fine-tune called ``juggernaut_sdxl`` is not SDXL 1.0 by name, and a
+    wrong fuzzy match must not show up in the name column as well.
+    """
+    canonical = row["base_model_canonical"]
+    if (
+        row["file_kind"] != FILE_CHECKPOINT
+        or not canonical
+        or row["base_model_source"]
+        not in (SOURCE_USER, SOURCE_DECLARED, SOURCE_FILENAME)
+        or not row["filename"]
+    ):
+        return None
+    return canonical if fold(derive_model_name(row["filename"])) == canonical else None
+
+
 def _to_response(
     row: dict,
     locations: dict[int, list[dict]],
     attachments: dict[str, list[dict]],
     capabilities: dict[int, list[str]],
+    picture_counts: dict[int, dict[str, int]],
+    marks: dict[int, list[dict]],
+    character_names: dict[int, str],
+    hidden: set[int],
+    suggestions: Optional[dict[int, KindSuggestion]] = None,
 ) -> ModelResponse:
+    counts = picture_counts.get(int(row["id"]), {})
+    suggestion = (suggestions or {}).get(int(row["id"]))
+    attached = attachments.get(row["sha256"] or "", [])
+    # A person's name stands in only on something a prompt calls up. A VAE can
+    # be attached to a person too, and it has no trigger word to default.
+    trigger_words, trigger_words_source = effective_trigger_words(
+        row["trigger_words"],
+        attached if row["file_kind"] in (FILE_ADAPTER, FILE_UNKNOWN) else [],
+        character_names,
+    )
+    tile = model_tile(
+        tile_canonical(row["base_model_canonical"], row["base_model"], row["filename"]),
+        row["filename"],
+        row["display_name"],
+        checkpoint=row["file_kind"] == FILE_CHECKPOINT,
+        adapter=row["file_kind"] == FILE_ADAPTER,
+    )
     return ModelResponse(
         id=int(row["id"]),
         sha256=row["sha256"],
+        hash_pending=bool(row["hash_pending"]),
         file_kind=row["file_kind"],
         kind=row["kind"],
         display_name=row["display_name"],
         filename=row["filename"],
         base_model=row["base_model"],
         base_model_folded=fold(row["base_model"]),
-        trigger_words=row["trigger_words"],
+        base_model_canonical=row["base_model_canonical"],
+        base_model_source=row["base_model_source"],
+        matched_name=_matched_name(row),
+        **(tile or {}),
+        family=served_family(row),
+        base_model_family=base_model_family(row),
+        base_model_family_label=family_label(base_model_family(row)),
+        quant=canonical_quant(row["quant"]),
+        weights_id=row["weights_id"],
+        trigger_words=trigger_words,
+        trigger_words_source=trigger_words_source,
         provenance=row["provenance"],
         training_run_id=row["training_run_id"],
         training_step=row["training_step"],
@@ -626,10 +1761,18 @@ def _to_response(
         total_size=row["total_size"],
         newest_member_at=row["newest_member_at"],
         locations=[ModelLocation(**loc) for loc in locations.get(int(row["id"]), [])],
-        attachments=[
-            ModelAttachment(**att) for att in attachments.get(row["sha256"] or "", [])
-        ],
+        attachments=[ModelAttachment(**att) for att in attached],
         capabilities=capabilities.get(int(row["id"]), []),
+        pictures_verified=counts.get("verified", 0),
+        pictures_by_filename=counts.get("by_filename", 0),
+        hidden=int(row["id"]) in hidden,
+        suggested_kind=suggestion.kind if suggestion else None,
+        suggested_by=suggestion.workflows if suggestion else 0,
+        suggested_fields=list(suggestion.fields) if suggestion else [],
+        kind_decided=bool(row["file_kind_decided"]),
+        set_verdicts=[
+            ModelSetVerdictMark(**mark) for mark in marks.get(int(row["id"]), [])
+        ],
     )
 
 
@@ -649,6 +1792,7 @@ def create_router(server) -> APIRouter:
         file_kinds: tuple[str, ...],
         *,
         base_model: Optional[str],
+        family: Optional[str] = None,
         kind: Optional[str],
         q: Optional[str],
         character_id: Optional[int],
@@ -672,6 +1816,12 @@ def create_router(server) -> APIRouter:
             direction=direction,
         )
 
+        if family is not None:
+            # In Python: the family is folded from the identified base model,
+            # which SQL cannot do. A value naming no family matches nothing.
+            wanted = family_named(family)
+            rows = [row for row in rows if wanted and base_model_family(row) == wanted]
+
         if character_id is not None or set_id is not None:
             entity_type = ENTITY_CHARACTER if character_id is not None else ENTITY_SET
             entity_id = character_id if character_id is not None else set_id
@@ -690,7 +1840,30 @@ def create_router(server) -> APIRouter:
         locations = fetch_locations(server.hub)
         attachments = fetch_attachments(server.vault)
         capabilities = fetch_capabilities(server.hub)
-        return [_to_response(row, locations, attachments, capabilities) for row in rows]
+        picture_counts = fetch_picture_counts(server.hub, server.vault)
+        marks = fetch_model_marks(server.hub)
+        character_names = fetch_character_names(server.vault)
+        hidden = set(hidden_model_ids(server.hub, server.vault.library_uuid))
+        # Only the kinds a suggestion can re-file, so a list of adapters asks
+        # the hub nothing more.
+        suggestions = kind_suggestions(
+            server.hub,
+            [int(row["id"]) for row in rows if row["file_kind"] in REFILEABLE_KINDS],
+        )
+        return [
+            _to_response(
+                row,
+                locations,
+                attachments,
+                capabilities,
+                picture_counts,
+                marks,
+                character_names,
+                hidden,
+                suggestions,
+            )
+            for row in rows
+        ]
 
     @router.get(
         "/adapters",
@@ -699,8 +1872,9 @@ def create_router(server) -> APIRouter:
             "Every adapter registered on this machine, with each copy's location "
             "and the characters/sets in the active library that use it. "
             "`file_kind` swaps in the other hash-addressable kinds instead: "
-            "`unknown` for the unclassified files, `vae` and `text_encoder` for "
-            "the support files a generation graph loads beside a checkpoint, "
+            "`unknown` for the unclassified files, `vae`, `text_encoder`, "
+            "`controlnet` and `upscaler` for the support files a generation "
+            "graph loads beside a checkpoint, "
             "`engine` for the models PixlStash downloads for itself. None of "
             "them is ever folded into /checkpoints. `base_model=UNASSIGNED` "
             "selects the rows that record no base model."
@@ -713,8 +1887,9 @@ def create_router(server) -> APIRouter:
         file_kind: str = Query(
             FILE_ADAPTER,
             description=(
-                "`adapter` (default), `unknown`, `vae`, `text_encoder` or "
-                "`engine`. Checkpoints have their own route."
+                "`adapter` (default), `unknown`, `vae`, `text_encoder`, "
+                "`controlnet`, `upscaler` or `engine`. Checkpoints have their "
+                "own route."
             ),
         ),
         base_model: Optional[str] = Query(
@@ -722,6 +1897,15 @@ def create_router(server) -> APIRouter:
             description=(
                 "Exact match on the recorded base model, or `UNASSIGNED` for the "
                 "rows that record none. Omit for all."
+            ),
+        ),
+        base_model_family: Optional[str] = Query(
+            None,
+            description=(
+                "Only adapters whose base model is in this family, named by "
+                "the family (`krea2`), its label (`Krea 2`) or any base model "
+                "in it (`Krea 2 Turbo`). Filename guesses included, as "
+                "`base_model_family` on the rows. Omit for all."
             ),
         ),
         kind: Optional[str] = Query(
@@ -764,6 +1948,7 @@ def create_router(server) -> APIRouter:
             adapters=_build_list(
                 (file_kind,),
                 base_model=base_model,
+                family=base_model_family,
                 kind=kind,
                 q=q,
                 character_id=character_id,
@@ -799,6 +1984,11 @@ def create_router(server) -> APIRouter:
             fetch_locations(server.hub, int(row["id"])),
             fetch_attachments(server.vault, sha256=sha256),
             fetch_capabilities(server.hub, int(row["id"])),
+            fetch_picture_counts(server.hub, server.vault),
+            fetch_model_marks(server.hub),
+            fetch_character_names(server.vault),
+            set(hidden_model_ids(server.hub, server.vault.library_uuid)),
+            kind_suggestions(server.hub, [int(row["id"])]),
         )
 
     @router.get(
@@ -884,6 +2074,7 @@ def create_router(server) -> APIRouter:
     ):
         server.auth.ensure_secure_when_required(request)
         return CheckpointListResponse(
+            shelf=shelf_uuid(server.hub),
             checkpoints=_build_list(
                 (FILE_CHECKPOINT,),
                 base_model=base_model,
@@ -893,7 +2084,7 @@ def create_router(server) -> APIRouter:
                 set_id=None,
                 sort=sort,
                 direction=direction,
-            )
+            ),
         )
 
     @router.get(
@@ -1004,10 +2195,11 @@ def create_router(server) -> APIRouter:
         "/models",
         summary="Correct what the shelf records about one or more models",
         description=(
-            "Three of the shelf's five verbs on one route, because all three "
+            "Four of the shelf's verbs on one route, because all of them "
             "write a curated column and differ only in which one: **Rename** "
-            "(`display_name`, one id), **Set base model** (`base_model`) and "
-            "**Set kind** (`kind`, `file_kind`, `capabilities`). Only the "
+            "(`display_name`, one id), **Set base model** (`base_model`), "
+            "**Set kind** (`kind`, `file_kind`, `capabilities`, "
+            "`suggest_kind`) and **Set trigger words** (`trigger_words`). Only the "
             "fields present in the body are written, so setting a base model "
             "across a selection cannot blank the names in it.\n\n"
             "Every column here is upserted with `COALESCE` by the folder "
@@ -1025,8 +2217,9 @@ def create_router(server) -> APIRouter:
         # `capabilities` rides with the columns and is not one: it is the
         # complete set for a second table, and `update_models` splits it back
         # out. Named here rather than added to `CURATABLE_FIELDS`, which is what
-        # the UPDATE's column list is built from.
-        writable = (*CURATABLE_FIELDS, "capabilities")
+        # the UPDATE's column list is built from. `suggest_kind` likewise: it
+        # writes the owner's mark, not a curated column.
+        writable = (*CURATABLE_FIELDS, "capabilities", "suggest_kind")
         sent = [field for field in writable if field in payload.model_fields_set]
         if not sent:
             raise HTTPException(
@@ -1067,6 +2260,10 @@ def create_router(server) -> APIRouter:
         ):
             raise HTTPException(
                 status_code=400, detail=f"file_kind must be one of {list(FILE_KINDS)}."
+            )
+        if "suggest_kind" in changes and changes["suggest_kind"] is None:
+            raise HTTPException(
+                status_code=400, detail="suggest_kind must be true or false."
             )
         if "file_kind" in changes and changes["file_kind"] is None:
             # Every file is *something*, and `unknown` is how the shelf says so.
@@ -1206,6 +2403,378 @@ def create_router(server) -> APIRouter:
         return ModelForgetResponse(
             forgotten=forgotten,
             refused=[ForgetRefusal(**item) for item in refused],
+        )
+
+    @router.put(
+        "/models/hidden",
+        summary="Hide or show models in this library",
+        description=(
+            "Which models the ACTIVE library leaves off its shelf and out of "
+            "every list that offers a model to pick. Per library: a model "
+            "hidden here is still shown in another library. Nothing else "
+            "changes: no file, no row and no set member is touched, and a "
+            "workflow or a recipe that already uses a hidden model still runs "
+            "with it. An id that names no model is skipped. Returns every "
+            "model the library now hides, so the client can draw from one "
+            "answer."
+        ),
+        tags=["model_shelf"],
+        response_model=ModelsHiddenResponse,
+    )
+    def put_models_hidden(request: Request, payload: ModelsHiddenRequest = Body(...)):
+        server.auth.ensure_secure_when_required(request)
+        return ModelsHiddenResponse(
+            hidden_models=set_models_hidden(
+                server.hub,
+                server.vault.library_uuid,
+                payload.ids,
+                payload.hidden,
+            )
+        )
+
+    @router.post(
+        "/models/companions",
+        summary="What deleting models would leave behind",
+        description=(
+            "Given the models about to be deleted, which VAEs and text "
+            "encoders they ran with no recipe pairs with any kept model "
+            "(`orphaned`), which are still used by a model staying on the "
+            "shelf (`shared`), and which cannot be told apart from another "
+            "file of the same name (`unknown`). Also which of the deleted "
+            "support files a kept model still runs with (`in_use`).\n\n"
+            "The evidence is the recipes the hub has read from pictures, in "
+            "every library: models in one recipe ran together. **A model no "
+            "recipe names is reported under `no_evidence`**, never as unused. "
+            "Changes nothing."
+        ),
+        tags=["model_shelf"],
+        response_model=ModelCompanionsResponse,
+    )
+    def shelf_model_companions(
+        request: Request,
+        payload: ModelCompanionsRequest = Body(...),
+    ):
+        server.auth.ensure_secure_when_required(request)
+        return ModelCompanionsResponse(**fetch_companions(server.hub, payload.ids))
+
+    @router.get(
+        "/models/workflow-sets",
+        summary="Which models have actually run together",
+        description=(
+            "One entry per **combination**: the exact set of shelf models one "
+            "or more recipes bound together, plus `missing`, the base models "
+            "they load that the shelf does not hold (so `models` may be empty), "
+            "with the kept pictures they made. "
+            "A model appears in every combination it has run in, so membership "
+            "overlaps and is stored nowhere - the evidence is a self-join over "
+            "`workflow_recipe_asset`, which is read here and nowhere written, "
+            "plus the ComfyUI runs stored in "
+            "`comfyui_history_model` (`history_runs`, counted apart).\n\n"
+            "**Co-occurrence is evidence; its absence is not.** Two models in "
+            "one recipe proves they ran together. Two models never seen "
+            "together proves nothing, so nothing is withheld for lacking a "
+            "pairing. A combination with no base model, on the shelf or "
+            "missing, is still listed but is no set, so the ids in no "
+            "combination WITH a base come back under `no_set` rather than "
+            "being dropped - an id can be in both. A member the evidence could only reach "
+            "by a basename two shelf rows share is flagged `ambiguous` and "
+            "still listed.\n\n"
+            "Pictures are scoped to the active library, unlike "
+            "`POST /models/companions`, which counts every recipe the hub "
+            "holds: that one keeps a file some other library needs, this one "
+            "draws what the library in front of the reader has made - or has "
+            "run in ComfyUI (the stored history rows; "
+            "ComfyUI need not be running). Changes nothing."
+        ),
+        tags=["model_shelf"],
+        response_model=WorkflowSetsResponse,
+    )
+    def list_workflow_sets(request: Request):
+        server.auth.ensure_secure_when_required(request)
+        found = _workflow_sets()
+        checks = fetch_set_checks(server.hub, server.vault, found)
+        return WorkflowSetsResponse(
+            combinations=[
+                WorkflowSetCombination(
+                    key=combination["key"],
+                    models=[
+                        WorkflowSetMember(**member) for member in combination["models"]
+                    ],
+                    missing=[
+                        WorkflowSetMissingBase(**entry)
+                        for entry in combination["missing"]
+                    ],
+                    recipes=combination["recipes"],
+                    history_runs=combination["history_runs"],
+                    picture_count=combination["picture_count"],
+                    covers=_cover_strip(combination["covers"]),
+                    covered_by=combination["covered_by"],
+                )
+                for combination in found["combinations"]
+            ],
+            no_set=found["no_set"],
+            hand_made=[_hand_made_set(entry) for entry in found["hand_made"]],
+            set_checks=[WorkflowSetCheck(**check) for check in checks],
+            hidden_sets=hidden_set_keys(server.hub, server.vault.library_uuid),
+            hidden_models=hidden_model_ids(server.hub, server.vault.library_uuid),
+        )
+
+    def _workflow_sets() -> dict:
+        return attach_hand_made(
+            server.hub, fetch_workflow_sets(server.hub, server.vault)
+        )
+
+    def _one_set(set_id: int) -> HandMadeSet:
+        # ponytail: the whole evidence read for one set's counts; a mutation is
+        # one click, so this is paid per gesture, never per row.
+        for entry in _workflow_sets()["hand_made"]:
+            if entry["id"] == set_id:
+                return _hand_made_set(entry)
+        raise HTTPException(status_code=404, detail=f"No workflow set {set_id}.")
+
+    @router.put(
+        "/models/workflow-sets/hidden",
+        summary="Hide or show workflow sets in this library",
+        description=(
+            "Which sets the ACTIVE library leaves out of the grid. The key is "
+            "the set's own - `model:<head id>` for a set from pictures (or "
+            "`missing:<filename>` when its head is off the shelf), `hand:<id>` "
+            "for a hand-made set - so a derived set and a hand-made one are "
+            "hidden the same way. Per library: a set hidden "
+            "here is still shown in another library, and hiding one thing "
+            "never touches a member or a file. Returns every set the library "
+            "now hides, so the client can draw the grid from one answer."
+        ),
+        tags=["model_shelf"],
+        response_model=WorkflowSetHiddenResponse,
+    )
+    def put_workflow_sets_hidden(
+        request: Request, payload: WorkflowSetHiddenRequest = Body(...)
+    ):
+        server.auth.ensure_secure_when_required(request)
+        return WorkflowSetHiddenResponse(
+            hidden_sets=set_sets_hidden(
+                server.hub,
+                server.vault.library_uuid,
+                payload.keys,
+                payload.hidden,
+            )
+        )
+
+    @router.post(
+        "/models/workflow-sets",
+        status_code=201,
+        summary="Make a workflow set by hand",
+        description=(
+            "A set of shelf models the owner says work together: at most one "
+            "checkpoint, any number of text encoders, VAEs, LoRAs and others, "
+            "no order. May be empty or unnamed. A member named by `sha256` "
+            "need not be on the shelf, which is how an undo of a delete puts "
+            "a set back whole. An engine, a file still being hashed and a "
+            "second checkpoint are refused (409). Touches no file."
+        ),
+        tags=["model_shelf"],
+        response_model=HandMadeSet,
+    )
+    def create_workflow_set(
+        request: Request, payload: WorkflowSetCreateRequest = Body(...)
+    ):
+        server.auth.ensure_secure_when_required(request)
+        with _workflow_set_errors():
+            set_id = create_set(
+                server.hub,
+                payload.name,
+                [member.model_dump() for member in payload.members],
+                cloned=payload.cloned,
+            )
+        return _one_set(set_id)
+
+    @router.patch(
+        "/models/workflow-sets/{set_id}",
+        summary="Rename a workflow set",
+        description="Null or blank clears the name.",
+        tags=["model_shelf"],
+        response_model=HandMadeSet,
+    )
+    def rename_workflow_set(
+        set_id: int, request: Request, payload: WorkflowSetRenameRequest = Body(...)
+    ):
+        server.auth.ensure_secure_when_required(request)
+        with _workflow_set_errors():
+            rename_set(server.hub, set_id, payload.name)
+        return _one_set(set_id)
+
+    @router.delete(
+        "/models/workflow-sets/{set_id}",
+        summary="Delete a workflow set",
+        description=(
+            "Drops the set and nothing else: no file, no shelf row. Returns "
+            "the set as it was, so posting it back undoes the delete."
+        ),
+        tags=["model_shelf"],
+        response_model=WorkflowSetDeleteResponse,
+    )
+    def delete_workflow_set(set_id: int, request: Request):
+        server.auth.ensure_secure_when_required(request)
+        with _workflow_set_errors():
+            snapshot = delete_set(server.hub, set_id)
+        return WorkflowSetDeleteResponse(deleted=_hand_made_set(snapshot))
+
+    @router.post(
+        "/models/workflow-sets/{set_id}/members",
+        summary="Add models to a workflow set",
+        description=(
+            "A member already in the set is left as it is and not reported "
+            "under `added`. All or nothing: one refused member (409) adds none."
+        ),
+        tags=["model_shelf"],
+        response_model=WorkflowSetMembersResponse,
+    )
+    def add_workflow_set_members(
+        set_id: int, request: Request, payload: WorkflowSetMembersRequest = Body(...)
+    ):
+        server.auth.ensure_secure_when_required(request)
+        with _workflow_set_errors():
+            added = add_members(
+                server.hub, set_id, [member.model_dump() for member in payload.members]
+            )
+        return WorkflowSetMembersResponse(set=_one_set(set_id), added=added)
+
+    @router.post(
+        "/models/workflow-sets/{set_id}/members/remove",
+        summary="Take models out of a workflow set",
+        description=(
+            "By sha256. An emptied set is kept. `removed` carries each slot "
+            "and label, so re-adding them by sha256 undoes the remove."
+        ),
+        tags=["model_shelf"],
+        response_model=WorkflowSetRemoveResponse,
+    )
+    def remove_workflow_set_members(
+        set_id: int, request: Request, payload: WorkflowSetRemoveRequest = Body(...)
+    ):
+        server.auth.ensure_secure_when_required(request)
+        with _workflow_set_errors():
+            removed = remove_members(server.hub, set_id, payload.sha256)
+        return WorkflowSetRemoveResponse(
+            set=_one_set(set_id),
+            removed=[RemovedWorkflowSetMember(**row) for row in removed],
+        )
+
+    @router.put(
+        "/models/workflow-sets/{set_id}/declines",
+        summary="Keep models out of a workflow set's merge offer",
+        description=(
+            "Replaces the list of models (by sha256) the set's merge offer "
+            "leaves out: Keep separate adds to it, Offer again empties it. "
+            "Returns the list as it was, so putting that back undoes the call. "
+            "Touches no member and no file."
+        ),
+        tags=["model_shelf"],
+        response_model=WorkflowSetDeclinesResponse,
+    )
+    def put_workflow_set_declines(
+        set_id: int, request: Request, payload: WorkflowSetDeclinesRequest = Body(...)
+    ):
+        server.auth.ensure_secure_when_required(request)
+        with _workflow_set_errors():
+            previous = set_declines(server.hub, set_id, payload.sha256)
+        return WorkflowSetDeclinesResponse(set=_one_set(set_id), previous=previous)
+
+    @contextmanager
+    def _verdict_errors():
+        try:
+            yield
+        except ValueError as exc:
+            logger.info("Workflow set verdict refused (422): %s", exc)
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except VerdictTargetError as exc:
+            logger.info("Workflow set verdict answered 404: %s", exc)
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    _VERDICT_NOTE = (
+        "**The owner's word, never PixlStash's check**, and a mark only: it "
+        "changes nothing else. It belongs to the exact combination "
+        "`combo_key` names (the sorted member model ids, comma-joined, as "
+        "`GET /models/workflow-sets` serves it under `set_checks`); a set "
+        "whose members change has a different key and so no verdict, and "
+        "nothing clears one when the check later changes. Recording needs every "
+        "id on the shelf (404); clearing does not, so an answer naming a model "
+        "that left can still go. Returns the answer it replaced as `previous`, so "
+        "writing that back undoes the call."
+    )
+
+    @router.put(
+        "/models/workflow-sets/verdicts/{combo_key}",
+        summary="Record the owner's verdict on a workflow set",
+        description="Does this set produce sensible output: `yes` or `no`. "
+        + _VERDICT_NOTE,
+        tags=["model_shelf"],
+        response_model=SetVerdictResponse,
+    )
+    def put_set_verdict(
+        combo_key: str, request: Request, payload: SetVerdictRequest = Body(...)
+    ):
+        server.auth.ensure_secure_when_required(request)
+        with _verdict_errors():
+            previous = write_set_verdict(server.hub, combo_key, payload.verdict)
+        return SetVerdictResponse(
+            combo_key=combo_key, verdict=payload.verdict, previous=previous
+        )
+
+    @router.delete(
+        "/models/workflow-sets/verdicts/{combo_key}",
+        summary="Clear the owner's verdict on a workflow set",
+        description="Back to unanswered. " + _VERDICT_NOTE,
+        tags=["model_shelf"],
+        response_model=SetVerdictResponse,
+    )
+    def delete_set_verdict(combo_key: str, request: Request):
+        server.auth.ensure_secure_when_required(request)
+        with _verdict_errors():
+            previous = write_set_verdict(server.hub, combo_key, None)
+        return SetVerdictResponse(combo_key=combo_key, verdict=None, previous=previous)
+
+    @router.put(
+        "/models/workflow-sets/verdicts/{combo_key}/members/{model_id}",
+        summary="Record whether a member is a problem in a workflow set",
+        description="`problem` or `not_problem`; `model_id` must be one of "
+        "the key's ids (404). Also marks the model's own shelf row "
+        "(`set_verdicts`). " + _VERDICT_NOTE,
+        tags=["model_shelf"],
+        response_model=MemberVerdictResponse,
+    )
+    def put_member_verdict(
+        combo_key: str,
+        model_id: int,
+        request: Request,
+        payload: MemberVerdictRequest = Body(...),
+    ):
+        server.auth.ensure_secure_when_required(request)
+        with _verdict_errors():
+            previous = write_member_verdict(
+                server.hub, combo_key, model_id, payload.verdict
+            )
+        return MemberVerdictResponse(
+            combo_key=combo_key,
+            model_id=model_id,
+            verdict=payload.verdict,
+            previous=previous,
+        )
+
+    @router.delete(
+        "/models/workflow-sets/verdicts/{combo_key}/members/{model_id}",
+        summary="Clear whether a member is a problem in a workflow set",
+        description="Back to unanswered. " + _VERDICT_NOTE,
+        tags=["model_shelf"],
+        response_model=MemberVerdictResponse,
+    )
+    def delete_member_verdict(combo_key: str, model_id: int, request: Request):
+        server.auth.ensure_secure_when_required(request)
+        with _verdict_errors():
+            previous = write_member_verdict(server.hub, combo_key, model_id, None)
+        return MemberVerdictResponse(
+            combo_key=combo_key, model_id=model_id, verdict=None, previous=previous
         )
 
     @router.post(

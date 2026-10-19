@@ -1,0 +1,2275 @@
+"""What a workflow card can be run from, and why it cannot (v1.12 B7).
+
+Two questions, kept apart because they fail differently:
+
+1. **Where does a runnable graph come from?** A card is an identity derived from
+   pictures, not a file, so "run this card" has to find something to submit.
+   :func:`resolve_source` tries three places in a fixed order and says
+   ``no_runnable_source`` when none of them answers.
+2. **Would submitting it work?** :func:`judge` turns a pre-flight, and the
+   handful of refusals that are not a pre-flight's business, into the reason
+   codes the run panel shows. Every refusal is a code and a payload, never a
+   sentence assembled here: the same batch mixes sources, and a caller
+   grouping "three pictures are missing the same model" cannot do it from
+   prose.
+
+**The codes are the contract.** One route returns them as a dry run
+(``/workflows/run/preflight``) and the other refuses on them, so a code that
+means one thing on the first and another on the second is a bug in the feature
+rather than in a caller.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import re
+from copy import deepcopy
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
+
+from pixlstash.services.comfyui_recipe_service import (
+    LORA_DIGEST_FIELD_RE,
+    PIXLSTASH_MULTI_ADAPTER_LOADER,
+    LORA_FILENAME_FIELD_RE,
+    VIDEO_SAVE_CLASSES,
+    bypass_node,
+    bypass_stage,
+    detect_seed_targets,
+    find_input_spec,
+    listed_options,
+    preflight_prompt,
+    sanitize_prompt_graph,
+    unchecked_preflight,
+)
+from pixlstash.services.comfyui_service import pixlstash_node_refusals
+from pixlstash.services.workflow_bindings import BINDINGS_KEY
+from pixlstash.services.workflow_hash import (
+    SECRET_FIELD_RE,
+    WorkflowGraphError,
+    asset_reference,
+    is_link,
+    normalized_filename,
+)
+from pixlstash.services.workflow_identity import CORE_ADDRESS_PREFIX, model_fix_kind
+from pixlstash.services.workflow_io import (
+    WorkflowIO,
+    api_graph,
+    detect_workflow_io,
+    prompt_field,
+)
+from pixlstash.services.workflow_parameters import is_picture_batch
+from pixlstash.utils.adapter_header import FILE_TEXT_ENCODER, FILE_VAE
+from pixlstash.utils.comfyui_utilities import (
+    NEGATIVE_FIELDS,
+    PROMPT_FIELDS,
+    collect_seed_inputs,
+    iter_model_fields_api,
+)
+from pixlstash.pixl_logging import get_logger
+
+logger = get_logger(__name__)
+
+# Every reason a run is refused or a pre-flight reports. Named rather than
+# spelled at each site: three route branches and the tests share them, and a
+# typo in a string literal is a refusal that silently never matches.
+COMFYUI_NOT_CONFIGURED = "comfyui_not_configured"
+COMFYUI_UNREACHABLE = "comfyui_unreachable"
+UI_FORMAT = "ui_format"
+MISSING_NODES = "missing_nodes"
+MISSING_MODELS = "missing_models"
+# A checkpoint or diffusion model ComfyUI lacks and the shelf holds, which a run
+# would load through `PixlStashCheckpointLoader` but for a ComfyUI still running
+# a pack from before its `shelf` widget (#1923): a restart, not an install, is
+# the fix.
+PACK_OUTDATED = "pack_outdated"
+A1111 = "a1111"
+PICTURE_INPUT_UNFILLED = "picture_input_unfilled"
+NO_LORA_LOADER = "no_lora_loader"
+LORA_NOT_INSERTABLE = "lora_not_insertable"
+PIXLSTASH_NODES = "pixlstash_nodes"
+NO_SAVE_NODE = "no_save_node"
+NO_RUNNABLE_SOURCE = "no_runnable_source"
+LORA_NOT_SKIPPABLE = "lora_not_skippable"
+STAGE_NOT_SKIPPABLE = "stage_not_skippable"
+MISSING_CHOICES = "missing_choices"
+
+# The sampler settings a run can swap for one this ComfyUI lists, and the
+# replacement offered first: a sampler or scheduler from a node pack this
+# ComfyUI lacks (RES4LYF's `res_2s`) is refused by `POST /prompt`, and unlike a
+# model it has an everyday stand-in. Offered, never applied unasked: the run
+# names its pick in `RunRequest.choices`.
+CHOICE_FALLBACKS = {"sampler_name": "euler", "scheduler": "simple"}
+
+# A reference whose ``workflow_recipe_asset`` row is gone: the owner forgot the
+# model's name, and the stored graph still says a model went there without
+# saying which. Substituted rather than left as the opaque token so the missing
+# model the pre-flight then reports is readable; either way it is a name no
+# ComfyUI lists, which is exactly the state the row delete created.
+FORGOTTEN_MODEL = "(forgotten model)"
+
+# Which of ComfyUI's model folders a loader field draws from, for
+# ``missing_models[{file, folder}]``: the folder is where the owner has to put
+# the file, and the field name alone does not say it. Keyed on the field, with
+# the three classes whose field name is ambiguous named directly.
+_FOLDER_BY_FIELD = {
+    "ckpt_name": "checkpoints",
+    "config_name": "configs",
+    "unet_name": "diffusion_models",
+    "model_path": "diffusers",
+    "vae_name": "vae",
+    "control_net_name": "controlnet",
+    "style_model_name": "style_models",
+    "gligen_name": "gligen",
+    "hypernetwork_name": "hypernetworks",
+    "photomaker_model_name": "photomaker",
+}
+
+# Custom seed nodes a graph may name without this ComfyUI having their pack
+# (#1463). Each exists only to hand a number to a sampler's seed widget, which
+# PixlStash writes itself on every run, so the node can be dropped and its link
+# replaced with a literal. **An allow-list, not a rule**: a replacement that is
+# nearly right changes what the picture looks like, which is worse than the
+# refusal, and anything that samples, conditions or loads has no equivalent.
+# rgthree's, WAS's, Comfyroll's and image-saver's, by their class_type.
+SEED_NODE_CLASSES = frozenset(
+    {"Seed (rgthree)", "Seed", "SeedGenerator", "Seed Generator", "CR Seed"}
+)
+
+# Text nodes that only hand their own string on, by class_type, to the input
+# holding that string. Same allow-list terms as the seed nodes: WAS's
+# `Text Multiline` (which also drops its `#` comment lines), Comfyroll's
+# `CR Text`, Chibi-Nodes' `Textbox` and core's `PrimitiveStringMultiline`
+# (absent on an older ComfyUI). The string becomes a literal in whatever the
+# node fed.
+TEXT_NODE_CLASSES = {
+    "Text Multiline": "text",
+    "CR Text": "text",
+    "Textbox": "text",
+    "PrimitiveStringMultiline": "value",
+}
+
+# WAS's own `[token]` substitutions (`[time]`, `[time(%Y)]`, custom names of
+# any spelling). A literal cannot expand them, so a text holding anything in
+# square brackets keeps its refusal; core ComfyUI gives brackets no meaning.
+WAS_TOKEN_RE = re.compile(r"\[[^\[\]]*\]")
+
+
+def overriding_text_inputs(class_type: str, inputs: dict) -> list[str]:
+    """The inputs of a text node, other than its text, that may change its string.
+
+    Textbox's ``passthrough`` replaces its text whenever it is non-empty, so a
+    link or a non-empty string in any input but the text field counts. One
+    rule for the repair and the Run prompt's target, so they cannot drift.
+    """
+    return [
+        name
+        for name, value in inputs.items()
+        if name != TEXT_NODE_CLASSES.get(class_type)
+        and (is_link(value) or (isinstance(value, str) and value))
+    ]
+
+
+def _literal_prompt_target(
+    graph: dict, node_id: str, field: Optional[str]
+) -> Optional[tuple[str, str]]:
+    """Where a prompt node's text is a literal string, as ``(node, field)``.
+
+    The encoder's own *field*, or the text field of the one unshared,
+    unoverridden :data:`TEXT_NODE_CLASSES` node wired into it.
+    """
+    inputs = (graph.get(node_id) or {}).get("inputs") or {}
+    text = inputs.get(field)
+    if isinstance(text, str):
+        return node_id, field
+    if is_link(text) and text[1] == 0:
+        source = graph.get(str(text[0]))
+        field = TEXT_NODE_CLASSES.get((source or {}).get("class_type"))
+        readers = sum(
+            1
+            for other in graph.values()
+            if isinstance(other, dict) and isinstance(other.get("inputs"), dict)
+            for link in other["inputs"].values()
+            if is_link(link) and str(link[0]) == str(text[0])
+        )
+        source_inputs = (source or {}).get("inputs") or {}
+        if (
+            field
+            and readers == 1
+            and isinstance(source_inputs.get(field), str)
+            and not overriding_text_inputs(source["class_type"], source_inputs)
+        ):
+            return str(text[0]), field
+    return None
+
+
+def prompt_text_target(
+    graph: dict,
+    node_id: str,
+    prompt: Optional[str],
+    fields: tuple[str, ...] = PROMPT_FIELDS,
+) -> Optional[tuple[str, str]]:
+    """Where a detected prompt node's text literally lives, as ``(node, field)``.
+
+    The encoder's own text field (:func:`workflow_io.prompt_field` over
+    *fields*) when it holds a string; otherwise, when that
+    input is a link from output 0 of a :data:`TEXT_NODE_CLASSES` node, that
+    node's text field. Without the hop a prompt typed into the Run popup was
+    skipped, and a missing text node's repair then inlined the stored prompt.
+    A text node feeding more than one input is not a target: writing the
+    positive prompt and then the negative into it would leave both negative.
+    Nor is one with another input overriding its text (Textbox's
+    ``passthrough``): the node would ignore the prompt written into it.
+
+    Any other wired text (a prompt builder, a shared or overridden text
+    node) is the encoder's own field, and the literal replaces the link.
+    Except when *prompt* is a string a recipe reads from the wired node: the
+    picture's recipe echoed back by an untouched Run popup (a builder's recipe
+    prompt is read from its widgets), and cutting the wire would generate from
+    the builder's template instead of what it builds. ``None`` also when the
+    encoder has no string or linked text field.
+    """
+    inputs = (graph.get(node_id) or {}).get("inputs")
+    if not isinstance(inputs, dict):
+        return None
+    name = prompt_field(inputs, fields)
+    if name is None:
+        return None
+    literal = _literal_prompt_target(graph, node_id, name)
+    if literal is not None:
+        return literal
+    text = inputs[name]
+    source = graph.get(str(text[0]))
+    source_inputs = (source or {}).get("inputs") or {}
+    # The strings a recipe may read from this node (comfyui_utilities: a named
+    # text/value/string field, in an order its UI and API readers disagree
+    # on, else its longest string), and no other input.
+    strings = [v.strip() for v in source_inputs.values() if isinstance(v, str)]
+    recipe_texts = {
+        source_inputs[key].strip()
+        for key in ("text", "value", "string")
+        if isinstance(source_inputs.get(key), str) and source_inputs[key].strip()
+    }
+    recipe_texts.add(max(strings, key=len, default=""))
+    recipe_texts.discard("")
+    if prompt and prompt.strip() in recipe_texts:
+        logger.info(
+            "Encoder %s keeps its wire from node %s: the run prompt is that "
+            "node's own text, so the node builds the prompt as it did.",
+            node_id,
+            text[0],
+        )
+        return None
+    logger.info(
+        "Encoder %s's text was wired from node %s (%s); the run prompt "
+        "replaces that link.",
+        node_id,
+        text[0],
+        (source or {}).get("class_type"),
+    )
+    return node_id, name
+
+
+def apply_prompts(graph: dict, prompt: Optional[str], negative: Optional[str]) -> dict:
+    """Put this run's prompts into the detected prompt nodes, and report on it.
+
+    Returns:
+        ``positive_settable`` / ``negative_settable``: whether the graph has
+        anywhere to put that side's prompt. ``positive_text``: the positive
+        prompt the graph held before this call, ``None`` where it holds none
+        as a literal or its prompt nodes disagree. ``unplaced``: the sides a
+        prompt was given for and had nowhere to go - said, never dropped
+        (#1832).
+    """
+    report = {
+        "positive_settable": False,
+        "negative_settable": False,
+        "positive_text": None,
+        "unplaced": [],
+    }
+    try:
+        detected = detect_workflow_io(graph)
+    except WorkflowGraphError as exc:
+        logger.info("Prompts not applied, the graph will not reduce: %s", exc)
+        detected = WorkflowIO()
+    for side, text in (("positive", prompt), ("negative", negative)):
+        node_ids = getattr(detected, f"{side}_prompts")
+        held = set()
+        for node_id in node_ids:
+            fields = _side_fields(detected, side, node_id)
+            inputs = (graph.get(node_id) or {}).get("inputs") or {}
+            name = prompt_field(inputs, fields)
+            if name is None:
+                continue
+            report[f"{side}_settable"] = True
+            literal = _literal_prompt_target(graph, node_id, name)
+            held.add(graph[literal[0]]["inputs"][literal[1]] if literal else None)
+            if text is None:
+                continue
+            target = prompt_text_target(graph, node_id, text, fields)
+            if target is not None:
+                graph[target[0]]["inputs"][target[1]] = text
+        if side == "positive" and len(held) == 1:
+            report["positive_text"] = held.pop()
+        if text is not None and not report[f"{side}_settable"]:
+            logger.warning(
+                "The run's %s prompt was not applied: the graph has no prompt "
+                "node PixlStash can write it into (detected %s, ambiguities %s).",
+                side,
+                list(node_ids),
+                list(detected.ambiguities),
+            )
+            report["unplaced"].append(side)
+    return report
+
+
+# Where the source of a runnable graph came from, in the order tried.
+FROM_FILE = "file"
+# The newest version the owner saved over an automatic workflow (`workflow_version`).
+FROM_EDIT = "edit"
+FROM_PICTURE = "picture"
+FROM_INSTANCE = "instance"
+
+
+def model_folder(class_type: str, field_name: str) -> Optional[str]:
+    """ComfyUI's model folder for one loader field, or ``None`` when unknown.
+
+    ``None`` is returned rather than guessed: a folder named wrongly sends the
+    owner to put a file somewhere it will not be found, which is worse than
+    naming the file and leaving the folder out.
+    """
+    if LORA_FILENAME_FIELD_RE.match(field_name or ""):
+        return "loras"
+    # By substring, as `model_fix_kind` and the clone dialog read it: a
+    # wrapped vision loader is still no place for a text encoder.
+    if "CLIPVision" in class_type:
+        return "clip_vision"
+    if class_type == "UpscaleModelLoader":
+        return "upscale_models"
+    if str(field_name).startswith("clip_name"):
+        return "text_encoders"
+    return _FOLDER_BY_FIELD.get(field_name)
+
+
+@dataclass
+class Source:
+    """A graph to submit, and where it was found.
+
+    ``forgotten`` counts references the hub could no longer name, which is only
+    ever non-zero for :data:`FROM_INSTANCE`: the other tiers carry the real
+    filenames because they were never reduced.
+    """
+
+    graph: dict
+    origin: str
+    picture_id: Optional[int] = None
+    forgotten: int = 0
+    # True when the seeds came out of a stored instance document, where they
+    # are null by design. Such a source has no seed to keep.
+    seedless: bool = False
+    # A linked file's `pixlstash_bindings`, when it has them (#1303). The graph
+    # above is sanitised and has lost them, and they are how a file the old
+    # import dialog stored says which picture inputs a run may fill: `[]` is a
+    # file that opted out of every one. `None` is a file without the key.
+    bindings: Optional[list] = None
+    # The version of a manual workflow's document this graph is
+    # (`hub/workflow_versions.py`), recorded on the pictures its run makes.
+    # None for every other source.
+    workflow_version: Optional[int] = None
+
+
+@dataclass
+class Reason:
+    """One refusal: a code and whatever the panel needs to act on it."""
+
+    code: str
+    detail: dict[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> dict:
+        return {"code": self.code, **self.detail}
+
+
+def resolve_references(
+    document: dict, names: list[tuple[str, str]]
+) -> tuple[dict, int, bool]:
+    """A stored instance document as a graph, with its asset references filled.
+
+    ``workflow_recipe_instance.document`` names every model and image by
+    :func:`~pixlstash.services.workflow_hash.asset_reference`, so the graph is
+    not submittable until the readable names come back from
+    ``workflow_recipe_asset``. The map is built from the names rather than from
+    the references because the reference *is* the hash of the name, so one pass
+    over the rows inverts it exactly.
+
+    A reference with no row left is the owner having forgotten that model's
+    name. It becomes :data:`FORGOTTEN_MODEL`, which no ComfyUI lists, so the
+    pre-flight reports it as a missing model - the brief's intended surfacing,
+    and the honest one: the graph still says a model went there.
+
+    Returns:
+        ``(graph, forgotten, had_null_seed)`` - the filled graph, how many
+        distinct references could not be named, and whether any seed was stored
+        as null. The last one is what makes ``seed_mode: "keep"`` answerable:
+        there is no seed here to keep, and running anyway would submit zero for
+        every one of ``count`` runs.
+    """
+    known = {asset_reference(filename): filename for _, filename in names or []}
+    forgotten: set[str] = set()
+
+    def fill(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: fill(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [fill(item) for item in value]
+        if isinstance(value, str) and value.startswith("asset:"):
+            if value in known:
+                return known[value]
+            forgotten.add(value)
+            return FORGOTTEN_MODEL
+        return value
+
+    graph = fill(document)
+    had_null_seed = False
+    # Seeds and output paths are the generation's and are stored as null
+    # (``workflow_hash.instance_document_from_reduction``). A null reaches
+    # ComfyUI as a type error on a required widget, so the two are given a
+    # value here; the seed is then set properly by the caller's seed mode.
+    for node in graph.values():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        for name, value in inputs.items():
+            if value is not None:
+                continue
+            if name == "filename_prefix":
+                inputs[name] = "PixlStash"
+            elif "seed" in str(name) or name == "noise_seed":
+                inputs[name] = 0
+                had_null_seed = True
+    return graph, len(forgotten), had_null_seed
+
+
+def resolve_source(
+    card,
+    *,
+    file_document: Optional[dict] = None,
+    picture_graph: Optional[dict] = None,
+    picture_id: Optional[int] = None,
+    instance_documents: Optional[list[tuple[str, dict]]] = None,
+    asset_names: Optional[dict[str, list[tuple[str, str]]]] = None,
+    file_problems: Optional[list[str]] = None,
+    edited_document: Optional[dict] = None,
+) -> tuple[Optional[Source], Optional[Reason]]:
+    """What to submit for a card, in the order the brief fixes.
+
+    0. The graph the owner saved over the workflow (*edited_document*), when
+       the card is the base of a workflow that has one: it is what they said
+       the workflow's graph is, so nothing below is consulted. One that is
+       not an API graph is no graph to run: it is logged and the tiers below
+       answer.
+    1. The linked imported file, when the card has one on this machine. It is
+       the only tier that is the workflow *as authored*, so it wins even when a
+       picture would also answer.
+    2. The embedded API graph of this library's best kept picture, which is a
+       real run of it with real filenames.
+    3. The best ``workflow_recipe_instance.document``, references resolved.
+    4. Nothing, which is :data:`NO_RUNNABLE_SOURCE`.
+
+    Every argument is already-read data, so the caller owns the I/O and its
+    ordering and this stays a pure decision. A tier that is present
+    but unusable (a UI-format file) falls through to the next rather than
+    failing the card: the owner's question is "can this run", and one export in
+    the wrong format is not an answer to it.
+
+    ``file_problems`` are the converter's sentences for an editor-format file
+    that would not convert; a ``ui_format`` reason carries them as ``detail``
+    (the first) and ``problems`` (all), so the owner is told why.
+    """
+    edited = api_graph(edited_document) if edited_document else None
+    if edited_document and not edited:
+        logger.warning(
+            "Card %s: the graph saved over its workflow is not an API graph, "
+            "so it is not used and another source is looked for.",
+            getattr(card, "workflow_key", "?"),
+        )
+    if edited:
+        bindings = edited_document.get(BINDINGS_KEY)
+        return Source(
+            sanitize_prompt_graph(edited),
+            FROM_EDIT,
+            bindings=bindings if isinstance(bindings, list) else None,
+        ), None
+    ui_only = False
+    if file_document:
+        graph = api_graph(file_document)
+        if graph:
+            bindings = file_document.get(BINDINGS_KEY)
+            return Source(
+                sanitize_prompt_graph(graph),
+                FROM_FILE,
+                bindings=bindings if isinstance(bindings, list) else None,
+            ), None
+        ui_only = True
+        logger.info(
+            "Card %s names workflow file %s, which is in ComfyUI's UI format "
+            "and cannot be submitted; looking for another source.",
+            getattr(card, "workflow_key", "?"),
+            getattr(card, "file_name", "?"),
+        )
+    if picture_graph:
+        return (
+            Source(sanitize_prompt_graph(picture_graph), FROM_PICTURE, picture_id),
+            None,
+        )
+    # The FIRST stored instance and no other: the caller hands them best-first,
+    # so this is an index rather than a search. Written as one because a `for`
+    # that always returns on its first pass reads as a loop that could do more.
+    best = (instance_documents or [None])[0]
+    if best is not None:
+        structural_hash, document = best
+        graph, forgotten, seedless = resolve_references(
+            document, (asset_names or {}).get(structural_hash, [])
+        )
+        return Source(
+            sanitize_prompt_graph(graph), FROM_INSTANCE, None, forgotten, seedless
+        ), None
+    # A UI-format file that was the ONLY tier is reported as what it is. The
+    # fall-through above is still right - one export in the wrong format is not
+    # an answer to "can this run" while a picture or an instance could answer -
+    # but when nothing else did, ``no_runnable_source`` would send the owner
+    # looking for a workflow they are in fact holding, in the wrong format.
+    # The card key is internal (#1623); the caller names the workflow.
+    if not ui_only:
+        return None, Reason(NO_RUNNABLE_SOURCE, {})
+    detail: dict[str, Any] = {"file_name": getattr(card, "file_name", None)}
+    if file_problems:
+        detail["detail"] = file_problems[0]
+        detail["problems"] = list(file_problems)
+    return None, Reason(UI_FORMAT, detail)
+
+
+def judge(
+    graph: dict,
+    object_info: Optional[dict],
+    object_info_error: Optional[str],
+    *,
+    wants_lora: bool = False,
+    lora_slots: Optional[list[dict]] = None,
+    library_ids: Optional[dict[str, dict[int, str]]] = None,
+    picture_loader: bool = False,
+    from_file: bool = False,
+    shelf_uuid: Optional[str] = None,
+) -> tuple[list[Reason], dict]:
+    """Every reason this graph would not run, and the pre-flight behind them.
+
+    The order is the order they are worth fixing in: a graph that cannot be
+    inspected at all is reported before what an inspection would have found,
+    and a structural refusal (PixlStash nodes, no save node) before a missing
+    file, because installing the file would not help.
+
+    ``wants_lora`` asks the question only when the caller is actually putting a
+    LoRA in: a workflow with no loader is perfectly runnable on its own, and
+    reporting ``no_lora_loader`` for one would make every plain card look
+    broken.
+
+    ``library_ids``, ``picture_loader``, ``from_file`` and ``shelf_uuid`` are
+    what the ComfyUI-PixlStash node policy needs to know about this run (#1521, see
+    :func:`~pixlstash.services.comfyui_service.pixlstash_node_refusals`); the
+    defaults refuse.
+
+    Returns:
+        ``(reasons, preflight)``. ``reasons`` empty means it would run.
+    """
+    reasons: list[Reason] = []
+    if object_info is None:
+        preflight = unchecked_preflight(object_info_error or "ComfyUI unreachable")
+        reasons.append(Reason(COMFYUI_UNREACHABLE, {"error": object_info_error or ""}))
+    else:
+        preflight = preflight_prompt(graph, object_info)
+
+    refused = pixlstash_node_refusals(
+        graph,
+        library_ids=library_ids,
+        picture_loader=picture_loader,
+        from_file=from_file,
+        shelf_uuid=shelf_uuid,
+    )
+    if refused:
+        reasons.append(Reason(PIXLSTASH_NODES, {"nodes": refused}))
+    if wants_lora and not (lora_slots or []):
+        reasons.append(Reason(NO_LORA_LOADER))
+
+    classes = preflight.get("missing_node_classes") or []
+    if classes:
+        reasons.append(Reason(MISSING_NODES, {"nodes": list(classes)}))
+    models = [
+        {
+            "file": str(item.get("value")),
+            "folder": model_folder(item.get("class_type"), item.get("field")),
+        }
+        for item in preflight.get("missing_models") or []
+        if item
+    ]
+    if models:
+        reasons.append(Reason(MISSING_MODELS, {"models": models}))
+    if object_info is not None:
+        choices = missing_choices(graph, object_info)
+        if choices:
+            reasons.append(Reason(MISSING_CHOICES, {"choices": choices}))
+    # Only meaningful when the graph was actually inspected: an unchecked
+    # pre-flight reports no save node because it read nothing, and refusing on
+    # that would turn "ComfyUI is down" into "your workflow is broken".
+    if preflight.get("checked") and not preflight.get("has_save_image"):
+        reasons.append(Reason(NO_SAVE_NODE))
+    return reasons, preflight
+
+
+def missing_choices(graph: dict, object_info: dict) -> list[dict]:
+    """Every sampler or scheduler in *graph* this ComfyUI does not list.
+
+    Only a literal on a field ComfyUI enumerates for that node: a wired value
+    is computed at run time, and a node whose options are unknown is not
+    reported missing on a guess.
+
+    Returns:
+        ``{node_id, class_type, field, value, options, replacement}`` per
+        field, ``replacement`` being :data:`CHOICE_FALLBACKS`' pick when
+        listed, else the first option.
+    """
+    found = []
+    for node_id, node in graph.items():
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        if not isinstance(inputs, dict):
+            continue
+        for field_name, fallback in CHOICE_FALLBACKS.items():
+            value = inputs.get(field_name)
+            if not isinstance(value, str):
+                continue
+            options = listed_options(object_info, node.get("class_type"), field_name)
+            if not options or value in options:
+                continue
+            found.append(
+                {
+                    "node_id": str(node_id),
+                    "class_type": node.get("class_type"),
+                    "field": field_name,
+                    "value": value,
+                    "options": options,
+                    "replacement": fallback if fallback in options else options[0],
+                }
+            )
+    return found
+
+
+def apply_choices(graph: dict, choices: list[tuple[str, str, str]]) -> None:
+    """Write each ``(node_id, field, value)`` replacement into *graph*.
+
+    Only over a literal: a wired input is left alone, as a parameter value
+    is, and a node or field the graph lacks is logged rather than invented.
+    Whether the value is one ComfyUI lists is :func:`judge`'s to say.
+    """
+    for node_id, field_name, value in choices:
+        node = graph.get(node_id)
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        if not isinstance(inputs, dict) or not isinstance(inputs.get(field_name), str):
+            logger.info(
+                "Replacement %s=%r names node %s, which has no such setting on "
+                "this graph, so it is not applied.",
+                field_name,
+                value,
+                node_id,
+            )
+            continue
+        logger.info(
+            "Node %s runs %s=%r in place of %r, as the run asked.",
+            node_id,
+            field_name,
+            value,
+            inputs[field_name],
+        )
+        inputs[field_name] = value
+
+
+def with_pack_outdated(reasons: list[Reason], files: set[str]) -> list[Reason]:
+    """*reasons* with every missing model in *files* moved to ``pack_outdated``.
+
+    *files* are the checkpoints a current ComfyUI-PixlStash would load off the
+    shelf, so they are not missing: the running ComfyUI's pack is old.
+    """
+    moved: list[dict] = []
+    kept: list[Reason] = []
+    for reason in reasons:
+        if reason.code == MISSING_MODELS and files:
+            models = reason.detail.get("models", [])
+            # A base model's: a VAE of the same name is still missing.
+            stale = [
+                model
+                for model in models
+                if model["file"] in files
+                and model["folder"] in ("checkpoints", "diffusion_models")
+            ]
+            if stale:
+                moved += stale
+                models = [model for model in models if model not in stale]
+                if not models:
+                    continue
+                reason = Reason(MISSING_MODELS, {**reason.detail, "models": models})
+        kept.append(reason)
+    return [*kept, Reason(PACK_OUTDATED, {"models": moved})] if moved else kept
+
+
+def with_pixlstash_refusals(reasons: list[Reason], nodes: list[dict]) -> list[Reason]:
+    """*reasons* with *nodes* added to its one ``pixlstash_nodes`` reason.
+
+    One reason per code, so a panel naming the refused nodes names them all.
+    """
+    for reason in reasons:
+        if reason.code == PIXLSTASH_NODES:
+            reason.detail["nodes"] = [*reason.detail.get("nodes", []), *nodes]
+            return reasons
+    return [*reasons, Reason(PIXLSTASH_NODES, {"nodes": nodes})]
+
+
+def bypass_missing_loras(graph: dict, object_info: dict) -> list[dict]:
+    """Take every LoRA loader whose file this ComfyUI lacks out of *graph*.
+
+    **A LoRA is optional and a checkpoint is not** (#1463). Installing a
+    checkpoint is a trip away from the keyboard, so refusing the run and
+    keeping the whole batch back is the kind answer; a LoRA the graph can
+    simply run without is not worth refusing over, and the owner's answer to
+    "we must be able to progress while missing a LoRA" is to disable the node.
+    So the run happens with the adapter not applied, which is
+    :func:`~pixlstash.services.comfyui_recipe_service.bypass_node`'s whole job.
+
+    **Relaxing the refusal alone would not do it**: a graph still naming an
+    absent file is one ``POST /prompt`` refuses, so the loader has to actually
+    leave the chain.
+
+    Which entries are LoRAs is :func:`model_folder`'s existing answer, on the
+    pre-flight's own findings rather than on a reason - a reason has been
+    reduced to ``{file, folder}`` and no longer says which node to take out,
+    and a LoRA the *request* asked to add reports the same folder without being
+    a slot the graph can do without.
+
+    Three loaders keep their refusal instead, each logged: one whose file this
+    hub can no longer NAME (:data:`FORGOTTEN_MODEL` - the file may be installed
+    and only the name is lost), a stacker whose other LoRA slots are filled
+    (taking the node out would drop the adapters that are here), and one
+    nothing can be rewired around.
+
+    **Never silent**: the caller reports what went on the group and on the run
+    alike, the way a model substitution is reported, and logs it here.
+
+    Args:
+        graph: The API-format graph, mutated in place.
+        object_info: The map this ComfyUI published. Required - with no list of
+            what it holds there is no missing file to find.
+
+    Returns:
+        ``[{file, folder, node_id, class_type, field}, …]``, one per missing
+        LoRA whose loader was taken out; empty when nothing was missing or
+        nothing could be bypassed honestly.
+    """
+    missing_by_node: dict[str, list[dict]] = {}
+    for item in preflight_prompt(graph, object_info).get("missing_models") or []:
+        if not item:
+            continue
+        if model_folder(item.get("class_type"), item.get("field")) != "loras":
+            continue
+        missing_by_node.setdefault(str(item.get("node_id")), []).append(item)
+
+    bypassed: list[dict] = []
+    for node_id, missing in missing_by_node.items():
+        item = missing[0]
+        if any(item.get("value") == FORGOTTEN_MODEL for item in missing):
+            # The hub lost this reference's NAME; the file itself may well be
+            # installed. :func:`resolve_references` puts the token in on
+            # purpose so the pre-flight surfaces it, and bypassing would trade
+            # that surfacing for a run quietly made without an adapter the
+            # owner has - then send them to install a file called
+            # "(forgotten model)".
+            logger.info(
+                "Node %s (%s) names a LoRA this hub can no longer name, so it "
+                "keeps its refusal rather than being bypassed.",
+                node_id,
+                item.get("class_type"),
+            )
+            continue
+        node = graph.get(node_id)
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        # A slot counts as filled whether it names a file or is WIRED from
+        # another node. Converting `lora_name` to an input is an ordinary
+        # ComfyUI gesture, and `preflight_prompt` skips a link (it is computed
+        # at run time, not a filename), so counting only strings would read a
+        # stacker's live second adapter as an empty slot and drop it.
+        filled = [
+            field
+            for field, value in (inputs or {}).items()
+            if LORA_FILENAME_FIELD_RE.match(str(field))
+            and (is_link(value) or (isinstance(value, str) and value))
+        ]
+        missing_fields = {str(item.get("field")) for item in missing}
+        if not set(filled) <= missing_fields:
+            # A stacker holding three LoRAs of which one is gone: the node
+            # carries the two that ARE here, so taking it out would drop them
+            # too. Left to block, which is the honest answer - the owner is
+            # missing one file and would lose three adapters.
+            logger.info(
+                "Node %s (%s) holds %d LoRA slots and one of them (%s) is not "
+                "on this ComfyUI, so it is left in place: bypassing it would "
+                "drop the ones that are here.",
+                node_id,
+                item.get("class_type"),
+                len(filled),
+                ", ".join(str(item.get("value")) for item in missing),
+            )
+            continue
+        try:
+            bypass_node(graph, node_id, object_info)
+        except LookupError as exc:
+            logger.warning(
+                "LoRA %s is not on this ComfyUI and node %s (%s) cannot be "
+                "taken out of the graph, so the run is still refused: %s",
+                item.get("value"),
+                node_id,
+                item.get("class_type"),
+                exc,
+            )
+            continue
+        logger.info(
+            "Node %s (%s) is bypassed: this ComfyUI does not have %s, and a "
+            "LoRA is optional, so the run goes ahead without it.",
+            node_id,
+            item.get("class_type"),
+            ", ".join(str(item.get("value")) for item in missing),
+        )
+        bypassed.extend(
+            {
+                "file": str(item.get("value")),
+                "folder": "loras",
+                "node_id": node_id,
+                "class_type": item.get("class_type"),
+                "field": item.get("field"),
+                # Taken out because the file is not here, not because the owner
+                # asked: `skip_requested_loras` marks its own `True`.
+                "requested": False,
+            }
+            for item in missing
+        )
+    return bypassed
+
+
+def run_seed_targets(graph: dict, object_info: Optional[dict]) -> list[dict]:
+    """The seed inputs a run writes into, as the run itself finds them.
+
+    One function for the run and for :func:`replace_missing_seed_nodes`, because
+    the replacement is only safe where this pass overwrites what it inlined: two
+    copies of the rule could agree today and drift tomorrow, and the drift would
+    be a run that quietly kept a placeholder seed.
+    """
+    return detect_seed_targets(graph, object_info or {}) or collect_seed_inputs(graph)
+
+
+def pin_batch_size(graph: dict, object_info: Optional[dict] = None) -> list[str]:
+    """Set every picture batch (:func:`is_picture_batch`) to a literal 1.
+
+    The Run popup's count is how many pictures a run makes: one submission
+    each, each with its own seed. A graph saved with ``batch_size: 4`` made
+    four per submission, so a count of 1 came back as four pictures.
+
+    **A wired value is replaced too**: a primitive (or a size picker's batch
+    output) setting the batch would otherwise multiply the count just the same.
+    The link is cut on the latent's input only, so whatever else the source
+    drives keeps its value. A batch the graph builds afterwards on purpose
+    (``RepeatLatentBatch``) is left as authored.
+
+    **In a graph that saves a video, a batch of pictures is the animation's
+    frames** (AnimateDiff's ``EmptyLatentImage`` at ``batch_size: 16``), and
+    pinning it would save a one-frame video. A video latent, which counts its
+    frames in ``length``, is still pinned: its batch is how many videos.
+
+    Returns:
+        The ids of the nodes it changed.
+    """
+    saves_video = any(
+        isinstance(node, dict) and node.get("class_type") in VIDEO_SAVE_CLASSES
+        for node in graph.values()
+    )
+    pinned = []
+    for node_id, node in graph.items():
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        if not isinstance(inputs, dict) or "batch_size" not in inputs:
+            continue
+        # ponytail: `length` is how every video latent names its frame count
+        # (core's and Wan's); a pack that names it otherwise keeps its batch.
+        if saves_video and "length" not in inputs:
+            continue
+        class_type = str(node.get("class_type") or "")
+        if not is_picture_batch(class_type, "batch_size", object_info):
+            continue
+        value = inputs["batch_size"]
+        if isinstance(value, bool) or value == 1:
+            continue
+        # A float counts: ComfyUI casts an INT input with int(), so 4.0 is 4.
+        if not (is_link(value) or isinstance(value, (int, float))):
+            continue
+        inputs["batch_size"] = 1
+        pinned.append(str(node_id))
+    return pinned
+
+
+def replace_missing_seed_nodes(graph: dict, object_info: dict) -> list[dict]:
+    """Drop every custom seed node this ComfyUI lacks, inlining its value.
+
+    A graph naming rgthree's ``Seed (rgthree)`` on an install without rgthree is
+    ``missing_nodes``, and the owner's only route was installing the pack. The
+    node does something PixlStash already does (#1463): it hands a number to a
+    sampler's ``seed`` / ``noise_seed``, and the run's seed pass writes that
+    widget itself. So the link from the node becomes a literal and the node
+    leaves the graph.
+
+    **The seed pass overwriting the literal is what makes this safe**, so it is
+    checked rather than assumed, and checked on the FINAL graph: a later
+    replacement can change which finder :func:`run_seed_targets` answers with
+    (``detect_seed_targets`` finding a new target stops the fallback), so an
+    input that passed alone could stop being written. If any inlined input is
+    not a target once every node is replaced, the graph is put back whole and
+    every node keeps its refusal. A consumer that is not a seed widget - an
+    ``INT`` driving width, a pack's own ``SEED`` dict - is refused the same way.
+
+    The literal is the node's own ``seed`` value, which is what
+    ``seed_mode: "keep"`` then keeps: a picture's embedded graph carries the
+    value the node actually handed on.
+
+    Keeps its refusal, logged: a class that IS installed (nothing to repair), a
+    class outside :data:`SEED_NODE_CLASSES`, a node whose own seed is wired
+    from elsewhere (the literal would cut that link), a **placeholder** seed
+    such as rgthree's ``-1`` (there is no seed to keep, and accepting it only
+    for some seed modes would make the pre-flight's answer depend on a control
+    the popups do not re-ask on), and a node feeding **more than one** input:
+    the seed pass rolls each target separately, so a hires-fix or refiner pair
+    built to share one seed would get two.
+
+    Args:
+        graph: The API-format graph, mutated in place.
+        object_info: The map this ComfyUI published.
+
+    Returns:
+        ``[{node_id, class_type, replacement, consumers}, …]``, one per node
+        replaced; empty when nothing could be replaced honestly.
+    """
+    original = deepcopy(graph)
+    replaced: list[dict] = []
+    for node_id in [str(key) for key in graph]:
+        node = graph.get(node_id)
+        if not isinstance(node, dict):
+            continue
+        class_type = node.get("class_type")
+        if class_type not in SEED_NODE_CLASSES or class_type in object_info:
+            continue
+        inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+        if any(is_link(value) for value in inputs.values()):
+            logger.info(
+                "Node %s (%s) is not on this ComfyUI but its own seed is wired "
+                "from another node, so it keeps its refusal: a literal would "
+                "cut that link.",
+                node_id,
+                class_type,
+            )
+            continue
+        value = inputs.get("seed")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            logger.info(
+                "Node %s (%s) is not on this ComfyUI and carries no real seed "
+                "(%r), so it keeps its refusal.",
+                node_id,
+                class_type,
+                value,
+            )
+            continue
+        consumers = [
+            (str(other_id), str(name))
+            for other_id, other in graph.items()
+            if isinstance(other, dict) and isinstance(other.get("inputs"), dict)
+            for name, link in other["inputs"].items()
+            if is_link(link) and str(link[0]) == node_id
+        ]
+        if len(consumers) > 1:
+            logger.info(
+                "Node %s (%s) is not on this ComfyUI and feeds %s, which share "
+                "one seed by design; the run would roll each separately, so it "
+                "keeps its refusal.",
+                node_id,
+                class_type,
+                ", ".join(f"{other}.{name}" for other, name in consumers),
+            )
+            continue
+        for other_id, name in consumers:
+            graph[other_id]["inputs"][name] = value
+        del graph[node_id]
+        replaced.append(
+            {
+                "node_id": node_id,
+                "class_type": class_type,
+                "replacement": "seed",
+                "consumers": [
+                    {"node_id": other, "field": name} for other, name in consumers
+                ],
+            }
+        )
+    targets = {
+        (str(target.get("node_id")), str(target.get("field")))
+        for target in run_seed_targets(graph, object_info)
+    }
+    unsafe = [
+        f"{consumer['node_id']}.{consumer['field']}"
+        for entry in replaced
+        for consumer in entry["consumers"]
+        if (consumer["node_id"], consumer["field"]) not in targets
+    ]
+    if unsafe:
+        logger.info(
+            "Seed nodes %s are not on this ComfyUI, but replacing them would "
+            "leave %s holding a value the run's seed pass does not write, so "
+            "the graph is left as it was and they keep their refusal.",
+            ", ".join(f"{e['node_id']} ({e['class_type']})" for e in replaced),
+            ", ".join(unsafe),
+        )
+        graph.clear()
+        graph.update(original)
+        return []
+    for entry in replaced:
+        logger.info(
+            "Node %s (%s) is not on this ComfyUI, so it is replaced: %s now "
+            "takes the run's own seed.",
+            entry["node_id"],
+            entry["class_type"],
+            ", ".join(f"{c['node_id']}.{c['field']}" for c in entry["consumers"])
+            or "nothing",
+        )
+    return replaced
+
+
+def replace_missing_text_nodes(graph: dict, object_info: dict) -> list[dict]:
+    """Drop every custom text node this ComfyUI lacks, inlining its string.
+
+    A prompt typed into WAS's ``Text Multiline`` is ``missing_nodes`` on an
+    install without WAS, although the node does nothing but hand its string to
+    a ``CLIPTextEncode``. So each link from it becomes that string and the node
+    leaves the graph. Unlike a seed, one string may feed any number of inputs.
+
+    Keeps its refusal, logged: a class that IS installed, one outside
+    :data:`TEXT_NODE_CLASSES`, a node whose text is wired from elsewhere or is
+    not a string, one with another input set that may override it (Textbox's
+    ``passthrough``), a WAS text holding a ``[token]`` only the node expands, and a
+    consumer reading any output other than the first.
+
+    Args:
+        graph: The API-format graph, mutated in place.
+        object_info: The map this ComfyUI published.
+
+    Returns:
+        ``[{node_id, class_type, replacement: "text", consumers}, …]``.
+    """
+    replaced: list[dict] = []
+    for node_id in [str(key) for key in graph]:
+        node = graph.get(node_id)
+        if not isinstance(node, dict):
+            continue
+        class_type = node.get("class_type")
+        if class_type not in TEXT_NODE_CLASSES or class_type in object_info:
+            continue
+        inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+        text = inputs.get(TEXT_NODE_CLASSES[class_type])
+        if not isinstance(text, str):
+            logger.info(
+                "Node %s (%s) is not on this ComfyUI and its text is not a "
+                "literal (%r), so it keeps its refusal.",
+                node_id,
+                class_type,
+                text,
+            )
+            continue
+        overriding = overriding_text_inputs(class_type, inputs)
+        if overriding:
+            logger.info(
+                "Node %s (%s) is not on this ComfyUI and %s may change its "
+                "text, so it keeps its refusal.",
+                node_id,
+                class_type,
+                ", ".join(overriding),
+            )
+            continue
+        if class_type == "Text Multiline":
+            if WAS_TOKEN_RE.search(text):
+                logger.info(
+                    "Node %s (%s) is not on this ComfyUI and its text holds a "
+                    "[token] only the node expands, so it keeps its refusal.",
+                    node_id,
+                    class_type,
+                )
+                continue
+            # The node's own loop, line for line.
+            text = "\n".join(
+                line.replace("\n", "")
+                for line in io.StringIO(text)
+                if not line.strip().startswith("#")
+            )
+        consumers = [
+            (str(other_id), str(name), link)
+            for other_id, other in graph.items()
+            if isinstance(other, dict) and isinstance(other.get("inputs"), dict)
+            for name, link in other["inputs"].items()
+            if is_link(link) and str(link[0]) == node_id
+        ]
+        if any(link[1] != 0 for _, _, link in consumers):
+            logger.info(
+                "Node %s (%s) is not on this ComfyUI and something reads an "
+                "output other than its text, so it keeps its refusal.",
+                node_id,
+                class_type,
+            )
+            continue
+        for other_id, name, _ in consumers:
+            graph[other_id]["inputs"][name] = text
+        del graph[node_id]
+        logger.info(
+            "Node %s (%s) is not on this ComfyUI, so it is replaced: %s now "
+            "holds its text.",
+            node_id,
+            class_type,
+            ", ".join(f"{other}.{name}" for other, name, _ in consumers) or "nothing",
+        )
+        replaced.append(
+            {
+                "node_id": node_id,
+                "class_type": class_type,
+                "replacement": "text",
+                "consumers": [
+                    {"node_id": other, "field": name} for other, name, _ in consumers
+                ],
+            }
+        )
+    return replaced
+
+
+@dataclass(frozen=True)
+class Repair:
+    """One refusal PixlStash can answer by changing the graph (#1463).
+
+    ``code`` is the reason it answers, ``report`` the ``RunGroup`` field that
+    names what it changed, and ``apply`` the change itself: it mutates the graph
+    and returns one entry per thing it did, empty when it did nothing.
+    """
+
+    code: str
+    report: str
+    apply: Callable[[dict, dict], list[dict]]
+
+
+# The repair registry: the one place that decides what "repairable" means. Keyed
+# on reason code so a repair runs only when `judge` reported what it answers,
+# and so a new one is an entry here rather than another patch to the run route.
+REPAIRS: tuple[Repair, ...] = (
+    Repair(
+        MISSING_MODELS,
+        "bypassed_loras",
+        bypass_missing_loras,
+    ),
+    # Text before seed, and the order is load-bearing: the seed repair's
+    # rollback restores the graph it was handed, which must already hold the
+    # text replacement it reports.
+    Repair(MISSING_NODES, "replaced_nodes", replace_missing_text_nodes),
+    Repair(MISSING_NODES, "replaced_nodes", replace_missing_seed_nodes),
+)
+
+
+def repair(
+    graph: dict, object_info: dict, reasons: list[Reason]
+) -> dict[str, list[dict]]:
+    """Apply every registered repair whose refusal *reasons* contains.
+
+    The caller judges, repairs, then judges **again**: a repair can leave its
+    refusal standing (a stacker still holding an adapter that is here, a seed
+    node feeding something that is not a seed), and only the second verdict
+    says whether the graph now runs. Re-judging is pure over the graph and the
+    ``object_info`` already fetched, so it costs no ComfyUI round-trip.
+
+    Returns:
+        ``{report_field: [entries…]}`` for every registered repair, empty lists
+        included, so the caller can assign each field without knowing the set.
+    """
+    codes = {reason.code for reason in reasons}
+    done: dict[str, list[dict]] = {}
+    for entry in REPAIRS:
+        done.setdefault(entry.report, []).extend(
+            entry.apply(graph, object_info) if entry.code in codes else []
+        )
+    return done
+
+
+# The ComfyUI-PixlStash loader a model fix swaps in where the workflow's own
+# loader cannot load the replacement (#1605), per slot kind, with the digest
+# widgets it takes in order. Checkpoints and diffusion models keep the rename
+# only, written unlisted where the run's shelf swap would load them:
+# `PixlStashCheckpointLoader`, which loads either, names a per-hub shelf id and
+# cannot fetch the file.
+PIXLSTASH_SWAP_LOADERS: dict[str, tuple[str, tuple[str, ...]]] = {
+    FILE_VAE: ("PixlStashVAELoader", ("vae_sha256",)),
+    FILE_TEXT_ENCODER: ("PixlStashCLIPLoader", ("clip_sha256", "clip_sha256_2")),
+}
+# The one output each of them has, which the original's first must be.
+_SWAP_OUTPUT_TYPES = {FILE_VAE: "VAE", FILE_TEXT_ENCODER: "CLIP"}
+# A widget the swapped-in loader has no place for, and the value at which
+# dropping it changes nothing (core `CLIPLoader`'s advanced `device`).
+_SWAP_DROPPABLE = {"device": "default"}
+
+# Why a loader was not swapped. Only NO_PIXLSTASH_NODES is the owner's to
+# fix, so it is checked last: when it is the answer, nothing else stood in
+# the way.
+SWAP_UNSUPPORTED = "unsupported_loader"
+SWAP_TOO_MANY_FILES = "too_many_files"
+SWAP_OUTPUTS_DIFFER = "outputs_differ"
+SWAP_CLIP_TYPE = "clip_type"
+SWAP_GGUF = "gguf"
+SWAP_NO_SHELF_COPY = "no_shelf_copy"
+SWAP_NO_PIXLSTASH_NODES = "no_pixlstash_nodes"
+
+
+def plan_pixlstash_swap(
+    graph: dict,
+    node_id: str,
+    kind: str,
+    swaps: dict[str, str],
+    object_info: Optional[dict],
+    digest_of: Callable[[str], Optional[str]],
+) -> tuple[Optional[dict], Optional[str]]:
+    """How to load *node_id*'s files, *swaps* applied, through a PixlStash loader.
+
+    Pure: :func:`apply_pixlstash_swap` writes the plan. Refused where the
+    swapped node would not do what the original did: another kind of file on
+    the node, more files than the PixlStash loader takes (a triple CLIP
+    loader), an output past the first in use or a first output of another type
+    (when ComfyUI declares it), a CLIP ``type`` it does not list, a widget it
+    has no place for. Refused too for a GGUF file (the PixlStash loaders load
+    through core ComfyUI, Pikselkroken/ComfyUI-PixlStash#27) and a file the
+    shelf holds no single digest with a present copy for (the hasher has not
+    read it, or its copies are gone).
+
+    Args:
+        swaps: The graph's filename -> the file to load instead; a file not
+            named here is loaded as it is.
+        digest_of: A filename -> its shelf SHA-256 in this slot kind, with a
+            copy present, or ``None``.
+
+    Returns:
+        ``(plan, None)`` or ``(None, reason)``, *reason* a ``SWAP_*`` code.
+        The plan is ``{class_type, type, fields: [(widget, original widget,
+        file, digest)]}``.
+    """
+    if kind not in PIXLSTASH_SWAP_LOADERS:
+        return None, SWAP_UNSUPPORTED
+    swap_class, digest_widgets = PIXLSTASH_SWAP_LOADERS[kind]
+    node = graph.get(node_id)
+    inputs = node.get("inputs") if isinstance(node, dict) else None
+    if not isinstance(inputs, dict):
+        return None, SWAP_UNSUPPORTED
+    # In the loader's declared file order (`MODEL_FILENAME_FIELDS`), which is
+    # the order its paths load in and so the order of our digest widgets.
+    fields = [
+        (widget, value)
+        for _node, cls, widget, value in iter_model_fields_api({node_id: node})
+    ]
+    if not fields or any(
+        model_fix_kind(node.get("class_type", ""), widget) != kind
+        for widget, _value in fields
+    ):
+        return None, SWAP_UNSUPPORTED
+    if len(fields) > len(digest_widgets):
+        return None, SWAP_TOO_MANY_FILES
+    named = {widget for widget, _value in fields}
+    clip_type = inputs.get("type") if kind == FILE_TEXT_ENCODER else None
+    for name, value in inputs.items():
+        if name in named or (name == "type" and kind == FILE_TEXT_ENCODER):
+            continue
+        if is_link(value) or _SWAP_DROPPABLE.get(name, object()) != value:
+            return None, SWAP_UNSUPPORTED
+    if kind == FILE_TEXT_ENCODER:
+        types = listed_options(object_info, swap_class, "type")
+        if not isinstance(clip_type, str) or (types and clip_type not in types):
+            return None, SWAP_CLIP_TYPE
+    declared = ((object_info or {}).get(node.get("class_type")) or {}).get("output")
+    # Only a list says anything: another shape is not ComfyUI's, and is read
+    # as undeclared rather than indexed.
+    if (
+        isinstance(declared, list)
+        and declared
+        and declared[0] != _SWAP_OUTPUT_TYPES[kind]
+    ):
+        return None, SWAP_OUTPUTS_DIFFER
+    for consumer in graph.values():
+        consumer_inputs = consumer.get("inputs") if isinstance(consumer, dict) else {}
+        for value in (consumer_inputs or {}).values():
+            if is_link(value) and value[0] == str(node_id) and value[1] != 0:
+                return None, SWAP_OUTPUTS_DIFFER
+    planned = []
+    for digest_widget, (widget, value) in zip(digest_widgets, fields):
+        file = swaps.get(value, value)
+        if file.lower().endswith(".gguf"):
+            return None, SWAP_GGUF
+        digest = digest_of(file)
+        if not digest:
+            return None, SWAP_NO_SHELF_COPY
+        planned.append((digest_widget, widget, file, digest))
+    if object_info is None or swap_class not in object_info:
+        return None, SWAP_NO_PIXLSTASH_NODES
+    return {"class_type": swap_class, "type": clip_type, "fields": planned}, None
+
+
+def apply_pixlstash_swap(graph: dict, node_id: str, plan: dict) -> None:
+    """Put the PixlStash loader *plan* names in place of *node_id*, id kept.
+
+    The id is kept, so every consumer's link still reads the node's first
+    output, which is the one :func:`plan_pixlstash_swap` checked is all they
+    read.
+    """
+    inputs = {widget: digest for widget, _was, _file, digest in plan["fields"]}
+    if plan["type"] is not None:
+        inputs["type"] = plan["type"]
+    graph[node_id] = {
+        **graph[node_id],
+        "class_type": plan["class_type"],
+        "inputs": inputs,
+    }
+
+
+def lora_slot_fields(inputs: dict) -> list[str]:
+    """Every LoRA slot a node's inputs hold, filled or not, in widget order."""
+    return [
+        str(field)
+        for field in inputs
+        if LORA_FILENAME_FIELD_RE.match(str(field))
+        or LORA_DIGEST_FIELD_RE.match(str(field))
+    ]
+
+
+def skip_requested_loras(
+    graph: dict,
+    slots: list[tuple[str, str]],
+    object_info: Optional[dict],
+) -> tuple[list[dict], list[Reason], set[tuple[str, str]]]:
+    """Skip the LoRA slots the owner asked this run to do without.
+
+    The owner's explicit "run without this LoRA" from the Run popup (#1478).
+    A skip, never a removal: *graph* is the run's own copy, and the stored
+    workflow keeps its loader - editing the workflow is the LoRA chain
+    editor's job.
+
+    It goes through :func:`bypass_node` like :func:`bypass_missing_loras`, and
+    **the request is the consent** that function has to do without: a loader
+    naming a :data:`FORGOTTEN_MODEL` is skipped when asked, because the owner
+    has said they do not want it, whatever file it is.
+
+    What the request cannot consent to is dropping a LoRA it did NOT name: a
+    stacker holding another filled slot keeps its node, and the slot is a
+    :data:`LORA_NOT_SKIPPABLE` reason instead - as is a loader nothing can be
+    rewired around, and every slot when ComfyUI cannot be asked what to wire
+    in its place. A reason and not a 400: the request made sense, this card
+    cannot honour it.
+
+    Slots the graph does not have are passed over (node ids belong to one graph,
+    and a run can span cards); the caller learns which were found from the
+    third value and refuses a slot NO graph of the run had.
+
+    Args:
+        graph: The API-format graph, mutated in place.
+        slots: ``[(node_id, field), …]`` the request named.
+        object_info: This ComfyUI's map, or ``None`` when it could not be asked.
+
+    Returns:
+        ``(skipped, reasons, found)``: ``bypassed_loras`` entries marked
+        ``"requested": True``, the refusals, and the requested slots this graph
+        holds.
+    """
+    wanted: dict[str, set[str]] = {}
+    for node_id, slot_field in slots:
+        wanted.setdefault(str(node_id), set()).add(str(slot_field))
+    skipped: list[dict] = []
+    reasons: list[Reason] = []
+    found: set[tuple[str, str]] = set()
+    for node_id, fields in wanted.items():
+        node = graph.get(node_id)
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        here = set(lora_slot_fields(inputs)) if isinstance(inputs, dict) else set()
+        asked = sorted(fields & here)
+        if not asked:
+            logger.debug(
+                "Skipping LoRA slot(s) %s on node %s does not apply here: this "
+                "graph has no such slot.",
+                ", ".join(sorted(fields)),
+                node_id,
+            )
+            continue
+        found.update((node_id, field) for field in asked)
+        class_type = node.get("class_type")
+
+        def shown(field: str) -> str:
+            value = inputs.get(field)
+            return value if isinstance(value, str) else ""
+
+        def refuse(message: str) -> None:
+            logger.info(
+                "LoRA slot(s) %s on node %s (%s) cannot be skipped as asked: %s",
+                ", ".join(asked),
+                node_id,
+                class_type,
+                message,
+            )
+            reasons.extend(
+                Reason(
+                    LORA_NOT_SKIPPABLE,
+                    {
+                        "node_id": node_id,
+                        "field": field,
+                        "file": shown(field),
+                        "message": message,
+                    },
+                )
+                for field in asked
+            )
+
+        # Filled whether it names a file or is wired, as bypass_missing_loras
+        # counts it: a wired second slot is a live adapter.
+        filled = {
+            field
+            for field in here
+            if is_link(inputs.get(field))
+            or (isinstance(inputs.get(field), str) and inputs.get(field))
+        }
+        kept = sorted(filled - set(asked))
+        if kept:
+            # The owner's word for taking a loader out is *Remove*, in the Run
+            # popup and in a save, which prints this too (`_refuse_unapplied`).
+            refuse(
+                f"Node {node_id} ({class_type}) also loads "
+                f"{', '.join(shown(f) or f for f in kept)}, and removing the "
+                "node would remove that too."
+            )
+            continue
+        if object_info is None:
+            refuse(
+                "PixlStash could not reach ComfyUI, so it cannot tell what to "
+                f"wire in place of node {node_id} ({class_type})."
+            )
+            continue
+        try:
+            bypass_node(graph, node_id, object_info)
+        except LookupError as exc:
+            refuse(str(exc))
+            continue
+        logger.info(
+            "Node %s (%s) is skipped for this run at the owner's request: %s.",
+            node_id,
+            class_type,
+            ", ".join(shown(field) or field for field in asked),
+        )
+        skipped.extend(
+            {
+                "file": shown(field),
+                "folder": "loras",
+                "node_id": node_id,
+                "class_type": class_type,
+                "field": field,
+                "requested": True,
+            }
+            for field in asked
+        )
+    return skipped, reasons, found
+
+
+def take_out_person_loras(
+    graph: dict,
+    slots: list[tuple[str, str]],
+    object_info: Optional[dict],
+) -> tuple[list[dict], list[dict]]:
+    """Take the LoRA slots holding a person's LoRA out of a graph being STORED.
+
+    A person's LoRA is never part of a workflow (rule 4 of #1846), so a graph
+    saved over one goes without it. Unlike :func:`skip_requested_loras`,
+    which is one run's choice and may leave a loader in, this is a write: a
+    slot that cannot be taken out is refused, never stored.
+
+    Per node, the rule is per row:
+
+    * a **digest row** (``adapter_sha256``, ``adapter_sha256_2``, ...) is
+      emptied, and on the multi-adapter loader the rows below move up with
+      their strengths, as the node itself removes a row;
+    * a node left with **no adapter at all** is bypassed, its readers wired to
+      what it read (:func:`bypass_node`). Where that cannot be done (ComfyUI
+      not answering, an output nothing stands in for), the multi-adapter
+      loader stays, empty, since with every row empty it passes MODEL and
+      CLIP straight through; any other loader is refused;
+    * a **filename slot** on a node that also loads another LoRA (a stacker)
+      has no empty value every pack accepts, so it is refused.
+
+    Args:
+        graph: The API-format graph, mutated in place.
+        slots: ``[(node_id, field), ...]`` holding a person's LoRA.
+        object_info: This ComfyUI's map, or ``None`` when it could not be asked.
+
+    Returns:
+        ``(taken, refused)``: each ``{node_id, class_type, field, file}``, a
+        refused one with the ``message`` saying why.
+    """
+    wanted: dict[str, set[str]] = {}
+    for node_id, slot_field in slots:
+        wanted.setdefault(str(node_id), set()).add(str(slot_field))
+    taken: list[dict] = []
+    refused: list[dict] = []
+    for node_id, fields in sorted(wanted.items()):
+        node = graph.get(node_id)
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        if not isinstance(inputs, dict):
+            inputs = {}
+        here = lora_slot_fields(inputs)
+        asked = sorted(fields)
+        class_type = node.get("class_type") if isinstance(node, dict) else None
+        entries = [
+            {
+                "node_id": node_id,
+                "class_type": class_type,
+                "field": slot_field,
+                "file": inputs[slot_field]
+                if isinstance(inputs.get(slot_field), str)
+                else "",
+            }
+            for slot_field in asked
+        ]
+        kept = [
+            slot_field
+            for slot_field in here
+            if slot_field not in asked
+            and (
+                is_link(inputs.get(slot_field))
+                or (isinstance(inputs.get(slot_field), str) and inputs[slot_field])
+            )
+        ]
+        rows = all(LORA_DIGEST_FIELD_RE.match(slot_field) for slot_field in asked)
+        message = None
+        if fields - set(here):
+            # A write: a slot this cannot find is refused, never passed over
+            # as though it had been taken out.
+            message = (
+                f"Node {node_id} ({class_type}) has no LoRA slot "
+                f"{', '.join(sorted(fields - set(here)))} PixlStash can empty."
+            )
+        elif kept and not rows:
+            message = (
+                f"Node {node_id} ({class_type}) also loads "
+                f"{', '.join(str(inputs[f]) for f in kept)}, and it has no empty "
+                "slot PixlStash can leave in its place."
+            )
+        elif kept:
+            for slot_field in asked:
+                inputs[slot_field] = ""
+            if class_type == PIXLSTASH_MULTI_ADAPTER_LOADER:
+                _close_adapter_rows(inputs)
+        else:
+            try:
+                if object_info is None:
+                    raise LookupError(
+                        "PixlStash could not reach ComfyUI, so it cannot tell "
+                        f"what to wire in place of node {node_id} ({class_type})."
+                    )
+                bypass_node(graph, node_id, object_info)
+            except LookupError as exc:
+                if class_type == PIXLSTASH_MULTI_ADAPTER_LOADER and rows:
+                    # Every row empty passes MODEL and CLIP through.
+                    for slot_field in asked:
+                        inputs[slot_field] = ""
+                else:
+                    message = str(exc)
+        if message is not None:
+            logger.info(
+                "A person's LoRA in node %s (%s) cannot be taken out of a graph "
+                "being stored: %s",
+                node_id,
+                class_type,
+                message,
+            )
+            refused += [{**entry, "message": message} for entry in entries]
+            continue
+        taken += entries
+    return taken, refused
+
+
+def take_out_empty_adapter_loaders(graph: dict) -> list[str]:
+    """Take every multi-adapter loader holding no adapter out of *graph*, in place.
+
+    The loader PixlStash puts on ComfyUI's canvas for picking people (#1852)
+    arrives in a graph saved back with nobody picked, or with its people's
+    rows just emptied (:func:`take_out_person_loras`). With every row empty it
+    passes MODEL and CLIP straight through, so its readers are wired to what
+    it read and the node goes: the workflow is stored as it was before the
+    loader was put on. ``trigger_words`` of no adapter is the empty string.
+
+    Wired by hand, not through :func:`bypass_node`: the node's three outputs
+    are this code's own contract with the pack, and ComfyUI need not answer.
+
+    Returns:
+        The ids of the nodes taken out.
+    """
+    # Output index -> what stands in for it, per loader taken out: MODEL,
+    # CLIP, and `trigger_words` of no adapter.
+    through: dict[str, dict[int, Any]] = {}
+    for node_id, node in graph.items():
+        if (
+            not isinstance(node, dict)
+            or node.get("class_type") != PIXLSTASH_MULTI_ADAPTER_LOADER
+        ):
+            continue
+        inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+        if any(
+            LORA_DIGEST_FIELD_RE.match(name) and (is_link(value) or value)
+            for name, value in inputs.items()
+        ):
+            continue
+        through[str(node_id)] = {0: inputs.get("model"), 1: inputs.get("clip"), 2: ""}
+    if not through:
+        return []
+
+    gone = object()
+    settled: dict[tuple[str, Any], Any] = {}
+
+    def stand_in(link: list) -> Any:
+        """What a reader of *link* reads once the loaders are out: followed
+        through a chain of them, each step once however many read it."""
+        walked: dict[tuple[str, Any], None] = {}
+        value: Any = link
+        while is_link(value) and str(value[0]) in through:
+            step = (str(value[0]), value[1])
+            if step in settled:
+                value = settled[step]
+                break
+            if step in walked:
+                # Empty loaders reading each other: nothing feeds the ring.
+                value = gone
+                break
+            walked[step] = None
+            value = through[step[0]].get(step[1])
+            if value is None:
+                # No CLIP was wired in, so the output carried nothing.
+                value = gone
+        for step in walked:
+            settled[step] = value
+        return value
+
+    # One pass over the readers, so a graph of nothing but loaders costs its
+    # size and not its square: the write is reachable from ComfyUI's port.
+    for node_id, node in graph.items():
+        read = node.get("inputs") if isinstance(node, dict) else None
+        if str(node_id) in through or not isinstance(read, dict):
+            continue
+        for name, value in list(read.items()):
+            if not is_link(value) or str(value[0]) not in through:
+                continue
+            found = stand_in(value)
+            if found is gone:
+                del read[name]
+            else:
+                read[name] = deepcopy(found)
+    for node_id in [key for key in graph if str(key) in through]:
+        del graph[node_id]
+    return sorted(through)
+
+
+def graph_structure(graph: dict, classes: Optional[dict[str, str]] = None) -> str:
+    """A digest of how an API-format *graph* is wired, whatever its values.
+
+    Each node's id and class and every connection it reads. Two graphs with
+    one structure differ only in widget values, so an editor document laid
+    out for one fits the other once those values are written over it; that is
+    what decides whether a ComfyUI layout may open (#1852).
+
+    *classes* names classes to read as another, so two graphs that differ
+    only in which of a pair a node is have one structure.
+    """
+    classes = classes or {}
+    wiring = sorted(
+        (
+            str(node_id),
+            str(classes.get(node.get("class_type"), node.get("class_type"))),
+            sorted(
+                (name, str(value[0]), value[1])
+                for name, value in (
+                    node["inputs"] if isinstance(node.get("inputs"), dict) else {}
+                ).items()
+                if is_link(value)
+            ),
+        )
+        for node_id, node in graph.items()
+        if isinstance(node, dict)
+    )
+    return hashlib.sha256(json.dumps(wiring).encode()).hexdigest()
+
+
+def _close_adapter_rows(inputs: dict) -> None:
+    """Move the multi-adapter loader's filled rows up over its empty ones.
+
+    Each row is ``adapter_sha256``, ``strength_model`` and ``strength_clip``
+    with the row's own suffix (none, ``_2``, ``_3``, ...); a row moves with
+    its strengths, and the rows left at the end are empty.
+    """
+
+    def suffix(digest: str) -> str:
+        row = re.search(r"_\d+$", digest)
+        return row.group(0) if row else ""
+
+    digests = sorted(
+        (f for f in inputs if LORA_DIGEST_FIELD_RE.match(f)),
+        key=lambda digest: int(suffix(digest)[1:] or 1),
+    )
+    widgets = ("strength_model", "strength_clip")
+
+    filled = [
+        (inputs[d], [inputs.get(f"{w}{suffix(d)}") for w in widgets])
+        for d in digests
+        if is_link(inputs[d]) or (isinstance(inputs[d], str) and inputs[d])
+    ]
+    for index, digest in enumerate(digests):
+        value, strengths = filled[index] if index < len(filled) else ("", None)
+        inputs[digest] = value
+        for widget, strength in zip(widgets, strengths or ()):
+            # A row with no strength of its own moves as that: never under
+            # the strength of the row it replaces.
+            if strength is None:
+                inputs.pop(f"{widget}{suffix(digest)}", None)
+            else:
+                inputs[f"{widget}{suffix(digest)}"] = strength
+
+
+def skip_requested_stages(
+    graph: dict, stages: list[str], object_info: Optional[dict]
+) -> list[Reason]:
+    """Switch the optional stages the owner asked this run to go without (#1621).
+
+    Each goes through :func:`bypass_stage` on the run's own copy. One that
+    cannot be switched off is a :data:`STAGE_NOT_SKIPPABLE` reason, which
+    blocks the card: the owner asked for a run without that stage, and running
+    it with the stage would be answering a different request. So is every
+    stage when ComfyUI cannot be asked what to wire in its place. A stage the
+    graph does not have is nothing to do.
+
+    Returns:
+        The refusals, ``{stage, message}`` each.
+    """
+    reasons: list[Reason] = []
+    for stage in dict.fromkeys(stages):
+        try:
+            # With no map every node of the stage is untyped and refuses, so a
+            # graph without the stage still runs and one with it is refused.
+            bypass_stage(graph, stage, object_info or {})
+            continue
+        except LookupError as exc:
+            message = (
+                str(exc)
+                if object_info is not None
+                else "PixlStash could not reach ComfyUI, so it cannot tell what "
+                f"to wire in place of the {stage.replace('_', ' ')} stage."
+            )
+        logger.info("Stage %s cannot be switched off as asked: %s", stage, message)
+        reasons.append(
+            Reason(STAGE_NOT_SKIPPABLE, {"stage": stage, "message": message})
+        )
+    return reasons
+
+
+def blocks_batch(reasons: list[Reason], *, allow_unchecked: bool = False) -> bool:
+    """Whether one source's reasons stop the whole request rather than itself.
+
+    A missing model is the brief's named case and the rule generalises the way
+    the owner would expect: installing a file is a trip away from the keyboard,
+    so queueing the rest of a mixed batch would leave them re-running the same
+    gesture afterwards to catch the ones that were skipped. Restarting ComfyUI
+    for an out-of-date pack (``pack_outdated``) is the same trip.
+
+    **An uninspectable ComfyUI blocks unless the owner has consented**, which is
+    the whole of the ``allow_unchecked`` rule: without it nothing at all is
+    known about the graph - not even which node classes this install has - so
+    the request fails closed. With it the run goes ahead and the reason is
+    still reported, because the fact remains true and the caller should see it.
+    Consent reaches no other code: a missing model is a fact that WAS
+    established, and there is nothing there to consent to.
+    """
+    unchecked = (COMFYUI_UNREACHABLE, COMFYUI_NOT_CONFIGURED)
+    return any(
+        reason.code in (MISSING_MODELS, PACK_OUTDATED)
+        or (reason.code in unchecked and not allow_unchecked)
+        for reason in reasons
+    )
+
+
+def blocks_group(reasons: list[Reason], *, allow_unchecked: bool = False) -> bool:
+    """Whether these reasons stop this one card from running.
+
+    Every reason does, with the single exception consent creates: an
+    acknowledged uninspectable ComfyUI is reported and run anyway. Without that
+    exception ``allow_unchecked`` could never do anything, because the reason it
+    consents to would keep its own group out of the submission either way.
+    """
+    if allow_unchecked:
+        return any(
+            reason.code not in (COMFYUI_UNREACHABLE, COMFYUI_NOT_CONFIGURED)
+            for reason in reasons
+        )
+    return bool(reasons)
+
+
+def _named(value) -> bool:
+    """Whether a stored model pin names its model this way: non-empty text."""
+    return isinstance(value, str) and bool(value)
+
+
+def saved_recipe_body(recipe) -> dict:
+    """A saved recipe as the run body fields it stands in for.
+
+    The row is the owner's own look, so it supplies the prompt, the LoRAs and
+    the overrides - and the request may still override any of them, which is
+    why this returns a body to merge under rather than applying anything.
+    """
+    try:
+        loras = json.loads(recipe.loras or "[]")
+    except json.JSONDecodeError as exc:
+        logger.error(
+            "Saved recipe %s has unreadable LoRAs, so the run uses none: %s",
+            recipe.id,
+            exc,
+        )
+        loras = []
+    try:
+        overrides = json.loads(recipe.overrides or "{}")
+    except json.JSONDecodeError as exc:
+        logger.error(
+            "Saved recipe %s has unreadable overrides, so the run uses none: %s",
+            recipe.id,
+            exc,
+        )
+        overrides = {}
+    models = None
+    if recipe.models is not None:
+        try:
+            models = json.loads(recipe.models)
+        except json.JSONDecodeError as exc:
+            logger.error(
+                "Saved recipe %s has unreadable models, so the run loads the "
+                "workflow's default ones: %s",
+                recipe.id,
+                exc,
+            )
+        if models is not None and not (
+            isinstance(models, list)
+            and all(
+                isinstance(m, dict)
+                and isinstance(m.get("address"), str)
+                and m.get("address")
+                # Exactly one way to name the model, as `RunModel` requires.
+                and _named(m.get("filename")) != _named(m.get("sha256"))
+                for m in models
+            )
+        ):
+            logger.error(
+                "Saved recipe %s has malformed models %r, so the run loads the "
+                "workflow's default ones.",
+                recipe.id,
+                models,
+            )
+            models = None
+    return {
+        "workflow_key": recipe.workflow_key,
+        # The workflow it runs on (#1622), once the cut-over has filled it in,
+        # and its models, pinned over the default recipe (NULL pins nothing).
+        "workflow_id": recipe.workflow_id,
+        "models": models,
+        "prompt": recipe.prompt,
+        "negative": recipe.negative,
+        "loras": loras if isinstance(loras, list) else [],
+        "overrides": overrides if isinstance(overrides, dict) else {},
+        "seed": recipe.seed,
+        "keep_seed": bool(recipe.keep_seed),
+    }
+
+
+def place_recipe_loras(
+    slots: list[dict],
+    recipe_loras: list[dict],
+    slot_digests: dict[tuple[str, str], Optional[str]],
+) -> tuple[list[tuple[dict, dict]], list[dict]]:
+    """Which LoRA slot of the graph each of a saved recipe's LoRAs goes into (#1478).
+
+    A saved LoRA names a file and a digest but no slot, so it is matched to one:
+    **digest first** (the slot already loads the same bytes), **then basename**
+    (the slot names a file of the same name, case-folded), then **any slot
+    still free, in graph order** - the positional fill the run always did, so a
+    recipe that ran before still runs the same. It replaces a positional
+    ``zip``, which put a recipe stored in the other order onto the wrong
+    loaders and dropped a third LoRA on a two-loader graph without a word, while
+    the credit matcher had matched all three by name.
+
+    A LoRA with nowhere to go is **reported, never dropped**, and so is one the
+    shelf cannot identify (no ``sha256``): PixlStash cannot load a file it
+    cannot name, so the recipe's row is not applied. That one still keeps a
+    slot naming a file of the same name out of the positional fill - the graph
+    loads it there already - and its report says so.
+
+    Args:
+        slots: :func:`detect_lora_targets`'s slots, in graph order.
+        recipe_loras: The saved ``[{filename, sha256, strength}, …]``.
+        slot_digests: ``{(node_id, field): sha256 or None}`` - which shelf LoRA
+            each slot already loads, as far as the shelf can tell.
+
+    Returns:
+        ``(placements, unplaced)``: ``[(slot, saved LoRA), …]`` to apply, and
+        ``[{"filename", "sha256", "node_id", "reason"}, …]`` for the rest.
+    """
+
+    def slot_key(slot: dict) -> tuple[str, str]:
+        return (str(slot.get("node_id")), str(slot.get("field")))
+
+    def digest_of(saved: dict) -> Optional[str]:
+        value = str(saved.get("sha256") or "").strip().lower()
+        return value or None
+
+    def basename(value: Any) -> str:
+        return normalized_filename(str(value or "").strip())
+
+    free = list(slots)
+    placed: dict[int, dict] = {}
+    for index, saved in enumerate(recipe_loras):
+        digest = digest_of(saved)
+        if digest is None:
+            continue
+        slot = next((s for s in free if slot_digests.get(slot_key(s)) == digest), None)
+        if slot is not None:
+            placed[index] = slot
+            free.remove(slot)
+    for index, saved in enumerate(recipe_loras):
+        name = basename(saved.get("filename"))
+        if index in placed or not name:
+            continue
+        slot = next(
+            (
+                s
+                for s in free
+                if s.get("by") != "digest" and basename(s.get("value")) == name
+            ),
+            None,
+        )
+        if slot is not None:
+            placed[index] = slot
+            free.remove(slot)
+    for index, saved in enumerate(recipe_loras):
+        if index not in placed and digest_of(saved) is not None and free:
+            placed[index] = free.pop(0)
+
+    placements: list[tuple[dict, dict]] = []
+    unplaced: list[dict] = []
+    for index, saved in enumerate(recipe_loras):
+        filename = str(saved.get("filename") or "")
+        shown = filename or "A LoRA"
+        digest = digest_of(saved)
+        slot = placed.get(index)
+        if digest is not None and slot is not None:
+            placements.append((slot, saved))
+            continue
+        if digest is None:
+            reason = (
+                f"Your model shelf cannot identify {shown}, so PixlStash does not "
+                "apply this recipe's setting for it"
+                + (
+                    f"; loader #{slot['node_id']} still loads a file of that name "
+                    "as the workflow has it."
+                    if slot is not None
+                    else ", and nothing in this workflow loads it."
+                )
+            )
+        elif not slots:
+            reason = f"This workflow has no LoRA loader, so {shown} is not applied."
+        else:
+            reason = (
+                f"This workflow has {len(slots)} LoRA "
+                f"{'loader' if len(slots) == 1 else 'loaders'} and the recipe's "
+                f"other LoRAs take {'it' if len(slots) == 1 else 'them all'}, so "
+                f"{shown} is not applied."
+            )
+        unplaced.append(
+            {
+                "filename": filename,
+                "sha256": digest,
+                "node_id": str(slot["node_id"]) if slot is not None else None,
+                "reason": reason,
+            }
+        )
+    return placements, unplaced
+
+
+def slots_recipe_names(
+    slots: list[dict],
+    recipe_loras: list[dict],
+    slot_digests: dict[tuple[str, str], Optional[str]],
+) -> dict[tuple[str, str], dict]:
+    """Every slot already loading a LoRA *recipe_loras* names, with that LoRA.
+
+    **Every** such slot, where :func:`place_recipe_loras` places one slot per
+    LoRA: a recipe names a file once however many loaders load it, so a graph
+    holding one LoRA in eight loaders has all eight named, and "the loaders
+    the recipe leaves out" must not count seven of them.
+
+    By digest where the shelf knows the slot's and the recipe has one, else by
+    basename - the Run popup's own rule for which loaders get a row
+    (``loaderOf``). A slot the shelf identifies as another file of the same
+    name is not the recipe's.
+
+    Returns:
+        ``{(node_id, field): saved LoRA, …}``, the first of *recipe_loras*
+        that names the slot's.
+    """
+    wanted = [
+        (
+            str(saved.get("sha256") or "").strip().lower(),
+            normalized_filename(str(saved.get("filename") or "").strip()),
+            saved,
+        )
+        for saved in recipe_loras
+    ]
+    named = {}
+    for slot in slots:
+        key = (str(slot.get("node_id")), str(slot.get("field")))
+        held = slot_digests.get(key)
+        name = (
+            normalized_filename(str(slot.get("value") or "").strip())
+            if slot.get("by") != "digest"
+            else ""
+        )
+        for digest, filename, saved in wanted:
+            if digest == held if digest and held else bool(name) and name == filename:
+                named[key] = saved
+                break
+    return named
+
+
+def _side_fields(detected: WorkflowIO, side: str, node_id: str) -> tuple[str, ...]:
+    """The inputs a prompt node may keep *side*'s text in.
+
+    An encoder that makes both sides keeps its negative in a field of its own;
+    its positive field must not take the negative.
+    """
+    both = set(detected.positive_prompts) & set(detected.negative_prompts)
+    return NEGATIVE_FIELDS if side == "negative" and node_id in both else PROMPT_FIELDS
+
+
+def _prompt_inputs(graph: dict, detected: WorkflowIO) -> set[tuple[str, str]]:
+    """The ``(node id, input)`` pairs :func:`apply_prompts` writes a prompt into."""
+    found = set()
+    for side in ("positive", "negative"):
+        for node_id in getattr(detected, f"{side}_prompts"):
+            name = prompt_field(
+                (graph.get(node_id) or {}).get("inputs") or {},
+                _side_fields(detected, side, node_id),
+            )
+            if name is not None:
+                found.add(
+                    _literal_prompt_target(graph, node_id, name) or (node_id, name)
+                )
+    return found
+
+
+def run_inputs(graph: dict, object_info: Optional[dict]) -> dict[tuple[str, str], str]:
+    """``{(node id, input): "prompt" | "seed"}``: what a run sets in *graph*.
+
+    The inputs :func:`apply_prompts` and the seed pass write. They belong to
+    the run and to recipes, never to the workflow (#1846).
+    """
+    try:
+        detected = detect_workflow_io(graph)
+    except WorkflowGraphError as exc:
+        logger.info("No prompt inputs read, the graph will not reduce: %s", exc)
+        detected = WorkflowIO()
+    found = {pair: "prompt" for pair in _prompt_inputs(graph, detected)}
+    for target in run_seed_targets(graph, object_info):
+        found[(str(target["node_id"]), str(target["field"]))] = "seed"
+    return found
+
+
+def keep_run_inputs(
+    graph: dict, before: dict, object_info: Optional[dict]
+) -> tuple[list[str], set[tuple[str, str]]]:
+    """Put the prompt and seed *before* holds back into a graph stored over it.
+
+    A whole graph saved over a workflow carries whatever the canvas held, and
+    ComfyUI re-rolls the seed on every queue: taken as sent, each save would
+    be a new version for a seed nobody chose. Only a literal over a literal
+    of the same node: a wire the owner added is an edit and stays.
+
+    Args:
+        graph: The API-format graph being stored, mutated in place.
+        before: The graph it replaces.
+
+    Returns:
+        ``(kinds put back, the run's inputs in graph)``: ``"prompt"`` and
+        ``"seed"`` where one differed, and every ``(node id, input)`` a run
+        sets, for a caller comparing the rest.
+    """
+    found = run_inputs(graph, object_info)
+    kept = set()
+    for (node_id, name), kind in found.items():
+        node, old = graph.get(node_id), before.get(node_id)
+        if not isinstance(old, dict) or old.get("class_type") != node.get("class_type"):
+            continue
+        was = (old.get("inputs") or {}).get(name)
+        now = node["inputs"].get(name)
+        if was is None or is_link(was) or is_link(now) or was == now:
+            continue
+        node["inputs"][name] = was
+        kept.add(kind)
+    return sorted(kept), set(found)
+
+
+def _node_title(node: dict) -> str:
+    """The name its author gave a node in ComfyUI, or ``""``."""
+    meta = node.get("_meta")
+    title = meta.get("title") if isinstance(meta, dict) else None
+    return title if isinstance(title, str) else ""
+
+
+# What ComfyUI's `object_info` calls a widget's type, as the form's own kinds.
+# A combo is `choice`; any other type is one the form cannot name.
+_FORM_KINDS = {
+    "INT": "number",
+    "FLOAT": "number",
+    "STRING": "text",
+    "BOOLEAN": "boolean",
+}
+
+
+def form_inputs(
+    graph: dict,
+    labels: dict[str, str],
+    core: dict[str, str],
+    object_info: Optional[dict],
+    exposed: set[tuple[str, str]],
+    max_text: int,
+) -> list[dict]:
+    """The inputs of *graph* a parameter row can set, grouped by node.
+
+    Every literal input a run writes by address (``labels`` / ``core``, as
+    ``_apply_addressed`` reads them), less the ones PixlStash already has a
+    control for or decides itself: the prompts, the seeds, a picture batch, a
+    picture loader, a model or LoRA loader's file and strengths, the save node
+    (a run swaps it) and a credential. A wired input is not a form field, and
+    text of several lines is left out because a row edits one line.
+
+    *exposed* is the addresses that are parameter rows already; those are kept
+    and flagged, so a row can be drawn with its options. An input is addressed
+    the way its row is, else by ``core:`` label when the node has one, since
+    that survives a change of topology. Nodes the graph cannot tell apart share
+    an address, and one write reaches them all, so only the first is listed.
+
+    Returns:
+        ``[{node_id, title, class_type, inputs: [{slot_label, input_name,
+        value, kind, options, exposed}]}]``, in graph order. ``kind`` is
+        ``number`` / ``text`` / ``boolean`` / ``choice`` from *object_info*, or
+        ``None`` where ComfyUI did not answer, does not declare the input, or
+        declares a list it names no choices of.
+    """
+    try:
+        detected = detect_workflow_io(graph)
+    except WorkflowGraphError as exc:
+        logger.info("Form inputs read without prompt or picture detection: %s", exc)
+        detected = WorkflowIO()
+    owned = _prompt_inputs(graph, detected)
+    owned.update(
+        (target["node_id"], target["field"])
+        for target in run_seed_targets(graph, object_info)
+    )
+    owned.update(
+        (str(node_id), widget)
+        for node_id, _class, widget, _value in iter_model_fields_api(graph)
+    )
+
+    seen: set[tuple[str, str]] = set()
+    nodes = []
+    for node_id, node in graph.items():
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        node_id = str(node_id)
+        if (
+            not isinstance(inputs, dict)
+            or node_id in detected.save_nodes
+            or node_id in detected.picture_inputs
+            or lora_slot_fields(inputs)
+        ):
+            continue
+        class_type = str(node.get("class_type") or "")
+        # The core address first: it is the one that survives another topology.
+        forms = [
+            form
+            for form in (
+                CORE_ADDRESS_PREFIX + core[node_id] if node_id in core else None,
+                labels.get(node_id),
+            )
+            if form
+        ]
+        found = []
+        for name, value in inputs.items():
+            if (
+                not forms
+                or not isinstance(value, (bool, int, float, str))
+                # The address is `<slot label>/<input name>`, split at the last one.
+                or "/" in name
+                or (node_id, name) in owned
+                # A credential is text; `max_tokens` is a number and stays.
+                or (isinstance(value, str) and SECRET_FIELD_RE.search(name))
+                or model_fix_kind("", name)
+                or is_picture_batch(class_type, name, object_info)
+                # ponytail: one-line text only; a textarea row if prompts of
+                # several lines are to be exposed.
+                or (isinstance(value, str) and (len(value) > max_text or "\n" in value))
+            ):
+                continue
+            row = next((form for form in forms if (form, name) in exposed), None)
+            address = (row or forms[0], name)
+            if address in seen:
+                continue
+            seen.add(address)
+            spec = find_input_spec((object_info or {}).get(class_type), name)
+            options = listed_options(object_info, class_type, name)
+            if options:
+                kind = "choice"
+            elif spec is None:
+                kind = None
+            else:
+                # A list with no choices named (filled at run time, or of
+                # numbers) has no entry here, so it is untyped like the rest.
+                kind = _FORM_KINDS.get(spec[0]) if isinstance(spec[0], str) else None
+            found.append(
+                {
+                    "slot_label": address[0],
+                    "input_name": name,
+                    "value": value,
+                    "kind": kind,
+                    "options": options or None,
+                    "exposed": row is not None,
+                }
+            )
+        if found:
+            nodes.append(
+                {
+                    "node_id": node_id,
+                    "title": _node_title(node) or class_type,
+                    "class_type": class_type,
+                    "inputs": found,
+                }
+            )
+    return nodes

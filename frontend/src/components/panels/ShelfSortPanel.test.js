@@ -26,15 +26,22 @@ function layoutSection(wrapper) {
 }
 
 describe("the folder layout sub-choice", () => {
-  it("is absent on every axis but Folder", () => {
+  it("is absent on every axis but Folder", async () => {
     const wrapper = mount(ShelfSortPanel, globalOpts);
     const store = useModelShelfStore();
 
-    expect(store.view.groupBy).toBe("none");
-    expect(layoutSection(wrapper).exists()).toBe(false);
-
-    store.setView({ groupBy: "base_model" });
-    expect(layoutSection(wrapper).exists()).toBe(false);
+    // The default axis is the set grid since #1438; what this pins is that the
+    // layout sub-choice belongs to Folder and to nothing else. Every other axis
+    // is walked, and the one that DOES show it is asserted at the end, so a
+    // panel that had stopped rendering the section at all cannot pass.
+    expect(store.view.groupBy).toBe("workflow_set");
+    for (const axis of ["workflow_set", "none", "base_model", "feature"]) {
+      store.setView({ groupBy: axis });
+      expect(layoutSection(wrapper).exists()).toBe(false);
+    }
+    store.setView({ groupBy: "folder" });
+    await wrapper.vm.$nextTick();
+    expect(layoutSection(wrapper).exists()).toBe(true);
   });
 
   it("appears under Folder and sets the layout when pressed", async () => {
@@ -45,17 +52,17 @@ describe("the folder layout sub-choice", () => {
 
     const section = layoutSection(wrapper);
     expect(section.exists()).toBe(true);
-    const buttons = section.findAll("button");
+    const buttons = section.findAll('[role="radio"]');
     expect(buttons).toHaveLength(2);
 
     // Seeded to drive: the first question a shelf of 438 GB is asked is which
     // disk is filling up.
     expect(store.view.folderLayout).toBe("drive");
-    expect(buttons[0].attributes("aria-pressed")).toBe("true");
+    expect(buttons[0].attributes("aria-checked")).toBe("true");
 
     await buttons[1].trigger("click");
     expect(store.view.folderLayout).toBe("alpha");
-    expect(buttons[1].attributes("aria-pressed")).toBe("true");
+    expect(buttons[1].attributes("aria-checked")).toBe("true");
   });
 
   it("remembers the layout across a trip through another axis", async () => {
@@ -70,7 +77,57 @@ describe("the folder layout sub-choice", () => {
 
     expect(store.view.folderLayout).toBe("alpha");
     expect(
-      layoutSection(wrapper).findAll("button")[1].attributes("aria-pressed"),
+      layoutSection(wrapper)
+        .findAll('[role="radio"]')[1]
+        .attributes("aria-checked"),
     ).toBe("true");
+  });
+});
+
+describe("picking a grouping", () => {
+  const groupRows = (wrapper) =>
+    wrapper.find('[aria-label="Group by"]').findAll('[role="radio"]');
+
+  it("tells the host on a click, on the current row too, and never on an arrow", async () => {
+    const wrapper = mount(ShelfSortPanel, {
+      ...globalOpts,
+      props: { section: "group" },
+    });
+    const store = useModelShelfStore();
+    const rows = groupRows(wrapper);
+    const current = rows.findIndex(
+      (row) => row.attributes("aria-checked") === "true",
+    );
+    // Any row but the current one and Folder, which has its own test below.
+    const other = rows.find(
+      (row, index) => index !== current && row.text() !== "Folder",
+    );
+
+    // Walking the rows changes the grouping without closing the menu under
+    // the reader.
+    const before = store.view.groupBy;
+    await rows[current].trigger("keydown", { key: "ArrowDown" });
+    expect(store.view.groupBy).not.toBe(before);
+    expect(wrapper.emitted("group-picked")).toBeUndefined();
+
+    await other.trigger("click");
+    expect(wrapper.emitted("group-picked")).toHaveLength(1);
+
+    // Pressing the grouping already in force is still an answer.
+    await other.trigger("click");
+    expect(wrapper.emitted("group-picked")).toHaveLength(2);
+  });
+
+  it("keeps the menu for Folder, which opens a further choice", async () => {
+    const wrapper = mount(ShelfSortPanel, {
+      ...globalOpts,
+      props: { section: "group" },
+    });
+    const store = useModelShelfStore();
+    const folder = groupRows(wrapper).find((row) => row.text() === "Folder");
+    await folder.trigger("click");
+    expect(store.view.groupBy).toBe("folder");
+    expect(layoutSection(wrapper).exists()).toBe(true);
+    expect(wrapper.emitted("group-picked")).toBeUndefined();
   });
 });

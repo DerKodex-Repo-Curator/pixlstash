@@ -306,7 +306,7 @@ onUnmounted(() => {
 }
 
 .scan-step__stat--warn {
-  border-color: rgb(var(--v-theme-warning));
+  border-color: rgb(var(--v-theme-surface-warning));
 }
 
 .scan-step__stat-value {
@@ -331,7 +331,7 @@ onUnmounted(() => {
 .scan-step__track {
   flex: 1;
   height: 6px;
-  border-radius: var(--radius-pill, 999px);
+  border-radius: var(--radius-pill);
   background: rgb(var(--v-theme-border));
   overflow: hidden;
 }

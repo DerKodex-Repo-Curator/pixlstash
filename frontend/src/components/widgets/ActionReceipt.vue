@@ -31,6 +31,7 @@ import { computed, ref } from "vue";
 
 import { useActionReceipt } from "../../composables/useActionReceipt";
 import { useBottomAnchor } from "../../composables/useBottomAnchor";
+import AppBarButton from "./AppBarButton.vue";
 
 const props = defineProps({
   /**
@@ -46,6 +47,12 @@ const props = defineProps({
    * none, so unmounting this would silence every undo announcement made there.
    */
   pillHidden: { type: Boolean, default: false },
+  /**
+   * Show only receipts raised by `showLocalReceipt`. A screen that is not in
+   * the operation log (the model shelf) narrates its own writes here, and a
+   * library action's Undo would revert something it cannot show.
+   */
+  localOnly: { type: Boolean, default: false },
 });
 
 // The receipt contract - wording, glyphs, keycaps, the drain window, the
@@ -70,6 +77,11 @@ const {
   resume,
   takeAction,
 } = useActionReceipt();
+
+// A receipt this surface does not draw is not announced from it either.
+const spoken = computed(() =>
+  props.localOnly && !receipt.value?.local ? "" : announcement.value,
+);
 
 /** The button's accessible name: the verb alone does not say what it undoes. */
 const actionAccessibleName = computed(
@@ -121,11 +133,11 @@ function onUndo(event) {
       aria-live="polite"
       aria-atomic="true"
       data-testid="action-receipt-announcement"
-      >{{ announcement }}</span
+      >{{ spoken }}</span
     >
     <transition name="receipt">
       <div
-        v-if="receipt && !pillHidden"
+        v-if="receipt && !pillHidden && (!localOnly || receipt.local)"
         :key="pillKey"
         class="receipt"
         :class="{ 'receipt--undone': undone, 'receipt--blocked': blocked }"
@@ -142,17 +154,16 @@ function onUndo(event) {
         >
         <span v-if="blocked" class="r-limit">Can't be undone</span>
         <template v-else>
-          <button
-            type="button"
+          <AppBarButton
+            shape="round"
             class="r-btn"
+            :icon="actionGlyph"
             :aria-disabled="store.busy"
             :aria-label="actionAccessibleName"
             :aria-keyshortcuts="actionKeyShortcut"
             @click="onUndo"
+            >{{ actionLabel }}</AppBarButton
           >
-            <v-icon size="16">{{ actionGlyph }}</v-icon>
-            <span>{{ actionLabel }}</span>
-          </button>
           <span class="kbdhint" aria-hidden="true">
             <kbd v-for="key in keyHint" :key="key">{{ key }}</kbd>
           </span>
@@ -242,32 +253,20 @@ function onUndo(event) {
   flex-shrink: 0;
 }
 
-/* Underlined semibold `on-surface`, not a `primary` label: an accent or primary
-   foreground is never small body text, and the underline makes the control
-   unambiguously actionable without relying on colour (WCAG 1.4.1). */
+/* The pill's verb is the round bar button (App.css `.bar-btn`). `aria-disabled`,
+   never the attribute: disabling a control the keyboard is currently ON moves
+   focus to <body>, and this button flips to Redo the moment the round trip
+   lands. The bar family keys its fade and hover on `:disabled`, so this state
+   says both itself. */
 .r-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
   flex-shrink: 0;
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-sm);
-  color: rgb(var(--v-theme-on-surface));
-  font-family: inherit;
-  font-size: var(--text-sm);
-  font-weight: var(--weight-semibold);
-  text-decoration: underline;
-  text-underline-offset: 2px;
 }
-.r-btn:hover:not([aria-disabled="true"]) {
-  background: var(--hover-wash);
-}
-/* `aria-disabled`, never the attribute: disabling a control the keyboard is
-   currently ON moves focus to <body>, and this button flips to Redo the moment
-   the round trip lands. */
 .r-btn[aria-disabled="true"] {
-  opacity: 0.35;
-  cursor: default;
+  opacity: var(--opacity-disabled);
+  cursor: not-allowed;
+}
+.r-btn[aria-disabled="true"]:hover {
+  background: transparent;
 }
 
 .kbdhint {

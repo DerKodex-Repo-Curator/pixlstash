@@ -22,6 +22,7 @@ from pixlstash.inference.engine import InferenceEngine
 from pixlstash.inference.vram_budget import ORT_ARENA_SHARE
 from pixlstash.utils.image_processing.image_utils import ImageUtils
 from pixlstash.utils.image_processing.face_utils import FaceUtils
+from pixlstash.utils.image_processing.video_utils import VideoUtils
 from pixlstash.utils.insightface_batched import BatchedFaceRunner
 from pixlstash.utils.media_files import SUPPORTED_IMAGE_EXTS
 from pixlstash.utils.insightface_model_utils import (
@@ -31,7 +32,7 @@ from pixlstash.utils.insightface_model_utils import (
 )
 from pixlstash.pixl_logging import get_logger
 from pixlstash.tasks.base_task import BaseTask, QueueType, TaskPriority
-from pixlstash.utils.vram_utils import empty_cuda_cache, is_vram_oom
+from pixlstash.utils.vram_utils import empty_device_cache, is_vram_oom
 
 # Suppress noisy FutureWarning from insightface's face_align.py about
 # SimilarityTransform.estimate being deprecated in scikit-image >= 0.26.
@@ -164,10 +165,7 @@ class FaceExtractionTask(BaseTask):
                 file_path = str(
                     ImageUtils.resolve_picture_path(self._db.image_root, pic.file_path)
                 )
-                ext = os.path.splitext(file_path)[1].lower()
-                if ext not in self._IMAGE_EXTS:
-                    if ext not in self._VIDEO_EXTS:
-                        return None, None, 1.0
+                if self._is_multiframe(file_path):
                     try:
                         return (file_path, *self._read_video_frames(file_path))
                     except Exception as exc:
@@ -179,6 +177,8 @@ class FaceExtractionTask(BaseTask):
                             exc,
                         )
                         return None, None, 1.0
+                if os.path.splitext(file_path)[1].lower() not in self._IMAGE_EXTS:
+                    return None, None, 1.0
                 img, inv_scale = ImageUtils.load_image_bgr_reduced(
                     file_path, FaceExtractionTask.INFERENCE_MAX_SIDE
                 )
@@ -330,7 +330,7 @@ class FaceExtractionTask(BaseTask):
             cls._app_instances.clear()
 
         gc.collect()
-        empty_cuda_cache()
+        empty_device_cache()
         cls._trim_process_memory()
 
     @staticmethod
@@ -416,6 +416,24 @@ class FaceExtractionTask(BaseTask):
             logger.debug("Reusing global InsightFace app")
             return cls._global_insightface_app
 
+        # CUDA only, and Apple Silicon is deliberately NOT included. This looks
+        # like one more `torch.cuda.is_available()` to sweep up, and it was
+        # measured rather than assumed: `buffalo_l` under the CoreML provider
+        # (`MLProgram`, `CPUAndGPU`) does not merely run slowly, it **fails**.
+        # The detector is the blocker - `det_10g` has a dynamic input shape
+        # (`[1, 3, '?', '?']`) and CoreML raises
+        # "Invalid shape for output feature '_448'" on the first detect() call,
+        # so no face is ever found. A second, softer reason to stay away: the
+        # five sessions' compiled CoreML cache measured 652 MB, for a model pack
+        # a fraction of that on disk.
+        #
+        # Note the trap for whoever revisits this. InsightFace's
+        # `model.prepare(ctx_id)` calls `session.set_providers(['CPUExecutionProvider'])`
+        # for any `ctx_id < 0`, so building `FaceAnalysis` with CoreML providers
+        # and then preparing with `ctx_id=-1` silently discards them and runs
+        # the whole pack on the CPU. A benchmark written that way reports a
+        # CoreML speed-up that is not CoreML at all. Use `ctx_id=0` to keep the
+        # providers, which is what surfaced the failure above.
         use_cuda = not engine.force_cpu and torch.cuda.is_available()
         providers = (
             ["CUDAExecutionProvider", "CPUExecutionProvider"]
@@ -584,6 +602,12 @@ class FaceExtractionTask(BaseTask):
     # recognition calls but longer gaps between visible DB progress ticks.
     _FLUSH_CHUNK_SIZE = 100
 
+    @classmethod
+    def _is_multiframe(cls, file_path: str) -> bool:
+        """True when faces are sampled across frames: a video or an animated GIF."""
+        ext = os.path.splitext(file_path)[1].lower()
+        return ext in cls._VIDEO_EXTS or VideoUtils.is_animated_gif(file_path)
+
     @staticmethod
     def _read_video_frames(
         file_path: str,
@@ -704,6 +728,7 @@ class FaceExtractionTask(BaseTask):
                 _p in chunk_paths
                 and _bimg is not None
                 and os.path.splitext(_p)[1].lower() in self._IMAGE_EXTS
+                and not self._is_multiframe(_p)
             ):
                 _batch_paths.append(_p)
                 _batch_imgs.append(_bimg)
@@ -733,6 +758,7 @@ class FaceExtractionTask(BaseTask):
                 ImageUtils.resolve_picture_path(self._db.image_root, pic.file_path)
             )
             ext = os.path.splitext(file_path)[1].lower()
+            is_multiframe = self._is_multiframe(file_path)
             if self._stop_event.is_set():
                 logger.debug(
                     "FaceExtractionTask: stop requested, aborting after %d pictures.",
@@ -759,7 +785,9 @@ class FaceExtractionTask(BaseTask):
 
             face_objects = []
 
-            if ext in self._IMAGE_EXTS:
+            # A GIF's extension is an image one, so the multi-frame test has
+            # to come first or an animated GIF never reaches the video path.
+            if ext in self._IMAGE_EXTS and not is_multiframe:
                 read_start = time.time()
                 preloaded_entry = preloaded.get(file_path)
                 if preloaded_entry is not None:
@@ -820,7 +848,7 @@ class FaceExtractionTask(BaseTask):
                                 (pic.id, pic.file_path, img, bboxes_loaded, inv_scale)
                             )
 
-            elif ext in self._VIDEO_EXTS:
+            elif is_multiframe:
                 if need_faces:
                     preloaded_entry = preloaded.get(file_path)
                     if preloaded_entry is not None:

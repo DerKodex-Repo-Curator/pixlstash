@@ -26,21 +26,36 @@
     >
       <!-- Keyed on the hub `model.id`: every row carries one, and it is what
            the shelf's other verbs address a row by. -->
-      <li
-        v-for="row in adapters"
-        :key="row.id"
-        class="adapter-card"
-        :title="cardTitle(row)"
-      >
+      <li v-for="row in adapters" :key="row.id" class="adapter-card">
+        <Tooltip :text="cardTitle(row)" activator="parent" />
         <ModelMark :row="row" />
         <span class="adapter-card__body">
           <span class="adapter-card__name">{{ nameOf(row) }}</span>
-          <span class="adapter-card__meta">{{
-            row.base_model || "Base model not set"
-          }}</span>
-          <span v-if="row.trigger_words" class="adapter-card__trigger">{{
-            row.trigger_words
-          }}</span>
+          <!-- The precision rides the base-model line rather than taking a
+               chip beside the name. `nameOf` has just stripped it out of the
+               name, so it has to be somewhere - and this card is a ~180px
+               track whose name already ellipsises, where a chip on that line
+               would eat the name it qualifies. Same `·` separator the shelf's
+               own file line uses; the hover text carries the long form. -->
+          <span class="adapter-card__meta"
+            >{{ row.base_model || "Base model not set"
+            }}<template v-if="quantBadge(row.quant)">
+              · {{ quantBadge(row.quant).label }}</template
+            ></span
+          >
+          <!-- What to type in a prompt for it: the first word and a count, as
+               on the shelf; the hover text has the list. Mono only when the
+               word is on record - a person's name standing in for one is not a
+               string out of the file. -->
+          <span
+            v-if="triggerChip(row)"
+            class="adapter-card__trigger"
+            :class="{
+              'adapter-card__trigger--default': triggerChip(row).isDefault,
+            }"
+            ><span class="visually-hidden">Trigger word: </span
+            >{{ triggerChip(row).label }}</span
+          >
         </span>
       </li>
     </ul>
@@ -73,8 +88,9 @@ import { computed, ref, useId, watch } from "vue";
 
 import { listAdapters } from "../../api/modelShelf";
 import { errorDetail } from "../../utils/apiError";
-import { modelName } from "../../utils/modelShelf";
+import { modelName, quantBadge, triggerChip } from "../../utils/modelShelf";
 import ModelMark from "./ModelMark.vue";
+import Tooltip from "./Tooltip.vue";
 
 // Both kinds an attachment can be read back through. `unknown` is here because
 // the server lets an unclassified file be attached - of the file kinds, the
@@ -170,7 +186,14 @@ function nameOf(row) {
 function cardTitle(row) {
   const name = nameOf(row);
   const filename = String(row?.filename || "").trim();
-  return filename && filename !== name ? `${name} - ${filename}` : name;
+  const quant = quantBadge(row?.quant);
+  const head = filename && filename !== name ? `${name} - ${filename}` : name;
+  // The long form of the precision, because the line above abbreviates it to
+  // `FP8` and the variant behind that is exactly what a reader hovers to find.
+  const trigger = triggerChip(row);
+  // The trigger line is one ellipsised line too, and a count where the file
+  // records several words, so the list itself is only ever here.
+  return [head, quant?.title, trigger?.title].filter(Boolean).join(" - ");
 }
 
 // Only the newest flight may write, or a slow read for one person lands last and
@@ -352,7 +375,7 @@ watch(
 }
 
 .adapter-tray__error {
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
 }
 
 .adapter-tray__grid {
@@ -418,5 +441,10 @@ watch(
 
 .adapter-card__trigger {
   font-family: var(--font-mono);
+}
+
+.adapter-card__trigger--default {
+  font-family: var(--font-ui);
+  font-style: italic;
 }
 </style>

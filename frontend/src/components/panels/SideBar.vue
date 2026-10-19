@@ -1,13 +1,15 @@
 <script setup>
+import { withRef } from "../../utils/withRef.js";
 import {
   computed,
   ref,
   onBeforeUnmount,
   onMounted,
+  onUpdated,
   watch,
   nextTick,
 } from "vue";
-import { MODEL_SHELF_ROUTES } from "../../router/routeNames";
+import { MODEL_SHELF_ROUTES, WORKFLOW_ROUTES } from "../../router/routeNames";
 import ImageImporter from "../io/ImageImporter.vue";
 import CharacterEditor from "../editors/CharacterEditor.vue";
 import PictureSetEditor from "../editors/PictureSetEditor.vue";
@@ -17,6 +19,11 @@ import UserSettingsDialog from "../settings/UserSettingsDialog.vue";
 import FolderTreeNode from "../editors/FolderTreeNode.vue";
 import FolderEditor from "../editors/FolderEditor.vue";
 import FolderBrowser from "../editors/FolderBrowser.vue";
+import AppButton from "../widgets/AppButton.vue";
+import ComfyuiIcon from "../widgets/ComfyuiIcon.vue";
+import Tooltip from "../widgets/Tooltip.vue";
+import AppDialog from "../widgets/AppDialog.vue";
+import AppInput from "../widgets/AppInput.vue";
 import FolderMappingWizard from "../folders/FolderMappingWizard.vue";
 import { useFolderMappingStore } from "../../stores/useFolderMappingStore";
 import { useLibrariesStore } from "../../stores/useLibrariesStore";
@@ -43,6 +50,7 @@ import {
   addPictureToSet,
 } from "../../api/pictureSets";
 import { inspectLibraryPath } from "../../api/libraries";
+import { getFolderStructureCommitStatus } from "../../api/folderStructure";
 import { deleteProject } from "../../api/projects";
 import {
   listReferenceFolders,
@@ -57,6 +65,7 @@ import {
 import { setPicturesProject } from "../../api/pictures";
 import { getSharedResourceIds, revokeTokensByResource } from "../../api/users";
 import { listSortMechanisms } from "../../api/session";
+import { listAdapters } from "../../api/modelShelf";
 import {
   extractSupportedImportFilesFromDataTransfer,
   isFaceDrag,
@@ -74,6 +83,7 @@ import {
   toggleEntityProjectPatch,
   withEntityProjectIds,
 } from "../../utils/projectMembership.js";
+import { onMenuKeydown } from "../../utils/menuKeyboard.js";
 import {
   SET_COLORS,
   SET_ICON_CATEGORIES,
@@ -90,12 +100,14 @@ import { useSidebarExpansion } from "../../composables/useSidebarExpansion";
 import { useRoute } from "vue-router";
 import { useDedupStore, scopeKey } from "../../stores/useDedupStore";
 import { useMovesStore } from "../../stores/useMovesStore";
+import { useModelShelfStore } from "../../stores/useModelShelfStore";
 import { useSelectionStore } from "../../stores/useSelectionStore";
 import { useSortStore } from "../../stores/useSortStore";
 import { useProjectStore } from "../../stores/useProjectStore";
 import { useUserPrefsStore } from "../../stores/useUserPrefsStore";
 import { useGridStore } from "../../stores/useGridStore";
 import { useFilterStore } from "../../stores/useFilterStore";
+import { useRunDialogStore } from "../../stores/useRunDialogStore";
 import { errorDetail } from "../../utils/apiError";
 import { activateOnEnterOrSpace } from "../../utils/keyboardActivation.js";
 import {
@@ -131,6 +143,7 @@ const isDesktop = typeof window !== "undefined" && !!window.pixlstashDesktop;
 
 const dedupStore = useDedupStore();
 const movesStore = useMovesStore();
+const modelShelfStore = useModelShelfStore();
 
 // Store-direct (Phase 3): the sidebar reads the selection, sort, project and
 // preference state it displays straight from the stores and writes changes
@@ -156,6 +169,7 @@ const telemetryIndicatorTitle = computed(() => {
 });
 const gridStore = useGridStore();
 const filterStore = useFilterStore();
+const runDialogStore = useRunDialogStore();
 const viewStore = useViewStore();
 const route = useRoute();
 
@@ -170,6 +184,16 @@ const isDuplicatesView = computed(() => route.name === "duplicates");
 // Both of the shelf's routes, from the one list, so the runs tab cannot fall
 // out of this the way it did when the two predicates were separate literals.
 const isModelsView = computed(() => MODEL_SHELF_ROUTES.includes(route.name));
+const isWorkflowsView = computed(() => WORKFLOW_ROUTES.includes(route.name));
+// The Models row's `new` tag means "arrived while you were not looking", so the
+// shelf being open answers it, including for an arrival while it is open.
+watch(
+  () => isModelsView.value && modelShelfStore.unseenArrivals,
+  (seen) => {
+    if (seen) modelShelfStore.unseenArrivals = false;
+  },
+  { immediate: true },
+);
 
 // A shared library keeps the duplicate affordances VISIBLE and inert rather
 // than hiding them: a read-only visitor should still see that the feature
@@ -206,6 +230,9 @@ const READ_ONLY_INSIGHTS_HINT =
 // session because nothing here ever calls GET /moves/pending for one.
 const isMovesView = computed(() => route.name === "moves");
 
+const READ_ONLY_WORKFLOWS_HINT =
+  "The workflow library is only available in your own library";
+
 const props = defineProps({
   backendUrl: { type: String, default: () => API_BASE_URL },
   installType: { type: String, default: "pip" },
@@ -217,6 +244,7 @@ const emit = defineEmits([
   "select-models",
   "select-insights",
   "select-moves",
+  "select-workflows",
   "select-character",
   "select-set",
   "import-finished",
@@ -227,6 +255,7 @@ const emit = defineEmits([
   "images-moved",
   "empty-scrapheap",
   "suggest-pictures-for-character",
+  "suggest-pictures-for-set",
   "view-project",
   "update:check-for-updates",
   "select-folder",
@@ -378,6 +407,10 @@ const sidebarCtxX = ref(0);
 const sidebarCtxY = ref(0);
 const sidebarCtxCharacter = ref(null); // { id, name } or null
 const sidebarCtxSet = ref(null); // { id, name, set_icon, set_color } or null
+// Whether the open menu's person or set has a LoRA for "Create with LoRA…":
+// 'checking' | 'attached' | 'none' | 'failed'. Only 'attached' enables the row.
+const sidebarCtxLoraState = ref("checking");
+let loraCheckEpoch = 0;
 const setCtxIconMenuOpen = ref(false);
 const setCtxColorMenuOpen = ref(false);
 const setCtxAppearanceMenuPos = ref({ top: 0, left: 0, openUp: false });
@@ -395,12 +428,23 @@ const sidebarCtxHeader = ref(null);
 // (auto-hide, dock mode).
 const sidebarCtxEmpty = ref(false);
 
+// The rendered menu's height. It depends on the target (a set's menu is
+// several rows taller than a folder's), so a fixed estimate flipped the taller
+// menus one row too late and clipped their last entry. Measured after every
+// render; the correcting re-render lands before paint.
+const sidebarCtxMenuEl = ref(null);
+const sidebarCtxMenuH = ref(0);
+onUpdated(() => {
+  if (sidebarCtxMenuEl.value) {
+    sidebarCtxMenuH.value = sidebarCtxMenuEl.value.offsetHeight;
+  }
+});
+
 // Computed style for the main context menu - opens upward when near the bottom.
 const sidebarCtxMenuStyle = computed(() => {
   const MENU_W = 165;
-  const MENU_H = 190; // actual menu height estimate
   const x = Math.min(sidebarCtxX.value, window.innerWidth - MENU_W - 8);
-  if (sidebarCtxY.value + MENU_H > window.innerHeight - 8) {
+  if (sidebarCtxY.value + sidebarCtxMenuH.value > window.innerHeight - 8) {
     return {
       left: x + "px",
       bottom: window.innerHeight - sidebarCtxY.value + "px",
@@ -454,12 +498,26 @@ function _moveMenuPos(rect) {
   return { top: rect.bottom + 4 + "px", left };
 }
 
+// These menus are teleported divs, not a `v-menu`, so nothing moves focus into
+// them the way VMenu's activator does. Without this the menu declares
+// `role="menu"` and then answers no key at all - worse for a screen reader than
+// the unrolled divs it used to be, which at least read in browse mode.
+async function _focusMoveMenu() {
+  await nextTick();
+  document.querySelector(".sidebar-move-menu")?.focus();
+}
+
 function openCharacterMoveMenu(event) {
   const el = event?.currentTarget ?? event?.target;
   if (el) {
     characterMenuPos.value = _moveMenuPos(el.getBoundingClientRect());
   }
+  // One move menu at a time: both are `.sidebar-move-menu`, and the outside
+  // click handler spares the other trigger, so both could stay open and focus
+  // would land in whichever teleported first.
+  setMoveMenuOpen.value = false;
   characterMoveMenuOpen.value = !characterMoveMenuOpen.value;
+  if (characterMoveMenuOpen.value) _focusMoveMenu();
 }
 
 function openSetMoveMenu(event) {
@@ -467,7 +525,9 @@ function openSetMoveMenu(event) {
   if (el) {
     setMenuPos.value = _moveMenuPos(el.getBoundingClientRect());
   }
+  characterMoveMenuOpen.value = false;
   setMoveMenuOpen.value = !setMoveMenuOpen.value;
+  if (setMoveMenuOpen.value) _focusMoveMenu();
 }
 
 // --- Character Editor State ---
@@ -712,6 +772,13 @@ function routeSubfolderUnder(root) {
   };
 }
 
+// The folder this session is on. A library on its first import is left out
+// of the listing, so `activeLibrary` is undefined until the import finishes -
+// and the import is exactly what the wizard reopened against this path runs.
+const activeRoot = computed(
+  () => librariesStore.activeLibrary?.path || librariesStore.importingPath,
+);
+
 // The pending mapping this library can act on. A `local_import` entry names
 // the library root it was saved for; shown or auto-opened against any OTHER
 // library it would offer to "set up" a library that is already set up - which
@@ -722,7 +789,7 @@ const pendingForThisLibrary = computed(() => {
   const entry = mappingStore.pending;
   if (!entry) return null;
   if (entry.mode !== "local_import") return entry;
-  return _samePath(entry.path, librariesStore.activeLibrary?.path)
+  return _samePath(entry.path, activeRoot.value)
     ? entry
     : null;
 });
@@ -763,11 +830,11 @@ async function chooseLibraryFolder() {
   // Read after the refresh: `pendingForThisLibrary` matches the entry against
   // the active library's path, and with no list yet a good entry looks absent.
   const entry = pendingForThisLibrary.value;
-  if (entry?.mode === "local_import") {
+  if (entry?.mode === "local_import" && (await pendingEntryIsLive(entry))) {
     openFolderMappingWizard(entry);
     return;
   }
-  const path = librariesStore.activeLibrary?.path;
+  const path = activeRoot.value;
   if (path && librariesStore.canManage) {
     // Re-inspected on every click: a root that was empty when the count was
     // cached may hold pictures now. A failed inspect leaves the count alone.
@@ -832,16 +899,66 @@ async function folderMappingWizardCommitted() {
 // Watched rather than checked once on mount: the library list that says
 // which root is active loads after this component does.
 let autoOpenedPendingMapping = false;
+// commit task id -> in-flight Promise<completed?>; see `pendingEntryIsLive`.
+// Above the watch, which runs immediately.
+const commitChecks = new Map();
 watch(
   () => pendingForThisLibrary.value,
-  (entry) => {
-    if (autoOpenedPendingMapping || isReadOnly.value) return;
-    if (entry?.mode !== "local_import") return;
+  async (entry) => {
+    if (!entry || isReadOnly.value) return;
+    // Every entry is settled on sight, not only one this would open: the
+    // "Finish organising…" row renders from the same entry.
+    if (!(await pendingEntryIsLive(entry))) return;
+    if (autoOpenedPendingMapping || entry.mode !== "local_import") return;
     autoOpenedPendingMapping = true;
     openFolderMappingWizard(entry);
   },
   { immediate: true },
 );
+
+/** The "Finish organising…" row: the same check as every other way in. */
+async function openPendingMapping() {
+  const entry = pendingForThisLibrary.value;
+  if (entry && (await pendingEntryIsLive(entry))) openFolderMappingWizard(entry);
+}
+
+/**
+ * Whether a saved entry still has anything to finish, clearing it when not.
+ *
+ * Promoting a first import closes the library's websockets, and the client
+ * reloads on that close - usually before the wizard's poll sees `completed`
+ * and clears the entry. Opened from it, the wizard would offer to set up the
+ * library the import just finished. Every way of opening a saved entry asks
+ * here; anything short of a definite `completed` (running, failed, forgotten)
+ * is still live, as before. Concurrent askers share one request.
+ */
+async function pendingEntryIsLive(entry) {
+  const id = entry.commitTaskId;
+  if (!id) return true;
+  if (!commitChecks.has(id)) {
+    commitChecks.set(
+      id,
+      getFolderStructureCommitStatus(id)
+        .then((body) => body?.status === "completed")
+        .catch((error) => {
+          console.warn("Could not check whether the saved import finished", {
+            commitTaskId: id,
+            error,
+          });
+          return false;
+        }),
+    );
+  }
+  const completed = await commitChecks.get(id);
+  // Only a finished commit is final. One still running (or unreachable) may
+  // finish later in this session, so the next opener asks again.
+  if (!completed) {
+    commitChecks.delete(id);
+    return true;
+  }
+  if (mappingStore.pending?.commitTaskId === id) mappingStore.clear();
+  return false;
+}
 
 // The empty library, when its own folder is not empty. The desktop's first
 // run creates the vault in whatever folder was chosen, and the web flow's
@@ -902,7 +1019,7 @@ async function takeParkedFolderRead() {
 
 async function _offerLoosePictures() {
   if (!librariesStore.hasLoadedSuccessfully) await librariesStore.refresh();
-  const path = librariesStore.activeLibrary?.path;
+  const path = activeRoot.value;
   if (!path || !librariesStore.canManage) return;
   // On desktop the startup screen may have read this very folder already,
   // alongside the runtime download. Resuming that read is the whole point of
@@ -1554,19 +1671,6 @@ function refreshLabelOverflows() {
   for (const [key, el] of labelRefs.entries()) {
     updateLabelOverflow(key, el);
   }
-}
-
-function mergeTooltipRef(refProps, key) {
-  return (el) => {
-    if (refProps?.ref) {
-      if (typeof refProps.ref === "function") {
-        refProps.ref(el);
-      } else {
-        refProps.ref.value = el;
-      }
-    }
-    registerLabelRef(key, el);
-  };
 }
 
 const sidebarNotice = ref(null);
@@ -2361,6 +2465,11 @@ function closeSetEditor() {
   setEditorSet.value = null;
 }
 
+// The control focused when Settings opened and its ancestors, nearest first:
+// DOM nodes, held raw. The ancestors are taken now because a node that has
+// since been removed no longer leads back up to the ones still in the page.
+let settingsReturnPath = [];
+
 /**
  * Open the settings dialog, optionally on a specific nav entry.
  * @param {string} [tab] - nav entry id (e.g. "scrapheap"); Appearance if omitted
@@ -2368,8 +2477,31 @@ function closeSetEditor() {
  */
 function openSettingsDialog(tab = "") {
   settingsDialogInitialTab.value = typeof tab === "string" ? tab : "";
+  // Settings opens from a prop, so Vuetify has no activator to hand focus back
+  // to on close; the control that was focused when it opened takes it instead.
+  settingsReturnPath = [];
+  for (let el = document.activeElement; el && el !== document.body; ) {
+    settingsReturnPath.push(el);
+    el = el.parentElement;
+  }
   settingsDialogOpen.value = true;
 }
+
+watch(settingsDialogOpen, (isOpen) => {
+  if (isOpen) return;
+  const path = settingsReturnPath;
+  settingsReturnPath = [];
+  // The opener may be gone (the shelf's empty state unmounts once a folder is
+  // scanned in) or folded away under a narrow toolbar's ⋯; the nearest
+  // ancestor that still takes focus (the shelf root) beats <body>.
+  nextTick(() => {
+    for (const el of path) {
+      if (!el.isConnected) continue;
+      el.focus();
+      if (document.activeElement === el) return;
+    }
+  });
+});
 
 function selectCharacter(id, label = null, event = null) {
   clearCountNew(id);
@@ -2731,6 +2863,71 @@ function primeDuplicateCount(type, item) {
 }
 
 /**
+ * Find out whether the person or set a context menu just opened on has a LoRA
+ * attached, so "Create with LoRA…" is only live when there is one to run.
+ *
+ * The row stays disabled until the answer lands and when it cannot be read:
+ * the popup makes the same read, so it would fail the same way. Both
+ * attachable file kinds, as `RunDialog.loadLoraSource` reads them.
+ *
+ * @param {string} type - the context-menu target type.
+ * @param {Object} item - the target object.
+ */
+async function primeLoraCheck(type, item) {
+  const mine = ++loraCheckEpoch;
+  // Reset before any return: the last menu's answer is not this one's.
+  sidebarCtxLoraState.value = "checking";
+  const filter = { character: "characterId", set: "setId" }[type];
+  if (!filter || !item?.id) return;
+  // The row is not rendered for these, and the read is the owner's alone.
+  if (isReadOnly.value || !filterStore.comfyuiConfigured) return;
+  let state;
+  try {
+    const kinds = await Promise.all(
+      ["adapter", "unknown"].map((fileKind) =>
+        listAdapters({ fileKind, [filter]: Number(item.id) }),
+      ),
+    );
+    // The same rows the Run popup then offers: a hidden LoRA is not one.
+    state = kinds.flat().some((row) => row?.sha256 && !row.hidden)
+      ? "attached"
+      : "none";
+  } catch (err) {
+    console.warn(
+      `Could not read the LoRAs attached to ${type} ${item.id}:`,
+      err,
+    );
+    state = "failed";
+  }
+  // A menu opened on another row while this read was out has its own answer.
+  if (mine === loraCheckEpoch) sidebarCtxLoraState.value = state;
+}
+
+// ComfyUI's configuration lands after start-up, possibly under an open menu.
+// The row it reveals was skipped by the check above, so ask again.
+watch([() => filterStore.comfyuiConfigured, isReadOnly], () => {
+  if (!sidebarCtxVisible.value) return;
+  if (sidebarCtxCharacter.value) {
+    primeLoraCheck("character", sidebarCtxCharacter.value);
+  } else if (sidebarCtxSet.value) {
+    primeLoraCheck("set", sidebarCtxSet.value);
+  }
+});
+
+/**
+ * Why "Create with LoRA…" is disabled on the open menu, or "" when it is live.
+ * @param {string} name - the person or set the menu was opened on.
+ * @returns {string}
+ */
+function loraRowReason(name) {
+  return {
+    checking: "Checking for an attached LoRA…",
+    none: `No LoRA is attached to ${name}. Assign one from the Models shelf.`,
+    failed: "Could not read the Models shelf.",
+  }[sidebarCtxLoraState.value] || "";
+}
+
+/**
  * The known duplicate count for one scope, or null while it is still unknown.
  * @param {string} type
  * @param {Object} item
@@ -2774,6 +2971,7 @@ function openSidebarCtxMenu(type, item, event) {
   // that turns out to be empty. A scoped count reuses cached hashes and is
   // cheap; the store also de-duplicates repeat opens on the same object.
   primeDuplicateCount(type, item);
+  primeLoraCheck(type, item);
   // Reset here rather than in every branch: only the scrapheap branch turns it
   // on, so a single top-level reset keeps the per-type blocks below untouched.
   sidebarCtxScrapheap.value = false;
@@ -2925,6 +3123,32 @@ function suggestPicturesForCharacterFromCtx(character) {
   emit("suggest-pictures-for-character", {
     id: character.id,
     name: character.name,
+  });
+}
+
+// "Suggest more pictures" for a set (#1489): ranks the library against the
+// set's members so the pictures that belong in it can be added in one action.
+// Like the person twin above, it does not select the set first.
+function suggestPicturesForSetFromCtx(pictureSet) {
+  if (!pictureSet?.id) return;
+  closeSidebarCtxMenu();
+  emit("suggest-pictures-for-set", {
+    id: pictureSet.id,
+    name: pictureSet.name,
+  });
+}
+
+// "Create with LoRA…" (person or set): the Run popup, with its workflow
+// picker narrowed to what fits the LoRA attached to it, that LoRA added to the
+// run and the results filed back to it. The popup is App.vue's.
+function openLoraRunFromCtx(entityType, item) {
+  if (!item?.id) return;
+  closeSidebarCtxMenu();
+  runDialogStore.openRun({
+    kind: "card",
+    pickWorkflow: true,
+    name: item.name,
+    lora: { entityType, entityId: item.id, name: item.name },
   });
 }
 
@@ -3143,7 +3367,8 @@ const selectionOwnsHighlight = computed(
     !hasFolderFilter.value &&
     !isDuplicatesView.value &&
     !isModelsView.value &&
-    !isInsightsView.value,
+    !isInsightsView.value &&
+    !isWorkflowsView.value,
 );
 
 const isAllPicturesRowActive = computed(() => {
@@ -4638,110 +4863,104 @@ defineExpose({
     @deleted="importFolderDeleted"
   />
 
-  <v-dialog v-model="addFolderTypeDialogOpen" max-width="420">
-    <v-card class="folder-type-card">
-      <v-card-title class="folder-type-title">Add Folder</v-card-title>
-      <v-card-text class="folder-type-body">
-        <p class="folder-type-subtitle">Choose folder type</p>
-        <div class="folder-type-options">
-          <button
-            class="folder-type-option"
-            @click="chooseFolderType('reference')"
-          >
-            <v-icon size="18">mdi-folder-network-outline</v-icon>
-            <span class="folder-type-option-text">
-              <strong>Reference folder</strong>
-              <small>Browse and filter existing files in place.</small>
-            </span>
-          </button>
-          <button
-            class="folder-type-option"
-            @click="chooseFolderType('import')"
-          >
-            <v-icon size="18">mdi-folder-download-outline</v-icon>
-            <span class="folder-type-option-text">
-              <strong>Import folder</strong>
-              <small>Watch for new files and import them automatically.</small>
-            </span>
-          </button>
-        </div>
-      </v-card-text>
-      <v-card-actions class="folder-type-actions">
-        <v-spacer />
-        <v-btn variant="text" @click="addFolderTypeDialogOpen = false"
-          >Cancel</v-btn
-        >
-      </v-card-actions>
-    </v-card>
-  </v-dialog>
-
-  <v-dialog v-model="referenceFolderRelocateOpen" max-width="560">
-    <v-card class="relocate-card">
-      <v-card-title class="relocate-title"
-        >Relocate Reference Folder</v-card-title
+  <AppDialog
+    :open="addFolderTypeDialogOpen"
+    title="Add folder"
+    size="sm"
+    @close="addFolderTypeDialogOpen = false"
+  >
+    <div class="folder-type-options">
+      <p class="folder-type-subtitle">Choose folder type</p>
+      <button
+        class="folder-type-option"
+        @click="chooseFolderType('reference')"
       >
-      <v-card-text class="relocate-body">
-        <div class="relocate-path-block">
-          <div class="relocate-path-label">Current folder</div>
-          <div
-            class="relocate-path-value"
-            :title="referenceFolderRelocateFolder?.folder"
-          >
-            {{ referenceFolderRelocateFolder?.folder }}
-          </div>
-        </div>
-        <div class="relocate-path-block">
-          <div class="relocate-path-label">Destination folder</div>
-          <div class="relocate-destination-row">
-            <v-text-field
-              v-model="referenceFolderRelocateDestination"
-              density="comfortable"
-              variant="filled"
-              hide-details
-              readonly
-              placeholder="Choose an empty folder"
-            />
-            <v-btn
-              variant="outlined"
-              size="small"
-              icon
-              title="Choose destination folder"
-              @click="referenceFolderRelocateBrowseOpen = true"
-            >
-              <v-icon size="18">mdi-folder-open-outline</v-icon>
-            </v-btn>
-          </div>
-        </div>
-        <div class="relocate-warning">
-          This moves every file and subfolder from the current reference folder
-          into the destination folder, then updates PixlStash to use the new
-          location. The destination must be empty.
-        </div>
-        <div v-if="referenceFolderRelocateError" class="relocate-error">
-          {{ referenceFolderRelocateError }}
-        </div>
-        <div v-if="referenceFolderRelocateResult" class="relocate-result">
-          {{ referenceFolderRelocateResult }}
-        </div>
-      </v-card-text>
-      <v-card-actions class="relocate-actions">
-        <v-spacer />
-        <v-btn variant="text" @click="closeReferenceFolderRelocateDialog">
-          {{ referenceFolderRelocateResult ? "Close" : "Cancel" }}
-        </v-btn>
-        <v-btn
-          v-if="!referenceFolderRelocateResult"
-          color="primary"
-          variant="flat"
-          :loading="referenceFolderRelocateLoading"
-          :disabled="!referenceFolderRelocateDestination"
-          @click="relocateReferenceFolder"
-        >
-          Move Files and Relocate
-        </v-btn>
-      </v-card-actions>
-    </v-card>
-  </v-dialog>
+        <v-icon size="18">mdi-folder-network-outline</v-icon>
+        <span class="folder-type-option-text">
+          <strong>Reference folder</strong>
+          <small>Browse and filter existing files in place.</small>
+        </span>
+      </button>
+      <button class="folder-type-option" @click="chooseFolderType('import')">
+        <v-icon size="18">mdi-folder-download-outline</v-icon>
+        <span class="folder-type-option-text">
+          <strong>Import folder</strong>
+          <small>Watch for new files and import them automatically.</small>
+        </span>
+      </button>
+    </div>
+    <template #footer>
+      <AppButton variant="secondary" @click="addFolderTypeDialogOpen = false">
+        Cancel
+      </AppButton>
+    </template>
+  </AppDialog>
+
+  <AppDialog
+    :open="referenceFolderRelocateOpen"
+    title="Relocate reference folder"
+    :persistent="referenceFolderRelocateLoading"
+    @close="closeReferenceFolderRelocateDialog"
+  >
+    <div class="relocate-path-block">
+      <div class="relocate-path-label">Current folder</div>
+      <div
+        class="relocate-path-value"
+        :title="referenceFolderRelocateFolder?.folder"
+      >
+        {{ referenceFolderRelocateFolder?.folder }}
+      </div>
+    </div>
+    <div class="relocate-path-block">
+      <div class="relocate-path-label">Destination folder</div>
+      <div class="relocate-destination-row">
+        <AppInput
+          v-model="referenceFolderRelocateDestination"
+          readonly
+          mono
+          aria-label="Destination folder"
+          placeholder="Choose an empty folder"
+          class="relocate-destination-input"
+        />
+        <AppButton
+          icon-only
+          icon-left="folder-open-outline"
+          class="relocate-browse-btn"
+          tooltip="Choose destination folder"
+          @click="referenceFolderRelocateBrowseOpen = true"
+        />
+      </div>
+    </div>
+    <div class="relocate-warning">
+      This moves every file and subfolder from the current reference folder
+      into the destination folder, then updates PixlStash to use the new
+      location. The destination must be empty.
+    </div>
+    <div v-if="referenceFolderRelocateError" class="relocate-error">
+      {{ referenceFolderRelocateError }}
+    </div>
+    <div v-if="referenceFolderRelocateResult" class="relocate-result">
+      {{ referenceFolderRelocateResult }}
+    </div>
+    <template #footer>
+      <AppButton
+        variant="secondary"
+        :disabled="referenceFolderRelocateLoading"
+        @click="closeReferenceFolderRelocateDialog"
+      >
+        {{ referenceFolderRelocateResult ? "Close" : "Cancel" }}
+      </AppButton>
+      <AppButton
+        v-if="!referenceFolderRelocateResult"
+        variant="primary"
+        :loading="referenceFolderRelocateLoading"
+        :disabled="!referenceFolderRelocateDestination"
+        @click="relocateReferenceFolder"
+      >
+        Move files and relocate
+      </AppButton>
+    </template>
+  </AppDialog>
 
   <FolderBrowser
     :open="referenceFolderRelocateBrowseOpen"
@@ -4771,10 +4990,11 @@ defineExpose({
       aria-orientation="vertical"
       aria-label="Resize sidebar"
       tabindex="0"
-      title="Drag to resize sidebar"
       @pointerdown="onSidebarResizeStart"
       @keydown="onSidebarResizeKey"
-    ></div>
+    >
+      <Tooltip text="Drag to resize sidebar" activator="parent" />
+    </div>
     <!-- On the desktop shell the brand (logo + name + update alert) lives in
          the title bar, so this row collapses to just the dock toggle. -->
     <div
@@ -4805,10 +5025,15 @@ defineExpose({
               v-if="userPrefsStore.telemetryActive"
               type="button"
               class="sidebar-telemetry-dot"
-              :title="telemetryIndicatorTitle"
               :aria-label="`${telemetryIndicatorTitle}. Open privacy settings.`"
               @click="openSettingsDialog('privacy')"
-            ></button>
+            >
+              <Tooltip
+                :text="telemetryIndicatorTitle"
+                activator="parent"
+                :describe="false"
+              />
+            </button>
           </div>
           <div
             v-if="updateAvailable && !updateDismissed"
@@ -4819,17 +5044,24 @@ defineExpose({
               target="_blank"
               rel="noopener noreferrer"
               :class="securityUpdateClass"
-              :title="securityUpdateTitle"
               @contextmenu.stop
-              >&#x2191; v{{ latestVersion
+              ><Tooltip
+                :text="securityUpdateTitle"
+                activator="parent"
+              />&#x2191; v{{ latestVersion
               }}{{
                 latestSecurityLevel ? " security \u26a0\ufe0f" : " available"
               }}</a
             ><button
               class="sidebar-update-dismiss"
-              :title="`Dismiss v${latestVersion} update alert`"
+              :aria-label="`Dismiss v${latestVersion} update alert`"
               @click.prevent="dismissUpdateAlert"
             >
+              <Tooltip
+                :text="`Dismiss v${latestVersion} update alert`"
+                activator="parent"
+                :describe="false"
+              />
               &times;
             </button>
           </div>
@@ -4856,7 +5088,7 @@ defineExpose({
           type="button"
           class="sidebar-collapsed-item sidebar-collapsed-item--has-flyout"
           style="margin: 0 auto"
-          :title="collapsedProjectBtnTitle"
+          :aria-label="collapsedProjectBtnTitle"
           ref="collapsedProjectBtnRef"
           aria-haspopup="menu"
           :aria-expanded="projectMenuOpen"
@@ -4864,6 +5096,11 @@ defineExpose({
           @click.stop="toggleProjectMenu"
           @keydown="onCollapsedProjectTriggerKeydown"
         >
+          <Tooltip
+            :text="collapsedProjectBtnTitle"
+            activator="parent"
+            :describe="false"
+          />
           <v-icon size="20">{{
             sidebarPrimaryTab === "folders"
               ? "mdi-folder-outline"
@@ -4878,7 +5115,7 @@ defineExpose({
           v-if="projectMenuOpen && sidebarStore.effectiveDocked"
           id="sidebar-project-menu"
           ref="collapsedProjectMenuRef"
-          class="sidebar-collapsed-project-menu"
+          class="ctx-menu sidebar-collapsed-project-menu"
           role="menu"
           aria-label="Library navigation"
           :style="{
@@ -4893,11 +5130,7 @@ defineExpose({
             type="button"
             role="menuitem"
             tabindex="-1"
-            class="sidebar-project-menu-item"
-            :class="{
-              active:
-                projectViewMode === 'global' && sidebarPrimaryTab !== 'folders',
-            }"
+            class="ctx-item"
             :aria-current="
               projectViewMode === 'global' && sidebarPrimaryTab !== 'folders'
                 ? 'page'
@@ -4906,11 +5139,18 @@ defineExpose({
             @mouseenter="scheduleCloseProjectSubMenu"
             @click="selectGlobalFromProjectMenu"
           >
-            <v-icon size="14">mdi-earth</v-icon>
-            <span class="sidebar-project-menu-item-label">Global</span>
+            <v-icon class="ctx-icon">mdi-earth</v-icon>
+            <span class="ctx-label-text">Global</span>
+            <v-icon
+              v-if="
+                projectViewMode === 'global' && sidebarPrimaryTab !== 'folders'
+              "
+              class="ctx-check"
+              >mdi-check</v-icon
+            >
           </button>
 
-          <div class="sidebar-project-menu-separator" role="separator"></div>
+          <div class="ctx-sep" role="separator"></div>
 
           <!-- Projects row → flyout submenu on hover or click -->
           <button
@@ -4918,13 +5158,13 @@ defineExpose({
             type="button"
             role="menuitem"
             tabindex="-1"
-            class="sidebar-project-menu-item sidebar-project-menu-has-sub"
-            :class="{
-              active:
-                projectViewMode === 'project' &&
-                sidebarPrimaryTab !== 'folders',
-              'sub-open': projectMenuSection === 'projects',
-            }"
+            class="ctx-item sidebar-project-menu-has-sub"
+            :class="{ 'sub-open': projectMenuSection === 'projects' }"
+            :aria-current="
+              projectViewMode === 'project' && sidebarPrimaryTab !== 'folders'
+                ? 'true'
+                : undefined
+            "
             data-project-submenu="projects"
             aria-haspopup="menu"
             :aria-expanded="projectMenuSection === 'projects'"
@@ -4934,11 +5174,9 @@ defineExpose({
               openProjectSubMenu('projects', $event, $event.detail === 0)
             "
           >
-            <v-icon size="14">mdi-briefcase-outline</v-icon>
-            <span class="sidebar-project-menu-item-label">Projects</span>
-            <v-icon size="12" class="sidebar-project-menu-chevron"
-              >mdi-chevron-right</v-icon
-            >
+            <v-icon class="ctx-icon">mdi-briefcase-outline</v-icon>
+            <span class="ctx-label-text">Projects</span>
+            <v-icon class="ctx-arrow">mdi-chevron-right</v-icon>
           </button>
 
           <!-- Folders row → flyout submenu on hover or click -->
@@ -4947,11 +5185,9 @@ defineExpose({
             type="button"
             role="menuitem"
             tabindex="-1"
-            class="sidebar-project-menu-item sidebar-project-menu-has-sub"
-            :class="{
-              active: sidebarPrimaryTab === 'folders',
-              'sub-open': projectMenuSection === 'folders',
-            }"
+            class="ctx-item sidebar-project-menu-has-sub"
+            :class="{ 'sub-open': projectMenuSection === 'folders' }"
+            :aria-current="sidebarPrimaryTab === 'folders' ? 'true' : undefined"
             data-project-submenu="folders"
             aria-haspopup="menu"
             :aria-expanded="projectMenuSection === 'folders'"
@@ -4961,11 +5197,9 @@ defineExpose({
               openProjectSubMenu('folders', $event, $event.detail === 0)
             "
           >
-            <v-icon size="14">mdi-folder-outline</v-icon>
-            <span class="sidebar-project-menu-item-label">Folders</span>
-            <v-icon size="12" class="sidebar-project-menu-chevron"
-              >mdi-chevron-right</v-icon
-            >
+            <v-icon class="ctx-icon">mdi-folder-outline</v-icon>
+            <span class="ctx-label-text">Folders</span>
+            <v-icon class="ctx-arrow">mdi-chevron-right</v-icon>
           </button>
         </div>
       </Teleport>
@@ -4980,7 +5214,7 @@ defineExpose({
           "
           id="sidebar-project-submenu"
           ref="collapsedProjectSubMenuRef"
-          class="sidebar-collapsed-project-submenu"
+          class="ctx-menu sidebar-collapsed-project-submenu"
           role="menu"
           :aria-label="
             projectMenuSection === 'projects' ? 'Projects' : 'Library folders'
@@ -5000,13 +5234,11 @@ defineExpose({
               type="button"
               role="menuitem"
               tabindex="-1"
-              class="sidebar-project-menu-item sidebar-project-menu-add"
+              class="ctx-item"
               @click="createProject"
             >
-              <v-icon size="14">mdi-plus</v-icon>
-              <span class="sidebar-project-menu-item-label"
-                >Add new project</span
-              >
+              <v-icon class="ctx-icon">mdi-plus</v-icon>
+              <span class="ctx-label-text">Add new project</span>
             </button>
             <button
               v-for="p in sortedProjects"
@@ -5014,12 +5246,7 @@ defineExpose({
               type="button"
               role="menuitem"
               tabindex="-1"
-              class="sidebar-project-menu-item"
-              :class="{
-                active:
-                  projectStore.projectViewMode === 'project' &&
-                  projectStore.selectedProjectId === p.id,
-              }"
+              class="ctx-item"
               :aria-current="
                 projectStore.projectViewMode === 'project' &&
                 projectStore.selectedProjectId === p.id
@@ -5028,8 +5255,16 @@ defineExpose({
               "
               @click="selectProjectFromProjectMenu(p)"
             >
-              <v-icon size="14">mdi-folder</v-icon>
-              <span class="sidebar-project-menu-item-label">{{ p.name }}</span>
+              <v-icon class="ctx-icon">mdi-folder</v-icon>
+              <span class="ctx-label-text">{{ p.name }}</span>
+              <v-icon
+                v-if="
+                  projectStore.projectViewMode === 'project' &&
+                  projectStore.selectedProjectId === p.id
+                "
+                class="ctx-check"
+                >mdi-check</v-icon
+              >
             </button>
           </template>
 
@@ -5040,15 +5275,15 @@ defineExpose({
               type="button"
               role="menuitem"
               tabindex="-1"
-              class="sidebar-project-menu-item sidebar-project-menu-add"
+              class="ctx-item"
               @click="openAddFolderFromProjectMenu"
             >
-              <v-icon size="14">mdi-plus</v-icon>
-              <span class="sidebar-project-menu-item-label">Add folder</span>
+              <v-icon class="ctx-icon">mdi-plus</v-icon>
+              <span class="ctx-label-text">Add folder</span>
             </button>
             <div
               v-if="referenceFolders.length"
-              class="sidebar-project-menu-section-label"
+              class="section-label ctx-label"
               role="presentation"
             >
               Reference Folders
@@ -5059,13 +5294,7 @@ defineExpose({
               type="button"
               role="menuitem"
               tabindex="-1"
-              class="sidebar-project-menu-item"
-              :class="{
-                active:
-                  sidebarPrimaryTab === 'folders' &&
-                  selectedFolderKey === 'rf-' + rf.id &&
-                  !isDuplicatesView,
-              }"
+              class="ctx-item"
               :aria-current="
                 sidebarPrimaryTab === 'folders' &&
                 selectedFolderKey === 'rf-' + rf.id &&
@@ -5075,14 +5304,21 @@ defineExpose({
               "
               @click="selectFolderFromProjectMenu(rf, 'reference')"
             >
-              <v-icon size="14">mdi-folder-network-outline</v-icon>
-              <span class="sidebar-project-menu-item-label">{{
-                rf.label || rf.folder
-              }}</span>
+              <v-icon class="ctx-icon">mdi-folder-network-outline</v-icon>
+              <span class="ctx-label-text">{{ rf.label || rf.folder }}</span>
+              <v-icon
+                v-if="
+                  sidebarPrimaryTab === 'folders' &&
+                  selectedFolderKey === 'rf-' + rf.id &&
+                  !isDuplicatesView
+                "
+                class="ctx-check"
+                >mdi-check</v-icon
+              >
             </button>
             <div
               v-if="importFolders.length"
-              class="sidebar-project-menu-section-label"
+              class="section-label ctx-label"
               role="presentation"
             >
               Import Folders
@@ -5093,13 +5329,7 @@ defineExpose({
               type="button"
               role="menuitem"
               tabindex="-1"
-              class="sidebar-project-menu-item"
-              :class="{
-                active:
-                  sidebarPrimaryTab === 'folders' &&
-                  selectedFolderKey === 'if-' + imf.id &&
-                  !isDuplicatesView,
-              }"
+              class="ctx-item"
               :aria-current="
                 sidebarPrimaryTab === 'folders' &&
                 selectedFolderKey === 'if-' + imf.id &&
@@ -5109,10 +5339,17 @@ defineExpose({
               "
               @click="selectFolderFromProjectMenu(imf, 'import')"
             >
-              <v-icon size="14">mdi-folder-open-outline</v-icon>
-              <span class="sidebar-project-menu-item-label">{{
-                imf.label || imf.folder
-              }}</span>
+              <v-icon class="ctx-icon">mdi-folder-open-outline</v-icon>
+              <span class="ctx-label-text">{{ imf.label || imf.folder }}</span>
+              <v-icon
+                v-if="
+                  sidebarPrimaryTab === 'folders' &&
+                  selectedFolderKey === 'if-' + imf.id &&
+                  !isDuplicatesView
+                "
+                class="ctx-check"
+                >mdi-check</v-icon
+              >
             </button>
           </template>
         </div>
@@ -5189,12 +5426,16 @@ defineExpose({
               ]"
               :aria-current="isAllPicturesRowActive ? 'page' : undefined"
               aria-label="All Pictures"
-              title="All Pictures"
               @click="selectCharacter(ALL_PICTURES_ID, 'All Pictures')"
               @contextmenu.prevent.stop="
                 openSidebarCtxMenu('all-pictures', null, $event)
               "
             >
+              <Tooltip
+                text="All Pictures"
+                activator="parent"
+                :describe="false"
+              />
               <v-icon>mdi-image-multiple</v-icon>
             </button>
           </div>
@@ -5240,7 +5481,7 @@ defineExpose({
                     ? 'true'
                     : 'false'
                 "
-                :title="`${char.name || 'Character'} (Ctrl/Cmd + click to multi-select)`"
+                :aria-label="`${char.name || 'Character'} (Ctrl/Cmd + click to multi-select)`"
                 @click="
                   selectCharacter(char.id, char.name || 'Character', $event)
                 "
@@ -5249,6 +5490,11 @@ defineExpose({
                   openSidebarCtxMenu('character', char, $event)
                 "
               >
+                <Tooltip
+                  :text="`${char.name || 'Character'} (Ctrl/Cmd + click to multi-select)`"
+                  activator="parent"
+                  :describe="false"
+                />
                 <img
                   v-if="characterThumbnails[char.id]"
                   :src="characterThumbnails[char.id]"
@@ -5263,12 +5509,17 @@ defineExpose({
             <div v-if="!isReadOnly" class="sidebar-collapsed-row">
               <div
                 class="sidebar-collapsed-item sidebar-collapsed-item--add sidebar-collapsed-item--add-person"
-                title="Add person"
+                aria-label="Add person"
                 role="button"
                 tabindex="0"
                 @click="createCharacter()"
                 @keydown="activateOnEnterOrSpace"
               >
+                <Tooltip
+                  text="Add person"
+                  activator="parent"
+                  :describe="false"
+                />
                 <i
                   class="mdi mdi-account sidebar-collapsed-item--add-bg-icon"
                   aria-hidden="true"
@@ -5289,7 +5540,7 @@ defineExpose({
           >
             <div
               class="sidebar-collapsed-item sidebar-collapsed-item--add sidebar-collapsed-item--add-person"
-              title="Add person"
+              aria-label="Add person"
               role="button"
               tabindex="0"
               @click="createCharacter()"
@@ -5298,6 +5549,7 @@ defineExpose({
                 openSidebarCtxMenu('header', 'people', $event)
               "
             >
+              <Tooltip text="Add person" activator="parent" :describe="false" />
               <i
                 class="mdi mdi-account sidebar-collapsed-item--add-bg-icon"
                 aria-hidden="true"
@@ -5327,7 +5579,7 @@ defineExpose({
                     selectedCharacterIdSet.size > 0 && selectionOwnsHighlight,
                 },
               ]"
-              :title="
+              :aria-label="
                 selectedCharacterObj ? selectedCharacterObj.name : 'People'
               "
               ref="collapsedCharBtnRef"
@@ -5338,6 +5590,13 @@ defineExpose({
               @click.stop="toggleCollapsedCharMenu"
               @keydown="activateOnEnterOrSpace"
             >
+              <Tooltip
+                :text="
+                  selectedCharacterObj ? selectedCharacterObj.name : 'People'
+                "
+                activator="parent"
+                :describe="false"
+              />
               <img
                 v-if="
                   selectedCharacterObj &&
@@ -5356,7 +5615,7 @@ defineExpose({
             <div
               v-if="collapsedCharMenuOpen"
               ref="collapsedCharMenuRef"
-              class="sidebar-collapsed-flyout-menu"
+              class="ctx-menu sidebar-collapsed-flyout-menu"
               :style="{
                 top: collapsedCharMenuPos.top + 'px',
                 left: collapsedCharMenuPos.left + 'px',
@@ -5369,30 +5628,32 @@ defineExpose({
                 "
               >
                 <span>People</span>
-                <v-icon
-                  v-if="!isReadOnly"
-                  size="14"
-                  class="sidebar-collapsed-flyout-header-add"
-                  title="Add character"
-                  @click.stop="
-                    createCharacter();
-                    collapsedCharMenuOpen = false;
-                  "
-                  >mdi-plus</v-icon
-                >
+                <Tooltip v-if="!isReadOnly" text="Add character">
+                  <template #activator="{ props: tipProps }">
+                    <v-icon
+                      v-bind="tipProps"
+                      size="14"
+                      class="sidebar-collapsed-flyout-header-add"
+                      @click.stop="
+                        createCharacter();
+                        collapsedCharMenuOpen = false;
+                      "
+                      >mdi-plus</v-icon
+                    >
+                  </template>
+                </Tooltip>
               </div>
               <div class="sidebar-collapsed-flyout-scroll">
                 <div
                   v-for="char in visibleCharacters"
                   :key="char.id"
-                  :class="[
-                    'sidebar-collapsed-flyout-item',
-                    {
-                      active:
-                        selectionStore.selectedCharacter === char.id &&
-                        selectionOwnsHighlight,
-                    },
-                  ]"
+                  :class="['ctx-item', 'sidebar-collapsed-flyout-item']"
+                  :aria-current="
+                    selectionStore.selectedCharacter === char.id &&
+                    selectionOwnsHighlight
+                      ? 'true'
+                      : undefined
+                  "
                   @click="
                     selectCharacter(char.id, char.name || 'Character', $event);
                     collapsedCharMenuOpen = false;
@@ -5406,30 +5667,46 @@ defineExpose({
                     alt=""
                     class="sidebar-collapsed-flyout-thumb"
                   />
-                  <span class="sidebar-collapsed-flyout-label">{{
+                  <span class="ctx-label-text">{{
                     char.name || "Character"
                   }}</span>
+                  <v-icon
+                    v-if="
+                      selectionStore.selectedCharacter === char.id &&
+                      selectionOwnsHighlight
+                    "
+                    class="ctx-check"
+                    >mdi-check</v-icon
+                  >
                   <div
                     v-if="!isReadOnly"
                     class="sidebar-collapsed-flyout-item-actions"
                   >
-                    <v-icon
-                      size="14"
-                      title="Edit"
-                      @click.stop="
-                        openCharacterEditor(char);
-                        collapsedCharMenuOpen = false;
-                      "
-                      >mdi-pencil-outline</v-icon
-                    >
-                    <v-icon
-                      size="14"
-                      title="More"
-                      @click.stop="
-                        openSidebarCtxMenu('character', char, $event)
-                      "
-                      >mdi-dots-vertical</v-icon
-                    >
+                    <Tooltip text="Edit">
+                      <template #activator="{ props: tipProps }">
+                        <v-icon
+                          v-bind="tipProps"
+                          size="14"
+                          @click.stop="
+                            openCharacterEditor(char);
+                            collapsedCharMenuOpen = false;
+                          "
+                          >mdi-pencil-outline</v-icon
+                        >
+                      </template>
+                    </Tooltip>
+                    <Tooltip text="More">
+                      <template #activator="{ props: tipProps }">
+                        <v-icon
+                          v-bind="tipProps"
+                          size="14"
+                          @click.stop="
+                            openSidebarCtxMenu('character', char, $event)
+                          "
+                          >mdi-dots-vertical</v-icon
+                        >
+                      </template>
+                    </Tooltip>
                   </div>
                 </div>
               </div>
@@ -5470,7 +5747,7 @@ defineExpose({
                       selectedSetIdSet.has(pset.id) && selectionOwnsHighlight,
                   },
                 ]"
-                :title="pset.name || 'Picture Set'"
+                :aria-label="pset.name || 'Picture Set'"
                 role="button"
                 tabindex="0"
                 :aria-pressed="
@@ -5484,6 +5761,11 @@ defineExpose({
                   openSidebarCtxMenu('set', pset, $event)
                 "
               >
+                <Tooltip
+                  :text="pset.name || 'Picture Set'"
+                  activator="parent"
+                  :describe="false"
+                />
                 <v-icon
                   v-if="pset.set_icon && pset.set_icon !== ICON_CARDS"
                   :color="pset.set_color || undefined"
@@ -5509,24 +5791,32 @@ defineExpose({
                 <v-icon v-else :color="pset.set_color || undefined"
                   >mdi-image-album</v-icon
                 >
-                <v-icon
-                  v-if="pset.locked"
-                  class="sidebar-collapsed-lock"
-                  size="10"
-                  :title="SET_LOCKED_ROW_TITLE"
-                  >mdi-lock-outline</v-icon
-                >
+                <Tooltip v-if="pset.locked" :text="SET_LOCKED_ROW_TITLE">
+                  <template #activator="{ props: tipProps }">
+                    <v-icon
+                      v-bind="tipProps"
+                      class="sidebar-collapsed-lock"
+                      size="10"
+                      >mdi-lock-outline</v-icon
+                    >
+                  </template>
+                </Tooltip>
               </div>
             </div>
             <div v-if="!isReadOnly" class="sidebar-collapsed-row">
               <div
                 class="sidebar-collapsed-item sidebar-collapsed-item--add sidebar-collapsed-item--add-set"
-                title="Add picture set"
+                aria-label="Add picture set"
                 role="button"
                 tabindex="0"
                 @click="createSet()"
                 @keydown="activateOnEnterOrSpace"
               >
+                <Tooltip
+                  text="Add picture set"
+                  activator="parent"
+                  :describe="false"
+                />
                 <i
                   class="mdi mdi-image-album sidebar-collapsed-item--add-bg-icon"
                   aria-hidden="true"
@@ -5547,7 +5837,7 @@ defineExpose({
           >
             <div
               class="sidebar-collapsed-item sidebar-collapsed-item--add sidebar-collapsed-item--add-set"
-              title="Add picture set"
+              aria-label="Add picture set"
               role="button"
               tabindex="0"
               @click="createSet()"
@@ -5556,6 +5846,11 @@ defineExpose({
                 openSidebarCtxMenu('header', 'sets', $event)
               "
             >
+              <Tooltip
+                text="Add picture set"
+                activator="parent"
+                :describe="false"
+              />
               <i
                 class="mdi mdi-image-album sidebar-collapsed-item--add-bg-icon"
                 aria-hidden="true"
@@ -5579,7 +5874,9 @@ defineExpose({
                   active: selectedSetIdSet.size > 0 && selectionOwnsHighlight,
                 },
               ]"
-              :title="selectedSetObj ? selectedSetObj.name : 'Picture Sets'"
+              :aria-label="
+                selectedSetObj ? selectedSetObj.name : 'Picture Sets'
+              "
               ref="collapsedSetBtnRef"
               role="button"
               tabindex="0"
@@ -5588,6 +5885,11 @@ defineExpose({
               @click.stop="toggleCollapsedSetMenu"
               @keydown="activateOnEnterOrSpace"
             >
+              <Tooltip
+                :text="selectedSetObj ? selectedSetObj.name : 'Picture Sets'"
+                activator="parent"
+                :describe="false"
+              />
               <template v-if="selectedSetObj">
                 <v-icon
                   v-if="
@@ -5617,20 +5919,26 @@ defineExpose({
                 >
               </template>
               <v-icon v-else>mdi-image-album</v-icon>
-              <v-icon
+              <Tooltip
                 v-if="selectedSetObj && selectedSetObj.locked"
-                class="sidebar-collapsed-lock"
-                size="10"
-                :title="SET_LOCKED_ROW_TITLE"
-                >mdi-lock-outline</v-icon
+                :text="SET_LOCKED_ROW_TITLE"
               >
+                <template #activator="{ props: tipProps }">
+                  <v-icon
+                    v-bind="tipProps"
+                    class="sidebar-collapsed-lock"
+                    size="10"
+                    >mdi-lock-outline</v-icon
+                  >
+                </template>
+              </Tooltip>
             </div>
           </div>
           <Teleport to="body">
             <div
               v-if="collapsedSetMenuOpen"
               ref="collapsedSetMenuRef"
-              class="sidebar-collapsed-flyout-menu"
+              class="ctx-menu sidebar-collapsed-flyout-menu"
               :style="{
                 top: collapsedSetMenuPos.top + 'px',
                 left: collapsedSetMenuPos.left + 'px',
@@ -5643,29 +5951,31 @@ defineExpose({
                 "
               >
                 <span>Picture Sets</span>
-                <v-icon
-                  v-if="!isReadOnly"
-                  size="14"
-                  class="sidebar-collapsed-flyout-header-add"
-                  title="Add picture set"
-                  @click.stop="
-                    createSet();
-                    collapsedSetMenuOpen = false;
-                  "
-                  >mdi-plus</v-icon
-                >
+                <Tooltip v-if="!isReadOnly" text="Add picture set">
+                  <template #activator="{ props: tipProps }">
+                    <v-icon
+                      v-bind="tipProps"
+                      size="14"
+                      class="sidebar-collapsed-flyout-header-add"
+                      @click.stop="
+                        createSet();
+                        collapsedSetMenuOpen = false;
+                      "
+                      >mdi-plus</v-icon
+                    >
+                  </template>
+                </Tooltip>
               </div>
               <div class="sidebar-collapsed-flyout-scroll">
                 <div
                   v-for="pset in visibleSets"
                   :key="pset.id"
-                  :class="[
-                    'sidebar-collapsed-flyout-item',
-                    {
-                      active:
-                        selectedSetIdSet.has(pset.id) && selectionOwnsHighlight,
-                    },
-                  ]"
+                  :class="['ctx-item', 'sidebar-collapsed-flyout-item']"
+                  :aria-current="
+                    selectedSetIdSet.has(pset.id) && selectionOwnsHighlight
+                      ? 'true'
+                      : undefined
+                  "
                   @click="
                     selectSet(pset.id, pset.name || 'Picture Set', $event);
                     collapsedSetMenuOpen = false;
@@ -5694,35 +6004,53 @@ defineExpose({
                     @error="handleSetThumbnailError(pset.id)"
                   />
                   <v-icon v-else size="28">mdi-image-album</v-icon>
-                  <span class="sidebar-collapsed-flyout-label">{{
+                  <span class="ctx-label-text">{{
                     pset.name || "Picture Set"
                   }}</span>
+                  <Tooltip v-if="pset.locked" :text="SET_LOCKED_ROW_TITLE">
+                    <template #activator="{ props: tipProps }">
                   <v-icon
-                    v-if="pset.locked"
+                        v-bind="tipProps"
                     class="sidebar-lock-icon"
                     size="12"
-                    :title="SET_LOCKED_ROW_TITLE"
                     >mdi-lock-outline</v-icon
+                  >
+                    </template>
+                  </Tooltip>
+                  <v-icon
+                    v-if="
+                      selectedSetIdSet.has(pset.id) && selectionOwnsHighlight
+                    "
+                    class="ctx-check"
+                    >mdi-check</v-icon
                   >
                   <div
                     v-if="!isReadOnly"
                     class="sidebar-collapsed-flyout-item-actions"
                   >
-                    <v-icon
-                      size="14"
-                      title="Edit"
-                      @click.stop="
-                        openSetEditor(pset);
-                        collapsedSetMenuOpen = false;
-                      "
-                      >mdi-pencil-outline</v-icon
-                    >
-                    <v-icon
-                      size="14"
-                      title="More"
-                      @click.stop="openSidebarCtxMenu('set', pset, $event)"
-                      >mdi-dots-vertical</v-icon
-                    >
+                    <Tooltip text="Edit">
+                      <template #activator="{ props: tipProps }">
+                        <v-icon
+                          v-bind="tipProps"
+                          size="14"
+                          @click.stop="
+                            openSetEditor(pset);
+                            collapsedSetMenuOpen = false;
+                          "
+                          >mdi-pencil-outline</v-icon
+                        >
+                      </template>
+                    </Tooltip>
+                    <Tooltip text="More">
+                      <template #activator="{ props: tipProps }">
+                        <v-icon
+                          v-bind="tipProps"
+                          size="14"
+                          @click.stop="openSidebarCtxMenu('set', pset, $event)"
+                          >mdi-dots-vertical</v-icon
+                        >
+                      </template>
+                    </Tooltip>
                   </div>
                 </div>
               </div>
@@ -5745,15 +6073,22 @@ defineExpose({
               :aria-current="isDuplicatesView ? 'page' : undefined"
               :aria-disabled="isReadOnly || undefined"
               aria-label="Duplicates"
-              :title="isReadOnly ? READ_ONLY_DEDUP_HINT : 'Duplicates'"
               @click="isReadOnly || emit('select-duplicates', {})"
             >
+              <Tooltip
+                :text="isReadOnly ? READ_ONLY_DEDUP_HINT : 'Duplicates'"
+                activator="parent"
+              />
               <v-icon>mdi-content-duplicate</v-icon>
               <span
                 v-if="dedupStore.hasDuplicates"
                 class="sidebar-collapsed-dedup-badge"
-                title="There are duplicates to review"
-              ></span>
+              >
+                <Tooltip
+                  text="There are duplicates to review"
+                  activator="parent"
+                />
+              </span>
             </button>
           </div>
 
@@ -5770,10 +6105,36 @@ defineExpose({
               }"
               :aria-current="isModelsView ? 'page' : undefined"
               :aria-disabled="isReadOnly || undefined"
-              :title="isReadOnly ? READ_ONLY_SHELF_HINT : 'Models'"
+              aria-label="Models"
               @click="isReadOnly || emit('select-models')"
             >
+              <Tooltip
+                :text="isReadOnly ? READ_ONLY_SHELF_HINT : 'Models'"
+                activator="parent"
+              />
               <v-icon>mdi-layers-outline</v-icon>
+            </button>
+          </div>
+
+          <!-- The workflow library's dock mirror, same treatment as Models. -->
+          <div :class="['sidebar-collapsed-row', { active: isWorkflowsView }]">
+            <button
+              type="button"
+              class="sidebar-collapsed-item sidebar-destination-btn"
+              :class="{
+                active: isWorkflowsView,
+                'sidebar-collapsed-item--unavailable': isReadOnly,
+              }"
+              :aria-current="isWorkflowsView ? 'page' : undefined"
+              :aria-disabled="isReadOnly || undefined"
+              aria-label="Workflows"
+              @click="isReadOnly || emit('select-workflows')"
+            >
+              <Tooltip
+                :text="isReadOnly ? READ_ONLY_WORKFLOWS_HINT : 'Workflows'"
+                activator="parent"
+              />
+              <ComfyuiIcon />
             </button>
           </div>
 
@@ -5794,19 +6155,23 @@ defineExpose({
               :class="{ active: isMovesView }"
               :aria-current="isMovesView ? 'page' : undefined"
               aria-label="Moves made outside PixlStash"
-              :title="
-                movesStore.hasPending
-                  ? `${movesStore.pendingCount} move(s) to review`
-                  : 'Moves already followed, nothing to decide'
-              "
               @click="emit('select-moves')"
             >
+              <Tooltip
+                :text="
+                  movesStore.hasPending
+                    ? `${movesStore.pendingCount} move(s) to review`
+                    : 'Moves already followed, nothing to decide'
+                "
+                activator="parent"
+              />
               <v-icon>mdi-folder-move-outline</v-icon>
               <span
                 v-if="movesStore.hasPending"
                 class="sidebar-collapsed-dedup-badge"
-                title="There are moves to review"
-              ></span>
+              >
+                <Tooltip text="There are moves to review" activator="parent" />
+              </span>
             </button>
           </div>
 
@@ -5834,12 +6199,12 @@ defineExpose({
               ]"
               :aria-current="isScrapheapRowActive ? 'page' : undefined"
               aria-label="Scrapheap"
-              title="Scrapheap"
               @click="selectCharacter(SCRAPHEAP_PICTURES_ID, 'Scrapheap')"
               @contextmenu.prevent.stop="
                 openSidebarCtxMenu('scrapheap', null, $event)
               "
             >
+              <Tooltip text="Scrapheap" activator="parent" :describe="false" />
               <v-icon>mdi-trash-can-outline</v-icon>
             </button>
           </div>
@@ -5854,7 +6219,7 @@ defineExpose({
             class="sidebar-project-tree-add"
             @click="openAddFolderTypeDialog()"
           >
-            <v-icon size="14">mdi-plus</v-icon>
+            <v-icon size="16">mdi-plus</v-icon>
             Add folder
           </div>
 
@@ -5874,16 +6239,13 @@ defineExpose({
               >mdi-folder-network-outline</v-icon
             >
             <p class="sidebar-no-projects-text">No folders configured.</p>
-            <v-btn
-              color="primary"
-              size="small"
-              prepend-icon="mdi-plus"
-              rounded="lg"
-              class="sidebar-no-projects-btn sidebar-no-projects-btn--folders"
+            <AppButton
+              variant="primary"
+              icon-left="plus"
               @click="openAddFolderTypeDialog()"
             >
               Add folder
-            </v-btn>
+            </AppButton>
           </div>
           <div
             v-else
@@ -5902,17 +6264,25 @@ defineExpose({
               "
             >
               <div class="sidebar-folder-section-title">Reference folders</div>
-              <v-icon
+              <Tooltip
                 v-if="selectedReferenceFolderForHeader"
-                size="13"
-                class="sidebar-folder-section-edit-btn"
-                title="Edit selected reference folder"
-                @click.stop="
-                  openReferenceFolderEditor(selectedReferenceFolderForHeader)
-                "
+                text="Edit selected reference folder"
               >
-                mdi-pencil-outline
-              </v-icon>
+                <template #activator="{ props: tipProps }">
+                  <v-icon
+                    v-bind="tipProps"
+                    size="13"
+                    class="sidebar-folder-section-edit-btn"
+                    @click.stop="
+                      openReferenceFolderEditor(
+                        selectedReferenceFolderForHeader,
+                      )
+                    "
+                  >
+                    mdi-pencil-outline
+                  </v-icon>
+                </template>
+              </Tooltip>
               <v-icon
                 class="sidebar-project-tree-expand-indicator"
                 :class="{ expanded: !referenceFoldersCollapsed }"
@@ -5923,14 +6293,17 @@ defineExpose({
             <div
               v-if="pendingForThisLibrary"
               class="sidebar-folder-row sidebar-mapping-resume-row"
-              :title="
-                pendingForThisLibrary.taskId
-                  ? 'The scan is kept - reopening this does not re-scan'
-                  : 'Reopening this starts scanning that folder'
-              "
-              @click="openFolderMappingWizard(pendingForThisLibrary)"
+              @click="openPendingMapping"
             >
-              <v-icon size="15" class="sidebar-mapping-resume-icon"
+              <Tooltip
+                :text="
+                  pendingForThisLibrary.taskId
+                    ? 'The scan is kept - reopening this does not re-scan'
+                    : 'Reopening this starts scanning that folder'
+                "
+                activator="parent"
+              />
+              <v-icon size="16" class="sidebar-mapping-resume-icon"
                 >mdi-map-marker-path</v-icon
               >
               <span class="sidebar-mapping-resume-label">
@@ -5955,11 +6328,6 @@ defineExpose({
                     dragOverReferenceTargetKey === 'rf-' + rf.id &&
                     dropRejected,
                 }"
-                :title="
-                  inDocker
-                    ? rf.folder
-                    : `${rf.folder} - drop dragged reference images here to move them`
-                "
                 @contextmenu.prevent="openSidebarCtxMenu('folder', rf, $event)"
                 @dragover="
                   !inDocker &&
@@ -5985,8 +6353,16 @@ defineExpose({
                   });
                 "
               >
+                <Tooltip
+                  :text="
+                    inDocker
+                      ? rf.folder
+                      : `${rf.folder} - drop dragged reference images here to move them`
+                  "
+                  activator="parent"
+                />
                 <v-icon
-                  size="12"
+                  size="16"
                   class="sidebar-row-glyph sidebar-folder-chevron"
                   :class="{
                     'sidebar-row-glyph--empty': !referenceFolderCanDisclose(rf),
@@ -6018,47 +6394,63 @@ defineExpose({
                   <button
                     type="button"
                     class="sidebar-folder-action-btn"
-                    title="Relocate folder and move files"
+                    aria-label="Relocate folder and move files"
                     @click="openReferenceFolderRelocateDialog(rf)"
                   >
+                    <Tooltip
+                      text="Relocate folder and move files"
+                      activator="parent"
+                      :describe="false"
+                    />
                     <v-icon size="13">mdi-folder-move-outline</v-icon>
                   </button>
                   <button
                     type="button"
                     class="sidebar-folder-action-btn"
-                    title="Edit folder settings"
+                    aria-label="Edit folder settings"
                     @click="openReferenceFolderEditor(rf)"
                   >
+                    <Tooltip
+                      text="Edit folder settings"
+                      activator="parent"
+                      :describe="false"
+                    />
                     <v-icon size="13">mdi-pencil-outline</v-icon>
                   </button>
                 </span>
                 <span
                   v-if="rf.status === 'mount_error'"
                   class="sidebar-folder-status-badge sidebar-folder-status--mount_error"
-                  :title="
-                    inDocker
-                      ? 'Mount error - check Docker volume'
-                      : 'Folder not accessible'
-                  "
                 >
+                  <Tooltip
+                    :text="
+                      inDocker
+                        ? 'Mount error - check Docker volume'
+                        : 'Folder not accessible'
+                    "
+                    activator="parent"
+                  />
                   <v-icon size="12">mdi-alert-circle-outline</v-icon>
                 </span>
                 <span
                   v-else-if="rf.status === 'pending_mount'"
                   class="sidebar-folder-status-badge sidebar-folder-status--pending_mount"
-                  :title="
-                    inDocker
-                      ? 'Pending restart - restart server to mount'
-                      : 'Scan pending - will start automatically'
-                  "
                 >
+                  <Tooltip
+                    :text="
+                      inDocker
+                        ? 'Pending restart - restart server to mount'
+                        : 'Scan pending - will start automatically'
+                    "
+                    activator="parent"
+                  />
                   <v-icon size="12">mdi-clock-outline</v-icon>
                 </span>
                 <span
                   v-else-if="rf.status === 'active' && rf.last_scanned == null"
                   class="sidebar-folder-status-badge sidebar-folder-status--scanning"
-                  title="Scanning…"
                 >
+                  <Tooltip text="Scanning…" activator="parent" />
                   <v-progress-circular indeterminate size="10" width="1.5" />
                 </span>
                 <span
@@ -6067,8 +6459,8 @@ defineExpose({
                     (folderBrowseCache[rf.folder]?.image_count ?? 0) > 0
                   "
                   class="sidebar-folder-count-badge"
-                  title="Direct images in folder"
                 >
+                  <Tooltip text="Direct images in folder" activator="parent" />
                   {{
                     folderBrowseCache[rf.folder]?.loading
                       ? "..."
@@ -6137,17 +6529,23 @@ defineExpose({
               "
             >
               <div class="sidebar-folder-section-title">Import folders</div>
-              <v-icon
+              <Tooltip
                 v-if="selectedImportFolderForHeader"
-                size="13"
-                class="sidebar-folder-section-edit-btn"
-                title="Edit selected import folder"
-                @click.stop="
-                  openImportFolderEditor(selectedImportFolderForHeader)
-                "
+                text="Edit selected import folder"
               >
-                mdi-pencil-outline
-              </v-icon>
+                <template #activator="{ props: tipProps }">
+                  <v-icon
+                    v-bind="tipProps"
+                    size="13"
+                    class="sidebar-folder-section-edit-btn"
+                    @click.stop="
+                      openImportFolderEditor(selectedImportFolderForHeader)
+                    "
+                  >
+                    mdi-pencil-outline
+                  </v-icon>
+                </template>
+              </Tooltip>
               <v-icon
                 class="sidebar-project-tree-expand-indicator"
                 :class="{ expanded: !importFoldersCollapsed }"
@@ -6166,7 +6564,6 @@ defineExpose({
                 :class="{
                   active: selectedFolderKey === 'if-' + importFolder.id,
                 }"
-                :title="importFolder.folder"
                 @contextmenu.prevent="
                   openSidebarCtxMenu('import-folder', importFolder, $event)
                 "
@@ -6178,8 +6575,9 @@ defineExpose({
                   })
                 "
               >
+                <Tooltip :text="importFolder.folder" activator="parent" />
                 <v-icon
-                  size="12"
+                  size="16"
                   class="sidebar-row-glyph sidebar-row-glyph--empty sidebar-folder-chevron"
                 >
                   mdi-chevron-right
@@ -6193,14 +6591,18 @@ defineExpose({
                 <span
                   v-if="importFolder.delete_after_import"
                   class="sidebar-folder-status-badge sidebar-folder-status--pending_mount"
-                  title="Delete source file after successful import"
                 >
+                  <Tooltip
+                    text="Delete source file after successful import"
+                    activator="parent"
+                  />
                   <v-icon size="12">mdi-delete-outline</v-icon>
                 </span>
-                <span
-                  class="sidebar-folder-count-badge"
-                  title="Imported pictures from folder"
-                >
+                <span class="sidebar-folder-count-badge">
+                  <Tooltip
+                    text="Imported pictures from folder"
+                    activator="parent"
+                  />
                   {{ importFolder.picture_count ?? 0 }}
                 </span>
               </div>
@@ -6259,9 +6661,12 @@ defineExpose({
                 ]"
                 :aria-current="isDuplicatesView ? 'page' : undefined"
                 :aria-disabled="isReadOnly || undefined"
-                :title="isReadOnly ? READ_ONLY_DEDUP_HINT : undefined"
                 @click="isReadOnly || emit('select-duplicates', {})"
               >
+                <Tooltip
+                  :text="isReadOnly ? READ_ONLY_DEDUP_HINT : ''"
+                  activator="parent"
+                />
                 <span class="sidebar-list-icon sidebar-list-icon--toplevel"
                   ><v-icon size="18">mdi-content-duplicate</v-icon></span
                 >
@@ -6269,8 +6674,11 @@ defineExpose({
                 <span
                   v-if="dedupStore.isScanning"
                   class="sidebar-dedup-scanning"
-                  title="Still looking for duplicates. Groups appear as they are found."
                 >
+                  <Tooltip
+                    text="Still looking for duplicates. Groups appear as they are found."
+                    activator="parent"
+                  />
                   <v-progress-circular indeterminate size="10" width="1.5" />
                 </span>
                 <!-- A presence DOT, not a count (owner call, 2026-07-29): the
@@ -6278,11 +6686,12 @@ defineExpose({
                      so it read as churn. The dot only says "there are
                      duplicates to review"; the queue's own header carries the
                      numbers. -->
-                <span
-                  v-if="dedupStore.hasDuplicates"
-                  class="sidebar-dedup-dot"
-                  title="There are duplicates to review"
-                ></span>
+                <span v-if="dedupStore.hasDuplicates" class="sidebar-dedup-dot">
+                  <Tooltip
+                    text="There are duplicates to review"
+                    activator="parent"
+                  />
+                </span>
               </button>
             </div>
 
@@ -6309,13 +6718,52 @@ defineExpose({
                 }"
                 :aria-current="isModelsView ? 'page' : undefined"
                 :aria-disabled="isReadOnly || undefined"
-                :title="isReadOnly ? READ_ONLY_SHELF_HINT : undefined"
                 @click="isReadOnly || emit('select-models')"
               >
+                <Tooltip
+                  :text="isReadOnly ? READ_ONLY_SHELF_HINT : ''"
+                  activator="parent"
+                />
                 <span class="sidebar-list-icon sidebar-list-icon--toplevel"
                   ><v-icon size="18">mdi-layers-outline</v-icon></span
                 >
                 <span class="sidebar-list-label">Models</span>
+                <!-- Models arrived from the Downloads folder while the shelf
+                     was not open. Cleared by opening it. -->
+                <span
+                  v-if="modelShelfStore.unseenArrivals && !isReadOnly"
+                  class="sidebar-list-count"
+                  ><span class="sidebar-new-tag">new</span></span
+                >
+              </button>
+            </div>
+
+            <!-- Workflows sits under Models because it is the same kind of
+                 destination: a list of what this MACHINE holds, which no
+                 picture view can express. Owner-only for the same reason as
+                 well — every /workflows route is, so the row is inert and
+                 carries no count rather than starting a fetch a share session
+                 cannot satisfy. -->
+            <div class="sidebar-all-pictures-row">
+              <button
+                type="button"
+                class="sidebar-list-item sidebar-destination-btn"
+                :class="{
+                  active: isWorkflowsView,
+                  'sidebar-list-item--unavailable': isReadOnly,
+                }"
+                :aria-current="isWorkflowsView ? 'page' : undefined"
+                :aria-disabled="isReadOnly || undefined"
+                @click="isReadOnly || emit('select-workflows')"
+              >
+                <Tooltip
+                  :text="isReadOnly ? READ_ONLY_WORKFLOWS_HINT : ''"
+                  activator="parent"
+                />
+                <span class="sidebar-list-icon sidebar-list-icon--toplevel"
+                  ><ComfyuiIcon :size="16" /></span
+                >
+                <span class="sidebar-list-label">Workflows</span>
               </button>
             </div>
 
@@ -6406,8 +6854,12 @@ defineExpose({
                     @click.stop="
                       selectCharacter(ALL_PICTURES_ID, 'All Pictures')
                     "
-                    title="Clear character selection"
                   >
+                    <Tooltip
+                      text="Clear character selection"
+                      activator="parent"
+                      :describe="false"
+                    />
                     <v-icon size="16">mdi-selection-off</v-icon>
                   </button>
                   <button
@@ -6420,8 +6872,12 @@ defineExpose({
                     class="edit-character-inline"
                     aria-label="Edit selected character"
                     @click.stop="openCharacterEditor(selectedCharacterObj)"
-                    title="Edit selected character"
                   >
+                    <Tooltip
+                      text="Edit selected character"
+                      activator="parent"
+                      :describe="false"
+                    />
                     <v-icon size="16">mdi-pencil</v-icon>
                   </button>
                   <button
@@ -6437,8 +6893,12 @@ defineExpose({
                     class="delete-character-inline"
                     aria-label="Delete selected character"
                     @click.stop="deleteCharacter"
-                    title="Delete selected character"
                   >
+                    <Tooltip
+                      text="Delete selected character"
+                      activator="parent"
+                      :describe="false"
+                    />
                     <v-icon size="16">mdi-trash-can-outline</v-icon>
                   </button>
                   <button
@@ -6447,8 +6907,12 @@ defineExpose({
                     class="add-character-inline"
                     aria-label="Add character"
                     @click.stop="createCharacter"
-                    title="Add character"
                   >
+                    <Tooltip
+                      text="Add character"
+                      activator="parent"
+                      :describe="false"
+                    />
                     <v-icon size="16">mdi-plus</v-icon>
                   </button>
                 </div>
@@ -6510,7 +6974,6 @@ defineExpose({
                         ? 'true'
                         : 'false'
                     "
-                    :title="`${char.name || 'Character'} (Ctrl/Cmd + click to multi-select)`"
                     @click="
                       selectCharacter(char.id, char.name || 'Character', $event)
                     "
@@ -6527,6 +6990,10 @@ defineExpose({
                       })
                     "
                   >
+                    <Tooltip
+                      :text="`${char.name || 'Character'} (Ctrl/Cmd + click to multi-select)`"
+                      activator="parent"
+                    />
                     <span class="sidebar-list-icon">
                       <img
                         :src="
@@ -6541,14 +7008,18 @@ defineExpose({
                       />
                     </span>
                     <span class="sidebar-list-label">
-                      <v-tooltip
+                      <Tooltip
                         location="top"
                         :disabled="!labelNeedsTooltip(`char-${char.id}`)"
+                        :describe="false"
                       >
                         <template #activator="{ props }">
                           <span
-                            v-bind="props"
-                            :ref="mergeTooltipRef(props, `char-${char.id}`)"
+                            v-bind="
+                              withRef(props, (el) =>
+                                registerLabelRef(`char-${char.id}`, el),
+                              )
+                            "
                             class="sidebar-list-label-text"
                             >{{
                               char.name.charAt(0).toUpperCase() +
@@ -6557,16 +7028,22 @@ defineExpose({
                           >
                         </template>
                         <span>{{ char.name }}</span>
-                      </v-tooltip>
+                      </Tooltip>
                     </span>
                     <span class="sidebar-character-actions">
-                      <v-icon
+                      <Tooltip
                         v-if="sharedCharacterIds.has(char.id)"
-                        class="sidebar-shared-icon"
-                        size="11"
-                        title="Has active share links"
-                        >mdi-link-variant</v-icon
+                        text="Has active share links"
                       >
+                        <template #activator="{ props: tipProps }">
+                          <v-icon
+                            v-bind="tipProps"
+                            class="sidebar-shared-icon"
+                            size="11"
+                            >mdi-link-variant</v-icon
+                          >
+                        </template>
+                      </Tooltip>
                       <span class="sidebar-list-count">
                         <span v-if="isCountNew(char.id)" class="sidebar-new-tag"
                           >new</span
@@ -6579,7 +7056,7 @@ defineExpose({
               </div>
             </div>
 
-            <div class="sidebar-section-divider" style="margin-top: 8px" />
+            <div class="sidebar-section-divider" style="margin-top: var(--space-3)" />
 
             <div
               v-if="scopedResourceType !== 'character'"
@@ -6612,8 +7089,12 @@ defineExpose({
                     class="clear-selection-inline"
                     aria-label="Clear set selection"
                     @click.stop="emit('select-set', null)"
-                    title="Clear set selection"
                   >
+                    <Tooltip
+                      text="Clear set selection"
+                      activator="parent"
+                      :describe="false"
+                    />
                     <v-icon size="16">mdi-selection-off</v-icon>
                   </button>
                   <button
@@ -6622,8 +7103,12 @@ defineExpose({
                     class="edit-set-inline"
                     aria-label="Edit selected set"
                     @click.stop="openSetEditor(selectedSetObj)"
-                    title="Edit selected set"
                   >
+                    <Tooltip
+                      text="Edit selected set"
+                      activator="parent"
+                      :describe="false"
+                    />
                     <v-icon size="16">mdi-pencil</v-icon>
                   </button>
                   <button
@@ -6632,12 +7117,15 @@ defineExpose({
                     class="delete-character-inline"
                     aria-label="Delete selected sets"
                     @click.stop="handleDeleteSet"
-                    :title="
-                      selectedSetIdSet.size > 1
-                        ? `Delete ${selectedSetIdSet.size} selected sets`
-                        : 'Delete selected set'
-                    "
                   >
+                    <Tooltip
+                      :text="
+                        selectedSetIdSet.size > 1
+                          ? `Delete ${selectedSetIdSet.size} selected sets`
+                          : 'Delete selected set'
+                      "
+                      activator="parent"
+                    />
                     <v-icon size="16">mdi-trash-can-outline</v-icon>
                   </button>
                   <button
@@ -6646,8 +7134,12 @@ defineExpose({
                     class="add-character-inline"
                     aria-label="Create new set"
                     @click.stop="createSet"
-                    title="Create new set"
                   >
+                    <Tooltip
+                      text="Create new set"
+                      activator="parent"
+                      :describe="false"
+                    />
                     <v-icon size="16">mdi-plus</v-icon>
                   </button>
                 </div>
@@ -6683,7 +7175,6 @@ defineExpose({
                         ? 'true'
                         : 'false'
                     "
-                    :title="`${pset.name || 'Picture Set'} (Ctrl/Cmd + click to multi-select)`"
                     @click="
                       selectSet(pset.id, pset.name || 'Picture Set', $event)
                     "
@@ -6695,6 +7186,10 @@ defineExpose({
                     @dragleave="dragLeaveSetItem($event)"
                     @drop.prevent="handleDropOnSet(pset.id, $event)"
                   >
+                    <Tooltip
+                      :text="`${pset.name || 'Picture Set'} (Ctrl/Cmd + click to multi-select)`"
+                      activator="parent"
+                    />
                     <span class="sidebar-list-icon">
                       <v-icon
                         v-if="pset.set_icon && pset.set_icon !== ICON_CARDS"
@@ -6724,35 +7219,48 @@ defineExpose({
                       >
                     </span>
                     <span class="sidebar-list-label">
-                      <v-tooltip
+                      <Tooltip
                         location="top"
                         :disabled="!labelNeedsTooltip(`set-${pset.id}`)"
+                        :describe="false"
                       >
                         <template #activator="{ props }">
                           <span
-                            v-bind="props"
-                            :ref="mergeTooltipRef(props, `set-${pset.id}`)"
+                            v-bind="
+                              withRef(props, (el) =>
+                                registerLabelRef(`set-${pset.id}`, el),
+                              )
+                            "
                             class="sidebar-list-label-text"
                             >{{ pset.name }}</span
                           >
                         </template>
                         <span>{{ pset.name }}</span>
-                      </v-tooltip>
+                      </Tooltip>
                     </span>
-                    <v-icon
-                      v-if="pset.locked"
-                      class="sidebar-lock-icon"
-                      size="11"
-                      :title="SET_LOCKED_ROW_TITLE"
-                      >mdi-lock-outline</v-icon
-                    >
-                    <v-icon
+                    <Tooltip v-if="pset.locked" :text="SET_LOCKED_ROW_TITLE">
+                      <template #activator="{ props: tipProps }">
+                        <v-icon
+                          v-bind="tipProps"
+                          class="sidebar-lock-icon"
+                          size="11"
+                          >mdi-lock-outline</v-icon
+                        >
+                      </template>
+                    </Tooltip>
+                    <Tooltip
                       v-if="sharedSetIds.has(pset.id)"
-                      class="sidebar-shared-icon"
-                      size="11"
-                      title="Has active share links"
-                      >mdi-link-variant</v-icon
+                      text="Has active share links"
                     >
+                      <template #activator="{ props: tipProps }">
+                        <v-icon
+                          v-bind="tipProps"
+                          class="sidebar-shared-icon"
+                          size="11"
+                          >mdi-link-variant</v-icon
+                        >
+                      </template>
+                    </Tooltip>
                     <span class="sidebar-list-count">{{
                       pset.picture_count ?? 0
                     }}</span>
@@ -6772,15 +7280,12 @@ defineExpose({
                 Create a project to organise your library into separate
                 collections.
               </p>
-              <v-btn
+              <AppButton
                 v-if="!isReadOnly"
-                color="primary"
-                size="small"
-                prepend-icon="mdi-plus"
-                rounded="lg"
-                class="sidebar-no-projects-btn"
+                variant="primary"
+                icon-left="plus"
                 @click="createProject"
-                >Create new project</v-btn
+                >Create new project</AppButton
               >
             </div>
 
@@ -6791,7 +7296,7 @@ defineExpose({
                 class="sidebar-project-tree-add"
                 @click="createProject"
               >
-                <v-icon size="14">mdi-plus</v-icon>
+                <v-icon size="16">mdi-plus</v-icon>
                 New project
               </div>
 
@@ -6818,7 +7323,6 @@ defineExpose({
                       'project-move-target': moveDragOverProjectId === p.id,
                     },
                   ]"
-                  :title="`${p.name} (drop pictures here to add them to this project)`"
                   @click="selectProjectNode(p)"
                   @contextmenu.prevent="
                     openSidebarCtxMenu('project', p, $event)
@@ -6836,9 +7340,13 @@ defineExpose({
                     onProjectDrop(p.id, $event);
                   "
                 >
+                  <Tooltip
+                    :text="`${p.name} (drop pictures here to add them to this project)`"
+                    activator="parent"
+                  />
                   <v-icon
                     class="sidebar-row-glyph sidebar-project-tree-chevron"
-                    size="14"
+                    size="16"
                     @click.stop="toggleProjectExpanded(p.id)"
                     >{{
                       expandedProjectIds.has(p.id)
@@ -6849,37 +7357,53 @@ defineExpose({
                   <span class="sidebar-project-tree-name-group">
                     <span class="sidebar-project-tree-label">{{ p.name }}</span>
                   </span>
-                  <v-icon
+                  <Tooltip
                     v-if="sharedProjectIds.has(p.id)"
-                    size="11"
-                    class="sidebar-shared-icon"
-                    title="Has active share links"
-                    >mdi-link-variant</v-icon
+                    text="Has active share links"
                   >
+                    <template #activator="{ props: tipProps }">
+                      <v-icon
+                        v-bind="tipProps"
+                        size="11"
+                        class="sidebar-shared-icon"
+                        >mdi-link-variant</v-icon
+                      >
+                    </template>
+                  </Tooltip>
                   <span class="sidebar-project-tree-actions" @click.stop>
-                    <v-icon
-                      v-if="!isReadOnly"
-                      size="13"
-                      class="sidebar-project-tree-action-btn"
-                      @click.stop="openProjectEditor(p)"
-                      title="Edit project"
-                      >mdi-pencil</v-icon
-                    >
-                    <v-icon
-                      size="13"
-                      class="sidebar-project-tree-action-btn"
-                      @click.stop="exportProject(p)"
-                      title="Export project as ZIP"
-                      >mdi-download-outline</v-icon
-                    >
-                    <v-icon
-                      v-if="!isReadOnly"
-                      size="13"
-                      class="sidebar-project-tree-action-btn sidebar-project-tree-action-btn--danger"
-                      @click.stop="deleteProjectById(p)"
-                      title="Delete project"
-                      >mdi-trash-can-outline</v-icon
-                    >
+                    <Tooltip v-if="!isReadOnly" text="Edit project">
+                      <template #activator="{ props: tipProps }">
+                        <v-icon
+                          v-bind="tipProps"
+                          size="13"
+                          class="sidebar-project-tree-action-btn"
+                          @click.stop="openProjectEditor(p)"
+                          >mdi-pencil</v-icon
+                        >
+                      </template>
+                    </Tooltip>
+                    <Tooltip text="Export project as ZIP">
+                      <template #activator="{ props: tipProps }">
+                        <v-icon
+                          v-bind="tipProps"
+                          size="13"
+                          class="sidebar-project-tree-action-btn"
+                          @click.stop="exportProject(p)"
+                          >mdi-download-outline</v-icon
+                        >
+                      </template>
+                    </Tooltip>
+                    <Tooltip v-if="!isReadOnly" text="Delete project">
+                      <template #activator="{ props: tipProps }">
+                        <v-icon
+                          v-bind="tipProps"
+                          size="13"
+                          class="sidebar-project-tree-action-btn sidebar-project-tree-action-btn--danger"
+                          @click.stop="deleteProjectById(p)"
+                          >mdi-trash-can-outline</v-icon
+                        >
+                      </template>
+                    </Tooltip>
                   </span>
                   <span class="sidebar-list-count">{{
                     projectCounts[p.id] ?? ""
@@ -6910,7 +7434,7 @@ defineExpose({
                       "
                     >
                       <v-icon
-                        size="14"
+                        size="16"
                         class="sidebar-row-glyph sidebar-project-tree-sub-chevron"
                         :class="{
                           'sidebar-row-glyph--empty': !projectHasPeople(p.id),
@@ -6932,79 +7456,93 @@ defineExpose({
                           v-if="!isReadOnly"
                           @click.stop
                         >
-                          <v-icon
-                            class="add-character-inline"
-                            @click.stop="
-                              selectProject(p.id);
-                              openCharacterMoveMenu($event);
-                            "
-                            title="Add or remove people from this project"
-                            >mdi-plus</v-icon
+                          <Tooltip
+                            text="Add or remove people from this project"
                           >
+                            <template #activator="{ props: tipProps }">
+                              <v-icon
+                                v-bind="tipProps"
+                                class="add-character-inline"
+                                @click.stop="
+                                  selectProject(p.id);
+                                  openCharacterMoveMenu($event);
+                                "
+                                >mdi-plus</v-icon
+                              >
+                            </template>
+                          </Tooltip>
                           <Teleport to="body">
                             <div
                               v-if="
                                 characterMoveMenuOpen &&
                                 selectedProjectId === p.id
                               "
-                              class="sidebar-move-menu"
+                              class="ctx-menu sidebar-move-menu"
+                              role="menu"
+                              tabindex="-1"
                               :style="characterMenuPos"
+                              @keydown="onMenuKeydown"
                             >
-                              <div
-                                class="sidebar-move-menu-item sidebar-move-menu-item--create"
+                              <button
+                                type="button"
+                                class="ctx-item"
+                                role="menuitem"
                                 @click.stop="
                                   createCharacter();
                                   characterMoveMenuOpen = false;
                                 "
                               >
-                                <v-icon
-                                  size="16"
-                                  class="sidebar-move-menu-check"
+                                <v-icon class="ctx-icon"
                                   >mdi-plus-circle-outline</v-icon
                                 >Create new
-                              </div>
+                              </button>
+                              <div class="ctx-sep" role="separator"></div>
                               <template
                                 v-for="group in projectMenuCharacterGroups"
                                 :key="group.label"
                               >
                                 <div
-                                  class="sidebar-move-menu-group-header"
+                                  class="section-label ctx-label"
                                   :class="{
-                                    'sidebar-move-menu-group-header--current':
+                                    'ctx-label--current':
                                       group.projectId === selectedProjectId,
                                   }"
+                                  role="presentation"
                                 >
                                   {{ group.label }}
                                 </div>
-                                <div
+                                <button
                                   v-for="char in group.items"
                                   :key="char.id"
-                                  class="sidebar-move-menu-item"
-                                  :class="{
-                                    'sidebar-move-menu-item--checked':
-                                      entityBelongsToProject(
-                                        char,
-                                        selectedProjectId,
-                                      ),
-                                  }"
+                                  type="button"
+                                  class="ctx-item"
+                                  role="menuitemcheckbox"
+                                  :aria-checked="
+                                    entityBelongsToProject(
+                                      char,
+                                      selectedProjectId,
+                                    )
+                                      ? 'true'
+                                      : 'false'
+                                  "
                                   @click.stop="
                                     toggleCharacterProjectMembership(char.id)
                                   "
                                 >
+                                  <span class="ctx-label-text">{{
+                                    char.name
+                                  }}</span>
                                   <v-icon
-                                    size="16"
-                                    class="sidebar-move-menu-check"
-                                    >{{
+                                    v-if="
                                       entityBelongsToProject(
                                         char,
                                         selectedProjectId,
                                       )
-                                        ? "mdi-checkbox-marked"
-                                        : "mdi-checkbox-blank-outline"
-                                    }}</v-icon
+                                    "
+                                    class="ctx-check"
+                                    >mdi-check</v-icon
                                   >
-                                  {{ char.name }}
-                                </div>
+                                </button>
                               </template>
                             </div>
                           </Teleport>
@@ -7037,7 +7575,6 @@ defineExpose({
                           onEntityDragStart('character', char.id, $event)
                         "
                         @dragend="onEntityDragEnd"
-                        :title="`${char.name || 'Character'} (Ctrl/Cmd + click to multi-select)`"
                         @click="
                           selectCharacter(
                             char.id,
@@ -7057,6 +7594,10 @@ defineExpose({
                           })
                         "
                       >
+                        <Tooltip
+                          :text="`${char.name || 'Character'} (Ctrl/Cmd + click to multi-select)`"
+                          activator="parent"
+                        />
                         <span class="sidebar-list-icon">
                           <img
                             :src="
@@ -7071,15 +7612,17 @@ defineExpose({
                           />
                         </span>
                         <span class="sidebar-list-label">
-                          <v-tooltip
+                          <Tooltip
                             location="top"
                             :disabled="!labelNeedsTooltip(`char-${char.id}`)"
+                            :describe="false"
                           >
                             <template #activator="{ props: tipProps }">
                               <span
-                                v-bind="tipProps"
-                                :ref="
-                                  mergeTooltipRef(tipProps, `char-${char.id}`)
+                                v-bind="
+                                  withRef(tipProps, (el) =>
+                                    registerLabelRef(`char-${char.id}`, el),
+                                  )
                                 "
                                 class="sidebar-list-label-text"
                                 >{{
@@ -7089,16 +7632,22 @@ defineExpose({
                               >
                             </template>
                             <span>{{ char.name }}</span>
-                          </v-tooltip>
+                          </Tooltip>
                         </span>
                         <span class="sidebar-character-actions">
-                          <v-icon
+                          <Tooltip
                             v-if="sharedCharacterIds.has(char.id)"
-                            class="sidebar-shared-icon"
-                            size="11"
-                            title="Has active share links"
-                            >mdi-link-variant</v-icon
+                            text="Has active share links"
                           >
+                            <template #activator="{ props: tipProps }">
+                              <v-icon
+                                v-bind="tipProps"
+                                class="sidebar-shared-icon"
+                                size="11"
+                                >mdi-link-variant</v-icon
+                              >
+                            </template>
+                          </Tooltip>
                           <span class="sidebar-list-count">
                             <span
                               v-if="isCountNew(char.id)"
@@ -7134,7 +7683,7 @@ defineExpose({
                       "
                     >
                       <v-icon
-                        size="14"
+                        size="16"
                         class="sidebar-row-glyph sidebar-project-tree-sub-chevron"
                         :class="{
                           'sidebar-row-glyph--empty': !projectHasSets(p.id),
@@ -7156,78 +7705,90 @@ defineExpose({
                           v-if="!isReadOnly"
                           @click.stop
                         >
-                          <v-icon
-                            class="add-character-inline"
-                            @click.stop="
-                              selectProject(p.id);
-                              openSetMoveMenu($event);
-                            "
-                            title="Add or remove sets from this project"
-                            >mdi-plus</v-icon
-                          >
+                          <Tooltip text="Add or remove sets from this project">
+                            <template #activator="{ props: tipProps }">
+                              <v-icon
+                                v-bind="tipProps"
+                                class="add-character-inline"
+                                @click.stop="
+                                  selectProject(p.id);
+                                  openSetMoveMenu($event);
+                                "
+                                >mdi-plus</v-icon
+                              >
+                            </template>
+                          </Tooltip>
                           <Teleport to="body">
                             <div
                               v-if="
                                 setMoveMenuOpen && selectedProjectId === p.id
                               "
-                              class="sidebar-move-menu"
+                              class="ctx-menu sidebar-move-menu"
+                              role="menu"
+                              tabindex="-1"
                               :style="setMenuPos"
+                              @keydown="onMenuKeydown"
                             >
-                              <div
-                                class="sidebar-move-menu-item sidebar-move-menu-item--create"
+                              <button
+                                type="button"
+                                class="ctx-item"
+                                role="menuitem"
                                 @click.stop="
                                   createSet();
                                   setMoveMenuOpen = false;
                                 "
                               >
-                                <v-icon
-                                  size="16"
-                                  class="sidebar-move-menu-check"
+                                <v-icon class="ctx-icon"
                                   >mdi-plus-circle-outline</v-icon
                                 >Create new
-                              </div>
+                              </button>
+                              <div class="ctx-sep" role="separator"></div>
                               <template
                                 v-for="group in projectMenuSetGroups"
                                 :key="group.label"
                               >
                                 <div
-                                  class="sidebar-move-menu-group-header"
+                                  class="section-label ctx-label"
                                   :class="{
-                                    'sidebar-move-menu-group-header--current':
+                                    'ctx-label--current':
                                       group.projectId === selectedProjectId,
                                   }"
+                                  role="presentation"
                                 >
                                   {{ group.label }}
                                 </div>
-                                <div
+                                <button
                                   v-for="pset in group.items"
                                   :key="pset.id"
-                                  class="sidebar-move-menu-item"
-                                  :class="{
-                                    'sidebar-move-menu-item--checked':
-                                      entityBelongsToProject(
-                                        pset,
-                                        selectedProjectId,
-                                      ),
-                                  }"
+                                  type="button"
+                                  class="ctx-item"
+                                  role="menuitemcheckbox"
+                                  :aria-checked="
+                                    entityBelongsToProject(
+                                      pset,
+                                      selectedProjectId,
+                                    )
+                                      ? 'true'
+                                      : 'false'
+                                  "
                                   @click.stop="
                                     toggleSetProjectMembership(pset.id)
                                   "
                                 >
+                                  <span class="ctx-label-text">{{
+                                    pset.name
+                                  }}</span>
                                   <v-icon
-                                    size="16"
-                                    class="sidebar-move-menu-check"
-                                    >{{
+                                    v-if="
                                       entityBelongsToProject(
                                         pset,
                                         selectedProjectId,
                                       )
-                                        ? "mdi-checkbox-marked"
-                                        : "mdi-checkbox-blank-outline"
-                                    }}</v-icon
+                                    "
+                                    class="ctx-check"
+                                    >mdi-check</v-icon
                                   >
-                                  {{ pset.name }}
-                                </div>
+                                </button>
                               </template>
                             </div>
                           </Teleport>
@@ -7256,7 +7817,6 @@ defineExpose({
                         :draggable="!isReadOnly"
                         @dragstart="onEntityDragStart('set', pset.id, $event)"
                         @dragend="onEntityDragEnd"
-                        :title="`${pset.name || 'Picture Set'} (Ctrl/Cmd + click to multi-select)`"
                         @click="
                           selectSet(pset.id, pset.name || 'Picture Set', $event)
                         "
@@ -7267,6 +7827,10 @@ defineExpose({
                         @dragleave="dragLeaveSetItem($event)"
                         @drop.prevent="handleDropOnSet(pset.id, $event)"
                       >
+                        <Tooltip
+                          :text="`${pset.name || 'Picture Set'} (Ctrl/Cmd + click to multi-select)`"
+                          activator="parent"
+                        />
                         <span class="sidebar-list-icon">
                           <v-icon
                             v-if="pset.set_icon && pset.set_icon !== ICON_CARDS"
@@ -7296,37 +7860,51 @@ defineExpose({
                           >
                         </span>
                         <span class="sidebar-list-label">
-                          <v-tooltip
+                          <Tooltip
                             location="top"
                             :disabled="!labelNeedsTooltip(`set-${pset.id}`)"
+                            :describe="false"
                           >
                             <template #activator="{ props: tipProps }">
                               <span
-                                v-bind="tipProps"
-                                :ref="
-                                  mergeTooltipRef(tipProps, `set-${pset.id}`)
+                                v-bind="
+                                  withRef(tipProps, (el) =>
+                                    registerLabelRef(`set-${pset.id}`, el),
+                                  )
                                 "
                                 class="sidebar-list-label-text"
                                 >{{ pset.name }}</span
                               >
                             </template>
                             <span>{{ pset.name }}</span>
-                          </v-tooltip>
+                          </Tooltip>
                         </span>
-                        <v-icon
+                        <Tooltip
                           v-if="pset.locked"
-                          class="sidebar-lock-icon"
-                          size="11"
-                          :title="SET_LOCKED_ROW_TITLE"
-                          >mdi-lock-outline</v-icon
+                          :text="SET_LOCKED_ROW_TITLE"
                         >
-                        <v-icon
+                          <template #activator="{ props: tipProps }">
+                            <v-icon
+                              v-bind="tipProps"
+                              class="sidebar-lock-icon"
+                              size="11"
+                              >mdi-lock-outline</v-icon
+                            >
+                          </template>
+                        </Tooltip>
+                        <Tooltip
                           v-if="sharedSetIds.has(pset.id)"
-                          class="sidebar-shared-icon"
-                          size="11"
-                          title="Has active share links"
-                          >mdi-link-variant</v-icon
+                          text="Has active share links"
                         >
+                          <template #activator="{ props: tipProps }">
+                            <v-icon
+                              v-bind="tipProps"
+                              class="sidebar-shared-icon"
+                              size="11"
+                              >mdi-link-variant</v-icon
+                            >
+                          </template>
+                        </Tooltip>
                         <span class="sidebar-list-count">{{
                           pset.picture_count ?? 0
                         }}</span>
@@ -7387,7 +7965,8 @@ defineExpose({
   <Teleport to="body">
     <div
       v-if="sidebarCtxVisible"
-      class="sidebar-ctx-menu"
+      ref="sidebarCtxMenuEl"
+      class="ctx-menu sidebar-ctx-menu"
       :style="sidebarCtxMenuStyle"
       @contextmenu.prevent
       @mousedown.stop
@@ -7408,90 +7987,118 @@ defineExpose({
              already means "the whole library" everywhere else in this
              sidebar, so its context menu is where owners now find it. -->
         <button
-          class="sidebar-ctx-item"
+          class="ctx-item"
           :disabled="isReadOnly"
-          :title="isReadOnly ? READ_ONLY_INSIGHTS_HINT : undefined"
           @click="
             emit('select-insights');
             closeSidebarCtxMenu();
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon"
-            >mdi-lightbulb-on-outline</v-icon
-          >
+          <Tooltip
+            :text="isReadOnly ? READ_ONLY_INSIGHTS_HINT : ''"
+            activator="parent"
+          />
+          <v-icon class="ctx-icon">mdi-lightbulb-on-outline</v-icon>
           About your library
         </button>
         <button
-          class="sidebar-ctx-item"
+          class="ctx-item"
           :disabled="isReadOnly"
           @click="
             shareResource(null, null, 'All Pictures');
             closeSidebarCtxMenu();
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon"
-            >mdi-share-variant-outline</v-icon
-          >
+          <v-icon class="ctx-icon">mdi-share-variant-outline</v-icon>
           Share
         </button>
       </template>
       <template v-if="sidebarCtxScrapheap">
         <button
-          class="sidebar-ctx-item sidebar-ctx-item--danger"
+          class="ctx-item ctx-item--danger"
           :disabled="isReadOnly || scrapheapIsEmpty"
-          :title="scrapheapIsEmpty ? 'Scrapheap is already empty' : undefined"
           :aria-disabled="isReadOnly || scrapheapIsEmpty"
           @click="emptyScrapheapFromCtx()"
         >
-          <v-icon size="15" class="sidebar-ctx-icon"
-            >mdi-trash-can-outline</v-icon
-          >
+          <Tooltip
+            :text="scrapheapIsEmpty ? 'Scrapheap is already empty' : ''"
+            activator="parent"
+          />
+          <v-icon class="ctx-icon">mdi-trash-can-outline</v-icon>
           Empty Scrapheap
         </button>
       </template>
       <template v-if="sidebarCtxCharacter">
         <button
           v-if="!isReadOnly"
-          class="sidebar-ctx-item"
-          :title="`Rank the library against ${sidebarCtxCharacter.name}'s reference faces to find their un-tagged pictures`"
+          class="ctx-item"
           @click="suggestPicturesForCharacterFromCtx(sidebarCtxCharacter)"
         >
-          <v-icon size="15" class="sidebar-ctx-icon">mdi-account-search</v-icon>
+          <Tooltip
+            :text="`Rank the library against ${sidebarCtxCharacter.name}'s reference faces to find their un-tagged pictures`"
+            activator="parent"
+          />
+          <v-icon class="ctx-icon">mdi-account-search</v-icon>
           <!-- The name is deliberately NOT in the label. The menu is anchored to
                that person's row and every other item in it is already about
                them, so repeating the name only bought an ellipsis: the menu is
                260px wide and "Suggest more pictures of <a real name>" does not
                fit. The title below still names them in full. -->
-          <span class="sidebar-ctx-label">Suggest more pictures</span>
+          <span class="ctx-label-text">Suggest more pictures</span>
         </button>
         <button
-          class="sidebar-ctx-item"
+          v-if="!isReadOnly && filterStore.comfyuiConfigured"
+          class="ctx-item"
+          :disabled="sidebarCtxLoraState !== 'attached'"
+          @click="openLoraRunFromCtx('character', sidebarCtxCharacter)"
+        >
+          <Tooltip
+            :text="
+              loraRowReason(sidebarCtxCharacter.name) ||
+              `Run a workflow with ${sidebarCtxCharacter.name}'s LoRA`
+            "
+            activator="parent"
+          />
+          <v-icon class="ctx-icon">mdi-sitemap-outline</v-icon>
+          <!-- The reason is in the label as well as the tooltip, as on the
+               duplicates row below: a disabled row cannot be focused. -->
+          <span class="ctx-label-text">{{
+            sidebarCtxLoraState === "none"
+              ? "No LoRA attached"
+              : "Create with LoRA…"
+          }}</span>
+        </button>
+        <button
+          class="ctx-item"
           :disabled="
             isReadOnly ||
             duplicateCountFor('character', sidebarCtxCharacter) === 0
           "
-          :title="isReadOnly ? READ_ONLY_DEDUP_HINT : undefined"
           @click="findDuplicatesIn('character', sidebarCtxCharacter)"
         >
-          <v-icon size="15" class="sidebar-ctx-icon">{{
+          <Tooltip
+            :text="isReadOnly ? READ_ONLY_DEDUP_HINT : ''"
+            activator="parent"
+          />
+          <v-icon class="ctx-icon">{{
             duplicateCountFor("character", sidebarCtxCharacter) === 0
               ? "mdi-check"
               : "mdi-content-duplicate"
           }}</v-icon>
-          <span class="sidebar-ctx-label">{{
+          <span class="ctx-label-text">{{
             duplicateCountFor("character", sidebarCtxCharacter) === 0
               ? "No duplicates for this person"
               : "Find duplicates for this person"
           }}</span>
           <span
             v-if="duplicateCountFor('character', sidebarCtxCharacter)"
-            class="sidebar-ctx-count"
+            class="ctx-meta"
             >{{ duplicateCountFor("character", sidebarCtxCharacter) }}</span
           >
         </button>
-        <div class="sidebar-ctx-divider"></div>
+        <div class="ctx-sep"></div>
         <button
-          class="sidebar-ctx-item"
+          class="ctx-item"
           :disabled="isReadOnly"
           @click="
             shareResource(
@@ -7501,19 +8108,16 @@ defineExpose({
             )
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon"
-            >mdi-share-variant-outline</v-icon
-          >
-          <span class="sidebar-ctx-label"
+          <v-icon class="ctx-icon">mdi-share-variant-outline</v-icon>
+          <span class="ctx-label-text"
             >Share "{{ sidebarCtxCharacter.name }}"</span
           >
         </button>
         <button
-          class="sidebar-ctx-item"
+          class="ctx-item"
           :disabled="sidebarCtxDeleteIds.length > 1 || isReadOnly"
           :class="{
-            'sidebar-ctx-item--disabled':
-              sidebarCtxDeleteIds.length > 1 || isReadOnly,
+            'ctx-item--disabled': sidebarCtxDeleteIds.length > 1 || isReadOnly,
           }"
           @click="
             sidebarCtxDeleteIds.length === 1 &&
@@ -7521,12 +8125,12 @@ defineExpose({
             (openCharacterEditor(sidebarCtxCharacter), closeSidebarCtxMenu())
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon">mdi-pencil</v-icon>
+          <v-icon class="ctx-icon">mdi-pencil</v-icon>
           Edit
         </button>
         <button
           v-if="sharedCharacterIds.has(sidebarCtxCharacter.id)"
-          class="sidebar-ctx-item sidebar-ctx-item--danger"
+          class="ctx-item ctx-item--danger"
           :disabled="isReadOnly"
           @click="
             openRevokeSharesDialog(
@@ -7536,22 +8140,18 @@ defineExpose({
             )
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon"
-            >mdi-link-variant-off</v-icon
-          >
+          <v-icon class="ctx-icon">mdi-link-variant-off</v-icon>
           Remove all shares
         </button>
         <button
-          class="sidebar-ctx-item sidebar-ctx-item--danger"
+          class="ctx-item ctx-item--danger"
           :disabled="isReadOnly"
           @click="
             deleteCharactersByIds(sidebarCtxDeleteIds);
             closeSidebarCtxMenu();
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon"
-            >mdi-trash-can-outline</v-icon
-          >
+          <v-icon class="ctx-icon">mdi-trash-can-outline</v-icon>
           {{
             sidebarCtxDeleteIds.length > 1
               ? `Delete ${sidebarCtxDeleteIds.length} characters`
@@ -7560,65 +8160,101 @@ defineExpose({
         </button>
       </template>
       <template v-if="sidebarCtxSet">
+        <!-- Hidden on a locked set: adding to it is refused, and an action
+             that cannot complete is worse than one that is not offered. -->
         <button
-          class="sidebar-ctx-item"
+          v-if="!isReadOnly && !sidebarCtxSet.locked"
+          class="ctx-item"
+          @click="suggestPicturesForSetFromCtx(sidebarCtxSet)"
+        >
+          <Tooltip
+            :text="`Rank the library against ${sidebarCtxSet.name} to find pictures that belong in it`"
+            activator="parent"
+          />
+          <v-icon class="ctx-icon">mdi-image-search</v-icon>
+          <span class="ctx-label-text">Suggest more pictures</span>
+        </button>
+        <!-- Hidden on a locked set for the same reason: the run files its
+             pictures into the set, and a locked set refuses them. -->
+        <button
+          v-if="
+            !isReadOnly && !sidebarCtxSet.locked && filterStore.comfyuiConfigured
+          "
+          class="ctx-item"
+          :disabled="sidebarCtxLoraState !== 'attached'"
+          @click="openLoraRunFromCtx('set', sidebarCtxSet)"
+        >
+          <Tooltip
+            :text="
+              loraRowReason(sidebarCtxSet.name) ||
+              `Run a workflow with the LoRA attached to ${sidebarCtxSet.name}`
+            "
+            activator="parent"
+          />
+          <v-icon class="ctx-icon">mdi-sitemap-outline</v-icon>
+          <span class="ctx-label-text">{{
+            sidebarCtxLoraState === "none"
+              ? "No LoRA attached"
+              : "Create with LoRA…"
+          }}</span>
+        </button>
+        <button
+          class="ctx-item"
           :disabled="
             isReadOnly || duplicateCountFor('set', sidebarCtxSet) === 0
           "
-          :title="isReadOnly ? READ_ONLY_DEDUP_HINT : undefined"
           @click="findDuplicatesIn('set', sidebarCtxSet)"
         >
-          <v-icon size="15" class="sidebar-ctx-icon">{{
+          <Tooltip
+            :text="isReadOnly ? READ_ONLY_DEDUP_HINT : ''"
+            activator="parent"
+          />
+          <v-icon class="ctx-icon">{{
             duplicateCountFor("set", sidebarCtxSet) === 0
               ? "mdi-check"
               : "mdi-content-duplicate"
           }}</v-icon>
-          <span class="sidebar-ctx-label">{{
+          <span class="ctx-label-text">{{
             duplicateCountFor("set", sidebarCtxSet) === 0
               ? "No duplicates in this set"
               : "Find duplicates in this set"
           }}</span>
           <span
             v-if="duplicateCountFor('set', sidebarCtxSet)"
-            class="sidebar-ctx-count"
+            class="ctx-meta"
             >{{ duplicateCountFor("set", sidebarCtxSet) }}</span
           >
         </button>
-        <div class="sidebar-ctx-divider"></div>
+        <div class="ctx-sep"></div>
         <button
-          class="sidebar-ctx-item"
+          class="ctx-item"
           :disabled="isReadOnly"
           @click="
             shareResource('picture_set', sidebarCtxSet.id, sidebarCtxSet.name)
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon"
-            >mdi-share-variant-outline</v-icon
-          >
-          <span class="sidebar-ctx-label"
-            >Share "{{ sidebarCtxSet.name }}"</span
-          >
+          <v-icon class="ctx-icon">mdi-share-variant-outline</v-icon>
+          <span class="ctx-label-text">Share "{{ sidebarCtxSet.name }}"</span>
         </button>
         <button
-          class="sidebar-ctx-item"
+          class="ctx-item"
           :disabled="isReadOnly"
           @click="
             openSetEditor(sidebarCtxSet);
             closeSidebarCtxMenu();
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon">mdi-pencil</v-icon>
+          <v-icon class="ctx-icon">mdi-pencil</v-icon>
           Edit
         </button>
         <!-- Icon sub-menu -->
         <button
-          class="sidebar-ctx-item sidebar-ctx-item--has-arrow"
+          class="ctx-item"
           :disabled="isReadOnly"
           @click.stop="openSetCtxIconMenu($event)"
         >
           <v-icon
-            size="15"
-            class="sidebar-ctx-icon"
+            class="ctx-icon"
             :color="sidebarCtxSet.set_color || undefined"
           >
             {{
@@ -7628,7 +8264,7 @@ defineExpose({
             }}
           </v-icon>
           Icon
-          <span class="sidebar-ctx-arrow">›</span>
+          <v-icon class="ctx-arrow">mdi-chevron-right</v-icon>
         </button>
         <Teleport to="body">
           <div
@@ -7652,11 +8288,16 @@ defineExpose({
                     <button
                       class="sidebar-ctx-icon-btn"
                       :class="{ selected: sidebarCtxSet.set_icon === ic.value }"
-                      :title="ic.label"
+                      :aria-label="ic.label"
                       @click="
                         applySetAppearance(sidebarCtxSet.id, ic.value, null)
                       "
                     >
+                      <Tooltip
+                        :text="ic.label"
+                        activator="parent"
+                        :describe="false"
+                      />
                       <v-icon
                         size="18"
                         :color="sidebarCtxSet.set_color || undefined"
@@ -7682,11 +8323,16 @@ defineExpose({
                       !sidebarCtxSet.set_icon ||
                       sidebarCtxSet.set_icon === ICON_CARDS,
                   }"
-                  title="Thumbnail Stack"
+                  aria-label="Thumbnail Stack"
                   @click="
                     applySetAppearance(sidebarCtxSet.id, ICON_CARDS, null)
                   "
                 >
+                  <Tooltip
+                    text="Thumbnail Stack"
+                    activator="parent"
+                    :describe="false"
+                  />
                   <img
                     v-if="setThumbnails[sidebarCtxSet.id]"
                     :src="setThumbnails[sidebarCtxSet.id]"
@@ -7706,7 +8352,7 @@ defineExpose({
         </Teleport>
         <!-- Color sub-menu -->
         <button
-          class="sidebar-ctx-item sidebar-ctx-item--has-arrow"
+          class="ctx-item"
           :disabled="isReadOnly"
           @click.stop="openSetCtxColorMenu($event)"
         >
@@ -7715,7 +8361,7 @@ defineExpose({
             :style="{ background: sidebarCtxSet.set_color || '#888' }"
           />
           Color
-          <span class="sidebar-ctx-arrow">›</span>
+          <v-icon class="ctx-arrow">mdi-chevron-right</v-icon>
         </button>
         <Teleport to="body">
           <div
@@ -7733,15 +8379,21 @@ defineExpose({
                 class="sidebar-ctx-color-swatch"
                 :class="{ selected: sidebarCtxSet.set_color === col.value }"
                 :style="{ background: col.value }"
-                :title="col.label"
+                :aria-label="col.label"
                 @click="applySetAppearance(sidebarCtxSet.id, null, col.value)"
-              />
+              >
+                <Tooltip
+                  :text="col.label"
+                  activator="parent"
+                  :describe="false"
+                />
+              </button>
             </div>
           </div>
         </Teleport>
         <button
           v-if="sharedSetIds.has(sidebarCtxSet.id)"
-          class="sidebar-ctx-item sidebar-ctx-item--danger"
+          class="ctx-item ctx-item--danger"
           :disabled="isReadOnly"
           @click="
             openRevokeSharesDialog(
@@ -7751,17 +8403,15 @@ defineExpose({
             )
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon"
-            >mdi-link-variant-off</v-icon
-          >
+          <v-icon class="ctx-icon">mdi-link-variant-off</v-icon>
           Remove all shares
         </button>
         <button
-          class="sidebar-ctx-item"
+          class="ctx-item"
           :disabled="isReadOnly"
           @click="toggleSetLock(sidebarCtxSet)"
         >
-          <v-icon size="15" class="sidebar-ctx-icon">{{
+          <v-icon class="ctx-icon">{{
             sidebarCtxSet.locked
               ? "mdi-lock-open-variant-outline"
               : "mdi-lock-outline"
@@ -7769,48 +8419,52 @@ defineExpose({
           {{ sidebarCtxSet.locked ? "Unlock set" : "Lock set" }}
         </button>
         <button
-          class="sidebar-ctx-item sidebar-ctx-item--danger"
+          class="ctx-item ctx-item--danger"
           :disabled="isReadOnly || sidebarCtxSet.locked"
-          :title="sidebarCtxSet.locked ? SET_LOCK_REASON : undefined"
           @click="
             deleteSetById(sidebarCtxSet.id);
             closeSidebarCtxMenu();
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon"
-            >mdi-trash-can-outline</v-icon
-          >
+          <Tooltip
+            :text="sidebarCtxSet.locked ? SET_LOCK_REASON : ''"
+            activator="parent"
+          />
+          <v-icon class="ctx-icon">mdi-trash-can-outline</v-icon>
           Delete
         </button>
       </template>
       <template v-if="sidebarCtxProject">
         <button
-          class="sidebar-ctx-item"
+          class="ctx-item"
           :disabled="
             isReadOnly || duplicateCountFor('project', sidebarCtxProject) === 0
           "
-          :title="isReadOnly ? READ_ONLY_DEDUP_HINT : undefined"
           @click="findDuplicatesIn('project', sidebarCtxProject)"
         >
-          <v-icon size="15" class="sidebar-ctx-icon">{{
+          <Tooltip
+            :text="isReadOnly ? READ_ONLY_DEDUP_HINT : ''"
+            activator="parent"
+          />
+          <v-icon class="ctx-icon">{{
             duplicateCountFor("project", sidebarCtxProject) === 0
               ? "mdi-check"
               : "mdi-content-duplicate"
           }}</v-icon>
-          <span class="sidebar-ctx-label">{{
+          <span class="ctx-label-text">{{
             duplicateCountFor("project", sidebarCtxProject) === 0
               ? "No duplicates in this project"
               : "Find duplicates in this project"
           }}</span>
           <span
             v-if="duplicateCountFor('project', sidebarCtxProject)"
-            class="sidebar-ctx-count"
+            class="ctx-meta"
             >{{ duplicateCountFor("project", sidebarCtxProject) }}</span
           >
         </button>
-        <div class="sidebar-ctx-divider"></div>
+        <div class="ctx-sep"></div>
         <button
-          class="sidebar-ctx-item"
+          class="ctx-item"
           :disabled="isReadOnly"
           @click="
             shareResource(
@@ -7821,37 +8475,33 @@ defineExpose({
             closeSidebarCtxMenu();
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon"
-            >mdi-share-variant-outline</v-icon
-          >
+          <v-icon class="ctx-icon">mdi-share-variant-outline</v-icon>
           Share
         </button>
         <button
-          class="sidebar-ctx-item"
+          class="ctx-item"
           @click="
             exportProject(sidebarCtxProject);
             closeSidebarCtxMenu();
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon"
-            >mdi-download-outline</v-icon
-          >
+          <v-icon class="ctx-icon">mdi-download-outline</v-icon>
           Export as ZIP
         </button>
         <button
-          class="sidebar-ctx-item"
+          class="ctx-item"
           :disabled="isReadOnly"
           @click="
             openProjectEditor(sidebarCtxProject);
             closeSidebarCtxMenu();
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon">mdi-pencil</v-icon>
+          <v-icon class="ctx-icon">mdi-pencil</v-icon>
           Edit
         </button>
         <button
           v-if="sharedProjectIds.has(sidebarCtxProject.id)"
-          class="sidebar-ctx-item sidebar-ctx-item--danger"
+          class="ctx-item ctx-item--danger"
           :disabled="isReadOnly"
           @click="
             openRevokeSharesDialog(
@@ -7861,183 +8511,167 @@ defineExpose({
             )
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon"
-            >mdi-link-variant-off</v-icon
-          >
+          <v-icon class="ctx-icon">mdi-link-variant-off</v-icon>
           Remove all shares
         </button>
         <button
-          class="sidebar-ctx-item sidebar-ctx-item--danger"
+          class="ctx-item ctx-item--danger"
           :disabled="isReadOnly"
           @click="
             deleteProjectById(sidebarCtxProject);
             closeSidebarCtxMenu();
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon"
-            >mdi-trash-can-outline</v-icon
-          >
+          <v-icon class="ctx-icon">mdi-trash-can-outline</v-icon>
           Delete
         </button>
       </template>
       <template v-if="sidebarCtxFolder && !isReadOnly">
         <button
           v-if="!isReadOnly && !sidebarCtxFolderScopePath"
-          class="sidebar-ctx-item"
+          class="ctx-item"
           :disabled="duplicateCountFor('folder', sidebarCtxFolder) === 0"
           @click="findDuplicatesIn('folder', sidebarCtxFolder)"
         >
-          <v-icon size="15" class="sidebar-ctx-icon">{{
+          <v-icon class="ctx-icon">{{
             duplicateCountFor("folder", sidebarCtxFolder) === 0
               ? "mdi-check"
               : "mdi-content-duplicate"
           }}</v-icon>
-          <span class="sidebar-ctx-label">{{
+          <span class="ctx-label-text">{{
             duplicateCountFor("folder", sidebarCtxFolder) === 0
               ? "No duplicates in this folder"
               : "Find duplicates in this folder"
           }}</span>
           <span
             v-if="duplicateCountFor('folder', sidebarCtxFolder)"
-            class="sidebar-ctx-count"
+            class="ctx-meta"
             >{{ duplicateCountFor("folder", sidebarCtxFolder) }}</span
           >
         </button>
         <div
           v-if="!isReadOnly && !sidebarCtxFolderScopePath"
-          class="sidebar-ctx-divider"
+          class="ctx-sep"
         ></div>
         <button
           v-if="!inDocker && !sidebarCtxFolderScopePath"
-          class="sidebar-ctx-item"
+          class="ctx-item"
           @click="
             openReferenceFolderRelocateDialog(sidebarCtxFolder);
             closeSidebarCtxMenu();
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon"
-            >mdi-folder-move-outline</v-icon
-          >
+          <v-icon class="ctx-icon">mdi-folder-move-outline</v-icon>
           Relocate
         </button>
         <button
           v-if="!sidebarCtxFolderScopePath"
-          class="sidebar-ctx-item"
+          class="ctx-item"
           @click="
             openReferenceFolderEditor(sidebarCtxFolder);
             closeSidebarCtxMenu();
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon">mdi-pencil</v-icon>
+          <v-icon class="ctx-icon">mdi-pencil</v-icon>
           Edit
         </button>
         <button
           v-if="!sidebarCtxFolderScopePath"
-          class="sidebar-ctx-item sidebar-ctx-item--danger"
+          class="ctx-item ctx-item--danger"
           @click="
             deleteReferenceFolderById(sidebarCtxFolder.id);
             closeSidebarCtxMenu();
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon"
-            >mdi-trash-can-outline</v-icon
-          >
+          <v-icon class="ctx-icon">mdi-trash-can-outline</v-icon>
           Remove
         </button>
       </template>
       <template v-if="sidebarCtxImportFolder && !isReadOnly">
         <button
-          class="sidebar-ctx-item"
+          class="ctx-item"
           @click="
             openImportFolderEditor(sidebarCtxImportFolder);
             closeSidebarCtxMenu();
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon">mdi-pencil</v-icon>
+          <v-icon class="ctx-icon">mdi-pencil</v-icon>
           Edit
         </button>
         <button
-          class="sidebar-ctx-item sidebar-ctx-item--danger"
+          class="ctx-item ctx-item--danger"
           @click="
             deleteImportFolderById(sidebarCtxImportFolder.id);
             closeSidebarCtxMenu();
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon"
-            >mdi-trash-can-outline</v-icon
-          >
+          <v-icon class="ctx-icon">mdi-trash-can-outline</v-icon>
           Remove
         </button>
       </template>
       <!-- ── Section-header menus (right-click a section's title) ── -->
       <template v-if="sidebarCtxHeader === 'people'">
         <button
-          class="sidebar-ctx-item"
+          class="ctx-item"
           :disabled="isReadOnly"
           @click="
             createCharacter();
             closeSidebarCtxMenu();
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon"
-            >mdi-account-plus-outline</v-icon
-          >
+          <v-icon class="ctx-icon">mdi-account-plus-outline</v-icon>
           Create person
         </button>
       </template>
       <template v-if="sidebarCtxHeader === 'sets'">
         <button
-          class="sidebar-ctx-item"
+          class="ctx-item"
           :disabled="isReadOnly"
           @click="
             createSet();
             closeSidebarCtxMenu();
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon">mdi-image-album</v-icon>
+          <v-icon class="ctx-icon">mdi-image-album</v-icon>
           Create set
         </button>
       </template>
       <template v-if="sidebarCtxHeader === 'reference-folders'">
         <button
-          class="sidebar-ctx-item"
+          class="ctx-item"
           :disabled="isReadOnly"
           @click="
             openReferenceFolderEditor();
             closeSidebarCtxMenu();
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon"
-            >mdi-folder-plus-outline</v-icon
-          >
+          <v-icon class="ctx-icon">mdi-folder-plus-outline</v-icon>
           Add folder
         </button>
       </template>
       <template v-if="sidebarCtxHeader === 'import-folders'">
         <button
-          class="sidebar-ctx-item"
+          class="ctx-item"
           :disabled="isReadOnly"
           @click="
             openImportFolderEditor();
             closeSidebarCtxMenu();
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon"
-            >mdi-folder-plus-outline</v-icon
-          >
+          <v-icon class="ctx-icon">mdi-folder-plus-outline</v-icon>
           Add folder
         </button>
       </template>
       <!-- ── Empty-space menu (right-click uncovered sidebar area) ── -->
       <template v-if="sidebarCtxEmpty">
         <button
-          class="sidebar-ctx-item"
+          class="ctx-item"
           @click="
             sidebarStore.setSidebarPinned(!sidebarStore.sidebarPinned);
             closeSidebarCtxMenu();
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon">{{
+          <v-icon class="ctx-icon">{{
             sidebarStore.sidebarPinned
               ? "mdi-checkbox-blank-outline"
               : "mdi-checkbox-marked-outline"
@@ -8045,13 +8679,13 @@ defineExpose({
           Auto hide sidebar
         </button>
         <button
-          class="sidebar-ctx-item"
+          class="ctx-item"
           @click="
             sidebarStore.setSidebarDocked(!sidebarStore.sidebarDocked);
             closeSidebarCtxMenu();
           "
         >
-          <v-icon size="15" class="sidebar-ctx-icon">{{
+          <v-icon class="ctx-icon">{{
             sidebarStore.sidebarDocked
               ? "mdi-checkbox-marked-outline"
               : "mdi-checkbox-blank-outline"
@@ -8074,32 +8708,26 @@ defineExpose({
   />
 
   <!-- ── Revoke all shares confirm dialog ──────────────────────── -->
-  <v-dialog v-model="revokeSharesDialogOpen" max-width="400">
-    <v-card class="share-dialog-card">
-      <v-card-title class="share-dialog-title">
-        <v-icon size="18" class="share-dialog-title-icon"
-          >mdi-link-variant-off</v-icon
-        >
+  <AppDialog
+    :open="revokeSharesDialogOpen"
+    title="Remove all shares"
+    size="sm"
+    @close="revokeSharesDialogOpen = false"
+  >
+    <p class="share-dialog-hint">
+      This will revoke all active share links for
+      <strong>{{ revokeSharesPending?.label }}</strong
+      >. Anyone with an existing link will lose access immediately.
+    </p>
+    <template #footer>
+      <AppButton variant="secondary" @click="revokeSharesDialogOpen = false">
+        Cancel
+      </AppButton>
+      <AppButton variant="danger" @click="confirmRevokeShares">
         Remove all shares
-      </v-card-title>
-      <v-card-text class="share-dialog-body">
-        <p class="share-dialog-hint">
-          This will revoke all active share links for
-          <strong>{{ revokeSharesPending?.label }}</strong
-          >. Anyone with an existing link will lose access immediately.
-        </p>
-      </v-card-text>
-      <v-card-actions class="share-dialog-actions">
-        <v-btn variant="text" @click="revokeSharesDialogOpen = false"
-          >Cancel</v-btn
-        >
-        <v-spacer />
-        <v-btn color="error" variant="tonal" @click="confirmRevokeShares">
-          Remove all shares
-        </v-btn>
-      </v-card-actions>
-    </v-card>
-  </v-dialog>
+      </AppButton>
+    </template>
+  </AppDialog>
 </template>
 <style scoped src="./SideBar.css"></style>
 <style src="./SideBar.global.css"></style>

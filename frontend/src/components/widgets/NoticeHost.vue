@@ -24,6 +24,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { VIcon } from "vuetify/components";
 import { useNoticeStore } from "../../stores/useNoticeStore";
+import AppBarButton from "./AppBarButton.vue";
 import { NARROW_VIEWPORT_MAX_PX } from "../../utils/floatingBottom";
 
 const props = defineProps({
@@ -149,14 +150,27 @@ const hostEl = ref(null);
         >
           {{ card.action.label }}
         </button>
-        <button
-          type="button"
+        <AppBarButton
+          icon="close"
           class="notice-dismiss"
+          :on-dark="props.onDark"
           aria-label="Dismiss notification"
           @click="store.dismiss(card.id)"
-        >
-          <v-icon size="16" aria-hidden="true">mdi-close</v-icon>
-        </button>
+        />
+        <!-- Countdown: drains over the auto-dismiss window and stops whenever
+             the store's timer does (hover, focus, hidden tab). Re-mounted from
+             the banked time on every timer start, so it cannot drift. -->
+        <span
+          v-if="card.timeout > 0"
+          :key="card.countdown?.run ?? 0"
+          class="notice-countdown"
+          aria-hidden="true"
+          :style="{
+            '--notice-countdown-from': card.countdown?.from ?? 1,
+            animationDuration: `${card.countdown?.ms ?? card.timeout}ms`,
+            animationPlayState: card.running ? 'running' : 'paused',
+          }"
+        ></span>
       </div>
     </TransitionGroup>
   </div>
@@ -193,10 +207,10 @@ const hostEl = ref(null);
    Opaque on purpose: the selection pill's translucent + backdrop-filter look is
    a legibility gamble over an arbitrary photo grid, and a message the user must
    read does not take that gamble. The status tint is a separate layer over the
-   opaque base (::before), so the fill never affects the text. */
+   opaque base (a background image over the background colour), so the fill
+   never affects the text. */
 .notice-card {
   position: relative;
-  isolation: isolate;
   pointer-events: auto;
   box-sizing: border-box;
   width: min(100% - 2 * var(--space-5), var(--notice-max-w));
@@ -206,22 +220,19 @@ const hostEl = ref(null);
   gap: var(--space-3);
   padding: var(--space-4) var(--space-5);
   padding-inline-start: calc(var(--space-5) + var(--space-2));
-  background: rgb(var(--v-theme-surface));
+  background-color: rgb(var(--v-theme-surface));
+  /* The status tint, painted over the colour above. A gradient because a
+     background image cannot be a bare colour; one stop each end makes it flat. */
+  background-image: linear-gradient(
+    var(--notice-tint, transparent),
+    var(--notice-tint, transparent)
+  );
   border: 1px solid rgba(var(--v-theme-on-surface), 0.2);
   border-radius: var(--radius-md);
   /* --elevation-3, not -4: -4 is reserved for dialogs and lightbox chrome, and
      a notice must read as lighter than a modal. */
   box-shadow: var(--elevation-3);
   overflow: hidden;
-}
-
-/* Status tint layer - sits over the opaque base, under the content. */
-.notice-card::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  background: var(--notice-tint, transparent);
 }
 
 /* The rail follows the card's radius because the card clips. */
@@ -233,30 +244,55 @@ const hostEl = ref(null);
   background: var(--notice-status, transparent);
 }
 
+/* Countdown bar along the bottom edge, in the status hue. */
+.notice-countdown {
+  position: absolute;
+  inset-inline: 0;
+  inset-block-end: 0;
+  height: var(--space-1);
+  background: var(--notice-status, transparent);
+  transform-origin: left center;
+  animation-name: notice-countdown;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+[dir="rtl"] .notice-countdown {
+  transform-origin: right center;
+}
+
+@keyframes notice-countdown {
+  from {
+    transform: scaleX(var(--notice-countdown-from, 1));
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
 /* Per-variant: ONLY the tint, border and rail carry the hue. The glyph and the
    message stay `on-surface` in every variant - see spec §3.2. Three of the four
    status colours fail the 3:1 non-text floor as a foreground on their own tinted
    card in the light theme, so a coloured glyph would be a variant that silently
    fails on one theme. */
 .notice-card--info {
-  --notice-status: rgb(var(--v-theme-info));
+  --notice-status: rgb(var(--v-theme-surface-info));
   --notice-tint: rgba(var(--v-theme-info), 0.08);
-  border-color: rgba(var(--v-theme-info), 0.5);
+  border-color: rgba(var(--v-theme-surface-info), 0.5);
 }
 .notice-card--success {
-  --notice-status: rgb(var(--v-theme-success));
+  --notice-status: rgb(var(--v-theme-surface-success));
   --notice-tint: rgba(var(--v-theme-success), 0.08);
-  border-color: rgba(var(--v-theme-success), 0.5);
+  border-color: rgba(var(--v-theme-surface-success), 0.5);
 }
 .notice-card--warning {
-  --notice-status: rgb(var(--v-theme-warning));
+  --notice-status: rgb(var(--v-theme-surface-warning));
   --notice-tint: rgba(var(--v-theme-warning), 0.08);
-  border-color: rgba(var(--v-theme-warning), 0.5);
+  border-color: rgba(var(--v-theme-surface-warning), 0.5);
 }
 .notice-card--error {
-  --notice-status: rgb(var(--v-theme-error));
+  --notice-status: rgb(var(--v-theme-surface-error));
   --notice-tint: rgba(var(--v-theme-error), 0.08);
-  border-color: rgba(var(--v-theme-error), 0.5);
+  border-color: rgba(var(--v-theme-surface-error), 0.5);
 }
 
 .notice-glyph {
@@ -312,35 +348,11 @@ const hostEl = ref(null);
   background: var(--hover-wash);
 }
 
-.notice-dismiss {
-  position: relative;
-  flex-shrink: 0;
-  width: 24px;
-  height: 24px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border-radius: var(--radius-sm);
-  color: rgba(var(--v-theme-on-surface), 0.7);
-}
-
-/* Hit area expanded to 40×40 (WCAG 2.5.8 floor is 24×24) without punching a
-   40px hole in the layout. */
-.notice-dismiss::before {
-  content: "";
-  position: absolute;
-  inset: -8px;
-}
-
-.notice-dismiss:hover {
-  color: rgb(var(--v-theme-on-surface));
-  background: var(--hover-wash);
-}
-
 /* ── Dark-surface variant (spec §2.5) ─────────────────────────────────────── */
 .notice-host--on-dark .notice-card {
-  background: rgb(var(--v-theme-dark-surface));
+  /* Amber on a dark panel keeps the bright amber in both themes (#1413). */
+  --v-theme-accent: var(--v-theme-dark-surface-accent);
+  background-color: rgb(var(--v-theme-dark-surface));
   border-color: rgba(var(--v-theme-on-dark-surface), 0.2);
 }
 .notice-host--on-dark .notice-glyph,
@@ -348,12 +360,18 @@ const hostEl = ref(null);
 .notice-host--on-dark .notice-action {
   color: rgb(var(--v-theme-on-dark-surface));
 }
+/* Muted at rest (spec §2.5); the `on-dark` bar button's own hover, which
+   outranks this, lifts the dismiss to full ink and brings the wash and ring.
+   The action below is not a button component and restates them. */
 .notice-host--on-dark .notice-count,
 .notice-host--on-dark .notice-dismiss {
   color: rgba(var(--v-theme-on-dark-surface), 0.7);
 }
-.notice-host--on-dark .notice-dismiss:hover {
-  color: rgb(var(--v-theme-on-dark-surface));
+.notice-host--on-dark .notice-action:hover {
+  background: rgba(var(--v-theme-on-dark-surface), 0.16);
+}
+.notice-host--on-dark :focus-visible {
+  outline-color: rgb(var(--v-theme-on-dark-surface));
 }
 /* The hue swaps too, not just the alpha. A `dark-surface` stays dark in both
    themes, so the theme's own status hues are the wrong values on it - the light
@@ -427,6 +445,11 @@ const hostEl = ref(null);
   .notice-move,
   .notice-host {
     transition: none;
+  }
+  /* The global token collapse would empty the bar instantly; a bar that is
+     always empty says nothing, so drop it. */
+  .notice-countdown {
+    display: none;
   }
 }
 </style>

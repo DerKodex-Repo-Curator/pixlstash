@@ -1,65 +1,127 @@
-import asyncio
+import functools
+import hashlib
 import json
+import math
 import os
 import threading
-import uuid
+import time
+from collections import Counter
 from copy import deepcopy
-from urllib.parse import quote
 
-import websockets
-from fastapi import APIRouter, Body, HTTPException, Request, WebSocket
-from fastapi.websockets import WebSocketDisconnect
-from pydantic import BaseModel, ConfigDict
-from sqlmodel import select
+from fastapi import APIRouter, Body, HTTPException, Query, Request
+from pydantic import BaseModel, ConfigDict, Field
+from send2trash import TrashPermissionError, send2trash
 
 from typing import Optional
 
-from pixlstash.database import DBPriority
 from pixlstash.db_models import (
     Picture,
-    User,
 )
+from pixlstash.hub import workflow_cards, workflow_origin, workflow_versions
+from pixlstash.hub.workflow_card_reads import (
+    find_workflow,
+    manual_documents_holding,
+    run_filed_workflow_ids,
+    workflow_of_variant,
+)
+from pixlstash.hub.workflow_group_writes import (
+    create_manual_workflow,
+    set_manual_api_document,
+)
+from pixlstash.hub.workflows import (
+    forget_input_modes,
+    input_modes_by_workflow,
+    replace_parameter_pins,
+)
+from pixlstash.routes._helpers import require_hub
+from pixlstash.utils.adapter_header import FILE_ADAPTER, FILE_UNKNOWN
 from pixlstash.utils.comfyui_utilities import (
     collect_seed_inputs,
     extract_comfy_workflow_info,
     extract_generation_info,
+    extract_recipe_extras,
+    NotAWorkflowError,
+    check_comfy_workflow,
     find_comfy_api_prompt,
+    find_comfy_workflow,
     summarize_comfy_workflow,
 )
+from pixlstash.services.a1111_recipe import A1111Recipe, reduce_a1111
 from pixlstash.services.comfyui_recipe_service import (
-    MAX_SEED_64,
-    apply_seeds,
     collect_node_classes,
+    detect_lora_targets,
     detect_seed_targets,
     fetch_object_info,
+    plan_lora_insertion,
     preflight_prompt,
+    read_lora_chain,
     sanitize_prompt_graph,
     unchecked_preflight,
 )
+from pixlstash.services.comfyui_ui_graph import (
+    NO_OBJECT_INFO,
+    convert_ui_graph_to_api,
+    is_ui_graph,
+)
+from pixlstash.services.model_shelf_service import (
+    adapter_digest_index,
+    fetch_character_names,
+    fetch_locations,
+    fetch_model_by_hash,
+    lora_owners,
+    shelf_uuid,
+)
+from pixlstash.services.picture_recipe_service import (
+    describe_recipe,
+    resolution_lock_in_session,
+)
+from pixlstash.services.workflow_inputs import (
+    SELECTION,
+    resolve_input_modes,
+)
+from pixlstash.services import (
+    workflow_bindings,
+    workflow_inbox,
+    workflow_parameters,
+)
+from pixlstash.services.workflow_events import announce_changed_workflows
+from pixlstash.services.workflow_inbox import workflow_user_dir
+from pixlstash.services.workflow_hash import (
+    WorkflowGraphError,
+    normalized_filename,
+    topology_hash as api_topology_hash,
+    ui_topology_hash,
+)
+from pixlstash.services.workflow_run_service import (
+    take_out_empty_adapter_loaders,
+    take_out_person_loras,
+)
+from pixlstash.services.workflow_io import (
+    api_graph,
+    detect_workflow_io,
+    with_converted_graph,
+)
 from pixlstash.utils.image_processing.image_utils import ImageUtils
 from pixlstash.utils.path_utils import resolve_path_within
-from pixlstash.stacking import (
-    build_stack_filename_prefix,
-    get_or_create_stack_for_picture,
-)
-from platformdirs import user_data_dir
+from pixlstash.utils.workflow_ids import MANUAL_PREFIX
 
 # ComfyUI workflow-execution orchestration and the output-import pipeline live in
 # the service layer (backend refactor Phase 2 §4.5); the route handlers below
 # stay thin and delegate to it. See pixlstash/services/comfyui_service.py.
 from pixlstash.services.comfyui_service import (
-    _apply_filename_prefix,
-    _apply_fixed_seed,
     _comfyui_abort,
-    _extract_output_node_ids,
-    _process_comfyui_outputs,
-    _randomize_seeds,
-    _replace_placeholders,
-    _submit_comfyui_prompt,
-    _upload_image_to_comfyui,
-    graph_has_pixlstash_nodes,
-    graph_has_pixlstash_saver,
+    PACK_OPENS_RUNS,
+    PACK_OPENS_WORKFLOWS,
+    PACK_SAVES_BACK,
+    PIXLSTASH_CHECKPOINT_LOADER,
+    comfyui_pixlstash_scripts,
+    library_ids_named,
+    probe_comfyui,
+    pixlstash_node_refusals,
+    swap_pixlstash_savers,
 )
+from pixlstash.services import comfyui_link_service, comfyui_pack_service
+from pixlstash.services.workflow_library_service import read_library_ids
 
 # Re-exported so existing call sites and tests that import these helpers from
 # this module keep resolving after the move into services/comfyui_service.py.
@@ -97,13 +159,9 @@ def _workflow_builtin_dir() -> str:
     )
 
 
-def _workflow_user_dir() -> str:
-    return os.path.join(user_data_dir("pixlstash"), "comfyui-workflows", "user")
-
-
 def _workflow_dirs() -> list[tuple[str, str]]:
     return [
-        ("user", _workflow_user_dir()),
+        ("user", workflow_user_dir()),
         ("built-in", _workflow_builtin_dir()),
     ]
 
@@ -131,79 +189,864 @@ def _normalize_workflow_name(name: str) -> str:
     return safe
 
 
+# The largest workflow document this process will parse.
+#
+# On the LOADER rather than on one caller, because all ten call sites read the
+# same watched-folder files: the grid's per-card read, the workflow list, the
+# menu, import, the inbox. A cap on one of them is a cap on one screen (#1483).
+# Measured off the open handle so the size that is checked is the size that is
+# read - a stat before the open races a rewrite.
+MAX_WORKFLOW_FILE_BYTES = 32 * 1024 * 1024
+
+
+class WorkflowFileTooLarge(ValueError):
+    """*path* is past :data:`MAX_WORKFLOW_FILE_BYTES`, so it was not parsed.
+
+    A ``ValueError`` because every caller already handles one from
+    ``json.load`` and treats it the same way - the document did not read.
+    """
+
+
+class WorkflowChanged(Exception):
+    """A workflow got a newer version than the one an edit of it was made on."""
+
+
 def _load_workflow_json(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as handle:
+        size = os.fstat(handle.fileno()).st_size
+        if size > MAX_WORKFLOW_FILE_BYTES:
+            raise WorkflowFileTooLarge(
+                f"{size} bytes, past the {MAX_WORKFLOW_FILE_BYTES} this reads"
+            )
         return json.load(handle)
 
 
-def _save_workflow_json(path: str, payload: dict) -> None:
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, ensure_ascii=True)
+# The API graph ComfyUI converted an editor-format file into (#1530), kept
+# BESIDE the file rather than over it: the file stays byte-identical to what
+# ComfyUI holds, so it still re-opens there and still deduplicates against a
+# second hand-over. Not ``.json``, so the folder listing never reads it as a workflow.
+CONVERTED_SUFFIX = ".api"
 
 
-MAX_SEED = 2**32 - 1
+def _editor_digest(workflow: dict) -> str:
+    """Which version of an editor file a converted graph was made from."""
+    return hashlib.sha256(
+        workflow_bindings.canonical(workflow).encode("utf-8")
+    ).hexdigest()
 
 
-def _resolve_fixed_seed(payload: dict, max_seed: int = MAX_SEED) -> int | None:
-    """Return the validated fixed seed, or ``None`` when seeds should randomize.
+def converted_graph(path: str, workflow: dict) -> dict | None:
+    """The API graph stored beside the editor file at *path*, or ``None``.
 
-    Shared by the t2i, i2i and recipe run handlers so all three accept the same
-    ``seed_mode`` / ``seed`` pair.
+    ``None`` too when it will not read, or when it was converted from another
+    version of the file: a file overwritten since is a different workflow, and
+    running the old conversion would run the wrong graph.
+    """
+    sidecar = f"{path}{CONVERTED_SUFFIX}"
+    if not os.path.isfile(sidecar):
+        return None
+    try:
+        stored = _load_workflow_json(sidecar)
+    except (OSError, ValueError, RecursionError) as exc:
+        logger.warning(
+            "Converted graph %s will not load, so %s runs as an editor file: %s",
+            sidecar,
+            path,
+            exc,
+        )
+        return None
+    if not isinstance(stored, dict):
+        logger.warning("Converted graph %s is not a JSON object; ignored.", sidecar)
+        return None
+    if stored.get("converted_from") != _editor_digest(workflow):
+        logger.info(
+            "Converted graph %s was made from another version of %s; ignored "
+            "until the file is converted again.",
+            sidecar,
+            path,
+        )
+        return None
+    return api_graph(stored)
 
-    ``max_seed`` differs by caller on purpose. The template paths keep the
-    historical 32-bit ceiling, which every sampler accepts. Recipe replay must
-    allow the full 64-bit range ComfyUI's core samplers declare: the shipped
-    ``Flux2-Klein-Image-Edit`` template's own ``noise_seed`` is 432262096973502,
-    so a 32-bit check would reject reproducing our own built-in's default.
 
-    Args:
-        payload: The raw request body.
-        max_seed: Inclusive upper bound to accept.
+def runnable_document(path: str, workflow: dict) -> dict:
+    """*workflow*, or the graph it was converted into if it is an editor file.
 
-    Returns:
-        The seed to pin, or ``None`` for ``seed_mode`` other than ``"fixed"``.
+    What every reader that runs or parameterises a stored file goes through,
+    so a converted editor file reads as the API graph it now has. PixlStash's
+    own keys (bindings, output choice) are the file's and carry over.
+    """
+    if api_graph(workflow) is not None:
+        return workflow
+    return with_converted_graph(workflow, converted_graph(path, workflow))
+
+
+def _converted_mtime_ns(path: str) -> int:
+    """The converted graph's mtime beside *path*, 0 when there is none."""
+    try:
+        return os.stat(f"{path}{CONVERTED_SUFFIX}").st_mtime_ns
+    except FileNotFoundError:
+        return 0
+    except OSError as exc:
+        logger.warning("Could not stat the converted graph of %s: %s", path, exc)
+        return 0
+
+
+def _stem(name: str) -> str:
+    """What a workflow called *name* (``flow.json``) is called: ``flow``."""
+    return os.path.splitext(_normalize_workflow_name(name))[0] or "workflow"
+
+
+def store_manual_workflow(
+    hub,
+    name: str,
+    workflow: dict,
+    origin: str,
+    *,
+    from_workflow_id: str | None = None,
+    from_name: str | None = None,
+    api_document: dict | None = None,
+    record: tuple[str, str, int | None, str | None] | None = None,
+) -> str:
+    """Store *workflow* as a new manual workflow called *name*; return its id.
+
+    What every way a workflow arrives goes through - an import, the watched
+    inbox, a built-in, a duplicate, a fixed copy, a clone, a LoRA
+    edit, an extract - so each stores the same kind of record. Always a new
+    record: identical copies are allowed. No file is written.
+
+    **The shape check and the placeholder migration are not skipped**: a
+    workflow stored with placeholder tokens is one that will not run.
 
     Raises:
-        HTTPException: 400 when ``seed_mode`` is ``"fixed"`` and ``seed`` is
-            missing, non-numeric, or out of range.
+        NotAWorkflowError: *workflow* is not shaped like a ComfyUI workflow.
+        RecursionError: The document nests too deeply to read.
+        WorkflowFileTooLarge: It is past :data:`MAX_WORKFLOW_FILE_BYTES`.
     """
-    if payload.get("seed_mode", "random") != "fixed":
-        return None
-    detail = (
-        "Invalid seed: when seed_mode is 'fixed', seed must be an integer "
-        f"between 0 and {max_seed}."
+    check_comfy_workflow(workflow)
+    workflow, _migrated = workflow_bindings.migrate_placeholders(workflow)
+    _within_the_cap(workflow)
+    if api_document is not None:
+        _within_the_cap(api_document)
+    return create_manual_workflow(
+        hub,
+        name,
+        workflow,
+        origin,
+        from_workflow_id=from_workflow_id,
+        from_name=from_name,
+        api_document=api_document,
+        record=record,
     )
-    raw_seed = payload.get("seed")
-    if raw_seed is None or (isinstance(raw_seed, str) and raw_seed.strip() == ""):
-        raise HTTPException(status_code=400, detail=detail)
+
+
+def store_over_workflow(
+    hub,
+    workflow_id: str,
+    workflow: dict,
+    source: str,
+    *,
+    expected_version: int | None = None,
+    original: dict | None = None,
+    also=None,
+) -> int:
+    """Store *workflow* as the next version of the existing workflow *workflow_id*.
+
+    The other half of :func:`store_manual_workflow`: the same checks, and no
+    new record. Every overwrite is a version (``workflow_version``, *source*
+    its ``source``), so what it replaced is kept and the workflow's graph is
+    its newest. A manual workflow already has its document as version 1. An
+    automatic one holds no document, so the first overwrite stores *original*,
+    the graph read off its pictures, as version 1 beside the edit as version 2.
+    Name, notes, defaults, pins and pictures stay where they are.
+
+    *expected_version* is the version the edit was made on, checked inside the
+    write transaction: a version made in between (another tab's
+    overwrite) is not buried under an edit of the older graph. A manual
+    workflow is not written without it; for an automatic one ``None`` says
+    the edit was made on its pictures' graph, before any version.
+
+    *also* is called with the connection and the version's number once the
+    version is written, inside the same transaction: what a save changes
+    beside the graph (default rows, the changes that waited) lands with the
+    version or not at all.
+
+    Returns:
+        The number of the version written.
+
+    Raises:
+        WorkflowChanged: The workflow is not at *expected_version*.
+        NotAWorkflowError: *workflow* is not shaped like a ComfyUI workflow.
+        RecursionError: The document nests too deeply to read.
+        WorkflowFileTooLarge: It, or *original*, is past
+            :data:`MAX_WORKFLOW_FILE_BYTES`.
+        LookupError: No manual workflow *workflow_id*, or an automatic one's
+            first overwrite came without *original*.
+    """
+    check_comfy_workflow(workflow)
+    workflow, _migrated = workflow_bindings.migrate_placeholders(workflow)
+    _within_the_cap(workflow)
+    if original is not None:
+        _within_the_cap(original)
+    manual = workflow_id.startswith(MANUAL_PREFIX)
+    with hub.transaction() as conn:
+        current = conn.execute(
+            "SELECT MAX(version) FROM workflow_version WHERE workflow_id = ?",
+            (workflow_id,),
+        ).fetchone()[0]
+        if manual and current is None:
+            # Made by a build before versions: its document is version 1.
+            current = 1
+        # A manual `None` is refused too: an unguarded write is the one that
+        # could bury a version made since.
+        if current != expected_version:
+            raise WorkflowChanged(
+                f"{workflow_id} is at version {current}, and the edit was "
+                f"made on version {expected_version}"
+            )
+        version = workflow_versions.append_version(
+            conn,
+            workflow_id,
+            workflow,
+            source=source,
+            first=None if manual else original,
+        )
+        if also is not None:
+            also(conn, version)
+        return version
+
+
+def _within_the_cap(document: dict) -> None:
+    """Refuse a document past :data:`MAX_WORKFLOW_FILE_BYTES` serialised.
+
+    The file loader's cap, held for a stored row too: a hub row is read on the
+    grid and every run as a file was.
+
+    Raises:
+        WorkflowFileTooLarge: It is.
+    """
+    size = len(json.dumps(document))
+    if size > MAX_WORKFLOW_FILE_BYTES:
+        raise WorkflowFileTooLarge(
+            f"{size} bytes, past the {MAX_WORKFLOW_FILE_BYTES} a workflow may be"
+        )
+
+
+def store_inbox_workflow(hub, name: str, workflow: dict) -> dict:
+    """Store one inbox file as a manual workflow, once per content.
+
+    **The caller holds ``workflow_inbox.INBOX_LOCK``** (the reconcile does).
+    Deduplicated on ``workflow_origin`` alone: a content the inbox, a
+    built-in or an earlier pull already stored as a live workflow is matched,
+    so a restart,
+    which reads every inbox file again, re-imports nothing. A new one is
+    recorded under the ``inbox`` origin keyed by its content hash; deleting
+    the workflow removes that row, so restoring the file from the trash
+    imports it again.
+    """
+    digest = workflow_inbox.content_hash(workflow)
+    stored = workflow_origin.stored_as(hub, digest)
+    if stored is not None:
+        return {"name": _stem(name), "matched": True, "workflow_id": stored}
+    workflow_id = store_manual_workflow(
+        hub,
+        _stem(name),
+        workflow,
+        "inbox",
+        record=(workflow_origin.INBOX_ORIGIN, digest, None, digest),
+    )
+    return {"name": _stem(name), "matched": False, "workflow_id": workflow_id}
+
+
+def _trash_stored_workflow(path: str, name: str, sweep: bool = True) -> None:
+    """Move a stored workflow to the system trash by way of the inbox.
+
+    The trash copy comes first and the stored file goes only once it is there,
+    so a failed trash never loses the workflow.
+    """
     try:
-        seed_int = int(raw_seed)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail=detail)
-    if not (0 <= seed_int <= max_seed):
+        workflow = _load_workflow_json(path)
+        if not isinstance(workflow, dict):
+            raise ValueError("not a JSON object")
+    except (ValueError, RecursionError) as exc:
+        # Nothing to write back that the inbox could import; the file itself
+        # is what goes to the trash.
+        logger.warning(
+            "Workflow %s is not a readable workflow, trashing the file as it is: %s",
+            name,
+            exc,
+        )
+        send2trash(path)
+        return
+    workflow_inbox.trash_workflow(
+        workflow_inbox.workflow_inbox_dir(), name, workflow, sweep=sweep
+    )
+    os.remove(path)
+
+
+def user_workflow_exists(workflow_name: str) -> bool:
+    """Whether the user folder still holds a workflow file called *workflow_name*."""
+    try:
+        path = resolve_path_within(
+            workflow_user_dir(), _normalize_workflow_name(workflow_name)
+        )
+    except ValueError:
+        logger.warning("Workflow file %r is not inside the user folder.", workflow_name)
+        return False
+    return os.path.isfile(path)
+
+
+def trash_user_workflow(hub, workflow_name: str, *, sweep: bool = True) -> str:
+    """Send one stored workflow to the trash and forget its rows.
+
+    Shared with ``DELETE /workflows/{key}``, so the card route and the file
+    route delete a workflow the same way: through the inbox, with the
+    migration backup, the input modes, the pins and the place on its card
+    each forgotten on its own. Only the **user** folder resolves here, so a
+    built-in is a 404 rather than a deletion nobody can undo.
+
+    Args:
+        hub: The hub, or ``None``. The file goes either way; the rows it
+            leaves behind are forgotten only if there is somewhere to forget
+            them. Takes the hub rather than the whole server so it needs no
+            server to test.
+        workflow_name: The stored file to delete.
+
+    Returns:
+        The normalized name that was deleted.
+    """
+    normalized = _normalize_workflow_name(workflow_name)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="workflow_name is required")
+    workflow_dir = workflow_user_dir()
+    try:
+        path = resolve_path_within(workflow_dir, normalized)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid workflow name")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Workflow not found in user")
+    stored_name = _on_disk_name(path)
+    try:
+        with workflow_inbox.INBOX_LOCK:
+            _trash_stored_workflow(path, normalized, sweep)
+    except (TrashPermissionError, OSError, RecursionError, ValueError) as exc:
+        logger.warning("Failed to delete workflow %s: %s", normalized, exc)
+        raise HTTPException(status_code=500, detail="Failed to delete workflow")
+    # The placeholder migration's backup and the converted graph go with the
+    # workflow they were made from.
+    for what, extra in (
+        ("migration backup", f"{path}{workflow_bindings.BACKUP_SUFFIX}"),
+        ("converted graph", f"{path}{CONVERTED_SUFFIX}"),
+    ):
+        if not os.path.exists(extra):
+            continue
+        try:
+            os.remove(extra)
+        except OSError as exc:
+            logger.warning(
+                "Deleted workflow %s but not its %s %s: %s",
+                normalized,
+                what,
+                extra,
+                exc,
+            )
+    if hub is not None:
+        # The file is already gone, so its rows describe nothing; they would
+        # only come back into force if a file of the same name is imported
+        # later. Each is updated on its own, so one failing keeps the others.
+        for what, forget in (
+            ("picture-input modes", lambda: forget_input_modes(hub, stored_name)),
+            (
+                "parameter pins",
+                lambda: replace_parameter_pins(hub, stored_name, None),
+            ),
+            (
+                "place on its workflow card",
+                lambda: workflow_cards.forget_file(hub, stored_name),
+            ),
+        ):
+            try:
+                forget()
+            except Exception as exc:
+                logger.warning(
+                    "Deleted workflow %s but could not update its %s: %s",
+                    normalized,
+                    what,
+                    exc,
+                )
+    return normalized
+
+
+def _builtin_path(name: str) -> str | None:
+    """The built-in workflow file called *name*, or ``None``. Never a user file."""
+    normalized = _normalize_workflow_name(name)
+    for source, folder in _workflow_dirs():
+        if source != "built-in" or not normalized:
+            continue
+        try:
+            path = resolve_path_within(folder, normalized)
+        except ValueError:
+            return None
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+# ponytail: one request submits its runs one after another, uploads included;
+# a queue of its own (and a higher cap) if large batches become routine.
+MAX_RUNS_PER_REQUEST = 200
+
+# What a LoRA slot may be given: an adapter, or a file the header reader could
+# not place, which on this shelf is usually an adapter in a format it has not
+# been taught. Everything else it holds is refused by name (#1310).
+LOADABLE_ADAPTER_FILE_KINDS = frozenset({FILE_ADAPTER, FILE_UNKNOWN})
+
+
+def slot_digests(slots: list[dict], shelf_index) -> dict:
+    """``{(node_id, field): sha256 or None}``: which shelf LoRA each slot loads.
+
+    A digest slot names its LoRA exactly, and counts when the shelf holds
+    that digest. A filename slot is matched on its case-folded basename,
+    and a name two shelf LoRAs share names neither - the rule
+    ``resolveRecipeLoras`` and ``_resolve_against_shelf`` already apply.
+    """
+    by_name, digests = shelf_index or ({}, set())
+    answer: dict[tuple[str, str], str | None] = {}
+    for slot in slots:
+        value = str(slot.get("value") or "")
+        if slot.get("by") == "digest":
+            digest = value.strip().lower()
+            found = digest if digest in digests else None
+        else:
+            matched = by_name.get(normalized_filename(value.strip()), set())
+            found = next(iter(matched)) if len(matched) == 1 else None
+        answer[(str(slot.get("node_id")), str(slot.get("field")))] = found
+    return answer
+
+
+def people_loras_in(hub, vault, graph: dict) -> list[dict]:
+    """Every LoRA slot of an API *graph* holding a LoRA attached to a person.
+
+    Rule 4 of #1846's one question, for a graph that is being stored or
+    exported: ``[{node_id, class_type, field, sha256, character_ids, lora,
+    people}]``,
+    ``lora`` and ``people`` being names for the sentence that says a LoRA was
+    left out (the shelf's name for it, else its file's). A digest row names
+    its LoRA whether or not the shelf still lists it: an attachment outlives
+    a shelf row.
+    """
+    owners = lora_owners(vault)
+    if not owners:
+        return []
+    targets = detect_lora_targets(graph)
+    digests = slot_digests(targets, adapter_digest_index(hub))
+    # (digest, the file the slot names when it names one)
+    held: dict[tuple[str, str], tuple[str, str]] = {}
+    for target in targets:
+        slot = (str(target["node_id"]), str(target["field"]))
+        value = str(target.get("value") or "")
+        by_digest = target.get("by") == "digest"
+        digest = digests.get(slot) or (value.strip().lower() if by_digest else None)
+        if digest in owners:
+            held[slot] = (digest, "" if by_digest else value)
+    if not held:
+        return []
+    wanted = sorted({digest for digest, _ in held.values()})
+    shelf = {
+        str(row["sha256"]).lower(): row
+        for row in hub.fetchall(
+            "SELECT sha256, filename, display_name FROM model WHERE "
+            f"lower(sha256) IN ({','.join('?' * len(wanted))})",
+            tuple(wanted),
+        )
+    }
+    names = fetch_character_names(vault)
+    found = []
+    for (node_id, slot_field), (digest, named) in sorted(held.items()):
+        row = shelf.get(digest)
+        file = (row["filename"] if row else None) or named
+        found.append(
+            {
+                "node_id": node_id,
+                "class_type": (graph.get(node_id) or {}).get("class_type"),
+                "field": slot_field,
+                "sha256": digest,
+                "character_ids": sorted(owners[digest]),
+                "lora": (row["display_name"] if row else None)
+                or os.path.splitext(os.path.basename(file))[0]
+                or digest[:12],
+                "people": [
+                    names[cid] for cid in sorted(owners[digest]) if names.get(cid)
+                ],
+            }
+        )
+    return found
+
+
+def without_peoples_picks(
+    editor: dict, people: set[str], *, filenames: set[str] | None = None
+) -> dict:
+    """An editor document with no person's LoRA named in it by digest.
+
+    *people* is every digest attached to a person. An editor document names
+    its widgets by position, so this goes by value: a digest is blanked
+    wherever the document holds it (a row of a loader, a note quoting it), and
+    the entry a PixlStash loader records beside a pick
+    (``properties.pixlstash_models``: the digest with its file and display
+    name) goes whole. Nodes the graph does not run (bypassed, muted) are in
+    the document like any other, so they are covered. A copy; *editor* is not
+    changed. A person's LoRA named by FILE has no empty value: that is the
+    caller's to refuse. When *filenames* is supplied, widgets naming one
+    of those case-folded basenames refuse the export, including bypassed nodes.
+    """
+    if not people:
+        return editor
+
+    def clean(value, key=None):
+        if key == "widgets_values" and filenames:
+            widgets = value.values() if isinstance(value, dict) else value
+            if isinstance(widgets, (list, tuple)) or isinstance(value, dict):
+                if any(
+                    isinstance(widget, str)
+                    and normalized_filename(widget.strip()) in filenames
+                    for widget in widgets
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="The editor names a person's LoRA by file name; "
+                        "remove it before exporting the workflow.",
+                    )
+        if isinstance(value, str):
+            return "" if value.strip().lower() in people else value
+        if isinstance(value, list):
+            if key == "pixlstash_models":
+                value = [
+                    entry
+                    for entry in value
+                    if not (
+                        isinstance(entry, dict)
+                        and str(entry.get("sha256") or "").strip().lower() in people
+                    )
+                ]
+            return [clean(item) for item in value]
+        if isinstance(value, dict):
+            return {name: clean(item, name) for name, item in value.items()}
+        return value
+
+    return clean(editor)
+
+
+def _shelf_adapter(hub, sha256) -> dict:
+    """The shelf model *sha256* names, as the names a LoRA slot can be given.
+
+    Both names are collected because the two sides count from different roots:
+    ComfyUI lists a file relative to its own ``loras`` folder and the shelf
+    knows it relative to the folder PixlStash scanned, so the copy's ``relpath``
+    is the one that matches an install sharing that tree and ``filename`` the
+    one that matches anything else.
+
+    What may be loaded is an **allow-list**: an adapter, or a file the shelf has
+    not classified yet, which is first-class there and is usually an adapter the
+    header reader could not place. Everything else the shelf holds - a
+    checkpoint, a VAE, a text encoder, one of PixlStash's own engines - is
+    refused by name, because writing any of them into ``lora_name`` produces a
+    run that fails somewhere further in.
+
+    Raises:
+        HTTPException: 400 when *sha256* is not a string or names something no
+            LoRA loader can load, 404 when the shelf does not have it, 503 when
+            no hub is attached to ask.
+    """
+    if not isinstance(sha256, str) or not sha256.strip():
+        raise HTTPException(
+            status_code=400, detail="adapter_sha256 must be a model's SHA-256"
+        )
+    if hub is None:
+        # Not a 404: the model may be perfectly well on the shelf, and saying it
+        # is not would send the owner looking for a file that is right there.
+        raise HTTPException(
+            status_code=503,
+            detail="No hub is attached, so PixlStash cannot look up that LoRA.",
+        )
+    digest = sha256.strip().lower()
+    row = fetch_model_by_hash(hub, digest)
+    if row is None:
+        raise HTTPException(
+            status_code=404, detail="That LoRA is not on this PixlStash's shelf."
+        )
+    if row["file_kind"] not in LOADABLE_ADAPTER_FILE_KINDS:
+        logger.warning(
+            "Refused a %s (model %s) for a LoRA slot", row["file_kind"], row["id"]
+        )
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid seed: must be between 0 and {max_seed}.",
+            detail=(
+                f"That hash is a {row['file_kind']}, which no LoRA loader can load."
+            ),
         )
-    return seed_int
+    model_id = int(row["id"])
+    copies = fetch_locations(hub, model_id).get(model_id, [])
+    return {
+        "sha256": digest,
+        "filenames": [
+            name
+            for name in [
+                *(copy["relpath"] for copy in copies if copy.get("relpath")),
+                row["filename"],
+            ]
+            if name
+        ],
+    }
 
 
-def _find_placeholder_usage(payload: dict) -> tuple[bool, list[str]]:
-    dump = json.dumps(payload, ensure_ascii=False)
-    missing = []
-    if PLACEHOLDER_IMAGE not in dump:
-        missing.append(PLACEHOLDER_IMAGE)
-    if PLACEHOLDER_CAPTION not in dump:
-        missing.append(PLACEHOLDER_CAPTION)
-    is_t2i = PLACEHOLDER_IMAGE in missing
-    if is_t2i:
-        # t2i workflow: valid when the caption placeholder is present
-        valid = PLACEHOLDER_CAPTION not in missing
-    else:
-        # i2i workflow: valid as long as image placeholder is present;
-        # caption is optional (hidden in UI when absent)
-        valid = True
-    return valid, missing
+def _describe_lora_insertion(
+    graph: dict | None,
+    object_info: dict | None,
+    error: str | None,
+) -> dict | None:
+    """Where a LoRA loader would go, for the owner to see before a run (#1376).
+
+    Args:
+        graph: The API-format graph, or ``None`` for a UI-format file.
+        object_info: The map already read for this request, or ``None``.
+        error: Why ComfyUI could not be asked, when it could not.
+
+    Returns:
+        ``None`` when the graph already has a LoRA loader, else
+        ``{"plan", "reason"}``: the plan from :func:`plan_lora_insertion`, or
+        ``None`` and the reason no loader can be added.
+    """
+    if graph is None:
+        return {
+            "plan": None,
+            "reason": (
+                "This workflow is saved in ComfyUI's UI format, so PixlStash "
+                "cannot add a LoRA loader to it."
+            ),
+        }
+    if detect_lora_targets(graph):
+        return None
+    if object_info is None:
+        return {
+            "plan": None,
+            "reason": f"PixlStash could not ask ComfyUI where a loader would go: {error}",
+        }
+    try:
+        plan = plan_lora_insertion(graph, object_info)
+        return {"plan": plan, "reason": None}
+    except LookupError as exc:
+        logger.info("No LoRA loader can be added to this graph: %s", exc)
+        return {"plan": None, "reason": str(exc)}
+
+
+def _describe_lora_chain(
+    graph: dict, object_info: dict | None, error: str | None
+) -> dict:
+    """Which LoRAs feed which sampler pass, as Edit LoRAs reads the chain.
+
+    ``lora_slots`` is a flat list, so a reader of the recipe alone cannot tell
+    a two-pass graph from a straight one, nor which pass a LoRA applies to.
+    This is :func:`read_lora_chain`'s answer, cut down to names: the ``trunk``
+    every pass reads and one entry per pass where the model forks.
+
+    Args:
+        graph: The API-format graph.
+        object_info: The map already read for this request, or ``None``.
+        error: Why ComfyUI could not be asked, when it could not.
+
+    Returns:
+        ``{"branches", "trunk", "passes", "note", "refusal"}``. ``branches``
+        is ``None`` when the chain could not be read, and ``refusal`` says why.
+    """
+    unread = {"branches": None, "trunk": [], "passes": [], "note": None}
+    if object_info is None:
+        return {
+            **unread,
+            "refusal": (
+                "PixlStash could not ask ComfyUI how this graph's LoRAs are "
+                f"wired: {error}"
+            ),
+        }
+    try:
+        chain = read_lora_chain(graph, object_info)
+    except LookupError as exc:
+        logger.info("This graph's LoRA chain cannot be read: %s", exc)
+        return {**unread, "refusal": str(exc)}
+
+    def loras(loaders: list[dict]) -> list[dict]:
+        return [
+            {"node_id": str(loader["node_id"]), "name": loader["name"]}
+            for loader in loaders
+        ]
+
+    return {
+        "branches": bool(chain["lanes"]),
+        "trunk": loras(chain["loaders"]),
+        "passes": [
+            {
+                "node_id": str(lane["pass"]["node_id"]),
+                "class_type": lane["pass"].get("class_type"),
+                "title": lane["pass"].get("title"),
+                "loras": loras(lane["loaders"]),
+            }
+            for lane in chain["lanes"]
+        ],
+        "note": chain.get("branch_note"),
+        "refusal": None,
+    }
+
+
+def _missing_placeholders(payload: dict, detected=None) -> list[str]:
+    """What a run of *payload* cannot fill, under the names the menus know.
+
+    No file carries a token any more; the names are kept so the ComfyUI menus
+    keep choosing workflows by what the run routes accept. A role is missing
+    when neither a binding nor detection gives it a target
+    (``services/workflow_bindings.py``).
+    """
+    targets = workflow_bindings.run_targets(payload, detected)
+    return [
+        placeholder
+        for placeholder, role in (
+            (PLACEHOLDER_IMAGE, workflow_bindings.IMAGE),
+            (PLACEHOLDER_CAPTION, workflow_bindings.CAPTION),
+        )
+        if not targets[role]
+    ]
+
+
+# ponytail: one entry per file version; stale versions age out of the LRU.
+@functools.lru_cache(maxsize=512)
+def _describe_workflow(
+    path: str, source: str, mtime_ns: int, size: int, converted_mtime_ns: int = 0
+) -> dict:
+    """List metadata for one workflow file, recomputed only when the file changes.
+
+    Keyed on mtime and size so detection runs once per file version, and a file
+    that stays broken is logged once rather than on every menu open. The
+    converted graph's mtime is in the key too, so converting a file (#1530)
+    makes it runnable on the next list rather than on its next edit.
+    """
+    try:
+        payload = runnable_document(path, _load_workflow_json(path))
+    except Exception as exc:
+        logger.warning("Failed to read %s workflow %s: %s", source, path, exc)
+        return {
+            "valid": False,
+            "missing_placeholders": [PLACEHOLDER_IMAGE, PLACEHOLDER_CAPTION],
+            "workflow_type": "t2i",
+            "flagged": False,
+        }
+    try:
+        detected = detect_workflow_io(payload)
+    except Exception as exc:
+        logger.warning(
+            "Failed to detect inputs of %s workflow %s, listing it invalid: %s",
+            source,
+            path,
+            exc,
+        )
+        return {
+            "valid": False,
+            "missing_placeholders": _missing_placeholders(payload),
+            "workflow_type": "t2i",
+            "flagged": workflow_bindings.is_flagged(payload),
+        }
+    return {
+        "valid": detected.valid,
+        "missing_placeholders": _missing_placeholders(payload, detected),
+        "workflow_type": detected.workflow_type,
+        "picture_inputs": _picture_input_classes(detected),
+        "flagged": workflow_bindings.is_flagged(payload),
+        # The run route submits API format only; a UI-format file lists but
+        # cannot run.
+        "runnable": detected.valid
+        and workflow_parameters.api_graph(payload) is not None,
+        # Every LoRA a run can swap (#1310), on the list because every menu
+        # that runs a workflow reads this and would otherwise need its own
+        # request per workflow to know whether to offer the shelf. WITHOUT the
+        # value each slot holds: this route is open to share-link tokens, and a
+        # slot's value is a LoRA's filename or digest - the owner's model
+        # inventory, which /models/ and /adapters/ keep from those tokens. The
+        # owner-only card detail read carries the values.
+        "lora_slots": [
+            {key: slot[key] for key in ("node_id", "class_type", "field", "by")}
+            for slot in detect_lora_targets(workflow_parameters.api_graph(payload))
+        ],
+    }
+
+
+def _comfyui_url(user) -> str:
+    """The ComfyUI base URL a user has set, without a trailing slash."""
+    url = getattr(user, "comfyui_url", None) if user else None
+    return (url or DEFAULT_COMFYUI_URL).rstrip("/")
+
+
+def _on_disk_name(path: str) -> str:
+    """The file's own spelling of its name, which keys its stored modes.
+
+    A client's spelling can differ in case, and on a case-insensitive
+    filesystem it still opens the file; keying on it would split one file's
+    setup between two names.
+    """
+    folder, base = os.path.split(path)
+    try:
+        entries = os.listdir(folder)
+    except OSError as exc:
+        logger.warning("Could not list %s to spell workflow %s: %s", folder, base, exc)
+        return base
+    if base in entries:
+        return base
+    return next((entry for entry in entries if entry.lower() == base.lower()), base)
+
+
+def _picture_input_classes(detected) -> dict[str, str]:
+    """Detected picture inputs as ``node_id -> class_type``, in detection order."""
+    return dict(zip(detected.picture_inputs, detected.picture_input_classes))
+
+
+def _stored_input_modes(server, workflow_name: str | None = None):
+    """This library's stored picture-input modes, all of them or one file's.
+
+    Empty without a hub or an attached library, or when the hub cannot be read,
+    so every input takes its default and a listing still answers.
+    """
+    hub = getattr(server, "hub", None)
+    library_uuid = getattr(server.vault, "library_uuid", None)
+    if hub is None or not library_uuid:
+        return {} if workflow_name is None else []
+    try:
+        stored = input_modes_by_workflow(hub, library_uuid)
+    except Exception as exc:
+        logger.warning(
+            "Could not read the picture-input modes of library %s, using the "
+            "defaults for workflow %s: %s",
+            library_uuid,
+            workflow_name or "(all)",
+            exc,
+        )
+        stored = {}
+    return stored if workflow_name is None else stored.get(workflow_name, [])
+
+
+def _offered_on_selection(picture_inputs: dict, stored, missing: list) -> bool:
+    """Whether the selection path may offer this workflow.
+
+    It needs a Selection input, which the run route fills by mode (#1307). A
+    workflow whose binding sits on a loader detection does not recognise has no
+    detected input, and is offered while that binding gives the selection
+    somewhere to go (``missing`` names ``{{image_path}}`` when it does not).
+    ``POST /workflows/run`` still fills only that one target, and checks
+    it itself.
+    """
+    if not picture_inputs:
+        return PLACEHOLDER_IMAGE not in missing
+    # No document: it only decides WHICH input defaults to Selection, never
+    # whether one does, and that is all this asks.
+    return any(
+        item.mode == SELECTION
+        for item in resolve_input_modes({}, picture_inputs, stored)
+    )
 
 
 def _resolve_picture_file(server, pic_id: int) -> str:
@@ -291,11 +1134,8 @@ def _picture_source_origin(server, pic_id: int) -> tuple[bool, str | None]:
     return False, None
 
 
-def _load_embedded_api_prompt(server, pic_id: int) -> dict | None:
-    """Return the picture's embedded API-format ``prompt`` graph, or ``None``.
-
-    ``None`` covers every honest "there is nothing to replay" case: a UI-graph
-    only file, A1111 metadata, a stripped PNG, or a JPEG. It is not an error.
+def _read_embedded_metadata(server, pic_id: int) -> dict:
+    """The picture file's embedded metadata.
 
     Raises:
         HTTPException: 404 when the picture or its file cannot be resolved,
@@ -303,7 +1143,7 @@ def _load_embedded_api_prompt(server, pic_id: int) -> dict | None:
     """
     file_path = _resolve_picture_file(server, pic_id)
     try:
-        embedded_metadata = ImageUtils.extract_embedded_metadata(file_path)
+        return ImageUtils.extract_embedded_metadata(file_path)
     except Exception as exc:
         logger.warning(
             "[comfyui] Failed to read embedded metadata for picture id=%s (%s): %s",
@@ -314,58 +1154,445 @@ def _load_embedded_api_prompt(server, pic_id: int) -> dict | None:
         raise HTTPException(
             status_code=500, detail="Failed to read embedded metadata"
         ) from exc
-    return find_comfy_api_prompt(embedded_metadata)
 
 
-def _describe_preflight_failure(preflight: dict) -> str:
-    """Turn a failed pre-flight into a sentence naming what to go and fix.
+def _load_embedded_api_prompt(
+    server, pic_id: int, object_info: dict | None = None
+) -> tuple[dict | None, list[str]]:
+    """The graph a replay of *pic_id* would submit, and why there is none.
 
-    The three buckets get three different sentences on purpose: a missing node
-    pack, a missing model file and a missing input image send the user to three
-    different places, and collapsing them into "something is missing" is the
-    difference between an actionable message and a support ticket.
+    The embedded API-format ``prompt`` chunk when the file has one, and
+    otherwise the editor ``workflow`` chunk rebuilt into one against
+    *object_info*.
+
+    **The rebuild lives here rather than in a handler on purpose.** Every route
+    that runs a picture's own graph comes through this function. It was written
+    that way while ``POST /comfyui/run_recipe`` still existed and could have
+    held it; #1410 has since retired that route, and the card run's
+    embedded-picture tier in ``routes/workflows.py`` is now the only caller -
+    so a rebuild written into the handler would have been deleted along with
+    it, and the offer the Recipe tab makes would have quietly stopped meaning
+    anything.
+
+    ``object_info`` of ``None`` is "ComfyUI was not asked", which is a refusal
+    and not a licence to guess: reading a positional widget array at all needs
+    ComfyUI's own node definitions.
+
+    Returns:
+        ``(graph, [])`` when there is something to submit, ``(None, problems)``
+        otherwise. **The two "no"s are different and the caller picks.** An
+        empty ``problems`` means the picture carries no workflow - A1111, a
+        stripped PNG, a photo - and the resolver moves on to the next candidate
+        without a word. A non-empty one means this picture HAS a workflow that
+        would not rebuild, which is worth saying: the resolver logs it against
+        that candidate, and the recipe read hands the same sentences to the
+        Recipe tab as ``conversion_problems``.
+
+    Raises:
+        HTTPException: 404 when the picture or its file cannot be resolved,
+            500 when the file exists but its metadata cannot be read.
     """
-    parts: list[str] = []
-    classes = preflight.get("missing_node_classes") or []
-    if classes:
-        parts.append("missing node types: " + ", ".join(str(c) for c in classes))
-    models = [
-        str(item.get("value")) for item in preflight.get("missing_models") or [] if item
-    ]
-    if models:
-        parts.append("missing models: " + ", ".join(models))
-    inputs = [
-        str(item.get("value"))
-        for item in preflight.get("missing_input_images") or []
-        if item
-    ]
-    if inputs:
-        parts.append(
-            "the source image this recipe loads is no longer in ComfyUI's input "
-            "folder: " + ", ".join(inputs)
+    metadata = _read_embedded_metadata(server, pic_id)
+    prompt_graph = find_comfy_api_prompt(metadata)
+    if prompt_graph:
+        return prompt_graph, []
+    editor_graph = find_comfy_workflow(metadata)
+    if not is_ui_graph(editor_graph):
+        return None, []
+    return convert_ui_graph_to_api(editor_graph, object_info)
+
+
+def _picture_workflow_key(server, pic_id: int) -> str | None:
+    """The workflow card this picture's variant is on, or ``None``.
+
+    Two reads and no derivation: the picture names its variant
+    (``workflow_structural_hash``) and the hub says which card that variant is
+    on. A picture whose graph has not been filed yet, or whose card has not
+    been derived yet, honestly has no key - deriving one here would report a
+    card the hub does not hold and cannot be asked about.
+
+    Never raises: this is one field of an advisory dialog, and a hub that
+    cannot be read must not be what breaks the recipe read.
+    """
+    hub = getattr(server, "hub", None)
+    if hub is None:
+        return None
+    try:
+        pics = server.vault.db.run_immediate_read_task(
+            Picture.find,
+            id=pic_id,
+            select_fields=["id", "workflow_structural_hash"],
         )
-    if not parts:
-        return "This recipe cannot run on your ComfyUI."
-    return "Your ComfyUI cannot run this recipe - " + "; ".join(parts) + "."
+        structural_hash = (
+            getattr(pics[0], "workflow_structural_hash", None) if pics else None
+        )
+        if not structural_hash:
+            return None
+        return workflow_cards.key_of_variant(hub, structural_hash)
+    except Exception as exc:
+        logger.warning(
+            "[comfyui] Could not read the workflow card for picture id=%s: %s; "
+            "reporting the recipe without a workflow_key.",
+            pic_id,
+            exc,
+        )
+        return None
 
 
-def _inspect_recipe(comfyui_url: str, prompt_graph: dict) -> tuple[dict, list[dict]]:
-    """Return ``(preflight, seed_targets)`` for *prompt_graph*.
+def _picture_workflow(server, pic_id: int) -> dict:
+    """``{workflow_id, workflow_version}`` of a picture; never raises.
 
-    Both answers come from the same ``/object_info`` fetch, so they are made
-    together. When ComfyUI is unreachable the pre-flight degrades to
-    *unchecked* (not *failed*) and seed detection falls back to the static
-    class list, which covers the core samplers but not custom node packs.
+    ``workflow_id`` is the workflow the hub files the variant in
+    (``workflow_of_variant``): the same resolution ``GET /pictures?workflow=``
+    makes the other way, so a link built from this id lists this picture.
+    ``None`` for a variant not filed at the current key version, or a topology
+    in no workflow yet. A picture made by a run of a workflow whose runs file
+    on it (a live manual workflow, or an automatic one the owner saved over:
+    ``run_filed_workflow_ids``) is filed on that workflow, and
+    ``workflow_version`` is the version of it that made the picture
+    (``picture.run_workflow_version``): null when that is not known, and
+    always null for an automatic workflow never saved over, which has no
+    versions.
+    """
+    found = {"workflow_id": None, "workflow_version": None}
+    hub = getattr(server, "hub", None)
+    if hub is None:
+        return found
+    try:
+        pics = server.vault.db.run_immediate_read_task(
+            Picture.find,
+            id=pic_id,
+            select_fields=[
+                "id",
+                "workflow_structural_hash",
+                "run_workflow_id",
+                "run_workflow_version",
+            ],
+        )
+        made_by = getattr(pics[0], "run_workflow_id", None) if pics else None
+        if made_by and made_by in run_filed_workflow_ids(hub):
+            # Filed on the workflow whose run made it, while that lives.
+            return {
+                "workflow_id": made_by,
+                "workflow_version": getattr(pics[0], "run_workflow_version", None),
+            }
+        structural_hash = (
+            getattr(pics[0], "workflow_structural_hash", None) if pics else None
+        )
+        if structural_hash:
+            found["workflow_id"] = workflow_of_variant(hub, structural_hash)
+        return found
+    except Exception as exc:
+        logger.warning(
+            "[comfyui] Could not read the workflow for picture id=%s: %s; "
+            "reporting the recipe without a workflow_id.",
+            pic_id,
+            exc,
+        )
+        return {"workflow_id": None, "workflow_version": None}
+
+
+def _a1111_strengths(value) -> dict:
+    """An A1111 LoRA weight as ``{"model": float}``, or ``{}`` if it is not one.
+
+    A1111 writes the weight as text, so it is parsed here to keep ``strengths``
+    ONE type across both branches of this route - a client formatting a number
+    must not have to find out that this branch hands it a string. Two cases
+    give nothing rather than something of another shape: the same LoRA used
+    twice in a picture, which ``services/a1111_recipe.py`` records as both
+    weights joined by a comma (reporting either alone would be a claim about
+    which applied), and a non-finite value, which cannot be rendered at all
+    (``allow_nan=False``) and would turn this read into a 500.
     """
     try:
-        object_info = fetch_object_info(comfyui_url)
+        weight = float(value)
+    except (TypeError, ValueError) as exc:
+        # Debug, not a warning: an absent weight, a bare `<lora:name>` and the
+        # comma-joined double use are all ordinary A1111 input, so this fires
+        # on the common case and says nothing is wrong. Logged all the same,
+        # because a silently dropped field is how a parsing change hides.
+        logger.debug("No A1111 LoRA strength from %r: %s", value, exc)
+        return {}
+    return {"model": weight} if math.isfinite(weight) else {}
+
+
+def _a1111_setting(value: str):
+    """An A1111 field value, as a number where it is wholly one.
+
+    A1111 writes every field as text, so ``Steps: 20`` would arrive as
+    ``"20"`` while the ComfyUI branch reports ``20`` - and ``steps`` is a key
+    both branches carry, so that is precisely where a client reaches for a
+    number and finds a string. Coerced here rather than left to the client.
+
+    Only a value that is *entirely* a number is converted: ``512x768`` and
+    ``Euler a`` stay the text they are, which is why the contract describes
+    this block as name/value pairs and not as a typed shape.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return value
+    if not math.isfinite(number):
+        return value
+    return int(number) if number.is_integer() and "." not in str(value) else number
+
+
+def _int_or_none(value) -> int | None:
+    """*value* as an ``int``, or ``None`` where it is not one."""
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        logger.warning(
+            "[comfyui] Reporting no seed for an A1111 picture: %r is not an "
+            "integer (%s). The reduction should already have refused it, so "
+            "this means the two disagree.",
+            value,
+            exc,
+        )
+        return None
+
+
+def _a1111_recipe_payload(recipe: A1111Recipe) -> dict:
+    """The recipe an A1111 picture can answer with, from its reduced graph.
+
+    Read off :func:`reduce_a1111`'s nodes rather than re-parsing the infotext,
+    so this endpoint and the hub agree about what the picture's recipe is: the
+    node names here are that function's own (``checkpoint``, ``positive``,
+    ``negative``, ``sampler``, ``lora_N``).
+
+    ``node_count`` and ``node_classes`` are deliberately left at their defaults.
+    They exist for the consent decision - what would execute on the owner's
+    ComfyUI - and an A1111 picture executes nothing, so a count of the reduction
+    the hub happens to build would be a number about PixlStash, not about the
+    picture.
+    """
+    widgets = {
+        node_id: dict(node.instance_widgets) for node_id, node in recipe.nodes.items()
+    }
+    sampler = widgets.get("sampler", {})
+    loras = [
+        (node_id, w)
+        for node_id, w in sorted(widgets.items())
+        if node_id.startswith("lora_") and w.get("lora_name")
+    ]
+    checkpoint = widgets.get("checkpoint", {}).get("ckpt_name")
+    return {
+        "available": False,
+        # Not ``no_prompt_chunk``: there IS a recipe here, it is simply not a
+        # graph any ComfyUI could be handed. A client that does not know the
+        # value still falls through to "nothing to replay", which is true.
+        "reason": "a1111",
+        "source": "a1111",
+        "summary": "A1111 parameters",
+        "positive_prompt": widgets.get("positive", {}).get("text") or None,
+        "negative_prompt": widgets.get("negative", {}).get("text") or None,
+        # `_integer_text` has already refused anything `int()` would, so this
+        # cannot raise; belt and braces so the two cannot drift apart, since
+        # the version of this that trusted `str.isdigit()` was a 500 on a
+        # crafted `parameters` chunk.
+        "seed": _int_or_none(recipe.seed),
+        "models": [checkpoint] if checkpoint else [],
+        "loras": [w["lora_name"] for _, w in loras],
+        "settings": {k: _a1111_setting(v) for k, v in sampler.items() if v is not None},
+        # The same shape the ComfyUI branch reports, with no node named: the
+        # reduction's own ids ("lora_0") are not in any graph, and `node_id` is
+        # what a client sends back as `lora_node_id` to swap a slot in a
+        # replay. There is no replay here, so there is no node to name.
+        "lora_slots": [
+            {
+                "node_id": None,
+                "class_type": None,
+                "field": "lora_name",
+                "value": w["lora_name"],
+                "by": "filename",
+                "strengths": _a1111_strengths(w.get("strength")),
+            }
+            for _node_id, w in loras
+        ],
+    }
+
+
+def _editor_graph_recipe_payload(workflow: dict, problems: list[str]) -> dict:
+    """The recipe an editor graph answers with when it would not convert.
+
+    The picture WAS made in ComfyUI and its graph is right there, so the Recipe
+    tab fills in - the prompt, the models, the seed - and only the offer to run
+    it again is withheld, with the reason named. That is the difference this
+    payload exists to draw: "nothing was made in ComfyUI here" and "this is a
+    ComfyUI picture PixlStash cannot hand back to ComfyUI" are two answers, and
+    a UI-only picture used to get the first one.
+
+    ``settings`` and ``negative_prompt`` stay empty: both are read off the
+    resolved API graph, and reading them off the editor's positional widget
+    array is the guessing this whole path refuses to do.
+    """
+    gen_info = extract_generation_info(workflow)
+    stats = summarize_comfy_workflow(workflow)
+    summary_parts = [f"Editor Workflow · {stats['node_count']} nodes"]
+    if stats["link_count"] is not None:
+        summary_parts.append(f"{stats['link_count']} links")
+    return {
+        "available": False,
+        # **Two different "no", because they send the reader to two different
+        # places.** A graph this ComfyUI cannot be asked about is a machine
+        # that is switched off, which the reader fixes by starting it; a graph
+        # that would not rebuild is a fact about the file. Collapsing them told
+        # somebody with no ComfyUI running that their workflow was unrebuildable.
+        "reason": (
+            "comfyui_unreachable" if problems == [NO_OBJECT_INFO] else "editor_graph"
+        ),
+        "source": "comfyui",
+        "summary": " · ".join(summary_parts),
+        "positive_prompt": gen_info["positive_prompt"],
+        "negative_prompt": None,
+        "settings": {},
+        "seed": gen_info["seed"],
+        "seed_text": None if gen_info["seed"] is None else str(gen_info["seed"]),
+        "models": gen_info["models"],
+        "loras": gen_info["loras"],
+        "node_count": stats["node_count"],
+        # One sentence per thing that could not be read, so the tab can say why
+        # rather than "it did not work".
+        "conversion_problems": problems,
+    }
+
+
+def _editor_graph_topology(rebuilt: dict | None, editor_graph: dict) -> str | None:
+    """The topology of the graph the Recipe tab is actually showing.
+
+    **Deliberately NOT the picture's stored ``workflow_topology_hash``.** That
+    column is written by the extraction pass, which reads the API ``prompt``
+    chunk or A1111 infotext and nothing else - neither of which this answer
+    came from. So on a picture carrying an editor graph *and* A1111 text the
+    column names a different reading of the same file, and the Recipe tab's
+    Open sends the reader to a workflow they were never shown; on a picture
+    carrying only an editor graph it is NULL, and Open is not offered at all.
+    Reporting the stored value either way is how Open came to open nothing.
+
+    A rebuilt graph is keyed by the ordinary API path, so it agrees exactly
+    with the same workflow saved in API format and Open reaches the card those
+    siblings are on. Without a rebuild the editor serialisation is keyed
+    directly - which is what :func:`ui_topology_hash` is for - and that agrees
+    with the API twin for most graphs but not all, so it is the fallback and
+    not the rule.
+
+    Never raises: this is one link in an advisory panel, and a graph the hash
+    layer will not reduce must not be what breaks the whole recipe read.
+    """
+    try:
+        if rebuilt is not None:
+            return api_topology_hash(rebuilt)
+        return ui_topology_hash(editor_graph)
+    except WorkflowGraphError as exc:
+        logger.info(
+            "[comfyui] Editor graph will not reduce, so the recipe reports no "
+            "topology to open: %s",
+            exc,
+        )
+        return None
+    except Exception as exc:
+        logger.warning("[comfyui] Could not key this editor graph's topology: %s", exc)
+        return None
+
+
+# How long a fetched `/object_info` map may be reused, and by whom. It is
+# several megabytes on an install with a few node packs, so the callers that
+# ask as fast as a person presses an arrow key - converting the editor graph
+# of each picture the lightbox steps onto, drawing each workflow the inspector
+# selects - cannot fetch it per step. A minute is short enough that a node or
+# model installed while the app is open shows up on the next look rather than
+# after a restart.
+OBJECT_INFO_CACHE_TTL_S = 60.0
+# `{url: (read_at, object_info, error)}`. A FAILURE is cached too: the read this
+# serves is fired per arrow-key, `OBJECT_INFO_TIMEOUT_S` is 15 seconds, and the
+# route is synchronous - so a ComfyUI that is merely not running would otherwise
+# hold one worker thread per keypress for 15 seconds each and take the rest of
+# the API down with it. A ComfyUI that comes back is picked up within the
+# minute.
+_object_info_cache: dict[str, tuple[float, dict | None, str | None]] = {}
+# One cold read at a time: selecting a workflow asks several routes at once,
+# and `fetch_object_info` shares the GET between them but hands each its own
+# parse of the megabytes. Held, the rest wait for the first and take the one
+# map it cached. The map is shared, so a cached reader must not edit it.
+# ponytail: one lock for every ComfyUI URL; per-URL locks if a hub ever serves
+# several ComfyUIs at once.
+_object_info_reading = threading.Lock()
+
+
+def _forget_cached_object_info() -> None:
+    """Drop the cached maps. For tests, which change what ComfyUI answers."""
+    _object_info_cache.clear()
+
+
+def _read_object_info(
+    comfyui_url: str, *, cached: bool = False
+) -> tuple[dict | None, str | None]:
+    """Return ``(object_info, error)``; ``(None, why)`` when ComfyUI cannot be asked.
+
+    Kept apart from :func:`_inspect_graph` so one fetch can serve both the
+    pre-flight and a LoRA swap or insertion on the same run, and so the swap
+    can be applied *before* the graph is judged.
+
+    ``cached`` reuses the last minute's answer - the map OR the failure; see
+    the cache's own note for why a failure counts. **Only for drawing**: an
+    editor graph, which needs the map to be readable at all, and what the
+    inspector shows of a workflow. Never for deciding whether a graph may run,
+    where the question is what ComfyUI has now. The cached map is one object
+    handed to every such reader, so none of them may edit it; a read without
+    ``cached`` is the caller's own copy.
+    """
+    if cached:
+        with _object_info_reading:
+            return _read_cached_object_info(comfyui_url)
+    return _fetch_object_info(comfyui_url)
+
+
+def _fetch_object_info(comfyui_url: str) -> tuple[dict | None, str | None]:
+    """Ask ComfyUI now: ``(object_info, None)`` or ``(None, why)``."""
+    try:
+        return fetch_object_info(comfyui_url), None
     except RuntimeError as exc:
         logger.info(
             "[comfyui] Recipe pre-flight skipped, ComfyUI not reachable at %s: %s",
             comfyui_url,
             exc,
         )
-        return unchecked_preflight(str(exc)), collect_seed_inputs(prompt_graph)
+        return None, str(exc)
+
+
+def _read_cached_object_info(comfyui_url: str) -> tuple[dict | None, str | None]:
+    """The last minute's answer for *comfyui_url*, fetched when there is none."""
+    now = time.monotonic()
+    entry = _object_info_cache.get(comfyui_url)
+    if entry is not None and (now - entry[0]) < OBJECT_INFO_CACHE_TTL_S:
+        return entry[1], entry[2]
+    result = _fetch_object_info(comfyui_url)
+    # Pruned on write rather than on a timer: these maps are megabytes, the
+    # keys are ComfyUI URLs, and one the owner has changed away from must not
+    # be pinned for the life of the process.
+    for url, entry in list(_object_info_cache.items()):
+        if (now - entry[0]) >= OBJECT_INFO_CACHE_TTL_S:
+            del _object_info_cache[url]
+    # Stamped when the answer ARRIVED, not when the request left: a fetch can
+    # take `OBJECT_INFO_TIMEOUT_S`, and stamping it `now` would file an entry
+    # a quarter of its own lifetime old.
+    _object_info_cache[comfyui_url] = (time.monotonic(), result[0], result[1])
+    return result
+
+
+def _inspect_graph(
+    prompt_graph: dict, object_info: dict | None, error: str | None
+) -> tuple[dict, list[dict]]:
+    """Return ``(preflight, seed_targets)`` for a graph and an already-read map.
+
+    ``object_info`` of ``None`` is "ComfyUI could not be asked": the pre-flight
+    degrades to *unchecked* (not *failed*) and seed detection falls back to the
+    static class list, which covers the core samplers but not custom packs.
+    """
+    if object_info is None:
+        return unchecked_preflight(error or "ComfyUI unreachable"), collect_seed_inputs(
+            prompt_graph
+        )
     return (
         preflight_prompt(prompt_graph, object_info),
         detect_seed_targets(prompt_graph, object_info),
@@ -373,7 +1600,7 @@ def _inspect_recipe(comfyui_url: str, prompt_graph: dict) -> tuple[dict, list[di
 
 
 class ComfyUIWorkflowItemResponse(BaseModel):
-    """A single discovered ComfyUI workflow with placeholder validation metadata."""
+    """A single discovered ComfyUI workflow. ``valid`` and ``workflow_type`` are detected from the graph."""
 
     model_config = ConfigDict(extra="allow")
 
@@ -383,6 +1610,32 @@ class ComfyUIWorkflowItemResponse(BaseModel):
     missing_placeholders: list[str] = []
     source: Optional[str] = None
     workflow_type: Optional[str] = None
+    # False when no picture input is filled by the selection, so the selection
+    # pill leaves it out and only the toolbar offers it.
+    has_selection_input: bool = False
+    # A placeholder migration could not restore a value a token replaced.
+    flagged: bool = False
+    # The run route can submit it: a save node, in API format.
+    runnable: bool = False
+
+
+class ComfyUILoraInsertionResponse(BaseModel):
+    """Where a LoRA loader would go in a graph that has none (#1376).
+
+    ``plan`` names the model source (and CLIP source, ``None`` for a model-only
+    loader) the loader would take, and every input it would rewire; it is
+    ``None`` when no loader can be added, and ``reason`` says why.
+    """
+
+    plan: Optional[dict] = None
+    reason: Optional[str] = None
+
+
+class ComfyUIWorkflowCardResponse(BaseModel):
+    """The workflow a stored workflow file runs as."""
+
+    name: str
+    workflow_id: str
 
 
 class ComfyUIWorkflowListResponse(BaseModel):
@@ -408,6 +1661,86 @@ class ComfyUIWorkflowDeleteResponse(BaseModel):
     name: str
 
 
+class ComfyUIPixlstashNodeResponse(BaseModel):
+    """Whether the owner's ComfyUI can open a PixlStash workflow link."""
+
+    can_open_workflows: Optional[bool] = None
+    # Whether a workflow opened there saves back to PixlStash (#1852): the
+    # pack's `save_workflow.js` is loaded. False for an older pack, which
+    # opens a copy; null when ComfyUI cannot be asked.
+    saves_back: Optional[bool] = None
+    # Whether it can open a run from the Run popup, which it saves as a new
+    # workflow: the pack's `open_run.js` is loaded. False for an older pack.
+    opens_runs: Optional[bool] = None
+
+
+class ComfyUIProbeRequest(BaseModel):
+    """An address to try ComfyUI at."""
+
+    url: str
+
+
+class ComfyUIProbeResponse(BaseModel):
+    """Whether ComfyUI answered at an address, asked from this server."""
+
+    reachable: bool
+    url: str
+    version: Optional[str] = None
+    detail: Optional[str] = None
+    # Whether ComfyUI's --listen lets other computers reach it; None unknown.
+    listens_on_network: Optional[bool] = None
+
+
+class ComfyUILinkStatus(BaseModel):
+    """The live ComfyUI link, if any."""
+
+    linked: bool
+    comfyui_url: Optional[str] = None
+    pixlstash_url: Optional[str] = None
+    where: Optional[str] = None
+    linked_at: Optional[str] = None
+    # The address the link token works from (None: a link made before #1810,
+    # whose token works from anywhere), and the last other address it was
+    # refused from since start-up.
+    bound_address: Optional[str] = None
+    refused_from: Optional[str] = None
+    # "other_computer", "listening" or None: see comfyui_link_service.exposure.
+    exposure: Optional[str] = None
+    # The key's row in the token list, and whether it works in every library
+    # or only one: `PUT /users/me/token/{token_id}/libraries` changes that.
+    token_id: Optional[int] = None
+    all_libraries: bool = False
+
+
+class ComfyUILinkStep(BaseModel):
+    """One row of the connect checklist."""
+
+    id: str
+    state: str
+    detail: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class ComfyUILinkResponse(BaseModel):
+    """How far linking got: ``linked`` only when every step is done."""
+
+    linked: bool
+    link: ComfyUILinkStatus
+    steps: list[ComfyUILinkStep]
+    can_install_pack: bool = False
+    exposure: Optional[str] = None
+
+
+class ComfyUIPackInstallResponse(BaseModel):
+    """Where the nodes went, what they replaced and how ComfyUI restarts."""
+
+    installed_to: str
+    version: Optional[str] = None
+    replaced: list[str]
+    restart: str
+    detail: Optional[str] = None
+
+
 class ComfyUIAbortResponse(BaseModel):
     """Result of aborting the active ComfyUI run."""
 
@@ -418,38 +1751,102 @@ class ComfyUIAbortResponse(BaseModel):
     queue_cleared: bool = False
 
 
-class ComfyUIPromptItemResponse(BaseModel):
-    """A single submitted ComfyUI prompt entry."""
-
-    model_config = ConfigDict(extra="allow")
-
-    prompt_id: Optional[str] = None
-    picture_id: Optional[int] = None
-    workflow: Optional[str] = None
-
-
-class ComfyUIRunResponse(BaseModel):
-    """Result of submitting one or more ComfyUI prompts."""
-
-    model_config = ConfigDict(extra="allow")
-
-    status: str
-    prompts: list[ComfyUIPromptItemResponse] = []
-    workflow: Optional[str] = None
-
-
 class ComfyUIWorkflowImportResponse(BaseModel):
     """Result of importing/saving a user workflow."""
 
     model_config = ConfigDict(extra="allow")
 
     status: str
+    # What the new manual workflow is called.
     name: str
-    workflow_dir: str
+    # Always False: an import is a new workflow, identical copies allowed.
+    matched: bool = False
+    # The manual workflow it is now.
+    workflow_id: Optional[str] = None
+
+
+class ComfyUIWorkflowConvertResponse(BaseModel):
+    """An editor workflow with the API graph ComfyUI converted it into (#1530)."""
+
+    # The manual workflow that holds the conversion now.
+    name: str
+    # True when a manual workflow already held that editor document (every
+    # such copy took the conversion); False when this stored it.
+    matched: bool
+    # That manual workflow (the first, where several matched).
+    workflow_id: Optional[str] = None
+    # LoRAs attached to a person that the graph loads (rule 4 of #1846): each
+    # `{node_id, class_type, field, sha256, character_ids, lora, people}`.
+    # They are stored
+    # in the document as sent and left out of every read of the workflow, so
+    # Run, Open in ComfyUI and Export go without them; the node says so.
+    left_out: list[dict] = Field(default_factory=list)
+
+
+class ComfyUIRecipeModelSlot(BaseModel):
+    """One model the graph loads, as the overlay's Recipe section shows it.
+
+    ``model_id`` and ``verified`` are absent for a scoped token: which shelf row
+    a file is, is a fact about the library rather than about this picture.
+    ``verified`` true means the graph named the file by its digest and exactly
+    one shelf model has it - the same tier the shelf's own picture counts use.
+    """
+
+    # No `extra="allow"` here, unlike its siblings in this module. This route
+    # varies its answer by credential, so the model is a disclosure boundary: a
+    # key some future version of the service starts returning must be declared
+    # here before it reaches anybody, rather than passing through unread.
+
+    name: str
+    widget: str
+    strength: Optional[float] = None
+    # The precision the file was stored at, as one canonical id (`bf16`,
+    # `fp8_e4m3`, `q4_k_m`, `mixed`), or null where nothing records it.
+    #
+    # **It crosses the disclosure boundary on the same rule as the rest**, and
+    # by construction rather than by a check here: a scoped token's slot
+    # carries only what `quant_from_filename(name)` derives, which is a pure
+    # function of the `name` above it and so says nothing the response did not
+    # already. The shelf's own column - read from the safetensors header, and
+    # therefore a fact about the LIBRARY - is only ever mixed in by
+    # `_resolve_against_shelf`, which the service runs for a fully-unscoped
+    # owner alone.
+    quant: Optional[str] = None
+    model_id: Optional[int] = None
+    # The name the owner gave that shelf row, for the chip to show instead of
+    # the file's. A fact about the library, so it is set on the same owner-only
+    # path as `model_id` and is absent for a scoped token.
+    display_name: Optional[str] = None
+    verified: bool = False
+
+
+class ComfyUIRecipeInput(BaseModel):
+    """The resolution lock: which picture one input of the run loaded.
+
+    **Served to a fully-unscoped owner only** - a row names another picture's id
+    and its content hash, which a picture-scoped token is refused everywhere
+    else. ``input_picture_id`` is null once that picture has left this library,
+    which does not unmake what was made from it: ``pixel_sha`` still identifies
+    it.
+    """
+
+    # No `extra="allow"` here, unlike its siblings in this module. This route
+    # varies its answer by credential, so the model is a disclosure boundary: a
+    # key some future version of the service starts returning must be declared
+    # here before it reaches anybody, rather than passing through unread.
+
+    node_ref: str
+    position: int
+    pixel_sha: str
+    input_picture_id: Optional[int] = None
 
 
 class ComfyUIPictureWorkflowResponse(BaseModel):
-    """ComfyUI workflow info extracted from a picture's embedded metadata."""
+    """The displayable graph a picture carries.
+
+    Deliberately only that: what a picture was MADE with is the recipe read
+    (#1313), which reads the graph that executed and answers for A1111 pictures
+    too. This one serves the editor's format, for Copy, Download and paste."""
 
     model_config = ConfigDict(extra="allow")
 
@@ -459,6 +1856,7 @@ class ComfyUIPictureWorkflowResponse(BaseModel):
     models: list[str] = []
     loras: list[str] = []
     positive_prompt: Optional[str] = None
+    negative_prompt: Optional[str] = None
     seed: Optional[int] = None
 
 
@@ -480,6 +1878,8 @@ class ComfyUIPreflightResponse(BaseModel):
     missing_input_images: list[dict] = []
     has_save_image: bool = False
     unchecked_fields: int = 0
+    # Model-shaped values on loaders PixlStash cannot read, so never checked.
+    unchecked_models: int = 0
 
 
 class ComfyUIPictureRecipeResponse(BaseModel):
@@ -495,14 +1895,57 @@ class ComfyUIPictureRecipeResponse(BaseModel):
 
     available: bool = False
     reason: Optional[str] = None
+    # With `reason: "pixlstash_nodes"`, the ComfyUI-PixlStash nodes a variant
+    # may not run, as `{node_id, class_type, title, why}` (#1521).
+    pixlstash_nodes: list[dict] = []
+    # Which generator wrote the recipe: "comfyui" for an embedded API graph,
+    # "a1111" for a picture whose recipe is A1111 infotext.
+    source: str = "comfyui"
     summary: Optional[str] = None
+    # True when the graph behind this answer was rebuilt from the picture's
+    # EDITOR chunk rather than read from the API one ComfyUI executed. It is a
+    # faithful rebuild or no rebuild at all, but it is a rebuild, and a reader
+    # deciding whether to trust a settings value is entitled to know.
+    converted_from_editor_graph: bool = False
+    # Why an editor graph could not be rebuilt, one sentence each - empty for
+    # every other answer. Read by the Recipe tab, which prints them under its
+    # refusal to run.
+    conversion_problems: list[str] = []
     positive_prompt: Optional[str] = None
+    negative_prompt: Optional[str] = None
     seed: Optional[int] = None
+    # The seed as text as well as a number: ComfyUI draws seeds up to 2**64-1
+    # and a JavaScript Number loses digits above 2**53, so a client rendering
+    # `seed` prints the wrong one for about half of real seeds.
+    seed_text: Optional[str] = None
+    # The sampler settings (steps, cfg, guidance, sampler, scheduler, denoise,
+    # width, height), or the A1111 fields. Read from the file, like the prompts
+    # beside it.
+    settings: dict = {}
+    # Reconciled onto this read (#1313): everything about how a picture was made
+    # answers here, so the lightbox's Recipe tab needs one call and `/workflow`
+    # is asked only for the graph's bytes.
+    topology_hash: Optional[str] = None
+    model_slots: list[ComfyUIRecipeModelSlot] = []
+    inputs: list[ComfyUIRecipeInput] = []
+    # The workflow this picture's variant is in, None when the hub has not
+    # filed or grouped it. `auto:<core and families digest>` or a manual group's uuid; what it
+    # GROUPS is an owner-only question, asked elsewhere.
+    workflow_id: Optional[str] = None
+    # Which version of that workflow's document made the picture, when it is a
+    # manual workflow and the version is known (`picture.run_workflow_version`):
+    # the one a PixlStash Run submitted, or the one a ComfyUI-made picture's
+    # editor graph equals exactly. Null otherwise. The version may since have
+    # been pruned (a workflow keeps version 1 and the newest 49).
+    workflow_version: Optional[int] = None
     models: list[str] = []
     loras: list[str] = []
     node_count: int = 0
     # Distinct class_type names the graph would execute, sorted.
     node_classes: list[str] = []
+    # How many nodes of each class, so a second sampler pass is visible even
+    # where ``node_classes`` lists its class once (#1579).
+    node_class_counts: dict[str, int] = {}
     # True when the source file entered the vault from outside this instance
     # (upload, watch folder, reference folder) rather than being generated here.
     source_is_imported: bool = False
@@ -510,162 +1953,68 @@ class ComfyUIPictureRecipeResponse(BaseModel):
     # None when it was generated here. Names the route, never the path.
     source_label: Optional[str] = None
     seed_inputs: list[dict] = []
+    # Every LoRA slot a replay can swap, so "Generate variants" can offer the
+    # shelf where the picture's own graph has a loader, and say so where it
+    # does not. Each carries its own ``strengths`` (model / clip).
+    lora_slots: list[dict] = []
+    # Set only when lora_slots is empty: where a loader would be added (#1376).
+    lora_insertion: Optional[ComfyUILoraInsertionResponse] = None
+    # Whether the model forks and which LoRAs feed which pass (#1579); see
+    # `_describe_lora_chain`. None for a recipe with no graph to read.
+    lora_chain: Optional[dict] = None
     preflight: Optional[ComfyUIPreflightResponse] = None
+
+
+def _recipe_extras(server, request, pic_id: int, graph: Optional[dict]) -> dict:
+    """The half of a picture's recipe that is about this LIBRARY, not the file.
+
+    Which shelf row each model is, which pictures a run actually loaded, the
+    seed as text and the topology the picture is filed under. Served from the
+    recipe read rather than from the workflow read (#1313): one read answers
+    "what was this made with", and a caller that wants the graph's bytes asks
+    the other route for them.
+
+    ``graph`` is the API graph, or ``None`` for an A1111 picture - whose models
+    are read from its infotext, so it gets the resolution lock, the seed text
+    and the topology without a graph to reduce.
+    """
+    owner = server.auth.is_unscoped_owner_request(request)
+    pics = server.vault.db.run_immediate_read_task(
+        Picture.find, id=pic_id, select_fields=["id", "workflow_topology_hash"]
+    )
+    topology = getattr(pics[0], "workflow_topology_hash", None) if pics else None
+    return {
+        **describe_recipe(
+            getattr(server, "hub", None),
+            graph,
+            ([], []),
+            # Not read at all for a caller who will not be served it: the rows
+            # name other pictures, and one nobody is going to see is one worth
+            # not fetching.
+            server.vault.db.run_immediate_read_task(
+                resolution_lock_in_session, picture_id=pic_id
+            )
+            if owner
+            else [],
+            owner=owner,
+        ),
+        "topology_hash": topology,
+    }
 
 
 def create_router(server) -> APIRouter:
     router = APIRouter()
 
-    @router.websocket("/ws/comfyui")
-    async def comfyui_progress_proxy(websocket: WebSocket):
-        lease = server.library_coordinator.acquire_read()
-        if lease is None:
-            await websocket.close(code=1013, reason="Library unavailable")
-            return
-        ws_client = None
-        ws_auth = None
-        admission_lease = None
-        try:
-            # The HTTP auth middleware does not cover WebSockets. Require an
-            # authenticated OWNER before accepting - running ComfyUI is an owner
-            # operation. Without this, an unauthenticated (or merely resource-
-            # scoped) client would get a WebSocket proxy to the internal ComfyUI
-            # service via the DEFAULT_COMFYUI_URL fallback. Also reject cross-site
-            # handshakes (CSWSH).
-            if not server.auth.is_websocket_origin_allowed(
-                websocket, server.allow_origins, server.allow_origin_regex
-            ):
-                await websocket.close(code=1008)
-                return
-            ws_auth = server.auth.authenticate_websocket(websocket)
-            if ws_auth is None or not ws_auth.is_owner:
-                await websocket.close(code=1008)
-                return
-            admission_lease = server.auth.register_authenticated_websocket(websocket)
-            if admission_lease is None:
-                await websocket.close(code=1012)
-                return
-            await websocket.accept()
-            # The proxy is library-bound even though its upstream URL is a machine
-            # setting: an in-flight workflow and its eventual picture ids belong to
-            # the old vault. Register it in the same lifecycle set as /ws/updates so
-            # a switch terminates both sides instead of leaving a stale proxy alive.
-            candidate = {
-                "ws": websocket,
-                "loop": asyncio.get_running_loop(),
-                "owner": True,
-                "broadcast": False,
-            }
-            with server._ws_clients_lock:
-                server._ws_clients.append(candidate)
-            ws_client = candidate
-        finally:
-            server.library_coordinator.release_read(lease)
-        if ws_client is None or ws_auth is None:
-            # Admission can be granted before a later step in the leased block
-            # fails. The proxy's ``finally`` never runs on this path, so release
-            # the admission lease here instead.
-            if admission_lease is not None:
-                server.auth.unregister_authenticated_websocket(admission_lease)
-            return
-        try:
-            # comfyui_url is a machine setting, so it lives in the hub.
-            user = server.hub_engine.run_task(
-                lambda session: session.get(User, ws_auth.user_id),
-                priority=DBPriority.IMMEDIATE,
-            )
-
-            comfyui_url = getattr(user, "comfyui_url", None) if user else None
-            comfyui_url = (comfyui_url or DEFAULT_COMFYUI_URL).rstrip("/")
-            client_id = (
-                websocket.query_params.get("clientId")
-                or websocket.query_params.get("client_id")
-                or f"pixlstash-{uuid.uuid4().hex[:8]}"
-            )
-            ws_base = (
-                comfyui_url.replace("https://", "wss://")
-                if comfyui_url.startswith("https://")
-                else comfyui_url.replace("http://", "ws://")
-            )
-            ws_url = f"{ws_base}/ws?clientId={quote(client_id)}"
-
-            async def forward_upstream(upstream):
-                try:
-                    async for message in upstream:
-                        if isinstance(message, (bytes, bytearray)):
-                            await websocket.send_bytes(bytes(message))
-                        else:
-                            await websocket.send_text(message)
-                except asyncio.CancelledError:
-                    raise
-                except WebSocketDisconnect:
-                    logger.debug(
-                        "ComfyUI WebSocket client disconnected while forwarding upstream."
-                    )
-                except Exception as exc:
-                    logger.debug("ComfyUI WebSocket upstream forward failed: %s", exc)
-
-            async def forward_downstream(upstream):
-                try:
-                    while True:
-                        message = await websocket.receive_text()
-                        if message:
-                            await upstream.send(message)
-                except asyncio.CancelledError:
-                    raise
-                except WebSocketDisconnect:
-                    logger.debug("ComfyUI WebSocket client disconnected normally.")
-                except Exception as exc:
-                    logger.debug("ComfyUI WebSocket downstream receive failed: %s", exc)
-
-            try:
-                async with websockets.connect(
-                    ws_url, ping_interval=None, close_timeout=2
-                ) as upstream:
-                    upstream_task = asyncio.create_task(forward_upstream(upstream))
-                    downstream_task = asyncio.create_task(forward_downstream(upstream))
-                    proxy_tasks = {upstream_task, downstream_task}
-                    try:
-                        done, _pending = await asyncio.wait(
-                            proxy_tasks,
-                            return_when=asyncio.FIRST_COMPLETED,
-                        )
-                        for task in done:
-                            exc = task.exception()
-                            if exc:
-                                raise exc
-                    finally:
-                        # The restore barrier cancels this owning handler after
-                        # closing the client socket. Always tear down both proxy
-                        # directions as part of that cancellation; otherwise an
-                        # orphaned upstream iterator could outlive cutover.
-                        for task in proxy_tasks:
-                            if not task.done():
-                                task.cancel()
-                        await asyncio.gather(*proxy_tasks, return_exceptions=True)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.warning("ComfyUI progress proxy failed: %s", exc)
-        finally:
-            with server._ws_clients_lock:
-                if ws_client is not None and ws_client in server._ws_clients:
-                    server._ws_clients.remove(ws_client)
-            try:
-                await websocket.close()
-            except Exception as exc:
-                logger.debug("Failed to close WebSocket cleanly: %s", exc)
-            server.auth.unregister_authenticated_websocket(admission_lease)
-
     @router.get(
         "/comfyui/workflows",
         summary="List ComfyUI workflows",
-        description="Lists discovered built-in and user workflows with placeholder validation metadata.",
+        description="Lists discovered built-in and user workflows. A workflow is valid when it has a save node, and i2i when it has a picture input.",
         response_model=ComfyUIWorkflowListResponse,
     )
-    async def list_comfyui_workflows():
+    def list_comfyui_workflows():
         workflows = []
         seen = set()
+        stored = _stored_input_modes(server)
         for source, folder in _workflow_dirs():
             if not os.path.isdir(folder):
                 continue
@@ -677,22 +2026,34 @@ def create_router(server) -> APIRouter:
                 seen.add(entry)
                 path = os.path.join(folder, entry)
                 try:
-                    payload = _load_workflow_json(path)
-                    valid, missing = _find_placeholder_usage(payload)
-                except Exception as exc:
-                    logger.warning("Failed to read workflow %s: %s", entry, exc)
-                    valid = False
-                    missing = [PLACEHOLDER_IMAGE, PLACEHOLDER_CAPTION]
+                    stat = os.stat(path)
+                except OSError as exc:
+                    logger.warning(
+                        "Failed to stat %s workflow %s: %s", source, path, exc
+                    )
+                    continue
+                # Copied, because the description is the cache's own dict.
+                described = dict(
+                    _describe_workflow(
+                        path,
+                        source,
+                        stat.st_mtime_ns,
+                        stat.st_size,
+                        _converted_mtime_ns(path),
+                    )
+                )
+                picture_inputs = described.pop("picture_inputs", {})
                 workflows.append(
                     {
                         "name": entry,
                         "display_name": os.path.splitext(entry)[0],
-                        "valid": valid,
-                        "missing_placeholders": missing,
                         "source": source,
-                        "workflow_type": "t2i"
-                        if PLACEHOLDER_IMAGE in missing
-                        else "i2i",
+                        **described,
+                        "has_selection_input": _offered_on_selection(
+                            picture_inputs,
+                            stored.get(entry, []),
+                            described["missing_placeholders"],
+                        ),
                     }
                 )
         workflows.sort(key=lambda item: item.get("name", ""))
@@ -702,26 +2063,210 @@ def create_router(server) -> APIRouter:
         "/comfyui/workflows/{workflow_name}",
         include_in_schema=False,
         summary="Delete user workflow",
-        description="Deletes a workflow JSON from the user workflow directory.",
+        description=(
+            "Writes the workflow back to the watched workflows folder, moves "
+            "every inbox file holding it to the system trash, then deletes it "
+            "from the user workflow directory. A stored file that is not a "
+            "readable workflow is moved to the trash as it is."
+        ),
         response_model=ComfyUIWorkflowDeleteResponse,
     )
-    async def delete_comfyui_workflow(workflow_name: str):
-        normalized = _normalize_workflow_name(workflow_name)
-        if not normalized:
-            raise HTTPException(status_code=400, detail="workflow_name is required")
-        workflow_dir = _workflow_user_dir()
+    def delete_comfyui_workflow(workflow_name: str):
+        # Sync on purpose: the trash is file I/O, so this runs on the thread pool.
+        return {
+            "status": "success",
+            "name": trash_user_workflow(getattr(server, "hub", None), workflow_name),
+        }
+
+    @router.get(
+        "/comfyui/pixlstash-node",
+        summary="Whether ComfyUI can open a PixlStash workflow",
+        description=(
+            "Asks the configured ComfyUI's /extensions whether the "
+            "ComfyUI-PixlStash node's open_workflow.js is loaded, the script "
+            "that reads ?pixlstash_workflow=<key>. can_open_workflows is null "
+            "when ComfyUI cannot be asked. opens_runs says the same of "
+            "open_run.js, which reads the Run popup's ?pixlstash_run=<opening>."
+        ),
+        response_model=ComfyUIPixlstashNodeResponse,
+    )
+    def get_comfyui_pixlstash_node(request: Request):
+        comfyui_url = _comfyui_url(server.auth.get_user_for_request(request))
+        scripts = comfyui_pixlstash_scripts(comfyui_url)
+        if scripts is None:
+            return {"can_open_workflows": None, "saves_back": None, "opens_runs": None}
+        return {
+            "can_open_workflows": PACK_OPENS_WORKFLOWS in scripts,
+            "saves_back": PACK_SAVES_BACK in scripts,
+            "opens_runs": PACK_OPENS_RUNS in scripts,
+        }
+
+    @router.get(
+        "/comfyui/link",
+        summary="Whether ComfyUI is linked to PixlStash",
+        response_model=ComfyUILinkStatus,
+    )
+    def get_comfyui_link(request: Request):
+        server.auth.ensure_secure_when_required(request)
+        return comfyui_link_service.link_status(server)
+
+    @router.post(
+        "/comfyui/link",
+        summary="Link the saved ComfyUI with a ComfyUI-only token",
+        description=(
+            "For a ComfyUI on this computer or the local network, from a local "
+            "owner: mints a token that reaches only the routes the "
+            "ComfyUI-PixlStash nodes call and works only from ComfyUI's "
+            "address (bound by the check), and writes it, with the PixlStash URL "
+            "ComfyUI should call (and PixlStash's certificate over HTTPS), into "
+            "ComfyUI's settings for the ComfyUI-PixlStash nodes. Then checks "
+            "that ComfyUI reaches PixlStash with it. Always 200: `steps` says "
+            "how far it got (`reach`, `nodes`, `link`, `check`), and `reason` "
+            "why a step needs the person. A ComfyUI on the local network needs "
+            "remote access on with HTTPS. `exposure` says whether other "
+            "computers can reach that ComfyUI. The token covers the open "
+            "library; `PUT /users/me/token/{token_id}/libraries` widens it."
+        ),
+        response_model=ComfyUILinkResponse,
+    )
+    def link_comfyui(request: Request):
+        server.auth.ensure_secure_when_required(request)
+        user = server.auth.get_user_for_request(request)
+        saved = getattr(user, "comfyui_url", None) if user else None
+        reply = comfyui_link_service.link(server, request, saved)
+        reply["can_install_pack"] = _can_install_pack(saved)
+        return reply
+
+    def _can_install_pack(saved: Optional[str]) -> bool:
+        if not saved or comfyui_pack_service.bundled_pack() is None:
+            return False
         try:
-            path = resolve_path_within(workflow_dir, normalized)
+            where, _pinned = comfyui_link_service.locate(saved)
         except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid workflow name")
-        if not os.path.isfile(path):
-            raise HTTPException(status_code=404, detail="Workflow not found in user")
+            return False
+        return where == "this_computer"
+
+    @router.post(
+        "/comfyui/pack/install",
+        summary="Install the ComfyUI-PixlStash nodes PixlStash ships",
+        description=(
+            "Copies the nodes this PixlStash carries (the version it is tested "
+            "with) into the saved ComfyUI's custom_nodes folder, moving any "
+            "older copy to the trash, then asks ComfyUI-Manager to restart "
+            "ComfyUI. Only for a ComfyUI on this computer. `restart` is "
+            "`requested`, or `manual` with `detail` saying why. 409 when it "
+            "cannot install here."
+        ),
+        response_model=ComfyUIPackInstallResponse,
+    )
+    def install_comfyui_pack(request: Request):
+        user = server.auth.get_user_for_request(request)
+        saved = getattr(user, "comfyui_url", None) if user else None
         try:
-            os.remove(path)
-        except OSError as exc:
-            logger.warning("Failed to delete workflow %s: %s", normalized, exc)
-            raise HTTPException(status_code=500, detail="Failed to delete workflow")
-        return {"status": "success", "name": normalized}
+            return comfyui_pack_service.install(saved)
+        except comfyui_pack_service.PackInstallRefused as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @router.delete(
+        "/comfyui/link",
+        summary="Unlink ComfyUI and revoke its token",
+        response_model=ComfyUILinkStatus,
+    )
+    def unlink_comfyui(request: Request):
+        server.auth.ensure_secure_when_required(request)
+        return comfyui_link_service.unlink(server, request)
+
+    @router.post(
+        "/comfyui/probe",
+        summary="Check whether ComfyUI answers at an address",
+        description=(
+            "Asks `GET /system_stats` at the address from this server, which is "
+            "where runs are submitted from. 200 whether or not it answered: "
+            "`reachable` says which and `detail` why not. `url` is the address "
+            "normalised to the form `comfyui_url` is saved in. 400 for an "
+            "address that is not http(s) with a host."
+        ),
+        response_model=ComfyUIProbeResponse,
+    )
+    def probe_comfyui_address(
+        request: Request, payload: ComfyUIProbeRequest = Body(...)
+    ):
+        server.auth.ensure_secure_when_required(request)
+        try:
+            return probe_comfyui(payload.url)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.post(
+        "/comfyui/workflows/{workflow_name}/card",
+        summary="Make a built-in workflow a manual workflow",
+        description=(
+            "Stores a workflow PixlStash ships as a manual workflow "
+            "and returns its id so the Run popup can open on it. A built-in "
+            "becomes one only when something asks: Edit with ComfyUI asks for "
+            "the built-in image edit workflow. Idempotent: a file already made "
+            "a workflow answers that workflow, while it lives. A user file "
+            "is not a built-in (404): data step 7 already made it a workflow."
+        ),
+        response_model=ComfyUIWorkflowCardResponse,
+        responses={
+            404: {"description": "No stored workflow has this name."},
+            409: {"description": "The file is not a workflow PixlStash can store."},
+            503: {"description": "No hub is attached."},
+        },
+    )
+    def card_for_comfyui_workflow(request: Request, workflow_name: str):
+        hub = require_hub(server, "The workflow library is not open.")
+        name = _normalize_workflow_name(workflow_name)
+        path = _builtin_path(name)
+        if path is None:
+            # Built-ins only: a user file is a manual workflow already (data
+            # step 7), and one its owner deleted must not come back as one.
+            raise HTTPException(
+                status_code=404, detail="No built-in workflow has this name."
+            )
+        with workflow_inbox.INBOX_LOCK:
+            workflow_id = workflow_origin.stored_at(
+                hub, workflow_origin.BUILTIN_ORIGIN, name
+            )
+            if workflow_id is None:
+                try:
+                    # The file as stored, not its runnable reading: the
+                    # conversion rides along as the row's API document.
+                    stored = _load_workflow_json(path)
+                    converted = converted_graph(path, stored)
+                    # Its origin row in the same transaction, with the content
+                    # hash, so the inbox dedupes against it too.
+                    workflow_id = store_manual_workflow(
+                        hub,
+                        _stem(name),
+                        stored,
+                        "builtin",
+                        api_document=converted,
+                        record=(
+                            workflow_origin.BUILTIN_ORIGIN,
+                            name,
+                            None,
+                            workflow_inbox.content_hash(stored),
+                        ),
+                    )
+                except (NotAWorkflowError, RecursionError, ValueError) as exc:
+                    logger.warning(
+                        "Stored workflow %s cannot be a manual workflow: %s",
+                        name,
+                        exc,
+                    )
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"PixlStash could not store the workflow {name}.",
+                    ) from exc
+                announce_changed_workflows(
+                    server,
+                    [workflow_id],
+                    "imported",
+                    origin_client_id=getattr(request.state, "origin_client_id", None),
+                )
+        return {"name": name, "workflow_id": workflow_id}
 
     @router.post(
         "/comfyui/abort",
@@ -732,291 +2277,24 @@ def create_router(server) -> APIRouter:
     )
     async def abort_comfyui(request: Request):
         user = server.auth.get_user_for_request(request)
-        comfyui_url = getattr(user, "comfyui_url", None) if user else None
-        comfyui_url = (comfyui_url or DEFAULT_COMFYUI_URL).rstrip("/")
+        comfyui_url = _comfyui_url(user)
         result = _comfyui_abort(comfyui_url)
         return {"status": "success", **result}
-
-    @router.post(
-        "/comfyui/run_i2i",
-        summary="Run ComfyUI image-to-image",
-        description=(
-            "Submits i2i prompts for one or more picture ids and imports generated "
-            "outputs back into PixlStash. Outputs are placed in each source "
-            "picture's stack by default; pass stack=false to skip stacking while "
-            "still copying the source's character/set/project associations. Seeds "
-            "randomize unless seed_mode='fixed' is sent with an integer seed "
-            "(0-4294967295), in which case every sampler node is pinned to it."
-        ),
-        response_model=ComfyUIRunResponse,
-    )
-    async def run_comfyui_i2i(request: Request, payload: dict = Body(...)):
-        workflow_name = _normalize_workflow_name(payload.get("workflow_name"))
-        if not workflow_name:
-            raise HTTPException(status_code=400, detail="workflow_name is required")
-
-        raw_ids = payload.get("picture_ids")
-        if raw_ids is None:
-            raw_ids = [payload.get("picture_id")]
-        if not isinstance(raw_ids, list) or not raw_ids:
-            raise HTTPException(status_code=400, detail="picture_ids must be a list")
-        try:
-            picture_ids = [int(pid) for pid in raw_ids if pid is not None]
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="picture_ids must be integers")
-        if not picture_ids:
-            raise HTTPException(status_code=400, detail="picture_ids must be integers")
-
-        caption = payload.get("caption") or ""
-        if not isinstance(caption, str):
-            caption = str(caption)
-        client_id = payload.get("client_id") or payload.get("clientId") or None
-        if client_id is not None:
-            client_id = str(client_id)
-        # Optional physical stacking of derived outputs. Default true preserves
-        # the historical behaviour; when false, outputs skip the stack entirely
-        # but still inherit the source's character/set/project associations.
-        should_stack = bool(payload.get("stack", True))
-        # Remix (v1.9) submits a seed from the "Generate from this" modal; the
-        # historical callers send neither key and keep randomizing.
-        fixed_seed = _resolve_fixed_seed(payload)
-
-        workflow_path, workflow_source = _resolve_workflow_path(workflow_name)
-        if not workflow_path:
-            raise HTTPException(status_code=404, detail="Workflow not found")
-
-        workflow_payload = _load_workflow_json(workflow_path)
-        valid, missing = _find_placeholder_usage(workflow_payload)
-        if not valid and PLACEHOLDER_IMAGE in missing:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Workflow missing placeholders: {', '.join(missing)}",
-            )
-        output_node_ids = _extract_output_node_ids(workflow_payload, payload)
-
-        user = server.auth.get_user_for_request(request)
-        comfyui_url = getattr(user, "comfyui_url", None) if user else None
-        comfyui_url = (comfyui_url or DEFAULT_COMFYUI_URL).rstrip("/")
-
-        def fetch_pictures(session, ids: list[int]):
-            return session.exec(select(Picture).where(Picture.id.in_(ids))).all()
-
-        pics = server.vault.db.run_task(fetch_pictures, picture_ids)
-        pic_map = {pic.id: pic for pic in pics}
-
-        prompts = []
-        for pic_id in picture_ids:
-            pic = pic_map.get(pic_id)
-            if not pic or not getattr(pic, "file_path", None):
-                raise HTTPException(status_code=404, detail="Picture not found")
-            resolved_path = ImageUtils.resolve_picture_path(
-                server.vault.image_root, pic.file_path
-            )
-            if not resolved_path or not os.path.isfile(resolved_path):
-                raise HTTPException(status_code=404, detail="Picture file missing")
-
-            uploaded_name = _upload_image_to_comfyui(comfyui_url, resolved_path)
-            replacements = {
-                PLACEHOLDER_IMAGE: uploaded_name,
-                PLACEHOLDER_CAPTION: caption,
-            }
-            workflow_instance = _replace_placeholders(
-                deepcopy(workflow_payload), replacements
-            )
-            if fixed_seed is not None:
-                _apply_fixed_seed(workflow_instance, fixed_seed)
-            else:
-                _randomize_seeds(workflow_instance)
-            # Only create/join a stack and tag the SaveImage filename when
-            # stacking is requested. When disabled, stack_id stays None so the
-            # worker places nothing in a stack; set/project associations and the
-            # source_picture_id marker are propagated either way.
-            stack_id: int | None = None
-            if should_stack:
-                stack_id = server.vault.db.run_task(
-                    get_or_create_stack_for_picture,
-                    pic_id,
-                )
-                prefix_seed = ""
-                for node in workflow_instance.values():
-                    if not isinstance(node, dict):
-                        continue
-                    if node.get("class_type") != "SaveImage":
-                        continue
-                    inputs = node.get("inputs") or {}
-                    prefix_seed = str(inputs.get("filename_prefix") or "")
-                    break
-                if stack_id:
-                    prefix_value = build_stack_filename_prefix(
-                        prefix_seed, stack_id, pic_id
-                    )
-                    if not _apply_filename_prefix(
-                        workflow_instance, prefix_value
-                    ) and not graph_has_pixlstash_saver(workflow_instance):
-                        logger.warning(
-                            "ComfyUI workflow has no SaveImage node to tag for stack %s",
-                            stack_id,
-                        )
-            response_payload = _submit_comfyui_prompt(
-                comfyui_url,
-                workflow_instance,
-                client_id,
-            )
-            prompt_id = response_payload.get("prompt_id") or response_payload.get("id")
-            if prompt_id:
-                origin_lease = request.state.library_lease
-                worker = threading.Thread(
-                    target=_process_comfyui_outputs,
-                    args=(
-                        server,
-                        comfyui_url,
-                        str(prompt_id),
-                        output_node_ids,
-                        stack_id,
-                        pic_id,
-                    ),
-                    kwargs={
-                        "origin_generation": origin_lease.generation,
-                        "origin_library_uuid": origin_lease.library_uuid,
-                    },
-                    daemon=True,
-                )
-                worker.start()
-            prompts.append(
-                {
-                    "picture_id": pic_id,
-                    "prompt_id": prompt_id,
-                    "workflow": workflow_name,
-                }
-            )
-
-        return {"status": "success", "prompts": prompts}
-
-    @router.post(
-        "/comfyui/run_t2i",
-        summary="Run ComfyUI text-to-image",
-        description="Submits a t2i prompt using only a caption and imports generated outputs back into PixlStash.",
-        response_model=ComfyUIRunResponse,
-    )
-    async def run_comfyui_t2i(request: Request, payload: dict = Body(...)):
-        workflow_name = _normalize_workflow_name(payload.get("workflow_name"))
-        if not workflow_name:
-            raise HTTPException(status_code=400, detail="workflow_name is required")
-
-        caption = payload.get("caption") or ""
-        if not isinstance(caption, str):
-            caption = str(caption)
-        client_id = payload.get("client_id") or payload.get("clientId") or None
-        if client_id is not None:
-            client_id = str(client_id)
-        raw_source_id = payload.get("source_picture_id")
-        source_picture_id: int | None = (
-            int(raw_source_id) if raw_source_id is not None else None
-        )
-        raw_set_id = payload.get("set_id")
-        raw_project_id = payload.get("project_id")
-        raw_character_id = payload.get("character_id")
-        view_context: dict | None = None
-        ctx: dict = {}
-        if raw_set_id is not None:
-            try:
-                ctx["set_id"] = int(raw_set_id)
-            except (TypeError, ValueError):
-                # Ignore invalid set_id values but log for debugging.
-                logger.debug(
-                    "Ignoring invalid set_id value in run_comfyui_t2i: %r", raw_set_id
-                )
-        if raw_project_id is not None:
-            try:
-                ctx["project_id"] = int(raw_project_id)
-            except (TypeError, ValueError):
-                # Ignore invalid project_id values but log for debugging.
-                logger.debug(
-                    "Ignoring invalid project_id value in run_comfyui_t2i: %r",
-                    raw_project_id,
-                )
-        if raw_character_id is not None:
-            try:
-                ctx["character_id"] = int(raw_character_id)
-            except (TypeError, ValueError):
-                # Ignore invalid character_id values but log for debugging.
-                logger.debug(
-                    "Ignoring invalid character_id value in run_comfyui_t2i: %r",
-                    raw_character_id,
-                )
-        if ctx:
-            view_context = ctx
-
-        workflow_path, _ = _resolve_workflow_path(workflow_name)
-        if not workflow_path:
-            raise HTTPException(status_code=404, detail="Workflow not found")
-
-        workflow_payload = _load_workflow_json(workflow_path)
-        if PLACEHOLDER_IMAGE in json.dumps(workflow_payload, ensure_ascii=False):
-            raise HTTPException(
-                status_code=400,
-                detail="This workflow requires an image input and cannot be used for text-to-image generation.",
-            )
-
-        output_node_ids = _extract_output_node_ids(workflow_payload, payload)
-
-        user = server.auth.get_user_for_request(request)
-        comfyui_url = getattr(user, "comfyui_url", None) if user else None
-        comfyui_url = (comfyui_url or DEFAULT_COMFYUI_URL).rstrip("/")
-
-        fixed_seed = _resolve_fixed_seed(payload)
-
-        replacements = {PLACEHOLDER_CAPTION: caption}
-        workflow_instance = _replace_placeholders(
-            deepcopy(workflow_payload), replacements
-        )
-        if fixed_seed is not None:
-            _apply_fixed_seed(workflow_instance, fixed_seed)
-        else:
-            _randomize_seeds(workflow_instance)
-
-        response_payload = _submit_comfyui_prompt(
-            comfyui_url, workflow_instance, client_id
-        )
-        prompt_id = response_payload.get("prompt_id") or response_payload.get("id")
-        if prompt_id:
-            origin_lease = request.state.library_lease
-            worker = threading.Thread(
-                target=_process_comfyui_outputs,
-                args=(
-                    server,
-                    comfyui_url,
-                    str(prompt_id),
-                    output_node_ids,
-                    None,
-                    source_picture_id,
-                ),
-                kwargs={
-                    "view_context": view_context,
-                    "origin_generation": origin_lease.generation,
-                    "origin_library_uuid": origin_lease.library_uuid,
-                },
-                daemon=True,
-            )
-            worker.start()
-
-        prompts = []
-        if prompt_id:
-            prompts.append({"prompt_id": prompt_id})
-        return {
-            "status": "success",
-            "prompts": prompts,
-            "workflow": workflow_name,
-        }
 
     @router.post(
         "/comfyui/workflows/import",
         include_in_schema=False,
         summary="Import ComfyUI workflow",
-        description="Saves a workflow JSON into the user workflow directory, optionally overwriting an existing file.",
+        description=(
+            "Stores a workflow JSON, UI or API format, as a new manual "
+            "workflow named `name` (a document still carrying placeholder "
+            "tokens is stored with them migrated to bindings). Always a new "
+            "workflow: identical copies are allowed, and no file is written. "
+            "A document not shaped like a ComfyUI workflow is refused with 400."
+        ),
         response_model=ComfyUIWorkflowImportResponse,
     )
-    async def import_comfyui_workflow(payload: dict = Body(...)):
+    def import_comfyui_workflow(request: Request, payload: dict = Body(...)):
         name = _normalize_workflow_name(payload.get("name"))
         if not name:
             raise HTTPException(status_code=400, detail="name is required")
@@ -1025,30 +2303,171 @@ def create_router(server) -> APIRouter:
             raise HTTPException(
                 status_code=400, detail="workflow must be a JSON object"
             )
-        overwrite = bool(payload.get("overwrite"))
-
-        workflow_dir = _workflow_user_dir()
-        os.makedirs(workflow_dir, exist_ok=True)
+        hub = require_hub(server, "The workflow library is not open.")
         try:
-            path = resolve_path_within(workflow_dir, name)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid workflow name")
-        if os.path.exists(path) and not overwrite:
-            raise HTTPException(status_code=409, detail="Workflow already exists")
-
-        _save_workflow_json(path, workflow)
+            workflow_id = store_manual_workflow(hub, _stem(name), workflow, "import")
+        except WorkflowFileTooLarge as exc:
+            logger.warning("Refused importing %s: %s", name, exc)
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        except NotAWorkflowError as exc:
+            logger.warning("Refused importing %s: %s", name, exc)
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RecursionError as exc:
+            logger.warning("Refused a workflow import that nests too deeply: %s", exc)
+            raise HTTPException(
+                status_code=400, detail="Workflow JSON nests too deeply"
+            ) from exc
+        announce_changed_workflows(
+            server,
+            [workflow_id],
+            "imported",
+            origin_client_id=getattr(request.state, "origin_client_id", None),
+        )
         return {
             "status": "success",
+            "name": _stem(name),
+            "matched": False,
+            "workflow_id": workflow_id,
+        }
+
+    @router.post(
+        "/comfyui/workflows/convert",
+        summary="Store ComfyUI's API conversion of an editor-format workflow",
+        description=(
+            "Takes what ComfyUI's own `graphToPrompt` returns for the workflow "
+            "open on its canvas - `workflow` (editor format) and `output` (API "
+            "format) - and stores the API graph on every manual workflow whose "
+            "document is that editor workflow. A workflow not stored yet is "
+            "stored first, as an import would. Such a workflow then runs and "
+            "takes parameters from the API graph. Sent by the "
+            "ComfyUI-PixlStash node's *Export to PixlStash* command, one "
+            "workflow at a time. It is never a version of another workflow. "
+            "A LoRA attached to a person is no part of a workflow: it is "
+            "taken out of the graph that is stored, the loader for picking "
+            "people comes off, and `left_out` names each one and whose it is."
+        ),
+        response_model=ComfyUIWorkflowConvertResponse,
+        responses={
+            400: {"description": "Not an editor workflow and its API graph."},
+            503: {"description": "No hub is attached."},
+        },
+    )
+    def convert_comfyui_workflow(request: Request, payload: dict = Body(...)):
+        workflow = payload.get("workflow")
+        output = payload.get("output")
+        if not isinstance(workflow, dict) or api_graph(workflow) is not None:
+            raise HTTPException(
+                status_code=400, detail="workflow must be an editor-format workflow"
+            )
+        # The envelope an embedded prompt chunk comes in is unwrapped, so the
+        # stored graph never wraps a second one.
+        if isinstance(output, dict) and isinstance(output.get("prompt"), dict):
+            output = output["prompt"]
+        try:
+            check_comfy_workflow(output)
+            check_comfy_workflow(workflow)
+        except NotAWorkflowError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if api_graph(output) is None:
+            raise HTTPException(
+                status_code=400, detail="output must be an API-format graph"
+            )
+        hub = require_hub(server, "The workflow library is not open.")
+        name = _stem(payload.get("name") or "workflow")
+        # Rule 4 of #1846, as for a graph saved over a workflow: whose LoRAs
+        # the graph loads is said, and the loader for picking people comes
+        # off where nobody is left in it.
+        try:
+            # Before anything walks it: the cap is what bounds the work.
+            _within_the_cap(output)
+            # Rule 4 of #1846, as for a graph saved over a workflow: a
+            # person's LoRA is taken out of the graph that is stored, row by
+            # row, and the loader for picking people comes off with nobody
+            # left in it. Best effort where the save refuses: one that cannot
+            # be taken out (ComfyUI not answering for the loader's wiring) is
+            # stored as sent, named like the rest, and left out by every read.
+            left_out = people_loras_in(hub, server.vault, api_graph(output))
+            output = deepcopy(output)
+            if left_out:
+                user = server.auth.get_user_for_request(request)
+                object_info = _read_object_info(_comfyui_url(user), cached=True)[0]
+                _taken, kept_in = take_out_person_loras(
+                    api_graph(output),
+                    [(entry["node_id"], entry["field"]) for entry in left_out],
+                    object_info,
+                )
+                for entry in kept_in:
+                    logger.info(
+                        "An exported workflow keeps a person's LoRA in node %s "
+                        "of its stored graph; reads leave it out: %s",
+                        entry.get("node_id"),
+                        entry.get("message"),
+                    )
+            # The editor document goes without the picks too, including
+            # a bypassed or muted node that is absent from the API graph.
+            people = set(lora_owners(server.vault))
+            by_name = adapter_digest_index(hub)[0] if people else {}
+            workflow = without_peoples_picks(
+                workflow,
+                people,
+                filenames={
+                    name for name, digests in by_name.items() if digests & people
+                },
+            )
+            take_out_empty_adapter_loaders(api_graph(output))
+            migrated, _ = workflow_bindings.migrate_placeholders(workflow)
+            canonical = workflow_bindings.canonical(migrated)
+            matched = manual_documents_holding(hub, canonical)
+            if matched:
+                # Re-checked inside the write: a save may have made a new
+                # version between the match and here.
+                matched = (
+                    set_manual_api_document(hub, matched, output, canonical) or matched
+                )
+                workflow_id = matched[0]
+                # Deleted since it matched: keep the derived name.
+                found = find_workflow(hub, workflow_id)
+                name = (found.name if found else None) or name
+            else:
+                workflow_id = store_manual_workflow(
+                    hub, name, workflow, "import", api_document=output
+                )
+        except WorkflowFileTooLarge as exc:
+            logger.warning("Refused a conversion of %s: %s", name, exc)
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        except RecursionError as exc:
+            logger.warning("Refused a conversion that nests too deeply: %s", exc)
+            raise HTTPException(
+                status_code=400, detail="Workflow JSON nests too deeply"
+            ) from exc
+        logger.info("Stored ComfyUI's conversion of %s on %s.", name, workflow_id)
+        announce_changed_workflows(
+            server,
+            matched or [workflow_id],
+            "imported",
+            origin_client_id=getattr(request.state, "origin_client_id", None),
+        )
+        return {
             "name": name,
-            "workflow_dir": workflow_dir,
+            "matched": bool(matched),
+            "workflow_id": workflow_id,
+            "left_out": left_out,
         }
 
     @router.get(
         "/comfyui/pictures/{picture_id}/workflow",
-        summary="Get ComfyUI workflow for a picture",
+        summary="Get the displayable ComfyUI workflow for a picture",
         description=(
-            "Extracts and returns the ComfyUI workflow embedded in a picture's "
-            "file metadata, if present."
+            "The graph a picture carries, for SHOWING: the UI `workflow` chunk "
+            "when the file has one, which is the format the ComfyUI editor "
+            "opens and the only one worth copying back into it. Falls back to "
+            "the `prompt` chunk for a file that carries nothing else (#628).\n\n"
+            "**This is not the recipe read.** What a picture was made with - "
+            "prompts, models with their strengths, settings, seed, the shelf "
+            "rows and the resolution lock - is "
+            "`GET /comfyui/pictures/{picture_id}/recipe`, which reads the graph "
+            "that actually executed and answers for A1111 pictures too. This "
+            "route exists for the bytes."
         ),
         response_model=ComfyUIPictureWorkflowResponse,
     )
@@ -1091,7 +2510,6 @@ def create_router(server) -> APIRouter:
                 status_code=404,
                 detail="No ComfyUI workflow found in picture metadata",
             )
-
         return workflow_info
 
     @router.get(
@@ -1101,39 +2519,164 @@ def create_router(server) -> APIRouter:
             "Reports whether a picture carries a replayable recipe - the "
             "embedded API-format `prompt` chunk, i.e. the graph the ComfyUI "
             "server actually executed - and pre-flights it against the target "
-            "ComfyUI's /object_info. The UI `workflow` chunk is deliberately "
-            "NOT considered: it is not submittable and is never converted. "
+            "ComfyUI's /object_info. A picture carrying only the editor "
+            "`workflow` chunk is converted to an API prompt against that same "
+            "/object_info and answers exactly like one that carried the API "
+            "chunk, with `converted_from_editor_graph: true`; a graph that "
+            "cannot be rebuilt exactly is NOT approximated, and answers "
+            '`available: false` with `reason: "editor_graph"`, its prompt and '
+            "models still filled in and `conversion_problems` naming what "
+            "could not be read. That conversion needs /object_info, so it is "
+            "the one case where `preflight=false` still reads ComfyUI (from a "
+            "one-minute cache). "
+            "A picture with no graph but with A1111 infotext answers from that "
+            'instead, as `source: "a1111"` with `available: false`: its recipe '
+            "is readable but not submittable to ComfyUI. "
             '`available: false` with `reason: "no_prompt_chunk"` is the normal '
-            "answer for imported photos, A1111 output and stripped files, not an "
+            "answer for imported photos and stripped files, not an "
             "error. A `preflight` with `checked: false` means ComfyUI could not "
             "be reached, not that the recipe passed."
         ),
         response_model=ComfyUIPictureRecipeResponse,
     )
-    def get_picture_comfyui_recipe(request: Request, picture_id: str):
+    def get_picture_comfyui_recipe(
+        request: Request,
+        picture_id: str,
+        preflight: bool = Query(
+            True,
+            description=(
+                "False skips the ComfyUI `/object_info` read, so the answer "
+                "costs one file read and no network. The lightbox's Recipe tab "
+                "uses it: it re-reads on every filmstrip step, and a round-trip "
+                "per arrow-key is not affordable. `preflight.checked` is then "
+                "false, which already means the question was not asked - never "
+                "that the recipe passed."
+            ),
+        ),
+    ):
         try:
             pic_id = int(picture_id)
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="Invalid picture id")
 
-        prompt_graph = _load_embedded_api_prompt(server, pic_id)
-        if not prompt_graph:
-            return {"available": False, "reason": "no_prompt_chunk"}
-
+        embedded_metadata = _read_embedded_metadata(server, pic_id)
+        prompt_graph = find_comfy_api_prompt(embedded_metadata)
         user = server.auth.get_user_for_request(request)
-        comfyui_url = getattr(user, "comfyui_url", None) if user else None
-        comfyui_url = (comfyui_url or DEFAULT_COMFYUI_URL).rstrip("/")
+        comfyui_url = _comfyui_url(user)
+        object_info: dict | None = None
+        object_info_error: str | None = None
+        editor_graph = None
+        conversion_problems: list[str] = []
+        from_editor_graph = False
+        if not prompt_graph:
+            # No API chunk is not the end of the question. The editor graph is
+            # the same workflow in the frontend's own serialisation, and
+            # ComfyUI's /object_info says how to read it - so it is converted
+            # here rather than declared unreadable.
+            #
+            # **This is the one case `preflight=false` still costs a round
+            # trip**, because without the map there is nothing to report at
+            # all, not merely nothing to judge. The map is reused for a minute
+            # so walking the filmstrip does not re-fetch several megabytes per
+            # arrow key.
+            editor_graph = find_comfy_workflow(embedded_metadata)
+            if is_ui_graph(editor_graph):
+                object_info, object_info_error = _read_object_info(
+                    comfyui_url, cached=True
+                )
+                prompt_graph, conversion_problems = convert_ui_graph_to_api(
+                    editor_graph, object_info
+                )
+                from_editor_graph = prompt_graph is not None
+        if not prompt_graph:
+            if is_ui_graph(editor_graph):
+                source_is_imported, source_label = _picture_source_origin(
+                    server, pic_id
+                )
+                return {
+                    **_editor_graph_recipe_payload(editor_graph, conversion_problems),
+                    "source_is_imported": source_is_imported,
+                    "source_label": source_label,
+                    **_picture_workflow(server, pic_id),
+                    **_recipe_extras(server, request, pic_id, None),
+                    # After the extras on purpose: it replaces the stored
+                    # column, which describes a different reading of this file.
+                    "topology_hash": _editor_graph_topology(None, editor_graph),
+                }
+            # An A1111 picture carries its recipe as text, and the same fields
+            # can be read off it.
+            a1111 = reduce_a1111(embedded_metadata)
+            if a1111 is None:
+                return {"available": False, "reason": "no_prompt_chunk"}
+            source_is_imported, source_label = _picture_source_origin(server, pic_id)
+            return {
+                **_a1111_recipe_payload(a1111),
+                "source_is_imported": source_is_imported,
+                "source_label": source_label,
+                **_picture_workflow(server, pic_id),
+                **_recipe_extras(server, request, pic_id, None),
+            }
 
         graph = sanitize_prompt_graph(prompt_graph)
         gen_info = extract_generation_info(graph)
+        extras = extract_recipe_extras(graph)
         stats = summarize_comfy_workflow(graph)
-        preflight, seed_targets = _inspect_recipe(comfyui_url, graph)
+        if not from_editor_graph:
+            object_info, object_info_error = (
+                _read_object_info(comfyui_url)
+                if preflight
+                else (None, "the pre-flight was not asked for")
+            )
+        # **A map read to REBUILD a graph does not become a pre-flight.** The
+        # editor branch above reads `/object_info` whether or not the flag asked
+        # for it, and from a cache up to a minute old; judging the graph against
+        # that would answer `checked: true` on a request that asked for no check
+        # and hand the reader a verdict about a ComfyUI that may have changed.
+        # `preflight=false` keeps meaning "the question was not asked".
+        judged_against = object_info if preflight else None
+        judged_error = (
+            object_info_error if preflight else "the pre-flight was not asked for"
+        )
+        preflight, seed_targets = _inspect_graph(graph, judged_against, judged_error)
         source_is_imported, source_label = _picture_source_origin(server, pic_id)
-        # A graph that calls back into PixlStash cannot be replayed as "a
-        # variant of this picture" - see run_recipe's refusal for why. Reported
+        # A ComfyUI-PixlStash node that may not run in a variant of this
+        # picture (#1521): the picture loader would not read this picture, a
+        # checkpoint loader names another hub's shelf row, and a loader's
+        # project, set or character must be one this library has. A picture
+        # or checkpoint id that says it is this library's or this shelf's is
+        # one (#1912): what a graph opened in ComfyUI from here holds. The run
+        # swaps a saver for SaveImage, so it is judged as swapped. Reported
         # here so the dialog can say so before the user commits to a run, and
         # offer the workflow to paste into ComfyUI instead.
-        has_pixlstash_nodes = graph_has_pixlstash_nodes(graph)
+        #
+        # Only the unscoped owner has the ids looked up: this route serves
+        # share links, and an answer that depends on whether project N exists
+        # would tell one about projects outside its scope (#708's class). A
+        # scoped reader is told every id is unchecked, and cannot run it anyway.
+        as_run = json.loads(json.dumps(graph))
+        swap_pixlstash_savers(as_run)
+        owner = server.auth.is_unscoped_owner_request(request)
+        refused_nodes = pixlstash_node_refusals(
+            as_run,
+            library_ids=(
+                read_library_ids(server.vault, library_ids_named(as_run))
+                if owner
+                else {}
+            ),
+            library_uuid=getattr(server.vault, "library_uuid", None) if owner else None,
+            # Made the first time it is read, so only where a loader asks.
+            shelf_uuid=(
+                shelf_uuid(server.hub)
+                if owner
+                and any(
+                    isinstance(node, dict)
+                    and node.get("class_type") == PIXLSTASH_CHECKPOINT_LOADER
+                    for node in as_run.values()
+                )
+                else None
+            ),
+        )
+        has_pixlstash_nodes = bool(refused_nodes)
         return {
             # "Same workflow, new seed" is only a meaningful offer when there
             # IS a seed to change. Without one the re-run is byte-identical,
@@ -1145,9 +2688,43 @@ def create_router(server) -> APIRouter:
                 if has_pixlstash_nodes
                 else (None if seed_targets else "no_seed_input")
             ),
-            "summary": f"API Workflow · {stats['node_count']} nodes",
+            # Which nodes, and why, in the run pre-flight's shape.
+            "pixlstash_nodes": refused_nodes,
+            "source": "comfyui",
+            # Named for the chunk it came out of, because the two are not
+            # equally trustworthy: the API chunk is what ComfyUI executed, the
+            # editor one is what PixlStash rebuilt from the editor's view.
+            "summary": (
+                f"Editor Workflow · {stats['node_count']} nodes"
+                if from_editor_graph
+                else f"API Workflow · {stats['node_count']} nodes"
+            ),
+            "converted_from_editor_graph": from_editor_graph,
             "positive_prompt": gen_info["positive_prompt"],
+            "negative_prompt": extras["negative_prompt"],
+            "settings": extras["settings"],
+            # The workflow this picture's variant is in, in a form the
+            # owner-only workflow routes can be asked about: `auto:<digest>`
+            # or a manual group's uuid. No filename, no prompt, no pixels.
+            # The digest is of this graph's own shape and its base models'
+            # families, which this same token can already read whole from the
+            # `/workflow` sibling; a manual id is a random uuid and says only
+            # that the owner grouped it with others.
+            **_picture_workflow(server, pic_id),
+            **_recipe_extras(server, request, pic_id, graph),
+            # A rebuilt graph is keyed from the rebuild, not from the column
+            # the extraction pass wrote about a chunk this picture does not
+            # have. Placed after the extras so it replaces theirs.
+            **(
+                {"topology_hash": _editor_graph_topology(graph, editor_graph)}
+                if from_editor_graph
+                else {}
+            ),
             "seed": gen_info["seed"],
+            # The seed as text as well as a number: ComfyUI draws seeds up to
+            # 2**64-1 and a JavaScript Number loses digits above 2**53, so a
+            # client rendering `seed` prints the wrong one about half the time.
+            "seed_text": (None if gen_info["seed"] is None else str(gen_info["seed"])),
             "models": gen_info["models"],
             "loras": gen_info["loras"],
             "node_count": stats["node_count"],
@@ -1155,211 +2732,30 @@ def create_router(server) -> APIRouter:
             # file that carries it came from outside. See R3 in
             # docs/reviews/v1.9-authz-signoff.md.
             "node_classes": collect_node_classes(graph),
+            "node_class_counts": dict(
+                sorted(
+                    Counter(
+                        node["class_type"]
+                        for node in graph.values()
+                        if isinstance(node, dict)
+                        and isinstance(node.get("class_type"), str)
+                        and node["class_type"]
+                    ).items(),
+                    # The order `node_classes` uses.
+                    key=lambda item: item[0].lower(),
+                )
+            ),
             "source_is_imported": source_is_imported,
             "source_label": source_label,
             "seed_inputs": seed_targets,
+            "lora_slots": detect_lora_targets(graph),
+            "lora_insertion": _describe_lora_insertion(
+                graph, object_info, object_info_error
+            ),
+            # Judged, like the pre-flight, only when it was asked for: the
+            # editor branch's cached map must not answer a preflight=false read.
+            "lora_chain": _describe_lora_chain(graph, judged_against, judged_error),
             "preflight": preflight,
-        }
-
-    @router.post(
-        "/comfyui/run_recipe",
-        summary="Re-run a picture's embedded ComfyUI recipe",
-        description=(
-            "Replays the API-format `prompt` graph embedded in a picture, with "
-            "fresh (or pinned) seeds. The graph is re-extracted from the file "
-            "server-side on every call - a client-supplied graph is never "
-            "accepted - and pre-flighted first; a pre-flight that finds missing "
-            "node classes or model files fails the request with 400 and names "
-            "them. A pre-flight that could not run at all (ComfyUI unreachable, "
-            "`preflight.checked: false`) also fails with 400 unless the caller "
-            "sends `allow_unchecked: true`, which records that the owner "
-            "knowingly approved an uninspected graph. Outputs land in the "
-            "source picture's stack, exactly as run_i2i does."
-        ),
-        response_model=ComfyUIRunResponse,
-    )
-    async def run_comfyui_recipe(request: Request, payload: dict = Body(...)):
-        raw_id = payload.get("picture_id")
-        if raw_id is None:
-            raise HTTPException(status_code=400, detail="picture_id is required")
-        try:
-            pic_id = int(raw_id)
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="Invalid picture id")
-
-        client_id = payload.get("client_id") or payload.get("clientId") or None
-        if client_id is not None:
-            client_id = str(client_id)
-        should_stack = bool(payload.get("stack", True))
-        # Consent must be the literal JSON true: any string - including
-        # "false" - is truthy in Python and must not read as an acknowledgement.
-        allow_unchecked = (
-            payload.get("allow_unchecked") is True
-            or payload.get("allowUnchecked") is True
-        )
-        # Replay allows the full 64-bit range the core samplers declare; the
-        # template paths keep the 32-bit ceiling. See _resolve_fixed_seed.
-        fixed_seed = _resolve_fixed_seed(payload, max_seed=MAX_SEED_64)
-
-        prompt_graph = _load_embedded_api_prompt(server, pic_id)
-        if not prompt_graph:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "This image has no executable workflow embedded, so it "
-                    "cannot be re-run. Use a template instead."
-                ),
-            )
-        workflow_instance = sanitize_prompt_graph(prompt_graph)
-
-        # Refused before the pre-flight, because this is not about whether the
-        # graph *can* run - it is that replaying it cannot mean what Generate
-        # variants promises. A ComfyUI-PixlStash graph calls back into PixlStash
-        # while PixlStash is running it, and every id it carries was frozen when
-        # the file was written: the loaders serialise a choice as "<name> #<id>".
-        # So the graph re-applies a project/set/character that may since have
-        # been deleted or split into another library (the FOREIGN KEY failure
-        # this refusal replaces), sources its input by a baked picture id rather
-        # than the picture the user right-clicked - or, with that field empty,
-        # auto-selects by its own sort and filters - and imports its outputs
-        # itself, competing with the import PixlStash is already doing for the
-        # variant. The owner's own associations are what a variant should
-        # inherit, and PixlStash copies those from the source picture already.
-        # Running such a graph from a template is fine: the ids are the ones the
-        # owner picked just now, and nothing claims the result is a variant.
-        if graph_has_pixlstash_nodes(workflow_instance):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "This workflow uses PixlStash nodes, which read and write "
-                    "the library while it runs. Re-running it here would use "
-                    "the projects, sets and pictures it was saved with, not "
-                    "this picture's. Copy the workflow into ComfyUI and run it "
-                    "there instead."
-                ),
-            )
-
-        user = server.auth.get_user_for_request(request)
-        comfyui_url = getattr(user, "comfyui_url", None) if user else None
-        comfyui_url = (comfyui_url or DEFAULT_COMFYUI_URL).rstrip("/")
-
-        preflight, seed_targets = _inspect_recipe(comfyui_url, workflow_instance)
-        if not preflight.get("ok", True):
-            raise HTTPException(
-                status_code=400, detail=_describe_preflight_failure(preflight)
-            )
-        if not preflight.get("checked") and not allow_unchecked:
-            # The graph is file metadata: whoever made the image authored it,
-            # and it executes on the owner's ComfyUI. When the pre-flight could
-            # not run, nothing at all is known about it - not even which node
-            # classes exist on this install. Fail CLOSED and make the owner say
-            # so explicitly, rather than letting an unreachable ComfyUI silently
-            # read as "ok". Enforced here and not only in the dialog, because a
-            # UI-only gate is not a gate.
-            logger.warning(
-                "[comfyui] Refusing recipe replay for picture id=%s: the "
-                "pre-flight could not run (%s) and the request carried no "
-                "allow_unchecked acknowledgement.",
-                pic_id,
-                preflight.get("error") or "ComfyUI unreachable",
-            )
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "PixlStash could not reach ComfyUI to check this workflow, "
-                    "so it has not been inspected. Embedded workflows come from "
-                    "the image file itself and can run anything your ComfyUI "
-                    "has installed. Start ComfyUI and try again, or confirm you "
-                    "want to run it unchecked."
-                ),
-            )
-        if allow_unchecked and not preflight.get("checked"):
-            logger.warning(
-                "[comfyui] Replaying an UNINSPECTED recipe for picture id=%s "
-                "(node classes: %s) on the owner's explicit acknowledgement; "
-                "the pre-flight could not run (%s).",
-                pic_id,
-                ", ".join(collect_node_classes(workflow_instance)) or "none",
-                preflight.get("error") or "ComfyUI unreachable",
-            )
-        if preflight.get("checked") and not preflight.get("has_save_image"):
-            # Would run to completion and import nothing - refuse now rather
-            # than after the full generation wait.
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "This workflow has no node that saves images (SaveImage or "
-                    "PixlStash Picture Saver), so it produces nothing PixlStash "
-                    "can import."
-                ),
-            )
-        if not seed_targets:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "This workflow has no random seed, so re-running it would "
-                    "produce the identical image. Edit the prompt or use a "
-                    "template instead."
-                ),
-            )
-
-        output_node_ids = _extract_output_node_ids(workflow_instance, payload)
-        apply_seeds(workflow_instance, seed_targets, fixed_seed)
-
-        stack_id: int | None = None
-        if should_stack:
-            stack_id = server.vault.db.run_task(get_or_create_stack_for_picture, pic_id)
-            if stack_id:
-                prefix_seed = ""
-                for node in workflow_instance.values():
-                    if not isinstance(node, dict):
-                        continue
-                    if node.get("class_type") != "SaveImage":
-                        continue
-                    prefix_seed = str(
-                        (node.get("inputs") or {}).get("filename_prefix") or ""
-                    )
-                    break
-                prefix_value = build_stack_filename_prefix(
-                    prefix_seed, stack_id, pic_id
-                )
-                if not _apply_filename_prefix(
-                    workflow_instance, prefix_value
-                ) and not graph_has_pixlstash_saver(workflow_instance):
-                    logger.warning(
-                        "Embedded recipe for picture %s has no SaveImage node to tag "
-                        "for stack %s; the output will import unstacked.",
-                        pic_id,
-                        stack_id,
-                    )
-
-        response_payload = _submit_comfyui_prompt(
-            comfyui_url, workflow_instance, client_id
-        )
-        prompt_id = response_payload.get("prompt_id") or response_payload.get("id")
-        if prompt_id:
-            origin_lease = request.state.library_lease
-            worker = threading.Thread(
-                target=_process_comfyui_outputs,
-                args=(
-                    server,
-                    comfyui_url,
-                    str(prompt_id),
-                    output_node_ids,
-                    stack_id,
-                    pic_id,
-                ),
-                kwargs={
-                    "origin_generation": origin_lease.generation,
-                    "origin_library_uuid": origin_lease.library_uuid,
-                },
-                daemon=True,
-            )
-            worker.start()
-
-        return {
-            "status": "success",
-            "prompts": [{"picture_id": pic_id, "prompt_id": prompt_id}],
         }
 
     return router

@@ -32,12 +32,21 @@ const REQUIRED = {
   backendUrl: "http://x",
 };
 
+// The tooltip is stubbed to carry its text on the element it wraps or sits in:
+// the real one renders nothing until it opens, and needs Vuetify besides.
+const TooltipStub = {
+  name: "Tooltip",
+  props: ["text", "activator"],
+  template:
+    '<span class="tip" :data-text="text"><slot name="activator" :props="{}" /></span>',
+};
+
 // Stub the flyouts: this test exercises the menu's forwarding, not the flyout
 // internals (those are covered in AddToEntityControl.test.js). Teleport is
 // stubbed so the menu renders inline where the wrapper can query it.
 const globalStubs = {
   global: {
-    stubs: { "v-icon": true, teleport: true, AddToEntityControl: true },
+    stubs: { "v-icon": true, Tooltip: TooltipStub, teleport: true, AddToEntityControl: true },
   },
 };
 
@@ -77,5 +86,38 @@ describe("create-character forwarding", () => {
   it("declares the create-character emit", () => {
     const wrapper = mountMenu();
     expect(wrapper.vm.$options.emits).toContain("create-character");
+  });
+});
+
+describe("set and person flyout toggles (#1262)", () => {
+  it.each([
+    ["character", "added", "add-to-character"],
+    ["character", "removed", "remove-from-character"],
+    ["set", "added", "added-to-set"],
+  ])("forwards %s %s without closing the menu", (type, event, upward) => {
+    const wrapper = mountMenu();
+    const flyout = wrapper
+      .findAllComponents(AddToEntityControl)
+      .find((c) => c.props("type") === type);
+    const payload = { pictureIds: ["10"] };
+
+    flyout.vm.$emit(event, payload);
+
+    expect(wrapper.emitted(upward)).toEqual([[payload]]);
+    expect(wrapper.emitted("close")).toBeUndefined();
+  });
+
+  it("closes when the host changes the selection under the open menu", async () => {
+    const wrapper = mountMenu();
+    // The grid clears the selection after an add in the Unassigned view.
+    await wrapper.setProps({ selectedImageIds: [] });
+    expect(wrapper.emitted("close")).toBeTruthy();
+  });
+
+  it("does not close when it opens onto a new selection", async () => {
+    const wrapper = mountMenu();
+    await wrapper.setProps({ visible: false });
+    await wrapper.setProps({ visible: true, selectedImageIds: ["12"] });
+    expect(wrapper.emitted("close")).toBeUndefined();
   });
 });

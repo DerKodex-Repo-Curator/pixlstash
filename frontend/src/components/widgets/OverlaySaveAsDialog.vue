@@ -3,7 +3,7 @@
     :open="open"
     title="Save as"
     :subtitle="mediaNoun"
-    :width="440"
+    size="sm"
     @close="emit('close')"
     @accept="confirm"
   >
@@ -127,16 +127,18 @@ function confirm() {
   display: flex;
   align-items: center;
   width: 100%;
-  height: 32px;
+  height: var(--control-h-bar);
   border: 1px solid rgb(var(--v-theme-border));
   border-radius: var(--radius-md);
   background: rgb(var(--v-theme-input-background));
   color: rgb(var(--v-theme-on-surface));
 }
 
+/* The input inside is borderless and outline-less, so the field box carries
+   the one focus ring. */
 .save-as-name-field:focus-within {
-  border-color: rgb(var(--v-theme-accent));
-  box-shadow: var(--focus-ring);
+  outline: var(--focus-width) solid var(--focus-stroke);
+  outline-offset: var(--focus-offset);
 }
 
 .save-as-input {
@@ -168,6 +170,6 @@ function confirm() {
 }
 
 .save-as-error {
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
 }
 </style>

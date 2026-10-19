@@ -5,7 +5,7 @@
 // /api/v1 prefix and the backend origin, injects the share token on same-origin
 // absolute URLs, and leaves foreign hosts alone.
 
-import { apiClient} from "../utils/apiClient";
+import { apiClient } from "../utils/apiClient";
 import { unwrap } from "../utils/unwrap";
 
 /**
@@ -26,52 +26,35 @@ export async function listWorkflows() {
 }
 
 /**
- * Delete one saved workflow by its file name.
- * @param {string} name - the workflow's `name` as listed (URL-encoded here).
- * @returns {Promise<Object>} the response body.
+ * Put a stored workflow, user or built-in, on its Workflows card.
+ *
+ * A built-in has no card until something asks, so this is how the Run popup
+ * gets a key to open on. Idempotent; owner-only.
+ *
+ * @param {string} name - the workflow's `name` as listed.
+ * @returns {Promise<{name: string, workflow_id: string}>}
  */
-export async function deleteWorkflow(name) {
-  return unwrap(apiClient.delete(
-    comfyUrl(`/workflows/${encodeURIComponent(name)}`),
-  ));
+export async function cardForWorkflow(name) {
+  return unwrap(
+    apiClient.post(comfyUrl(`/workflows/${encodeURIComponent(name)}/card`)),
+  );
 }
 
 /**
- * Import a workflow graph, optionally replacing one of the same name.
+ * Import a workflow file as it is, UI or API format.
  *
- * `overwrite` is the caller's answer to the "already exists" prompt; sending
- * it false means the server refuses rather than silently replacing a workflow.
+ * Every import is a NEW manual workflow (identical copies are allowed), and
+ * the answer names it: open it by `workflow_id`.
  *
  * @param {Object} body
  * @param {string} body.name
- * @param {Object} body.workflow - the graph, with placeholders already applied.
- * @param {boolean} [body.overwrite=false]
- * @returns {Promise<Object>} the response body.
+ * @param {Object} body.workflow - the parsed file, unchanged.
+ * @returns {Promise<{status: string, name: string, matched: boolean, workflow_id: string}>}
  */
-export async function importWorkflow(
-  { name, workflow, overwrite = false },
-) {
-  return unwrap(apiClient.post(comfyUrl("/workflows/import"), {
-    name,
-    workflow,
-    overwrite,
-  }));
-}
-
-/**
- * Run an image-to-image workflow over a set of pictures.
- *
- * @param {Object} body
- * @param {Array<number|string>} body.picture_ids
- * @param {string} body.workflow_name
- * @param {string} [body.caption]
- * @param {string} [body.client_id] - ties progress events back to this tab.
- * @param {boolean} [body.stack] - stack the outputs with their source.
- * @returns {Promise<Object>} the response body, whose `prompts` are the queued
- *   ComfyUI prompt ids.
- */
-export async function runImageToImage(body) {
-  return unwrap(apiClient.post(comfyUrl("/run_i2i"), body));
+export async function importWorkflow({ name, workflow }) {
+  return unwrap(
+    apiClient.post(comfyUrl("/workflows/import"), { name, workflow }),
+  );
 }
 
 /**
@@ -85,9 +68,7 @@ export async function runImageToImage(body) {
  *   prompt, models and LoRAs.
  */
 export async function getPictureWorkflow(pictureId) {
-  return unwrap(apiClient.get(
-    comfyUrl(`/pictures/${pictureId}/workflow`),
-  ));
+  return unwrap(apiClient.get(comfyUrl(`/pictures/${pictureId}/workflow`)));
 }
 
 /**
@@ -101,9 +82,22 @@ export async function getPictureWorkflow(pictureId) {
  * imported photos, so callers should read `available` rather than rely on a
  * rejection.
  *
+ * `lora_insertion` is `{plan, reason}` where `lora_slots` is empty: where a
+ * LoRA loader would be added (#1376), or why none can be.
+ *
  * `preflight` reports whether the recipe's models and LoRAs are present on the
  * ComfyUI server. `preflight.checked === false` means ComfyUI could not be
  * reached at all - it does NOT mean the recipe passed its checks.
+ *
+ * A picture carrying only ComfyUI's **editor** graph and not the API one the
+ * server ran answers here too: the editor graph is rebuilt into an API prompt
+ * against `/object_info` and the answer is the same shape, with
+ * `converted_from_editor_graph: true`. A rebuild that could not be exact is
+ * not approximated - it answers `available: false` with `reason:
+ * "editor_graph"`, its prompt and models still filled in, and
+ * `conversion_problems` holding one sentence per thing that could not be read.
+ * That is the one answer `preflight: false` still costs a ComfyUI read for,
+ * because without the node list there is nothing to report at all.
  *
  * `node_classes` is the distinct list of ComfyUI node classes the graph would
  * execute. It is read from the file, so it is populated even when the
@@ -114,47 +108,19 @@ export async function getPictureWorkflow(pictureId) {
  * @param {number|string} pictureId
  * @returns {Promise<Object>} the response body described above.
  */
-export async function getPictureRecipe(pictureId) {
-  return unwrap(apiClient.get(
-    comfyUrl(`/pictures/${pictureId}/recipe`),
-  ));
-}
-
-/**
- * Re-run a picture's own recipe to generate variants of it.
- *
- * The graph itself is never sent by the client: the backend re-extracts it from
- * the picture on every call, so a run always replays what the picture actually
- * carries rather than a copy the client may have gone stale on.
- *
- * @param {Object} body
- * @param {number|string} body.picture_id - the picture whose recipe to replay.
- * @param {string} body.seed_mode - how the seed is chosen for the variants.
- * @param {number} [body.seed] - the explicit seed, when `seed_mode` needs one.
- * @param {string} [body.client_id] - ties progress events back to this tab.
- * @param {boolean} [body.stack] - stack the outputs with their source.
- * @param {boolean} [body.allow_unchecked] - the user's explicit acknowledgement
- *   that they want to run a graph the server could not inspect. The backend
- *   refuses the run with a 400 without it whenever `preflight.checked` is
- *   false, so this must only ever be sent for a run the user acknowledged, and
- *   never as a constant.
- * @returns {Promise<Object>} the response body:
- *   `{status, prompts: [{picture_id, prompt_id}]}`.
- */
-export async function runRecipe(body) {
-  return unwrap(apiClient.post(comfyUrl("/run_recipe"), body));
-}
-
-/**
- * Run a text-to-image workflow.
- *
- * @param {Object} body - the prompt, workflow name, and the view context
- *   (`set_id`, `project_id`, `character_id`) the outputs should land in.
- * @returns {Promise<Object>} the response body, whose `prompts` are the queued
- *   ComfyUI prompt ids.
- */
-export async function runTextToImage(body) {
-  return unwrap(apiClient.post(comfyUrl("/run_t2i"), body));
+export async function getPictureRecipe(pictureId, { preflight = true } = {}) {
+  const url = comfyUrl(`/pictures/${pictureId}/recipe`);
+  // `preflight: false` skips the backend's ComfyUI `/object_info` read, so the
+  // answer costs one file read and no network. The lightbox's Recipe tab asks
+  // that way because it re-reads on every filmstrip step; the Remix dialog
+  // keeps the pre-flight, because it is about to run the thing and needs to
+  // know whether it can. The default call passes no config at all, so it stays
+  // exactly the request it has always been.
+  return unwrap(
+    preflight
+      ? apiClient.get(url)
+      : apiClient.get(url, { params: { preflight: false } }),
+  );
 }
 
 /**
@@ -163,4 +129,95 @@ export async function runTextToImage(body) {
  */
 export async function abortRun() {
   return unwrap(apiClient.post(comfyUrl("/abort")));
+}
+
+/**
+ * Whether the configured ComfyUI can open a PixlStash workflow link: it needs
+ * the ComfyUI-PixlStash node's `open_workflow.js`. Owner-only.
+ * @returns {Promise<{can_open_workflows: ?boolean, saves_back: ?boolean,
+ *   opens_runs: ?boolean}>}
+ *   `saves_back`: a workflow opened there saves back to PixlStash (the
+ *   node's `save_workflow.js` is loaded); false for older nodes, which open a
+ *   copy. `opens_runs`: it opens a run from the Run popup (`open_run.js`);
+ *   false for older nodes. All `null` when ComfyUI cannot be asked.
+ */
+export async function getPixlstashNode() {
+  return unwrap(apiClient.get(comfyUrl("/pixlstash-node")));
+}
+
+/**
+ * Ask the backend whether a ComfyUI answers at `url`. Owner-only.
+ *
+ * Always resolves for a well-formed URL, reachable or not; rejects (400) only
+ * for a malformed one. Save the reply's `url`, which is normalised.
+ *
+ * @param {string} url - e.g. `"http://127.0.0.1:8188/"`.
+ * @returns {Promise<{reachable: boolean, url: string, version: ?string,
+ *   detail: ?string, listens_on_network: ?boolean}>} `listens_on_network`:
+ *   whether ComfyUI's `--listen` lets other computers reach it, null unknown.
+ */
+export async function probeComfyui(url) {
+  return unwrap(apiClient.post(comfyUrl("/probe"), { url }));
+}
+
+/**
+ * Whether this PixlStash is linked to the saved ComfyUI. Owner-only.
+ *
+ * `bound_address` is the address the link's key works from (null for a link
+ * made before keys were bound, which works from anywhere); `refused_from` the
+ * last other address it was refused from since PixlStash started; `exposure`
+ * `"other_computer"` or `"listening"` when other computers can reach ComfyUI.
+ * `token_id` is the key's row in the token list and `all_libraries` whether it
+ * works in every library (`setTokenLibraries` changes that).
+ *
+ * @returns {Promise<{linked: boolean, comfyui_url: ?string,
+ *   pixlstash_url: ?string, where: ?("this_computer"|"local_network"),
+ *   linked_at: ?string, bound_address: ?string, refused_from: ?string,
+ *   exposure: ?("other_computer"|"listening"), token_id: ?number,
+ *   all_libraries: boolean}>}
+ */
+export async function getComfyuiLink() {
+  return unwrap(apiClient.get(comfyUrl("/link")));
+}
+
+/**
+ * Link the saved ComfyUI: mint a token that reaches only what the PixlStash
+ * nodes call and works only from ComfyUI's address, and write it, with
+ * PixlStash's URL, into ComfyUI's settings. Local owner only.
+ *
+ * Always resolves 200 whether or not it linked. `steps` is exactly four, in
+ * order `reach`, `nodes`, `link`, `check`, each `{id, state, detail, reason}`
+ * with `state` one of `done`, `failed`, `needs_you`, `not_run`.
+ * `can_install_pack` is true when this PixlStash carries the nodes and the
+ * saved ComfyUI is on this computer, so {@link installComfyuiPack} can run.
+ *
+ * @returns {Promise<{linked: boolean, link: Object, steps: Array<Object>,
+ *   can_install_pack: boolean, exposure: ?string}>}
+ */
+export async function linkComfyui() {
+  return unwrap(apiClient.post(comfyUrl("/link")));
+}
+
+/**
+ * Revoke the ComfyUI token and clear ComfyUI's copy, best-effort. Owner-only.
+ * @returns {Promise<{linked: false}>}
+ */
+export async function unlinkComfyui() {
+  return unwrap(apiClient.delete(comfyUrl("/link")));
+}
+
+/**
+ * Install the ComfyUI-PixlStash nodes this PixlStash carries into the saved
+ * ComfyUI, which must be on this computer. Owner-only, local caller only.
+ *
+ * Older copies go to the system trash (`replaced`). `restart` is `"requested"`
+ * when ComfyUI-Manager was asked to restart ComfyUI, `"manual"` when the
+ * person has to (`detail` says why). Rejects 409 when it cannot install.
+ *
+ * @returns {Promise<{installed_to: string, version: string,
+ *   replaced: Array<string>, restart: ("requested"|"manual"),
+ *   detail: ?string}>}
+ */
+export async function installComfyuiPack() {
+  return unwrap(apiClient.post(comfyUrl("/pack/install")));
 }

@@ -23,7 +23,7 @@ export const BASE_MODEL_UNASSIGNED = "UNASSIGNED";
  *
  * @param {Object} [options]
  * @param {string} [options.fileKind="adapter"] - `adapter`, `unknown`, `vae`,
- *   `text_encoder` or `engine`. Checkpoints have their own route; anything
+ *   `text_encoder`, `controlnet`, `upscaler` or `engine`. Checkpoints have their own route; anything
  *   else is a 400.
  * @param {string} [options.baseModel] - exact match, or `UNASSIGNED` for the
  *   rows that record none. Omit for all.
@@ -97,8 +97,8 @@ export async function listBaseModelCompletions() {
 /**
  * Write curated columns onto one or more models.
  *
- * Three of the shelf's verbs land here - Rename, Set base model, Set kind -
- * because all three write one column and differ in nothing else. **Only the
+ * Four of the shelf's verbs land here - Rename, Set base model, Set kind, Set
+ * trigger words - because they all write one column and differ in nothing else. **Only the
  * keys present in `changes` are sent**, so setting a base model across a
  * selection cannot blank the names in it, and an explicit `null` is a *clear*
  * rather than "leave it alone".
@@ -106,9 +106,11 @@ export async function listBaseModelCompletions() {
  * @param {Array<number>} ids - hub `model.id` values. Ids rather than hashes:
  *   an unhashed 24 GB checkpoint has no hash to be addressed by.
  * @param {Object} changes - any of `display_name` (one id only), `base_model`,
- *   `kind`, `file_kind`, `capabilities`. The last is the COMPLETE feature set
- *   for every id sent, so `[]` clears it; the server replaces rather than
- *   merges, or there would be no way to take one off.
+ *   `kind`, `file_kind`, `capabilities`, `trigger_words`. `capabilities` is the
+ *   COMPLETE feature set for every id sent, so `[]` clears it; the server
+ *   replaces rather than merges, or there would be no way to take one off.
+ *   `trigger_words` is the complete list too, and its `[]` is an answer ("needs
+ *   none") where `null` is "not set".
  * @returns {Promise<{updated: Array<number>, fields: Array<string>}>}
  */
 export async function editModels(ids, changes) {
@@ -157,6 +159,186 @@ export async function setAdapterAttachments(sha256, attachments) {
  */
 export async function forgetModels(ids) {
   return unwrap(apiClient.post("/models/forget", { ids }));
+}
+
+/**
+ * What deleting these models would leave behind: the VAEs and text encoders
+ * nothing else would use (`orphaned`), the ones a kept model still uses
+ * (`shared`), the ones a same-named file makes impossible to tell (`unknown`),
+ * the deleted support files a kept model still runs with (`in_use`), and the
+ * ids no recipe names at all (`no_evidence`). Read from the recipes the hub
+ * has seen; changes nothing.
+ *
+ * @param {Array<number>} ids - hub `model.id` values about to be deleted.
+ * @returns {Promise<{orphaned: Array<Object>, shared: Array<Object>,
+ *   unknown: Array<Object>, in_use: Array<Object>, no_evidence: Array<number>}>}
+ */
+export async function fetchModelCompanions(ids) {
+  return unwrap(apiClient.post("/models/companions", { ids }));
+}
+
+/**
+ * Which shelf models a kept picture or a stored ComfyUI run proves ran together.
+ *
+ * One entry per **combination**: the exact set of files one or more recipes
+ * bound together, with the pictures they made and the ComfyUI runs that used
+ * exactly those files (`history_runs`, counted apart, #1565). A model appears in every
+ * combination it has run in, so membership overlaps and is stored nowhere - the
+ * grouping is derived per request from the recipes the hub has read.
+ *
+ * **Co-occurrence is evidence; its absence is not.** The ids no picture in this
+ * library and no stored ComfyUI run used beside a base model come back under
+ * `no_set` rather than being dropped, and a
+ * member the evidence could only reach through a basename two shelf rows share
+ * is flagged `ambiguous` and still listed. Folding combinations into stacks is
+ * the CLIENT's (see `utils/workflowSets.js`): the server groups nothing, so the
+ * toolbar can price every fold setting without another request.
+ *
+ * `hand_made` is the owner's own sets (#1520), newest first; a combination one
+ * of them covers carries its id in `covered_by`. A set may carry a merge
+ * `offer` and the `declined` models kept out of it (#1523).
+ *
+ * @returns {Promise<{combinations: Array<Object>, no_set: Array<number>,
+ *   hand_made: Array<Object>, hidden_sets: Array<string>,
+ *   hidden_models: Array<number>}>}
+ */
+export async function fetchWorkflowSets() {
+  const body = await unwrap(apiClient.get("/models/workflow-sets"));
+  return {
+    combinations: Array.isArray(body?.combinations) ? body.combinations : [],
+    no_set: Array.isArray(body?.no_set) ? body.no_set : [],
+    hand_made: Array.isArray(body?.hand_made) ? body.hand_made : [],
+    set_checks: Array.isArray(body?.set_checks) ? body.set_checks : [],
+    hidden_sets: Array.isArray(body?.hidden_sets) ? body.hidden_sets : [],
+    hidden_models: Array.isArray(body?.hidden_models) ? body.hidden_models : [],
+  };
+}
+
+/**
+ * Hide or show workflow sets in the ACTIVE library (#1869).
+ *
+ * Per library, on the server: a set hidden here is still drawn in another. The
+ * key is the set's own - `model:<head id>` (or `missing:<filename>`), or
+ * `hand:<id>` for a hand-made set.
+ * Answers with every set the library now hides, so the caller can draw from one
+ * answer rather than re-reading the whole set payload.
+ *
+ * @param {Array<string>} keys - the sets' own keys.
+ * @param {boolean} hidden - true hides, false shows again.
+ * @returns {Promise<Array<string>>} the library's hidden set keys, after.
+ */
+export async function setWorkflowSetsHidden(keys, hidden) {
+  const body = await unwrap(
+    apiClient.put("/models/workflow-sets/hidden", { keys, hidden }),
+  );
+  return Array.isArray(body?.hidden_sets) ? body.hidden_sets : [];
+}
+
+/**
+ * Hide or show models in the ACTIVE library.
+ *
+ * Per library, on the server, as a set's hide is: a model hidden here is still
+ * on the shelf of another library. Nothing but the listing changes - no file,
+ * no row, and a workflow that already uses the model still runs with it.
+ * Answers with every model the library now hides.
+ *
+ * @param {Array<number>} ids - hub `model.id`s.
+ * @param {boolean} hidden - true hides, false shows again.
+ * @returns {Promise<Array<number>>} the library's hidden model ids, after.
+ */
+export async function setModelsHidden(ids, hidden) {
+  const body = await unwrap(apiClient.put("/models/hidden", { ids, hidden }));
+  return Array.isArray(body?.hidden_models) ? body.hidden_models : [];
+}
+
+// ── The owner's verdicts on a set and its members ───────────────────────────
+//
+// A mark only: nothing else changes. `comboKey` is the set's sorted member ids,
+// comma-joined (`utils/setVerdicts.js`). Each answers `{combo_key, [model_id],
+// verdict, previous}`.
+
+const verdictPath = (comboKey) =>
+  `/models/workflow-sets/verdicts/${encodeURIComponent(comboKey)}`;
+
+/** Record the owner's answer to "does this set produce sensible output". */
+export async function putSetVerdict(comboKey, verdict) {
+  return unwrap(apiClient.put(verdictPath(comboKey), { verdict }));
+}
+
+/** Record the owner's answer about one member: `problem` | `not_problem`. */
+export async function putMemberVerdict(comboKey, modelId, verdict) {
+  return unwrap(
+    apiClient.put(`${verdictPath(comboKey)}/members/${modelId}`, { verdict }),
+  );
+}
+
+// ── Hand-made workflow sets (#1520) ─────────────────────────────────────────
+//
+// A per-hub menu of models that work together, stored by hash so a member that
+// leaves the shelf stays in the set and reconnects when the file returns. None
+// of these calls touches a file or a shelf row.
+
+/**
+ * Make a set. Every argument is optional: the grid's tile makes an empty one.
+ *
+ * @param {{name?: string|null, members?: Array<Object>}} [body] - a member is
+ *   `{model_id, slot?}`, or `{sha256, slot, label?}` to put back one that was
+ *   removed or deleted (the undo), whether or not its file is on the shelf now.
+ * @returns {Promise<Object>} the set, as `hand_made` entries are shaped.
+ */
+export async function createWorkflowSet(body = {}) {
+  return unwrap(apiClient.post("/models/workflow-sets", body));
+}
+
+/** Rename a set. `null` clears the name; the set is then shown by its checkpoint. */
+export async function renameWorkflowSet(id, name) {
+  return unwrap(apiClient.patch(`/models/workflow-sets/${id}`, { name }));
+}
+
+/**
+ * Delete a set. Files and shelf rows are untouched.
+ *
+ * @returns {Promise<{deleted: Object}>} the set as it was, which is the undo.
+ */
+export async function deleteWorkflowSet(id) {
+  return unwrap(apiClient.delete(`/models/workflow-sets/${id}`));
+}
+
+/**
+ * Add members to a set. One already in it is skipped, not an error.
+ *
+ * @returns {Promise<{set: Object, added: Array<string>}>} `added` is the hashes
+ *   actually written, which is what an undo takes back out.
+ */
+export async function addWorkflowSetMembers(id, members) {
+  return unwrap(
+    apiClient.post(`/models/workflow-sets/${id}/members`, { members }),
+  );
+}
+
+/**
+ * Take members off a set, by hash. The files stay on the shelf.
+ *
+ * @returns {Promise<{set: Object, removed: Array<Object>}>} `removed` carries
+ *   `{sha256, slot, label}`, which is what an undo puts back.
+ */
+export async function removeWorkflowSetMembers(id, sha256) {
+  return unwrap(
+    apiClient.post(`/models/workflow-sets/${id}/members/remove`, { sha256 }),
+  );
+}
+
+/**
+ * Replace the models kept out of a set's merge offer (#1523): Keep separate
+ * adds to the list, Offer again empties it.
+ *
+ * @returns {Promise<{set: Object, previous: Array<string>}>} `previous` is the
+ *   list before, which is what an undo puts back.
+ */
+export async function setWorkflowSetDeclines(id, sha256) {
+  return unwrap(
+    apiClient.put(`/models/workflow-sets/${id}/declines`, { sha256 }),
+  );
 }
 
 /**

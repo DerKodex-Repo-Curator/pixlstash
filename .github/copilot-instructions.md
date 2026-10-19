@@ -91,15 +91,28 @@ proves something, say so in a line and spend the human's attention elsewhere.
 
 Use the architecture documents according to the scope of the task.
 
-**Read them by section, never end to end.** They are reference manuals:
-`backend_architecture.md` is ~82k tokens, `frontend_architecture.md` ~53k,
-`integration_architecture.md` ~24k. Reading all three costs ~160k tokens before
-you have looked at a line of code, almost all of it about subsystems you are not
-touching. Read the Table of Contents at the top, then only the sections covering
-the code you are about to change plus any section they point you to, and widen
-only when that turns out to be insufficient. `grep -n '^## ' docs/backend_architecture.md` gives the section map; `sed -n 'START,ENDp'`
-reads one section. A whole-file read is a mistake unless you are auditing the
-document itself.
+**Read them by section, never end to end.** They are reference manuals, each
+far larger than any one task needs; reading all three before a line of code
+spends a large share of the context window on subsystems you are not touching.
+No size is written here because a written figure goes stale: measure it with
+`wc -c docs/*_architecture.md` (roughly 3.5 characters per token). Read the
+Table of Contents at the top, then only the sections covering the code you are
+about to change plus any section they point you to, and widen only when that
+turns out to be insufficient. `grep -n '^## ' docs/backend_architecture.md`
+gives the section map (`'^### '` for subsections); `sed -n 'START,ENDp'` reads
+one section. A whole-file read is a mistake unless you are auditing the document
+itself.
+
+**File new material under its topic, never under its release.** A feature edits
+the section that covers its subsystem, adding a numbered subsection there when
+it needs one. Do not add a `## N. <feature> (vX.Y Phase Z)` heading: a reader
+arrives with a topic, finds it in the Table of Contents, reads that section and
+believes they are done, so a chronological section is the half they never read.
+A subsystem with no section yet gets one named for the subsystem, and the
+Table of Contents lists its subsections.
+`tests/test_architecture_guardrails.py::test_architecture_docs_are_filed_by_topic`
+fails the build on a release-named `##` section and on a Table of Contents that
+has drifted from the headings.
 
 1. Frontend tasks: the relevant sections of `/docs/frontend_architecture.md`.
 2. Backend tasks: the relevant sections of `/docs/backend_architecture.md`.
@@ -175,6 +188,21 @@ Decompose by domain first, then fan out. **Independent** sub-tasks run concurren
   its siblings. Name the property that must hold, and make the class sweep and
   the mutation check entry criteria rather than review findings.
 
+## Never query the live library with sqlite3
+
+**A question about what is *in* the owner's library (how many picture sets,
+which pictures carry a tag, what a picture's score is) is answered through the
+`pixlstash` MCP server, never by opening `vault.db` or `hub.db`.** Reading the
+file is the obvious shortcut and it is wrong three ways: some values are
+derived per request rather than stored (a picture row's raw `project_id` is
+re-derived from membership before the API returns it, so the column can name a
+project the picture is not in), the schema moves with migrations while the API
+is the contract, and the file is live and single-writer while the server runs.
+
+If the MCP server is not connected, say so and stop. Do not substitute a direct
+read; a plausible wrong number is worse than no number. Reading the schema or a
+migration as *source* is fine: that is code, not the live database.
+
 ## Imports
 - Imports go at the top of the file. A local import inside a function is only acceptable to break a circular dependency, to keep a rarely-used heavy module out of start-up, or when the import is *clearly* optional.
 - Do not use local imports for libraries that are commonly used in the code base, like torch, numpy, PIL, cv2, etc. These should be imported at the top of the file for clarity and consistency.
@@ -229,7 +257,7 @@ Decompose by domain first, then fan out. **Independent** sub-tasks run concurren
 - **Install dependencies:** `pip install -e .`
 - **Run server:** `python -m pixlstash.app`
 - **Run tests:** `python -m pytest -s -vvv --fast-captions`
-- **Check formatting:** `ruff check pixlstash`
+- **Check formatting:** `ruff check pixlstash tests scripts && ruff format --check pixlstash tests scripts`
 - **Build frontend:** `npm run build` (in `frontend/`)
 - **Dev frontend:** `npm run dev` (in `frontend/`)
 
@@ -470,6 +498,36 @@ wrote them.** Do not force-add a review doc or "fix" the ignore rule.
   `docs/` proper: the authz coverage matrix is `docs/authz-coverage-matrix.md`,
   tracked, and parsed by
   `tests/test_architecture_guardrails.py::test_coverage_matrix_document_matches_the_registry`.
+
+### Name the base; never review `@{u}`
+
+A session branch is created without tracking config, so `@{u}` is fatal on it:
+`git diff @{u}...HEAD` exits 128 with `no upstream configured for branch
+'<branch>'`. A review of #1417 died there before reading a line.
+
+**Setting an upstream is not the fix.** The mandated `git push -u origin
+<branch>` rewrites tracking to the branch's *own* remote ref, and from then on
+`@{u}...HEAD` is **empty**: the review stops failing and starts passing on a
+diff of nothing, which is worse than the 128 because it reads as a clean
+review. Do not point `@{u}` at the base branch either - under
+`push.default=upstream` a bare `git push` then lands the branch straight on
+`develop`.
+
+Name the base instead. Neither form needs an upstream to exist:
+
+```
+# a branch
+git fetch origin <base> && git diff origin/<base>...HEAD
+
+# a PR, by number, without checking anything out
+git fetch origin pull/<n>/head:refs/remotes/pr/<n>
+git diff origin/<base>...refs/remotes/pr/<n>
+```
+
+Use `...` (three dots) against the base: it diffs from the merge base, so
+commits that landed on the base after the branch forked stay out of the review.
+A review that cannot state which two commits it compared has not established
+what it reviewed.
 
 ## Security & authorization review process
 

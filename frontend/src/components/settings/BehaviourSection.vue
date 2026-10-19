@@ -1,10 +1,13 @@
 <script setup>
-import { onUnmounted, ref, watch } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 import { getUserConfig, patchUserConfig } from "../../api/config";
 import { getWorkerProgress } from "../../api/workers";
 import { listTaggers, listTaggerPluginDiagnostics } from "../../api/taggers";
 import { VSlider, VSwitch } from "vuetify/components";
-import PluginsTable from "../widgets/PluginsTable.vue";
+import PluginSelect from "../widgets/PluginSelect.vue";
+import TaggerPluginSettingsPanel from "../widgets/TaggerPluginSettingsPanel.vue";
+import AppButton from "../widgets/AppButton.vue";
+import AppDialog from "../widgets/AppDialog.vue";
 import SettingsSection from "./SettingsSection.vue";
 import SettingsTwoCol from "./SettingsTwoCol.vue";
 import SettingsFieldBlock from "./SettingsFieldBlock.vue";
@@ -33,6 +36,15 @@ const taggerCliSearchHint = ref(
 );
 const taggerCliListHint = ref("pixlstash-cli plugins list");
 const pluginInstallHelpOpen = ref(false);
+
+// The built-in tagger's settings sit in the pane below the pickers rather than
+// behind PluginSelect's gear, shown while it is the active tag plugin.
+const PIXLSTASH_TAGGER = "pixlstash_tagger";
+const pixlstashTagger = computed(() =>
+  taggerSettings.value?.active_tag_plugin === PIXLSTASH_TAGGER
+    ? (taggerPlugins.value.find((p) => p.name === PIXLSTASH_TAGGER) ?? null)
+    : null,
+);
 
 // ── VRAM budget ───────────────────────────────────────────────────────────────
 const VRAM_BUDGET_MIN_GB = 2;
@@ -267,15 +279,11 @@ watch(
 </script>
 
 <template>
-  <div class="behaviour-pane">
-    <SettingsSection
-      title="Model Memory"
-      desc="Keep models loaded in RAM/VRAM for faster processing. Turn off to unload models when idle and save memory."
-      first
-    >
+  <div>
+    <SettingsSection title="Model Memory" first>
       <v-switch
         v-model="keepModelsInMemory"
-        color="accent"
+        color="primary"
         density="compact"
         hide-details
         :disabled="keepModelsInMemoryLoading"
@@ -298,7 +306,7 @@ watch(
             :step="VRAM_BUDGET_STEP_GB"
             hide-details
             density="compact"
-            color="accent"
+            color="primary"
             track-color="rgba(var(--v-theme-on-surface), 0.2)"
             :disabled="maxVramGbLoading || maxVramGbHydrating"
           />
@@ -316,33 +324,31 @@ watch(
     </SettingsSection>
 
     <SettingsSection
-      class="tagger-section"
       title="Auto-tagging"
       desc="Plugins that generate tags and captions automatically. Hint: you can also pick taggers for selected pictures in the tag panel or context menu."
     >
-      <SettingsTwoCol class="tagger-cols">
+      <SettingsTwoCol>
         <SettingsFieldBlock class="tagger-col" title="Tag plugin" top>
           <div v-if="taggerLoading" class="settings-tagger-loading">
             Loading…
           </div>
-          <PluginsTable
+          <PluginSelect
             v-else
             kind="tag"
             :plugins="taggerPlugins"
-            :settings="taggerSettings"
-            @update:settings="(s) => (taggerSettings = s)"
+            :inline-settings-for="PIXLSTASH_TAGGER"
+            v-model:settings="taggerSettings"
           />
         </SettingsFieldBlock>
         <SettingsFieldBlock class="tagger-col" title="Description plugin" top>
           <div v-if="taggerLoading" class="settings-tagger-loading">
             Loading…
           </div>
-          <PluginsTable
+          <PluginSelect
             v-else
             kind="description"
             :plugins="taggerPlugins"
-            :settings="taggerSettings"
-            @update:settings="(s) => (taggerSettings = s)"
+            v-model:settings="taggerSettings"
           />
         </SettingsFieldBlock>
       </SettingsTwoCol>
@@ -355,116 +361,94 @@ watch(
         </li>
       </ul>
       <div class="settings-tagger-plugin-help">
-        <v-btn variant="text" size="small" prepend-icon="mdi-help-circle-outline" @click="pluginInstallHelpOpen = true">
+        <AppButton
+          variant="ghost"
+          size="sm"
+          icon-left="help-circle-outline"
+          @click="pluginInstallHelpOpen = true"
+        >
           How to install plugins
-        </v-btn>
+        </AppButton>
       </div>
     </SettingsSection>
 
-    <v-dialog
-      v-model="pluginInstallHelpOpen"
-      max-width="560"
-      @click:outside="pluginInstallHelpOpen = false"
+    <TaggerPluginSettingsPanel
+      v-if="!taggerLoading && pixlstashTagger"
+      title="PixlStash Tagger Settings"
+      :plugin="pixlstashTagger"
+      v-model:settings="taggerSettings"
+    />
+
+    <AppDialog
+      :open="pluginInstallHelpOpen"
+      title="How to install plugins"
+      @close="pluginInstallHelpOpen = false"
+      @accept="pluginInstallHelpOpen = false"
     >
-      <v-card class="plugin-install-card">
-        <v-card-title class="plugin-install-title">
-          How to install plugins
-        </v-card-title>
-        <v-card-text class="plugin-install-help-body">
-          <p>
-            Only install plugins you trust. They run with the same access as
-            PixlStash.
-          </p>
+      <p class="plugin-install-help">
+        Only install plugins you trust. They run with the same access as
+        PixlStash.
+      </p>
 
-          <h3>Find plugins</h3>
-          <p>
-            Browse the
-            <a
-              class="plugin-catalogue-link"
-              href="https://github.com/Pikselkroken/PixlStash-plugins"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              official plugin catalogue
-              <v-icon size="x-small" aria-hidden="true">mdi-open-in-new</v-icon>
-            </a>
-            or use the CLI to list published plugins, search the catalogue, and
-            show installed plugins.
-          </p>
-          <div class="plugin-install-commands">
-            <pre class="plugin-install-command"><code>{{ taggerCliAvailableHint }}</code></pre>
-            <pre class="plugin-install-command"><code>{{ taggerCliSearchHint }}</code></pre>
-            <pre class="plugin-install-command"><code>{{ taggerCliListHint }}</code></pre>
-          </div>
+      <section class="plugin-install-help">
+        <h3>Find plugins</h3>
+        <p>
+          Browse the
+          <a
+            class="plugin-catalogue-link"
+            href="https://github.com/Pikselkroken/PixlStash-plugins"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            official plugin catalogue
+            <v-icon size="x-small" aria-hidden="true">mdi-open-in-new</v-icon>
+          </a>
+          or use the CLI to list published plugins, search the catalogue, and
+          show installed plugins.
+        </p>
+        <div class="plugin-install-commands">
+          <pre class="plugin-install-command"><code>{{ taggerCliAvailableHint }}</code></pre>
+          <pre class="plugin-install-command"><code>{{ taggerCliSearchHint }}</code></pre>
+          <pre class="plugin-install-command"><code>{{ taggerCliListHint }}</code></pre>
+        </div>
+      </section>
 
-          <h3>Install with the CLI</h3>
-          <pre class="plugin-install-command"><code>{{ taggerCliHint }}</code></pre>
-          <p>
-            Use a repository name or local file/folder, then restart PixlStash.
-          </p>
+      <section class="plugin-install-help">
+        <h3>Install with the CLI</h3>
+        <pre class="plugin-install-command"><code>{{ taggerCliHint }}</code></pre>
+        <p>
+          Use a repository name or local file/folder, then restart PixlStash.
+        </p>
+      </section>
 
-          <h3>Install manually</h3>
-          <p v-if="taggerPluginDir">
-            Put the plugin file or folder in
-            <code class="settings-tagger-plugin-path">{{ taggerPluginDir }}</code>
-            and restart PixlStash.
-          </p>
-          <p v-else>
-            Put the plugin file or folder in PixlStash's custom plugin folder
-            and restart. Open this screen locally to see the exact path.
-          </p>
-        </v-card-text>
-        <v-card-actions class="plugin-install-actions">
-          <v-spacer />
-          <v-btn variant="text" @click="pluginInstallHelpOpen = false">
-            Close
-          </v-btn>
-        </v-card-actions>
-      </v-card>
-    </v-dialog>
+      <section class="plugin-install-help">
+        <h3>Install manually</h3>
+        <p v-if="taggerPluginDir">
+          Put the plugin file or folder in
+          <code class="settings-tagger-plugin-path">{{ taggerPluginDir }}</code>
+          and restart PixlStash.
+        </p>
+        <p v-else>
+          Put the plugin file or folder in PixlStash's custom plugin folder
+          and restart. Open this screen locally to see the exact path.
+        </p>
+      </section>
+
+      <template #footer>
+        <AppButton variant="secondary" @click="pluginInstallHelpOpen = false">
+          Close
+        </AppButton>
+      </template>
+    </AppDialog>
   </div>
 </template>
 
 <style scoped>
-/* The plugin lists scroll, the pane does not: the pane is a column, the
-   Auto-tagging section takes the leftover height, and each column's plugin
-   table is the only thing that overflows. The scroll box wraps the whole
-   table, header included, so PluginsTable pins its header row (see the
-   `position: sticky` there). Without this the two tables push the whole
-   Settings pane past its fixed height and the dialog grows a scrollbar. */
-.behaviour-pane {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-}
-
-.tagger-section {
-  display: flex;
-  flex-direction: column;
-  flex: 1 1 auto;
-  min-height: 0;
-}
-
-/* A floor, not 0: on a short window the pane is allowed to overflow and scroll
-   as it used to rather than crush the tables to nothing. */
-.tagger-cols {
-  flex: 1 1 auto;
-  min-height: 96px;
-}
-
-/* min-width as well as min-height: a grid item's automatic minimum is its
-   min-content, so a table that refuses to wrap widens its own 1fr track and
-   pushes the whole pane sideways. That is a horizontal scrollbar on the pane,
-   not on the table, and it is why PluginsTable lets a long plugin name wrap. */
+/* min-width: a grid item's automatic minimum is its min-content, so without
+   this a long plugin name widens its own 1fr track and pushes the whole pane
+   sideways. */
 .tagger-col {
   min-width: 0;
-  min-height: 0;
-}
-
-.tagger-col :deep(.field-block__control) {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
 }
 
 .settings-tagger-loading {
@@ -483,37 +467,24 @@ watch(
   padding-top: var(--space-2);
 }
 
-.plugin-install-card {
-  color: rgb(var(--v-theme-on-surface));
-  background: rgb(var(--v-theme-surface));
-  border-radius: var(--radius-lg);
-  box-shadow: var(--elevation-4);
-}
-
-.plugin-install-title {
-  padding: var(--space-5) var(--space-5) var(--space-3);
-  font-family: var(--font-ui);
-  font-size: var(--text-md);
-  font-weight: var(--weight-semibold);
-  line-height: var(--leading-tight);
-}
-
-.plugin-install-help-body {
+/* The dialog body spaces the groups; a heading sits tighter to its own
+   paragraph and commands. */
+.plugin-install-help {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  padding: var(--space-3) var(--space-5) var(--space-2);
+  margin: 0;
   font-family: var(--font-ui);
   font-size: var(--text-sm);
   line-height: var(--leading-body);
 }
 
-.plugin-install-help-body p {
+.plugin-install-help p {
   margin: 0;
 }
 
-.plugin-install-help-body h3 {
-  margin: var(--space-2) 0 0;
+.plugin-install-help h3 {
+  margin: 0;
   color: rgba(var(--v-theme-on-surface), 0.65);
   font-size: var(--text-xs);
   font-weight: var(--weight-semibold);
@@ -522,7 +493,7 @@ watch(
   text-transform: uppercase;
 }
 
-.plugin-install-help-body :not(pre) > code {
+.plugin-install-help :not(pre) > code {
   padding: 0 var(--space-1);
   border-radius: var(--radius-sm);
   background: rgba(var(--v-theme-on-surface), 0.08);
@@ -540,17 +511,12 @@ watch(
   font-weight: var(--weight-medium);
   text-decoration: underline;
   text-underline-offset: 2px;
+  border-radius: var(--radius-sm);
 }
 
 .plugin-catalogue-link:hover,
 .plugin-catalogue-link:active {
   text-decoration-thickness: 2px;
-}
-
-.plugin-catalogue-link:focus-visible {
-  border-radius: var(--radius-sm);
-  outline: none;
-  box-shadow: var(--focus-ring);
 }
 
 .plugin-install-commands {
@@ -580,49 +546,26 @@ watch(
   font: inherit;
 }
 
-.plugin-install-actions {
-  min-height: 40px;
-  padding: var(--space-3) var(--space-5) var(--space-4);
-}
-
 .settings-tagger-plugin-path {
   overflow-wrap: anywhere;
 }
 
-@media (max-width: 480px) {
-  .plugin-install-title {
-    padding-right: var(--space-4);
-    padding-left: var(--space-4);
-  }
-
-  .plugin-install-help-body {
-    padding-right: var(--space-4);
-    padding-left: var(--space-4);
-  }
-
-  .plugin-install-actions {
-    padding-right: var(--space-4);
-    padding-left: var(--space-4);
-  }
-}
-
 /* A plugin's load error is exception text from third-party code and has no
-   length limit, so it is bounded and scrolled too - otherwise it is a second
-   unbounded thing in this section and squeezes the tables it sits under. */
+   length limit, so it is bounded and scrolled rather than allowed to push the
+   Settings pane past its fixed height. */
 .settings-tagger-plugin-errors {
   list-style: none;
   padding: 0;
   margin: var(--space-3) 0 0;
   font-size: var(--text-xs);
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
   overflow-wrap: anywhere;
-  flex-shrink: 0;
   max-height: 72px;
   overflow-y: auto;
 }
 
 .settings-error {
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
   font-size: var(--text-xs);
   margin-top: var(--space-2);
 }
@@ -653,6 +596,6 @@ watch(
 }
 
 .vram-err {
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
 }
 </style>

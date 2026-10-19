@@ -20,11 +20,13 @@ from pathlib import Path
 import pixlstash
 import pytest
 from _pytest.config.exceptions import UsageError
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pixlstash.server import Server
 from pixlstash.tasks.face_extraction_task import FaceExtractionTask
 from pixlstash.tasks.image_embedding_task import ImageEmbeddingTask
 from pixlstash.tasks.tag_task import TagTask
+from tests.process_teardown import exit_if_enabled, remember_session
 
 # pytest appends the phase it is in to PYTEST_CURRENT_TEST.
 _PYTEST_PHASE = re.compile(r" \((setup|call|teardown)\)$")
@@ -410,6 +412,10 @@ def pytest_configure(config):
     # means an empty temp directory now costs every engine a fresh download on
     # every shard, rather than the warm model cache CI restores.
     Server.DEFAULT_DECLARE_MODEL_ROOTS = False
+    # The user workflow folder is machine-global too; never migrate the
+    # developer's own workflows from a test server.
+    Server.DEFAULT_MIGRATE_WORKFLOW_TOKENS = False
+    Server.DEFAULT_WATCH_WORKFLOW_INBOX = False
     # Pick a free port for the test session so Server instances don't collide
     # with the production app when it is already running on the default port.
     Server.DEFAULT_PORT = _find_free_port()
@@ -526,6 +532,53 @@ def sandbox_the_recorded_model_locations(tmp_path_factory):
         "and the test has to redirect builtin_models._pixlstash_data_dir to a "
         "tmp_path first - tests/test_builtin_models.py::data_dir is the shape."
     )
+
+
+@pytest.fixture(autouse=True)
+def no_object_info_map_outlives_its_test():
+    """Clear the route's cached ComfyUI ``/object_info`` between tests.
+
+    Suite-wide rather than in the one module that reads it: the cache is a
+    process global keyed by ComfyUI URL, every test server uses the same
+    default URL, and a shard runs many modules in one process. A module that
+    patched ComfyUI to answer one thing would otherwise be served whatever the
+    previous module's patch left behind - and the tests that assert a refusal
+    are exactly the ones a stale map makes pass for the wrong reason.
+
+    Both sides, because the leak runs in both directions.
+    """
+    from pixlstash.routes import comfyui as comfyui_routes
+
+    comfyui_routes._forget_cached_object_info()
+    yield
+    comfyui_routes._forget_cached_object_info()
+
+
+@pytest.fixture(autouse=True)
+def no_test_opens_a_comfyui_socket(monkeypatch):
+    """Keep a queued run from opening a socket to whatever ComfyUI is nearby.
+
+    ``follow_run`` starts ``_listen_for_progress`` on a thread that lives until
+    its runs end, and a test that queues a run stubs the poller that would end
+    it. Left alone the thread would outlive the session (and on a development
+    box would reach a real ComfyUI). The listener's own test calls it directly.
+    """
+    from pixlstash.routes import workflows as workflows_routes
+    from pixlstash.services import comfyui_service
+
+    monkeypatch.setattr(comfyui_service, "_listen_for_progress", lambda base_url: None)
+
+    # Nor does opening a graph with PixlStash nodes ask it for a Load Image's
+    # file (`_input_file_sha`): it answers as a ComfyUI without the file.
+    def no_input_file(base_url, entry):
+        raise HTTPException(status_code=404, detail="test-no-comfyui")
+
+    monkeypatch.setattr(workflows_routes, "_download_comfyui_image", no_input_file)
+    yield
+    # Nor does a run a test queued stay in flight for the next one to list.
+    with comfyui_service._run_outcomes_lock:
+        comfyui_service._live_runs.clear()
+        comfyui_service._listening.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -706,11 +759,16 @@ def _enforce_no_leaked_threads(session) -> None:
     A worker thread that outlives the session is a defect on its own: the
     object that owns it was never closed, so whatever that object held -
     a SQLAlchemy engine, pooled SQLite connections, an fd on vault.db - is
-    still live too. It is also the leading suspect for the Windows-only
-    SIGSEGV that fires *seconds after* a fully green pytest summary: CPython
-    kills surviving daemon threads mid-instruction during ``Py_FinalizeEx``,
-    and one that is inside ``sqlite3`` C code at that moment takes the process
-    down with an access violation, long after pytest has stopped watching.
+    still live too.
+
+    It was also the leading suspect for the Windows-only SIGSEGV that fires
+    *seconds after* a fully green pytest summary, on the theory that CPython
+    kills surviving daemon threads mid-instruction during ``Py_FinalizeEx``.
+    The evidence did not bear that out: run 35252455611 crashed with no
+    separator from this check anywhere in its log, i.e. with nothing but the
+    main thread alive. See ``tests/process_teardown`` for where that left the
+    diagnosis. This check stays because the defect it names is real on its own
+    terms, not because it is the fix.
 
     Threads with no frame of ours anywhere in their stack are reported but not
     failed on - a third-party pool we do not own is not ours to close.
@@ -783,6 +841,11 @@ def _stop_tqdm_monitors() -> None:
 def pytest_sessionfinish(session, exitstatus):
     """Release native model/session resources before interpreter teardown.
 
+    The session is recorded first, before anything below can raise, because
+    ``pytest_unconfigure`` needs its final exit status and is handed only the
+    config. That status is settled by then: the checks below are the last
+    things that can move it.
+
     ``trylast`` so any other session-finish work runs before this one. The
     phase reports the budget check measures are filed during the run rather
     than at teardown, so its input is complete wherever it sits.
@@ -791,6 +854,8 @@ def pytest_sessionfinish(session, exitstatus):
     ever raises, the release below has already happened, rather than the
     session dropping into interpreter teardown still holding models.
     """
+    remember_session(session)
+
     try:
         # Drain optional CPU spillover tagger if one was created by tag tasks.
         TagTask.release_idle_cpu_spillover_engine(force=True)
@@ -818,3 +883,18 @@ def pytest_sessionfinish(session, exitstatus):
     _enforce_no_leaked_threads(session)
 
     _enforce_test_time_budget(session)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_unconfigure(config):
+    """End the process without native teardown where that teardown crashes.
+
+    ``trylast`` so every other plugin's ``pytest_unconfigure`` has run: this
+    one does not return. It is the last hook pytest calls, so the terminal
+    summary, the durations report and the leak report above are all already
+    written.
+
+    Returns normally everywhere except Windows. See ``tests/process_teardown``
+    for the evidence and for the environment variable that overrides it.
+    """
+    exit_if_enabled(config)

@@ -160,8 +160,11 @@ def test_services_no_direct_db_calls():
         "pixlstash/services/tag_prediction_service.py",  # vault-injection pattern
         "pixlstash/services/tag_suggestion_service.py",  # vault-injection pattern; review-queue writeback
         "pixlstash/services/tagger_run_service.py",  # vault-injection pattern; tagger run history upsert
+        "pixlstash/services/workflow_library_service.py",  # vault-injection pattern; read-only wrappers around the session-level workflow counts
+        "pixlstash/services/workflow_set_verdicts.py",  # vault-injection pattern; fetch_set_checks is a read-only wrapper around recipe_evidence(session), the vault half of a hub/vault join no session can span
         "pixlstash/services/tag_scan_service.py",  # vault-injection pattern; sync near-neighbour tag scan
         "pixlstash/services/review_service.py",  # vault-injection pattern; orchestrates scan + review lifecycle
+        "pixlstash/services/saved_recipe_service.py",  # vault-injection pattern; thin wrappers around the *_in_session saved-recipe reads and writes
         "pixlstash/services/tag_health_service.py",  # vault-injection pattern; background cache rebuild dispatch
         "pixlstash/services/snapshot_service.py",  # vault-injection pattern; owns snapshot lifecycle
         # restore_service.py was decomposed into the restore/ package (plan §4.4);
@@ -336,6 +339,12 @@ def test_event_types_fully_classified():
             # Vault-wide reconciliation queue nudge (v1.11 Phase 5), like
             # VRAM_OOM: not a grid view a client's filters could exclude it from.
             EventType.EXTERNAL_MOVES_PENDING.name,
+            # A workflow card changed (v1.12 B4). A card is not a picture, so
+            # no grid filter says anything about whether a client wants it.
+            EventType.CHANGED_WORKFLOWS.name,
+            # Models moved onto the shelf from the Downloads folder. The shelf
+            # is machine-wide, so no grid filter applies.
+            EventType.MODELS_ARRIVED.name,
         }
     )
 
@@ -442,6 +451,14 @@ _LABEL_SINK_EXEMPT = {
     # --- New-picture ingest: a not-yet-imported picture cannot be in a locked set ---
     ("pixlstash/routes/pictures/_import.py", "apply_sidecar_tags"): (
         "applies sidecar tags to freshly-imported pictures (new pics)"
+    ),
+    ("pixlstash/routes/pictures/_library_move.py", "_copy_into"): (
+        "score and description carried onto the copy of a picture that is being "
+        "created in ANOTHER library (new pic there); the source's own lock is "
+        "honoured by the route, which skips locked pictures before copying"
+    ),
+    ("pixlstash/routes/pictures/_library_move.py", "persist"): (
+        "tags of that same new picture in the other library (new pic)"
     ),
     ("pixlstash/services/comfyui_service.py", "import_task"): (
         "sentinel Tag on freshly-imported ComfyUI pictures (new pics)"
@@ -757,7 +774,6 @@ _EXPECTED_ROUTE_MODULES = frozenset(
 # entry is stable regardless of that prefix-resolution quirk.
 _KNOWN_WEBSOCKET_ROUTES = frozenset(
     {
-        ("comfyui_progress_proxy", "/ws/comfyui"),
         ("websocket_updates", "/api/v1/ws/updates"),
     }
 )
@@ -881,6 +897,36 @@ def test_read_blocked_get_paths_name_declared_owner_class_gets():
         "a typo, a removed route, or a route deliberately loosened. Fix the path "
         "or drop the entry:\n" + "\n".join(f"  {p}" for p in stale)
     )
+
+
+def test_read_blocked_get_prefixes_cover_only_owner_class_gets():
+    """A prefix on the belt may never swallow a route a share token may read.
+
+    ``READ_BLOCKED_GET_PREFIXES`` refuses every scoped-token GET under a prefix,
+    so one that also covered a scoped or public GET would break share links
+    outright, and one that covers nothing protects nothing while reading as
+    protection. Both directions are derived from ``ROUTE_POLICIES``.
+    """
+    from pixlstash.auth import READ_BLOCKED_GET_PREFIXES
+    from pixlstash.authz.gate import OWNER_CLASS_POLICIES
+    from pixlstash.authz.registry import ROUTE_POLICIES
+
+    problems = []
+    for prefix in READ_BLOCKED_GET_PREFIXES:
+        assert prefix.endswith("/"), f"{prefix!r} would also match sibling names"
+        under = {
+            path: route_policy.policy
+            for (method, path), route_policy in ROUTE_POLICIES.items()
+            if method == "GET" and path.startswith(prefix)
+        }
+        if not under:
+            problems.append(f"  {prefix} covers no declared GET")
+        problems.extend(
+            f"  {prefix} swallows {path} ({policy.name})"
+            for path, policy in sorted(under.items())
+            if policy not in OWNER_CLASS_POLICIES
+        )
+    assert not problems, "\n".join(problems)
 
 
 # ---------------------------------------------------------------------------
@@ -1027,6 +1073,221 @@ def test_coverage_matrix_document_matches_the_registry():
     )
 
 
+# ---------------------------------------------------------------------------
+# Guardrail: the ComfyUI token scope admits exactly what the pack calls (#1811)
+# ---------------------------------------------------------------------------
+
+COMFYUI_PACK_DIR = REPO_ROOT / "integrations" / "ComfyUI-PixlStash"
+_COMFYUI_SCOPE_SECTION = "## The ComfyUI scope"
+_HTTP_VERBS = {"get", "post", "put", "patch", "delete"}
+
+# Paths the pack names away from the call that sends them (a constant, a
+# table, a variable), so the method cannot be read off the source and is
+# stated here. A path found that way and missing from this map fails the test.
+_COMFYUI_PACK_INDIRECT_CALLS = {
+    "/api/v1/pictures/thumbnails/1.webp": "GET",
+    "/api/v1/model-icons/1": "GET",
+    "/api/v1/characters/1/thumbnail": "GET",
+    "/api/v1/picture_sets/1/thumbnail": "GET",
+    "/api/v1/comfyui/workflows/convert": "POST",
+    "/api/v1/pictures/likeness-search": "POST",
+    "/api/v1/pictures/face-search": "POST",
+    "/api/v1/workflows/1/graph": "PUT",
+}
+
+
+def _comfyui_pack_calls(pack_dir: Path) -> set[tuple[str, str]]:
+    """``(method, path)`` for every PixlStash API path the pack's code names.
+
+    A path is a whole string or f-string under ``/api/v1/``; every
+    interpolated value and ``{}`` placeholder is written as ``1``. The method
+    is the HTTP verb of the call the path is an argument of (``client.get(...)``,
+    or ``_proxy_get`` in the proxy), else the one ``_COMFYUI_PACK_INDIRECT_CALLS``
+    states.
+    """
+    calls: set[tuple[str, str]] = set()
+    unstated: list[str] = []
+    for source in sorted(pack_dir.rglob("*.py")):
+        relative = source.relative_to(pack_dir)
+        if relative.parts[0] in {"tests", "vendor"}:
+            continue
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        verb_of: dict[int, str] = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "attr", getattr(node.func, "id", ""))
+            verb = "get" if name == "_proxy_get" else name
+            if verb in _HTTP_VERBS:
+                for argument in node.args:
+                    verb_of[id(argument)] = verb.upper()
+        inside_fstring = {
+            id(part)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.JoinedStr)
+            for part in node.values
+        }
+        for node in ast.walk(tree):
+            if isinstance(node, ast.JoinedStr):
+                text = "".join(
+                    part.value if isinstance(part, ast.Constant) else "1"
+                    for part in node.values
+                )
+            elif (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and id(node) not in inside_fstring
+            ):
+                text = node.value
+            else:
+                continue
+            # A path and nothing else: prose that mentions one has spaces.
+            if not re.fullmatch(r"/api/v1/\S+", text):
+                continue
+            path = re.sub(r"{[^}]*}", "1", text)
+            method = verb_of.get(id(node)) or _COMFYUI_PACK_INDIRECT_CALLS.get(path)
+            if method is None:
+                unstated.append(f"  {relative.as_posix()}:{node.lineno}: {path}")
+            else:
+                calls.add((method, path))
+    assert not unstated, (
+        "The ComfyUI-PixlStash pack names PixlStash path(s) away from the call "
+        "that sends them, so the method cannot be read from the source. State "
+        "it in _COMFYUI_PACK_INDIRECT_CALLS:\n" + "\n".join(unstated)
+    )
+    return calls
+
+
+def _route_template(app, method: str, path: str):
+    """The effective template of the route ``method path`` resolves to: the
+    first one mounted that matches, which is the router's own rule."""
+    from starlette.routing import compile_path
+
+    from pixlstash.route_inventory import iter_api_route_contexts
+
+    for route_method, template, _route in iter_api_route_contexts(app):
+        if route_method == method and compile_path(template)[0].match(path):
+            return template
+    return None
+
+
+def test_the_comfyui_scope_admits_every_route_the_pack_calls(built_app):
+    """The link key's allow-list and the pack's calls are the same set (#1811).
+
+    The ComfyUI link key reaches only ``auth.COMFYUI_SCOPE_ROUTES``. A route
+    the pack starts calling without an entry there is a node that fails with
+    a 403 in somebody's ComfyUI; an entry the pack no longer calls is access
+    the key has no reason to hold. Both directions fail here.
+    """
+    from pixlstash.auth import COMFYUI_SCOPE_ROUTES
+    from pixlstash.authz.registry import ROUTE_POLICIES
+
+    undeclared = COMFYUI_SCOPE_ROUTES - set(ROUTE_POLICIES)
+    assert not undeclared, (
+        "COMFYUI_SCOPE_ROUTES names route(s) the registry does not declare, so "
+        f"the scope admits nothing for them: {sorted(undeclared)}"
+    )
+
+    if not (COMFYUI_PACK_DIR / "proxy_routes.py").is_file():
+        message = (
+            "integrations/ComfyUI-PixlStash is not checked out "
+            "(git submodule update --init), so the pack's calls cannot be read."
+        )
+        if os.getenv("GITHUB_ACTIONS") == "true":
+            pytest.fail(message + " The CI checkout must set `submodules: true`.")
+        pytest.skip(message)
+
+    calls = _comfyui_pack_calls(COMFYUI_PACK_DIR)
+    assert len(calls) >= 20, (
+        f"Read only {len(calls)} PixlStash call(s) out of the pack; it makes "
+        "well over 20, so the reader has stopped finding them."
+    )
+    called: dict[tuple[str, str], str] = {}
+    unresolved: list[str] = []
+    for method, path in sorted(calls):
+        template = _route_template(built_app, method, path)
+        if template is None or template == "/{full_path:path}":
+            unresolved.append(f"  {method} {path}")
+        else:
+            called[(method, template)] = path
+    assert not unresolved, (
+        "The pack calls PixlStash path(s) no route answers:\n" + "\n".join(unresolved)
+    )
+
+    refused = set(called) - COMFYUI_SCOPE_ROUTES
+    assert not refused, (
+        "The ComfyUI-PixlStash pack calls route(s) the ComfyUI token scope does "
+        "not admit, so a linked ComfyUI is refused there. Add them to "
+        "COMFYUI_SCOPE_ROUTES in pixlstash/auth.py (and the matrix section), "
+        "after checking the nodes really need them:\n"
+        + "\n".join(
+            f"  {m} {t}  (called as {called[(m, t)]})" for m, t in sorted(refused)
+        )
+    )
+    unused = COMFYUI_SCOPE_ROUTES - set(called)
+    assert not unused, (
+        "COMFYUI_SCOPE_ROUTES admits route(s) the pack no longer calls. Remove "
+        "them: the link key should reach nothing the nodes do not use:\n"
+        + "\n".join(f"  {m} {t}" for m, t in sorted(unused))
+    )
+
+
+def test_the_pack_call_reader_has_teeth(tmp_path):
+    """The reader finds a direct call, a proxied one, an f-string and a
+    stated indirect one, and refuses an indirect path nobody stated."""
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_x.py").write_text('"/api/v1/ignored"\n')
+    (tmp_path / "nodes.py").write_text(
+        "def run(client, picture_id):\n"
+        '    """/api/v1/in-a-docstring is prose."""\n'
+        '    client.post("/api/v1/pictures/import", is_write=True)\n'
+        '    client.get(f"/api/v1/pictures/{picture_id}/metadata")\n'
+        '    _proxy_get(request, "/api/v1/projects")\n'
+        '    path = "/api/v1/comfyui/workflows/convert"\n'
+        '    table = {"set": "/api/v1/picture_sets/{}/thumbnail"}\n'
+    )
+    assert _comfyui_pack_calls(tmp_path) == {
+        ("POST", "/api/v1/pictures/import"),
+        ("GET", "/api/v1/pictures/1/metadata"),
+        ("GET", "/api/v1/projects"),
+        ("POST", "/api/v1/comfyui/workflows/convert"),
+        ("GET", "/api/v1/picture_sets/1/thumbnail"),
+    }
+    (tmp_path / "more.py").write_text('NEW = "/api/v1/users/me/token"\n')
+    with pytest.raises(AssertionError, match="more.py:1: /api/v1/users/me/token"):
+        _comfyui_pack_calls(tmp_path)
+
+
+def test_the_comfyui_scope_section_of_the_matrix_matches_the_code():
+    """The written list of what the ComfyUI key reaches is the code's list."""
+    from pixlstash.auth import COMFYUI_SCOPE_ROUTES
+    from pixlstash.authz.registry import ROUTE_POLICIES
+
+    rows: dict[tuple[str, str], str] = {}
+    inside = False
+    for line in COVERAGE_MATRIX_MD.read_text(encoding="utf-8").splitlines():
+        if line.startswith("## "):
+            inside = line.startswith(_COMFYUI_SCOPE_SECTION)
+            continue
+        match = _MATRIX_ROW_RE.match(line) if inside else None
+        if match:
+            method, path, policy = match.groups()
+            rows[(method, path)] = policy
+    assert set(rows) == COMFYUI_SCOPE_ROUTES, (
+        f"The '{_COMFYUI_SCOPE_SECTION}' table in "
+        f"{COVERAGE_MATRIX_MD.relative_to(REPO_ROOT).as_posix()} and "
+        "auth.COMFYUI_SCOPE_ROUTES disagree. Only in the document: "
+        f"{sorted(set(rows) - COMFYUI_SCOPE_ROUTES)}; only in the code: "
+        f"{sorted(COMFYUI_SCOPE_ROUTES - set(rows))}"
+    )
+    drift = {
+        key: policy
+        for key, policy in rows.items()
+        if policy != ROUTE_POLICIES[key].policy.name.lower()
+    }
+    assert not drift, f"Rows name a policy the registry does not: {drift}"
+
+
 def test_route_enumeration_is_not_silently_undercounting(built_app):
     """FAIL-LOUD: the enumeration cannot collapse and fake complete coverage.
 
@@ -1123,6 +1384,17 @@ _PROJECT_REFS_IN_TYPED_BODY = frozenset(
         ("POST", "/api/v1/reviews", "payload.project_id"),
         ("POST", "/api/v1/tag_suggestions/bulk-accept", "payload.project_id"),
         ("POST", "/api/v1/tag_suggestions/scan", "payload.project"),
+        # v1.12 B7. `destination` says where a run with no source picture
+        # files its output, so the project is the owner naming a destination
+        # rather than a filter to narrow by. Both are OWNER_ONLY POSTs and
+        # neither is in `READ_SAFE_POST_PATHS`, so no resource-scoped token
+        # reaches either one - which is assertion 2 below, not a claim made
+        # here.
+        ("POST", "/api/v1/workflows/run", "body.destination.project_id"),
+        ("POST", "/api/v1/workflows/run/preflight", "body.destination.project_id"),
+        # The same body again, held for ComfyUI to open: `destination` is read
+        # by nothing there, and the route is OWNER_ONLY like the two above.
+        ("POST", "/api/v1/workflows/run/opening", "body.destination.project_id"),
     }
 )
 
@@ -1153,7 +1425,6 @@ _PROJECT_REFS_IN_OPAQUE_BODY = frozenset(
             "/api/v1/picture_sets/{id}",
             "payload.project_ids|payload.project_id",
         ),
-        ("POST", "/api/v1/comfyui/run_t2i", "payload.project_id"),
     }
 )
 
@@ -1573,7 +1844,19 @@ _PICTURE_METADATA_FIELDS = {
     "perceptual_hash",
     "pixel_sha",
     "project_id",
+    # Whether the picture looks like its own prompt: a number derived from this
+    # picture's pixels and its prompt column (already in this payload), naming
+    # nothing else.
+    "prompt_match",
     "reference_folder_id",
+    # The manual workflow a run of which made the picture (`manual:<uuid>`):
+    # an opaque hub workflow id, the same class as the two workflow hashes
+    # below that already ride here. Every route that resolves one is
+    # OWNER_ONLY, so a scoped token learns an id it cannot open.
+    "run_workflow_id",
+    # Which version of that workflow's document made it: a small integer
+    # about the same opaque id, which a scoped token cannot open either.
+    "run_workflow_version",
     "score",
     "size_bin_index",
     "size_bytes",
@@ -2313,10 +2596,13 @@ _PRIVATE_ADDRESS_RE = re.compile(
 )
 
 # Named roots, never a repo-root walk: that is what lets every scan in this
-# file work without a node_modules / dist / .venv exclusion list, and a
-# too-greedy exclusion is a silent pass. The list is wide because the scan it
-# mirrors reads the whole diff - a literal in a workflow, an installer script
-# or the website blocks a push exactly as one in a test does.
+# file work without a dist / .venv exclusion list, and a too-greedy exclusion
+# is a silent pass. A node_modules path component is skipped under every root,
+# because electron/ is walked and npm install drops vendored .d.ts files there
+# that document the network APIs with RFC 1918 examples; it is gitignored
+# everywhere, so nothing it hides can reach a push. The list is wide because
+# the scan it mirrors reads the whole diff - a literal in a workflow, an
+# installer script or the website blocks a push exactly as one in a test does.
 _PRIVATE_ADDRESS_ROOTS = (
     ".github",
     "docs",
@@ -2417,11 +2703,14 @@ def _private_address_offenders(root: Path, repo_root: Path) -> list[str]:
     named = root.is_file()
     paths = [root] if named else sorted(root.rglob("*"))
     for path in paths:
+        rel = path.relative_to(repo_root)
+        # A component, not a substring: node_modules_notes.md is first-party.
+        if "node_modules" in rel.parts:
+            continue
         if not path.is_file():
             continue
         if not named and path.suffix not in _PRIVATE_ADDRESS_SUFFIXES:
             continue
-        rel = path.relative_to(repo_root)
         if rel.as_posix().startswith(_PRIVATE_ADDRESS_SKIP):
             continue
         try:
@@ -2507,12 +2796,25 @@ def test_private_address_guardrail_has_teeth(tmp_path):
         + "\n"
     )
     (tmp_path / "longer.md").write_text(f"the gateway is {LAN_IPV4}.7\n")
+    # Vendored code is skipped by path component, and only that: a first-party
+    # file beside it, or one merely named after it, is still read.
+    vendored = tmp_path / "app" / "node_modules" / "@types" / "node"
+    vendored.mkdir(parents=True)
+    (vendored / "net.d.ts").write_text(f"// Subnet: {_TEETH_OFFENDER}\n")
+    (tmp_path / "app" / "main.js").write_text(f"// host {_TEETH_OFFENDER}\n")
+    (tmp_path / "app" / "node_modules_notes.md").write_text(f"{_TEETH_OFFENDER}\n")
 
     offenders = _private_address_offenders(tmp_path, tmp_path)
-    caught = {o.split(":", 1)[0] for o in offenders}
-    assert caught == {"bad.md", "mixed.md", "longer.md", "digit.md", "sentence.md"}, (
-        f"the guardrail reported the wrong set of files: {offenders}"
-    )
+    caught = {o.split(":", 1)[0].replace("\\", "/") for o in offenders}
+    assert caught == {
+        "bad.md",
+        "mixed.md",
+        "longer.md",
+        "digit.md",
+        "sentence.md",
+        "app/main.js",
+        "app/node_modules_notes.md",
+    }, f"the guardrail reported the wrong set of files: {offenders}"
 
 
 def test_private_address_guardrail_reads_a_named_file_of_any_kind(tmp_path):
@@ -2668,6 +2970,45 @@ def test_frontend_import_extensions_match_the_staging_allowlist():
         f"server-only={sorted(STAGING_ALLOWED_MEDIA_EXTS - frontend_exts)}. "
         "A client-only extension uploads the whole file and then fails the "
         "commit; a server-only one is refused before it is ever offered."
+    )
+
+
+def test_base_model_kinds_agree_across_the_stack():
+    """One order for "which model is this card about", not two that drift.
+
+    The server names a card after its base model; the client's
+    ``checkpointModel`` picks the model row the card SHOWS and reads it to a
+    screen reader. Both walk a preference order over slot kinds, and when they
+    disagree one card says two things: #1449 shipped with the name row reading
+    ``flux1-dev`` and the model row reading ``ae.safetensors``, its VAE,
+    because the client still took "the first slot".
+
+    A guardrail of this shape guarded ``BASE_WIDGETS`` until F1b deleted the
+    shelf that held it, and it was removed on the grounds that no second list
+    was left. One is: this is that list, and this is that guardrail.
+
+    The server's own copy needs no assertion - it is derived from
+    ``CHECKPOINT_WIDGETS`` at import - so a widget added there reaches the
+    server for free and fails HERE until the client follows.
+    """
+    from pixlstash.services.workflow_card_service import BASE_MODEL_KINDS
+
+    card_js = (REPO_ROOT / "frontend" / "src" / "utils" / "workflowCard.js").read_text(
+        encoding="utf-8"
+    )
+    match = re.search(r"const BASE_MODEL_KINDS = \[(.*?)\];", card_js, re.DOTALL)
+    assert match, (
+        "BASE_MODEL_KINDS is gone from frontend/src/utils/workflowCard.js - the "
+        "model row is choosing its slot against something else, and this "
+        "guardrail can no longer see what."
+    )
+    frontend_kinds = tuple(re.findall(r'"([^"]+)"', match.group(1)))
+
+    assert frontend_kinds == tuple(BASE_MODEL_KINDS), (
+        "the base-model preference orders disagree: "
+        f"client={list(frontend_kinds)}, server={list(BASE_MODEL_KINDS)}. "
+        "ORDER matters as much as membership: a graph carrying both a "
+        "checkpoint and a unet is named after one and draws the other."
     )
 
 
@@ -2982,3 +3323,247 @@ def test_desktop_download_links_match_the_electron_artifact_name():
             f"install.html offers a .{extension} download for {platform}, but "
             f"electron/package.json builds {sorted(configured)} there"
         )
+
+
+# ── A mark flip carries every table the owner's decisions live in ───────────
+
+
+def _hub_tables_keyed_on_a_workflow_key() -> set[str]:
+    """Every hub table with a ``workflow_key`` column, read from the schema.
+
+    The column and not a foreign key: ``workflow_key`` is a content address and
+    nothing declares a reference to it, so the column's presence is the only
+    thing that says a row belongs to a card.
+    """
+    source = (REPO_ROOT / "pixlstash" / "hub" / "schema.py").read_text()
+    return {
+        match.group(1)
+        for match in re.finditer(
+            r"CREATE TABLE IF NOT EXISTS (\w+) \((.*?)\n\)", source, re.S
+        )
+        if re.search(r"^\s*workflow_key\s", match.group(2), re.M)
+    }
+
+
+def test_a_mark_flip_carries_every_table_a_card_key_appears_in():
+    """``_KEYED_TABLES`` is derivable, so it is derived rather than remembered.
+
+    A model fix re-keys every card of a topology and carries the card tables
+    across (``hub/workflow_card_writes.set_model_fix``), which the cut-over's
+    conversion reads once (#1623). The carry-over loops over
+    ``_KEYED_TABLES``, so a card table added to the schema and not to that
+    tuple is a name, a set of pins or a stack membership silently dropped by
+    the next re-key - a loss with no error and no log, on rows that cannot be
+    rebuilt.
+
+    The module says the tuple is "the one place a new card table has to be
+    listed", which makes it easy to find and does nothing to make it fail.
+    This is the failing half: the tuple is exactly the tables carrying a
+    ``workflow_key`` column, less the two that hold a DERIVED key and are
+    re-keyed by their own ``UPDATE`` rather than copied.
+    """
+    from pixlstash.hub.workflow_card_writes import _KEYED_TABLES
+
+    # Not the owner's decisions, so not copied: both are rebuilt from the
+    # stored graphs, and `_rekey_variants` moves each with a single UPDATE
+    # because a split must NOT duplicate a variant or a file onto both halves.
+    derived = {"workflow_variant", "workflow_file"}
+    assert set(_KEYED_TABLES).isdisjoint(derived), (
+        "a derived table copied by the carry-over would duplicate a variant "
+        "onto both halves of a split"
+    )
+    # A record of which workflow each card became at the cut-over (#1622,
+    # written by #1623): keyed by the card key AS IT WAS, so a later flip must
+    # leave it naming the old key rather than copy it onto the new ones. A
+    # family pass's moved card (#1689) keeps its old key too; `_rekey_variants`
+    # adds the new keys alongside it, from every merged card.
+    historical = {"workflow_key_successor", "workflow_card_move"}
+    assert set(_KEYED_TABLES).isdisjoint(historical)
+    assert _hub_tables_keyed_on_a_workflow_key() == (
+        set(_KEYED_TABLES) | derived | historical
+    ), (
+        "a hub table keyed on workflow_key is neither carried by a mark flip "
+        "nor one of the derived tables it re-keys: add it to _KEYED_TABLES, or "
+        "to `derived` here with the UPDATE that moves it"
+    )
+
+
+def test_the_keyed_table_guardrail_has_teeth(tmp_path):
+    """Break the derivation and the assertion above has to notice.
+
+    The check reads a regex over ``schema.py``; a regex that silently matched
+    nothing would pass for every tuple, which is the way a guardrail like this
+    fails in practice.
+    """
+    assert _hub_tables_keyed_on_a_workflow_key(), (
+        "the schema scan found no card tables at all, so it would pass "
+        "whatever _KEYED_TABLES held"
+    )
+    from pixlstash.hub.workflow_card_writes import _KEYED_TABLES
+
+    pretend = set(_KEYED_TABLES) - {"workflow_cover"} | {"workflow_variant"}
+    assert _hub_tables_keyed_on_a_workflow_key() != pretend | {
+        "workflow_variant",
+        "workflow_file",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Architecture docs are filed by topic, never by release (#1468)
+# ---------------------------------------------------------------------------
+
+ARCHITECTURE_DOCS = sorted((REPO_ROOT / "docs").glob("*_architecture.md"))
+_RELEASE_TAG = re.compile(r"\(v\d+\.\d+|\bPhase \d|\bLane [A-Z]\b|\(DAM \d")
+
+
+def _github_slug(heading: str) -> str:
+    """The anchor GitHub gives a Markdown heading, before de-duplication."""
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", heading)  # a link keeps its text
+    return re.sub(r"[^\w\- ]", "", text.strip().lower()).replace(" ", "-")
+
+
+def _architecture_doc_problems(text: str) -> list[str]:
+    """Release-named ``##`` sections, and Table of Contents drift both ways."""
+    headings = re.findall(r"^#{1,6} (.+)$", text, re.M)
+    anchors: set[str] = set()
+    for heading in headings:
+        slug = _github_slug(heading)
+        n = 0
+        while (slug if n == 0 else f"{slug}-{n}") in anchors:
+            n += 1
+        anchors.add(slug if n == 0 else f"{slug}-{n}")
+    parts = text.split("## Table of Contents", 1)
+    if len(parts) < 2:
+        return ["no '## Table of Contents' section"]
+    toc = parts[1].split("\n---", 1)[0]
+    linked = set(re.findall(r"\]\(#([^)]+)\)", toc))
+    problems = []
+    for section in re.findall(r"^## (\d+\..+)$", text, re.M):
+        if _RELEASE_TAG.search(section):
+            problems.append(f"release-named section: ## {section}")
+        if _github_slug(section) not in linked:
+            problems.append(f"not in the Table of Contents: ## {section}")
+    problems += [f"TOC link to no heading: #{a}" for a in sorted(linked - anchors)]
+    return problems
+
+
+def test_the_architecture_docs_exist():
+    """An empty glob parametrizes to zero tests, which would drop the guardrail."""
+    assert ARCHITECTURE_DOCS, "no docs/*_architecture.md found"
+
+
+@pytest.mark.parametrize("doc", ARCHITECTURE_DOCS, ids=lambda p: p.name)
+def test_architecture_docs_are_filed_by_topic(doc):
+    """A section named for a release is the half a topic-first reader never
+    reads. New material goes in its subsystem's section; see the
+    "Project Architecture" rule in .github/copilot-instructions.md."""
+    problems = _architecture_doc_problems(doc.read_text(encoding="utf-8"))
+    assert not problems, f"{doc.name}:\n" + "\n".join(problems)
+
+
+def test_the_architecture_doc_guardrail_has_teeth():
+    """Put a release tag back on a real section and both halves must fire."""
+    doc = REPO_ROOT / "docs" / "backend_architecture.md"
+    text = doc.read_text(encoding="utf-8")
+    heading = "## 24. Folder structure: read, commit, layout and moves"
+    assert heading in text
+    problems = _architecture_doc_problems(
+        text.replace(heading, heading + " (v1.11 Phase 2)")
+    )
+    assert any(p.startswith("release-named section") for p in problems), problems
+    assert any(p.startswith("not in the Table of Contents") for p in problems), problems
+    assert any(p.startswith("TOC link to no heading") for p in problems), problems
+    assert _architecture_doc_problems(text.replace("## Table of Contents", "")) == [
+        "no '## Table of Contents' section"
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Guardrail: no naive datetime is written (#1503)
+# ---------------------------------------------------------------------------
+
+
+def _naive_datetime_sites(source: str, in_models: bool) -> list[tuple[int, str]]:
+    """Return (lineno, what) for every way a naive datetime gets into a column.
+
+    ``datetime.utcnow`` / ``utcfromtimestamp`` and a bare ``datetime.now()``
+    produce naive values, which sqlmodel's ``UTCDateTime`` refuses on write. In
+    a model file a raw SQLAlchemy ``DateTime`` column also reads back naive, so
+    it would put naive values back into circulation.
+    """
+    hits = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Attribute) and node.attr in (
+            "utcnow",
+            "utcfromtimestamp",
+        ):
+            hits.append((node.lineno, f"datetime.{node.attr}"))
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            attr = node.func.attr
+            tz_args = [kw.value for kw in node.keywords if kw.arg == "tz"]
+            tz_args += node.args[1:] if attr == "fromtimestamp" else node.args
+            no_tz = not tz_args or all(
+                isinstance(a, ast.Constant) and a.value is None for a in tz_args
+            )
+            if attr == "today" or (attr in ("now", "fromtimestamp") and no_tz):
+                hits.append((node.lineno, f"datetime.{attr}() without a timezone"))
+        elif in_models and (
+            (isinstance(node, ast.Name) and node.id == "DateTime")
+            or (isinstance(node, ast.Attribute) and node.attr == "DateTime")
+        ):
+            hits.append((node.lineno, "DateTime column type (use UTCDateTime)"))
+    return hits
+
+
+def test_no_naive_datetime_is_written():
+    """Every stored datetime is aware UTC; sqlmodel >= 0.0.45 raises on naive."""
+    models_dir = PIXLSTASH_DIR / "db_models"
+    offenders = []
+    for path in sorted(PIXLSTASH_DIR.rglob("*.py")):
+        if "migrations" in path.parts:
+            continue
+        in_models = models_dir in path.parents
+        for lineno, what in _naive_datetime_sites(path.read_text("utf-8"), in_models):
+            offenders.append(f"  {path.relative_to(REPO_ROOT)}:{lineno}: {what}")
+    assert not offenders, (
+        "Use datetime.now(timezone.utc) (and UTCDateTime for an explicit column); "
+        "a naive value fails on insert:\n" + "\n".join(offenders)
+    )
+
+
+def test_naive_datetime_guardrail_has_teeth():
+    planted = {
+        "default_factory=datetime.utcnow": "f = Field(default_factory=datetime.utcnow)",
+        "utcnow call": "x = datetime.utcnow()",
+        "module-qualified": "x = datetime.datetime.utcnow()",
+        "bare now": "x = datetime.now()",
+        "utcfromtimestamp": "x = datetime.utcfromtimestamp(0)",
+        "now(None)": "x = datetime.now(None)",
+        "now(tz=None)": "x = datetime.now(tz=None)",
+        "fromtimestamp": "x = datetime.fromtimestamp(0)",
+        "today": "x = datetime.today()",
+    }
+    for name, snippet in planted.items():
+        assert _naive_datetime_sites(snippet, in_models=False), name
+    assert _naive_datetime_sites("c = Column(DateTime)", in_models=True)
+    assert not _naive_datetime_sites("c = Column(UTCDateTime())", in_models=True)
+    assert not _naive_datetime_sites("x = datetime.now(timezone.utc)", False)
+    assert not _naive_datetime_sites("x = _utcnow()", in_models=False)
+    assert not _naive_datetime_sites("x = datetime.fromtimestamp(0, tz=UTC)", False)
+    assert not _naive_datetime_sites("x = datetime.fromtimestamp(0, UTC)", False)
+
+
+def test_plugin_check_is_imported_only_by_the_cli():
+    """The `plugins test` audit hook must never be installed in the server.
+
+    `sys.addaudithook` cannot be undone, so a server that imported
+    `plugin_check` and ran a check would carry the hook for its whole life.
+    A plain text search rather than an `ast` walk, so a relative import or an
+    `importlib.import_module` string is caught as well.
+    """
+    mentions = {
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in PIXLSTASH_DIR.rglob("*.py")
+        if "plugin_check" in path.read_text(encoding="utf-8")
+    }
+    assert mentions == {"pixlstash/cli.py", "pixlstash/plugin_check.py"}

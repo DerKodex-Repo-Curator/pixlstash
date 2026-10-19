@@ -19,6 +19,12 @@ import os
 import pytest
 
 from pixlstash.hub.db import HubDatabase
+from pixlstash.hub.workflows import model_ghost_names
+from pixlstash.services.model_shelf_service import fetch_models, resolve_recipe_models
+from pixlstash.services.model_workflow_sets import (
+    WorkflowSetRefusedError,
+    create_set,
+)
 from pixlstash.task_runner import TaskRunner
 from pixlstash.tasks.checkpoint_hash_task import CheckpointHashTask
 from pixlstash.tasks.missing_checkpoint_hash_finder import MissingCheckpointHashFinder
@@ -228,6 +234,80 @@ class TestCollisionIsAMerge:
 
         assert rows(hub)[0]["base_model"] == "flux.1-dev"
 
+    def test_the_merge_carries_comfyui_run_evidence_to_the_survivor(
+        self, hub, tmp_path
+    ):
+        """#1518: runs recorded against either row are runs of the same bytes."""
+        first = write_model(tmp_path / "one" / "a.safetensors")
+        second = write_model(tmp_path / "two" / "b.safetensors")
+        first_id = register(hub, first)
+        second_id = register(hub, second)
+        with hub.transaction() as conn:
+            conn.executemany(
+                "INSERT INTO comfyui_history_model (prompt_id, model_id) VALUES (?, ?)",
+                [("both", first_id), ("both", second_id), ("second", second_id)],
+            )
+
+        CheckpointHashTask(
+            hub, [(first_id, str(first)), (second_id, str(second))]
+        ).run()
+
+        survivor = rows(hub)[0]["id"]
+        assert {
+            (row["prompt_id"], row["model_id"])
+            for row in hub.fetchall(
+                "SELECT prompt_id, model_id FROM comfyui_history_model"
+            )
+        } == {("both", survivor), ("second", survivor)}
+
+    def test_the_merge_carries_a_librarys_hide_to_the_survivor(self, hub, tmp_path):
+        """A library that hid either row hid these bytes, whichever row is kept."""
+        first = write_model(tmp_path / "one" / "a.safetensors")
+        second = write_model(tmp_path / "two" / "b.safetensors")
+        first_id = register(hub, first)
+        second_id = register(hub, second)
+        with hub.transaction() as conn:
+            conn.executemany(
+                "INSERT INTO model_hidden (library_uuid, model_id) VALUES (?, ?)",
+                [("hid-first", first_id), ("hid-second", second_id)],
+            )
+
+        CheckpointHashTask(
+            hub, [(first_id, str(first)), (second_id, str(second))]
+        ).run()
+
+        survivor = rows(hub)[0]["id"]
+        assert {
+            (row["library_uuid"], row["model_id"])
+            for row in hub.fetchall("SELECT library_uuid, model_id FROM model_hidden")
+        } == {("hid-first", survivor), ("hid-second", survivor)}
+
+    def test_the_merge_keeps_the_header_facts_only_the_dropped_row_has(
+        self, hub, tmp_path
+    ):
+        first = write_model(tmp_path / "one" / "a.safetensors")
+        second = write_model(tmp_path / "two" / "b.safetensors")
+        first_id = register(hub, first)
+        second_id = register(hub, second)
+        with hub.transaction() as conn:
+            conn.execute(
+                "UPDATE model SET family = 't5_xxl', quant = 'f16', "
+                "weights_id = 'w' WHERE id = ?",
+                (second_id,),
+            )
+
+        CheckpointHashTask(
+            hub, [(first_id, str(first)), (second_id, str(second))]
+        ).run()
+
+        (surviving,) = rows(hub)
+        assert surviving["id"] == first_id
+        assert (surviving["family"], surviving["quant"], surviving["weights_id"]) == (
+            "t5_xxl",
+            "f16",
+            "w",
+        )
+
     def test_the_merge_never_overwrites_what_the_survivor_already_knew(
         self, hub, tmp_path
     ):
@@ -245,6 +325,67 @@ class TestCollisionIsAMerge:
         surviving = rows(hub)[0]
         assert surviving["base_model"] == "typed by hand"
         assert surviving["filename"] == "a.safetensors"
+
+    def test_the_merge_keeps_the_stronger_base_model_identification(
+        self, hub, tmp_path
+    ):
+        # Not blank-filling: the survivor's guess must lose to a person's
+        # answer on the dropped row, including an answer of "none of these".
+        first = write_model(tmp_path / "one" / "a.safetensors")
+        second = write_model(tmp_path / "two" / "b.safetensors")
+        first_id = register(hub, first)
+        second_id = register(hub, second)
+        with hub.transaction() as conn:
+            conn.execute(
+                "UPDATE model SET base_model_canonical = 'Sana', "
+                "base_model_source = 'filename_fuzzy' WHERE id = ?",
+                (first_id,),
+            )
+            conn.execute(
+                "UPDATE model SET base_model_canonical = NULL, "
+                "base_model_source = 'user' WHERE id = ?",
+                (second_id,),
+            )
+
+        CheckpointHashTask(
+            hub, [(first_id, str(first)), (second_id, str(second))]
+        ).run()
+
+        (surviving,) = rows(hub)
+        assert surviving["id"] == first_id
+        assert (
+            surviving["base_model_canonical"],
+            surviving["base_model_source"],
+        ) == (None, "user")
+
+    def test_the_merge_keeps_the_survivors_identification_when_it_is_stronger(
+        self, hub, tmp_path
+    ):
+        first = write_model(tmp_path / "one" / "a.safetensors")
+        second = write_model(tmp_path / "two" / "b.safetensors")
+        first_id = register(hub, first)
+        second_id = register(hub, second)
+        with hub.transaction() as conn:
+            conn.execute(
+                "UPDATE model SET base_model_canonical = 'FLUX.2', "
+                "base_model_source = 'declared' WHERE id = ?",
+                (first_id,),
+            )
+            conn.execute(
+                "UPDATE model SET base_model_canonical = 'Sana', "
+                "base_model_source = 'filename_fuzzy' WHERE id = ?",
+                (second_id,),
+            )
+
+        CheckpointHashTask(
+            hub, [(first_id, str(first)), (second_id, str(second))]
+        ).run()
+
+        (surviving,) = rows(hub)
+        assert (
+            surviving["base_model_canonical"],
+            surviving["base_model_source"],
+        ) == ("FLUX.2", "declared")
 
     def test_a_merge_where_the_survivors_file_is_gone_still_keeps_both_rows(
         self, hub, tmp_path
@@ -319,6 +460,108 @@ class TestFinder:
         # And it is not counted as work still owed, or the shelf would report a
         # queue that can never drain.
         assert MissingCheckpointHashFinder(hub).progress() == (1, 1)
+
+    def test_the_managed_store_is_hashed_though_pixlstash_owns_it(self, hub, tmp_path):
+        """The managed store has the declared folders' owner, but its files are
+        plain files: the Downloads intake moves the owner's models there. A
+        text encoder never hashed there is one no PixlStash loader can load by
+        digest. Wrong if it is left out, or not counted as owed."""
+        downloaded = register(
+            hub,
+            write_model(tmp_path / "managed" / "t5-downloaded.safetensors"),
+            file_kind="text_encoder",
+        )
+        with hub.transaction() as conn:
+            conn.execute(
+                "UPDATE model_folder SET owner = 'pixlstash', kind = 'managed', "
+                "movable = 'root_only' WHERE path = ?",
+                (str(tmp_path / "managed"),),
+            )
+
+        task = MissingCheckpointHashFinder(hub).find_task()
+
+        assert task.params["checkpoint_ids"] == [downloaded]
+        assert MissingCheckpointHashFinder(hub).progress() == (1, 1)
+        pending = fetch_models(hub, ("text_encoder",))
+        assert [row["hash_pending"] for row in pending] == [1]
+
+    def test_nothing_waits_on_a_row_that_is_never_hashed(self, hub, tmp_path):
+        """A row this finder leaves out for good has `sha256` NULL for good.
+        Reading that as "still hashing" had the Models rail offer every cached
+        HuggingFace repo with a permanently disabled Add, and kept recipe
+        digests from ever being judged."""
+        cache = tmp_path / "hf"
+        (cache / "models--Wan-AI--Wan2.1-T2V-14B").mkdir(parents=True)
+        declared = register(
+            hub, cache / "models--Wan-AI--Wan2.1-T2V-14B", file_kind="unknown"
+        )
+        engine = register(
+            hub, write_model(tmp_path / "Tagger.onnx"), file_kind="engine"
+        )
+        with hub.transaction() as conn:
+            conn.execute(
+                "UPDATE model_folder SET owner = 'pixlstash' WHERE path = ?",
+                (str(cache),),
+            )
+            conn.execute(
+                "INSERT INTO workflow_topology (topology_hash, hash_version, "
+                "node_count, first_seen_at) VALUES ('t', 'v1', 1, 'now')"
+            )
+            conn.execute(
+                "INSERT INTO workflow_recipe (structural_hash, topology_hash, "
+                "hash_version, node_count, first_seen_at) "
+                "VALUES ('r', 't', 'v1', 1, 'now')"
+            )
+            conn.execute(
+                "INSERT INTO workflow_recipe_asset (structural_hash, widget_name, "
+                "normalized_filename) VALUES ('r', 'lora_sha256', ?)",
+                ("ab" * 32,),
+            )
+
+        def pending():
+            kinds = ("checkpoint", "unknown", "engine")
+            return {
+                row["id"] for row in fetch_models(hub, kinds) if row["hash_pending"]
+            }
+
+        def refusal(model_id):
+            with pytest.raises(WorkflowSetRefusedError) as refused:
+                create_set(hub, "doomed", [{"model_id": model_id}])
+            return str(refused.value)
+
+        assert pending() == set()
+        assert resolve_recipe_models(hub)[2] == set()
+        assert model_ghost_names(hub) == {"ab" * 32}
+        assert "has no file hash" in refusal(declared)
+        assert "workflow loads" in refusal(engine)
+
+        # The positive control: one row the finder WILL hand out, and every
+        # reader is waiting again.
+        waiting = register(hub, write_model(tmp_path / "Mine.safetensors"))
+
+        assert MissingCheckpointHashFinder(hub).find_task().params[
+            "checkpoint_ids"
+        ] == [waiting]
+        assert pending() == {waiting}
+        assert resolve_recipe_models(hub)[2] == {"r"}
+        assert model_ghost_names(hub) == set()
+        assert "still being hashed" in refusal(waiting)
+
+        # "Never" needs EVERY copy declared. One copy anywhere else and the row
+        # is still owed, as is a row with no copy at all: judging digests early
+        # forgets them, so those wait.
+        both = register(hub, write_model(tmp_path / "Both.safetensors"))
+        gone = register(hub, write_model(tmp_path / "Gone.safetensors"))
+        with hub.transaction() as conn:
+            conn.execute(
+                "INSERT INTO model_file (model_id, model_folder_id, relpath, state, "
+                "seen_at) SELECT ?, id, 'Both.safetensors', 'present', 'now' "
+                "FROM model_folder WHERE owner = 'pixlstash'",
+                (both,),
+            )
+            conn.execute("DELETE FROM model_file WHERE model_id = ?", (gone,))
+
+        assert pending() == {waiting, both, gone}
 
     def test_the_path_it_hands_out_is_the_folder_plus_the_relpath(self, hub, tmp_path):
         path = write_model(tmp_path / "sdxl.safetensors")
@@ -399,6 +642,23 @@ class TestFinder:
         assert finder.find_task() is None, (
             "the finder re-issued a batch whose result had not come back yet"
         )
+
+    def test_a_failed_batch_is_deferred_before_it_is_released(self, hub, tmp_path):
+        # The planner can run find_task the instant the batch is let go.
+        register(hub, write_model(tmp_path / "a.safetensors"))
+        finder = MissingCheckpointHashFinder(hub)
+        task = finder.find_task()
+        reissued = []
+
+        class Released(set):
+            def difference_update(self, ids):
+                super().difference_update(ids)
+                reissued.append(finder.find_task())
+
+        finder._handed_out = Released(finder._handed_out)
+        finder.on_task_complete(task, RuntimeError("hub went away"))
+
+        assert reissued == [None]
 
     def test_the_batch_is_released_once_its_result_is_in(self, hub, tmp_path):
         # The positive control: holding rows back forever would strand a

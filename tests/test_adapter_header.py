@@ -13,9 +13,13 @@ import pytest
 
 from pixlstash.utils.adapter_header import (
     KIND_UNKNOWN,
+    QUANT_MIXED,
     describe_adapter,
     detect_adapter_kind,
+    family_from_header,
+    quant_from_header,
     read_safetensors_header,
+    weights_id_from_header,
 )
 
 
@@ -257,6 +261,44 @@ def test_malformed_metadata_values_degrade_instead_of_raising(tmp_path):
     assert info.base_model is None
 
 
+def test_modelspec_and_kohya_evidence_is_read(tmp_path):
+    """The SAI ``modelspec.*`` block and kohya's training checkpoint name."""
+    path = _write_safetensors(
+        tmp_path / "example.safetensors",
+        ["x.lora_A.weight"],
+        {
+            "format": "pt",
+            "modelspec.architecture": "Stable-Diffusion-XL-v1-Base/LoRA",
+            "modelspec.title": "Example Style",
+            "ss_sd_model_name": "animagineXLV31_v31.safetensors",
+        },
+    )
+    info = describe_adapter(str(path))
+
+    assert info.architecture == "Stable-Diffusion-XL-v1-Base/LoRA"
+    assert info.trained_on == "animagineXLV31_v31.safetensors"
+    assert info.display_name == "Example Style"
+    # modelspec says what the file is trained against; it does not become the
+    # trainer's own base-model string.
+    assert info.base_model is None
+
+
+def test_metadata_text_is_bounded_and_ignores_structures(tmp_path):
+    path = _write_safetensors(
+        tmp_path / "hostile.safetensors",
+        ["x.lora_A.weight"],
+        {
+            "format": "pt",
+            "modelspec.architecture": "x" * 10_000,
+            "ss_sd_model_name": {"not": "a string"},
+        },
+    )
+    info = describe_adapter(str(path))
+
+    assert len(info.architecture) == 256
+    assert info.trained_on is None
+
+
 def test_tag_frequency_with_unusable_counts_still_yields_tags(tmp_path):
     metadata = {
         "format": "pt",
@@ -272,3 +314,99 @@ def test_describe_returns_none_when_the_header_is_unreadable(tmp_path):
     path = tmp_path / "broken.safetensors"
     path.write_bytes(b"\x00")
     assert describe_adapter(str(path)) is None
+
+
+# ── the header facts: family, quant and weights_id (#1314) ───────────────────
+
+
+def _entry(dtype, shape):
+    return {"dtype": dtype, "shape": shape, "data_offsets": [0, 0]}
+
+
+def test_quant_is_weighted_by_parameters_not_tensors():
+    """300 fp32 norm tensors against 200 fp8 weights is an fp8 model."""
+    header = {f"norm.{i}": _entry("F32", [8]) for i in range(300)}
+    header.update({f"weight.{i}": _entry("F8_E4M3", [64, 64]) for i in range(200)})
+    header["__metadata__"] = {"format": "pt"}
+    assert quant_from_header(header) == "f8_e4m3"
+
+
+def test_quant_is_mixed_when_no_dtype_holds_a_majority():
+    header = {
+        "a": _entry("F16", [100]),
+        "b": _entry("BF16", [100]),
+        "c": _entry("F8_E4M3", [50]),
+    }
+    assert quant_from_header(header) == QUANT_MIXED
+
+
+def test_quant_is_none_for_a_header_with_no_measurable_tensor():
+    assert quant_from_header({"__metadata__": {"format": "pt"}}) is None
+
+
+def test_weights_id_ignores_dtype_and_follows_names_and_shapes():
+    """Two clean casts share an id; a repack or a reshaped tensor does not."""
+    fp16 = {"a.weight": _entry("F16", [4, 4]), "b.weight": _entry("F16", [4])}
+    fp8 = {"b.weight": _entry("F8_E4M3", [4]), "a.weight": _entry("F8_E4M3", [4, 4])}
+    repacked = {**fp8, "a.weight_scale": _entry("F32", [1])}
+    reshaped = {**fp16, "b.weight": _entry("F16", [8])}
+
+    assert weights_id_from_header(fp16) == weights_id_from_header(fp8)
+    assert weights_id_from_header(repacked) != weights_id_from_header(fp8)
+    assert weights_id_from_header(reshaped) != weights_id_from_header(fp16)
+    assert weights_id_from_header({"__metadata__": {}}) is None
+
+
+@pytest.mark.parametrize(
+    "header, expected",
+    [
+        ({"decoder.conv_in.weight": _entry("F16", [512, 4, 3, 3])}, "vae_4ch"),
+        ({"decoder.conv_in.weight": _entry("BF16", [512, 16, 3, 3])}, "vae_16ch"),
+        (
+            {
+                "text_model.embeddings.token_embedding.weight": _entry(
+                    "F16", [49408, 768]
+                )
+            },
+            "clip_l",
+        ),
+        ({"token_embedding.weight": _entry("F16", [49408, 1280])}, "clip_g"),
+        ({"shared.weight": _entry("F16", [32128, 4096])}, "t5_xxl"),
+        (
+            {"encoder.embed_tokens.weight": _entry("F8_E4M3", [256384, 4096])},
+            "umt5_xxl",
+        ),
+        # A full checkpoint bakes its VAE and encoders in under prefixes, and
+        # must not be filed as either.
+        (
+            {
+                "first_stage_model.decoder.conv_in.weight": _entry(
+                    "F16", [512, 4, 3, 3]
+                ),
+                "conditioner.embedders.0.transformer.text_model.embeddings."
+                "token_embedding.weight": _entry("F16", [49408, 768]),
+            },
+            None,
+        ),
+        ({"model.embed_tokens.weight": _entry("BF16", [151936, 2560])}, None),
+        ({"decoder.conv_in.weight": "not an entry"}, None),
+    ],
+)
+def test_family_reads_the_architecture_off_top_level_tensors(header, expected):
+    assert family_from_header(header) == expected
+
+
+def test_describe_carries_the_header_facts(tmp_path):
+    path = tmp_path / "vae.safetensors"
+    header = {
+        "decoder.conv_in.weight": _entry("BF16", [512, 16, 3, 3]),
+        "decoder.norm.weight": _entry("F32", [512]),
+    }
+    raw = json.dumps(header).encode()
+    path.write_bytes(struct.pack("<Q", len(raw)) + raw)
+
+    info = describe_adapter(str(path))
+
+    assert info.family == "vae_16ch"
+    assert info.quant == "bf16"
+    assert info.weights_id == weights_id_from_header(header)

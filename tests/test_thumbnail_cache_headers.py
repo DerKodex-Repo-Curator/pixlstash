@@ -28,6 +28,7 @@ from PIL import Image
 
 from pixlstash.db_models import Face
 from pixlstash.server import Server
+from pixlstash.utils.image_processing.image_utils import ImageUtils
 from pixlstash.utils.http_cache import (
     REVALIDATE_CACHE_CONTROL,
     conditional_file_response,
@@ -107,6 +108,33 @@ def test_helper_serves_the_new_bytes_when_the_thumbnail_is_regenerated(tmp_path)
     assert resp.headers["etag"] != stale_etag
 
 
+def test_a_reused_picture_id_gets_a_thumbnail_url_of_its_own():
+    """SQLite gives a deleted picture's id to the next import.
+
+    A new picture the size of the deleted one would otherwise get its exact
+    ``?v=``, and the browser, holding that URL for up to an hour, paints the
+    deleted picture's bitmap in its place. The file tells the two apart.
+    """
+    gone = ImageUtils.thumbnail_cache_version(
+        384, 577, None, file_path="Unassigned/test-gone.png"
+    )
+    new = ImageUtils.thumbnail_cache_version(
+        384, 577, None, file_path="Unassigned/test-new.png"
+    )
+    assert gone != new
+    assert gone.startswith("384x577-")
+    # Stable for one picture, so the browser cache still works.
+    assert gone == ImageUtils.thumbnail_cache_version(
+        384, 577, None, file_path="Unassigned/test-gone.png"
+    )
+    # Before processing too: an unprocessed reuse must not share "0".
+    assert ImageUtils.thumbnail_cache_version(
+        None, None, file_path="Unassigned/test-gone.png"
+    ) != ImageUtils.thumbnail_cache_version(
+        None, None, file_path="Unassigned/test-new.png"
+    )
+
+
 def test_no_etag_when_the_file_cannot_be_stated(tmp_path, caplog):
     """A missing file yields no validator - and says so, rather than failing."""
     missing = str(tmp_path / "missing.png")
@@ -150,7 +178,7 @@ def _import_one_picture(client):
     return import_resp["results"][0]["picture_id"]
 
 
-def _age_the_cached_thumbnail(server, subdir, stem, old_version):
+def _age_the_cached_thumbnail(server, subdir, stem, old_version, image_format="PNG"):
     """Rewind a just-written cache entry to a pre-256 PixlStash.
 
     A fresh vault starts with an empty thumbnail cache, so the branch every
@@ -171,8 +199,8 @@ def _age_the_cached_thumbnail(server, subdir, stem, old_version):
     meta["version"] = old_version
     with open(meta_path, "w", encoding="utf-8") as handle:
         json.dump(meta, handle)
-    Image.new("RGBA", (64, 64), (1, 2, 3, 255)).save(
-        os.path.join(cache_dir, f"{stem}.png"), format="PNG"
+    Image.new("RGB", (64, 64), (1, 2, 3)).save(
+        os.path.join(cache_dir, f"{stem}.{image_format.lower()}"), format=image_format
     )
 
 
@@ -208,6 +236,8 @@ def test_character_thumbnail_revalidates_instead_of_going_stale():
         # Served at 256, not the 64 this route used to hardcode: the in-app
         # consumer is a 24 px mark, but external pickers render it far larger.
         assert Image.open(io.BytesIO(first.content)).size == (256, 256)
+        assert first.headers["content-type"] == "image/webp"
+        assert Image.open(io.BytesIO(first.content)).format == "WEBP"
         etag = first.headers.get("etag")
         assert etag
 
@@ -216,6 +246,7 @@ def test_character_thumbnail_revalidates_instead_of_going_stale():
         second = client.get(f"/characters/{char_id}/thumbnail")
         assert second.status_code == 200
         assert second.headers["cache-control"] == REVALIDATE_CACHE_CONTROL
+        assert second.headers["content-type"] == "image/webp"
 
         conditional = client.get(
             f"/characters/{char_id}/thumbnail",
@@ -225,7 +256,9 @@ def test_character_thumbnail_revalidates_instead_of_going_stale():
         assert conditional.content == b""
 
         # An install that already cached a 64x64 crop must not keep serving it.
-        _age_the_cached_thumbnail(server, "face_thumbnails", f"character_{char_id}", 6)
+        _age_the_cached_thumbnail(
+            server, "face_thumbnails", f"character_{char_id}", 6, image_format="WEBP"
+        )
         regenerated = client.get(f"/characters/{char_id}/thumbnail")
         assert regenerated.status_code == 200
         assert Image.open(io.BytesIO(regenerated.content)).size == (256, 256)

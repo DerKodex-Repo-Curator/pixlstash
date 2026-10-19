@@ -14,6 +14,10 @@ vi.mock("vuetify/components", () => ({
       '<div v-if="modelValue"><slot /></div>',
   },
   VIcon: { template: "<i><slot /></i>" },
+  VMenu: { template: "<div><slot name='activator' :props='{}' /></div>" },
+  VTooltip: {
+    template: '<slot name="activator" :props="{}" :is-active="false" />',
+  },
   VSlider: { template: "<input />" },
   VSpacer: { template: "<span />" },
   VSwitch: { template: "<input />" },
@@ -26,6 +30,7 @@ vi.mock("../../api/config", () => ({
 vi.mock("../../api/workers", () => ({ getWorkerProgress: vi.fn().mockResolvedValue({}) }));
 vi.mock("../../api/taggers", () => ({
   listTaggers: vi.fn().mockResolvedValue({ plugins: [], settings: {} }),
+  getLabelThresholds: vi.fn().mockResolvedValue([]),
   listTaggerPluginDiagnostics: vi.fn().mockResolvedValue({
     plugin_dirs: { user: "/home/me/.pixlstash/plugins" },
     load_errors: [],
@@ -52,25 +57,14 @@ function mountPane(stubOverrides = {}) {
         "v-card-text": { template: "<div><slot /></div>" },
         "v-card-actions": { template: "<div><slot /></div>" },
         "v-spacer": { template: "<span />" },
-        SettingsSection: { template: "<section><slot /></section>" },
+        // Both slots, as the real one: the tagger panel's Save sits in the
+        // heading's action slot.
+        SettingsSection: {
+          template: '<section><slot name="action" /><slot /></section>',
+        },
         SettingsTwoCol: { template: "<div><slot /></div>" },
         SettingsFieldBlock: { template: "<div><slot /></div>" },
-        PluginsTable: true,
-        VBtn: {
-          inheritAttrs: false,
-          emits: ["click"],
-          props: ["prependIcon"],
-          template: '<button @click="$emit(\'click\')"><slot /></button>',
-        },
-        // inheritAttrs:false matters: without it a native click reaches the
-        // parent's @click twice -- once through the emit, once through
-        // attribute fallthrough -- and every click-counting assertion doubles.
-        "v-btn": {
-          inheritAttrs: false,
-          emits: ["click"],
-          props: ["prependIcon"],
-          template: '<button @click="$emit(\'click\')"><slot /></button>',
-        },
+        PluginSelect: true,
         "v-tooltip": { template: "<div><slot /></div>" },
         ...stubOverrides,
       },
@@ -107,18 +101,18 @@ describe("BehaviourSection plugin installation help", () => {
   });
 });
 
-describe("BehaviourSection keeps the plugin tables in sync", () => {
+describe("BehaviourSection keeps the plugin pickers in sync", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  // `taggerSettings` is a ref, and inside a <script setup> template refs are
-  // auto-unwrapped — so `taggerSettings.value = s` in a template handler sets a
-  // property called "value" ON the settings object instead of replacing the
-  // ref's contents. The parent's copy then never moves.
+  // Both pickers bind `v-model:settings`. A hand-written handler here once did
+  // `taggerSettings.value = s`, which in a <script setup> template sets a
+  // property called "value" ON the settings object (refs are auto-unwrapped),
+  // so the parent's copy never moved.
   //
-  // Asserted at the prop boundary rather than through a rendered radio:
-  // PluginsTable is stubbed in this suite, and what is under test is the
-  // parent's handler, not the child's markup.
-  it("passes an updated settings object back down to the tables", async () => {
+  // Asserted at the prop boundary rather than through a rendered select:
+  // PluginSelect is stubbed in this suite, and what is under test is the
+  // parent's binding, not the child's markup.
+  it("passes an updated settings object back down to the pickers", async () => {
     const { listTaggers } = await import("../../api/taggers");
     listTaggers.mockResolvedValue({
       plugins: [{ name: "wd14", display_name: "WD14", supports_tags: true }],
@@ -130,22 +124,22 @@ describe("BehaviourSection keeps the plugin tables in sync", () => {
     await nextTick();
     await nextTick();
 
-    const tables = wrapper.findAllComponents({ name: "PluginsTable" });
-    expect(tables.length).toBeGreaterThan(0);
-    expect(tables[0].props("settings")).toEqual({ active_tag_plugin: "wd14" });
+    const pickers = wrapper.findAllComponents({ name: "PluginSelect" });
+    expect(pickers.length).toBeGreaterThan(0);
+    expect(pickers[0].props("settings")).toEqual({ active_tag_plugin: "wd14" });
 
-    // What PluginsTable emits when the active plugin is deselected.
-    tables[0].vm.$emit("update:settings", { active_tag_plugin: null });
+    // What PluginSelect emits when the active plugin is deselected.
+    pickers[0].vm.$emit("update:settings", { active_tag_plugin: null });
     await nextTick();
 
-    const after = wrapper.findAllComponents({ name: "PluginsTable" })[0];
+    const after = wrapper.findAllComponents({ name: "PluginSelect" })[0];
     expect(after.props("settings")).toEqual({ active_tag_plugin: null });
   });
 
-  // The description table has its own copy of the same handler, and the bug
-  // was in both. Reverting only that one left the suite green, so it needs its
-  // own assertion rather than riding on the tag table's.
-  it("does the same for the description table's handler", async () => {
+  // The description picker has its own binding, and the bug was once in both.
+  // Breaking only that one would leave the tag test green, so it needs its own
+  // assertion rather than riding on the tag picker's.
+  it("does the same for the description picker's handler", async () => {
     const { listTaggers } = await import("../../api/taggers");
     listTaggers.mockResolvedValue({
       plugins: [
@@ -163,13 +157,13 @@ describe("BehaviourSection keeps the plugin tables in sync", () => {
     await nextTick();
     await nextTick();
 
-    const tables = wrapper.findAllComponents({ name: "PluginsTable" });
-    expect(tables.length).toBeGreaterThan(1);
+    const pickers = wrapper.findAllComponents({ name: "PluginSelect" });
+    expect(pickers.length).toBeGreaterThan(1);
 
-    tables[1].vm.$emit("update:settings", { active_description_plugin: null });
+    pickers[1].vm.$emit("update:settings", { active_description_plugin: null });
     await nextTick();
 
-    const after = wrapper.findAllComponents({ name: "PluginsTable" })[1];
+    const after = wrapper.findAllComponents({ name: "PluginSelect" })[1];
     expect(after.props("settings")).toEqual({ active_description_plugin: null });
   });
 });
@@ -192,14 +186,14 @@ describe("a plugin's saved parameters survive reopening its dialog", () => {
       plugins: [PLUGIN],
       settings: { active_tag_plugin: "wd14", plugins: { wd14: { params: { threshold: 0.35 } } } },
     });
-    const w = mountPane({ PluginsTable: false });
+    const w = mountPane({ PluginSelect: false });
     await flushPromises();
     await nextTick();
     return w;
   }
 
   const gear = (w) =>
-    w.findAll(".pt-col-actions button")[0];
+    w.get(".ps-row .app-btn");
   const form = (w) => w.findComponent({ name: "TaggerParametersUI" });
 
   it("shows the value you saved, not the one it opened with", async () => {
@@ -254,3 +248,128 @@ describe("a plugin's saved parameters survive reopening its dialog", () => {
   });
 });
 
+
+describe("the PixlStash tagger's settings sit in the pane", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const TAGGER = {
+    name: "pixlstash_tagger",
+    display_name: "PixlStash Tagger",
+    supports_tags: true,
+    parameter_schema: [
+      { name: "threshold_offset", label: "Threshold offset", type: "number", min: -0.5, max: 0.5, step: 0.01, default: 0 },
+    ],
+  };
+  const WD14 = { name: "wd14", display_name: "WD14", supports_tags: true, parameter_schema: [] };
+
+  async function openPane(active) {
+    const { listTaggers } = await import("../../api/taggers");
+    listTaggers.mockResolvedValue({
+      plugins: [TAGGER, WD14],
+      settings: {
+        active_tag_plugin: active,
+        plugins: { pixlstash_tagger: { params: { threshold_offset: 0.1 } } },
+      },
+    });
+    const w = mountPane();
+    await flushPromises();
+    await nextTick();
+    return w;
+  }
+
+  const panel = (w) => w.findComponent({ name: "TaggerPluginSettingsPanel" });
+  const form = (w) => w.findComponent({ name: "TaggerParametersUI" });
+
+  it("shows while it is the active tag plugin, seeded with its saved params", async () => {
+    const w = await openPane("pixlstash_tagger");
+    expect(panel(w).exists()).toBe(true);
+    expect(form(w).props("modelValue")).toEqual({ threshold_offset: 0.1 });
+    // Only the tag picker: the PixlStash tagger does not caption.
+    const pickers = w.findAllComponents({ name: "PluginSelect" });
+    expect(pickers.map((p) => p.props("inlineSettingsFor"))).toEqual([
+      "pixlstash_tagger",
+      "",
+    ]);
+  });
+
+  it("is absent while another plugin, or None, is chosen", async () => {
+    expect(panel(await openPane("wd14")).exists()).toBe(false);
+    expect(panel(await openPane(null)).exists()).toBe(false);
+  });
+
+  it("saves an edit by itself and hands it to the pickers", async () => {
+    const { patchUserConfig } = await import("../../api/config");
+    patchUserConfig.mockResolvedValue({});
+    const w = await openPane("pixlstash_tagger");
+    // Saves as you go, like the rest of the tab: no Save button.
+    expect(w.findAll("button").map((b) => b.text())).not.toContain("Save");
+
+    vi.useFakeTimers();
+    form(w).vm.$emit("update:modelValue", { threshold_offset: -0.2 });
+    await vi.advanceTimersByTimeAsync(500);
+    await flushPromises();
+    vi.useRealTimers();
+
+    expect(patchUserConfig).toHaveBeenCalledWith({
+      tagger_settings: {
+        plugins: { pixlstash_tagger: { params: { threshold_offset: -0.2 } } },
+      },
+    });
+    const picker = w.findAllComponents({ name: "PluginSelect" })[0];
+    expect(
+      picker.props("settings").plugins.pixlstash_tagger.params,
+    ).toEqual({ threshold_offset: -0.2 });
+    expect(w.text()).toContain("Saved.");
+  });
+
+  it("alerts rather than claiming Saved when the save fails", async () => {
+    const { patchUserConfig } = await import("../../api/config");
+    patchUserConfig.mockRejectedValueOnce(new Error("boom"));
+    const w = await openPane("pixlstash_tagger");
+
+    vi.useFakeTimers();
+    form(w).vm.$emit("update:modelValue", { threshold_offset: -0.2 });
+    await vi.advanceTimersByTimeAsync(500);
+    await flushPromises();
+    vi.useRealTimers();
+
+    expect(w.find('[role="alert"]').exists()).toBe(true);
+    expect(w.text()).not.toContain("Saved.");
+  });
+
+  // The pane polls is_loaded every few seconds and replaces each plugin object.
+  // Reseeding the form on that would silently discard what the user typed.
+  it("keeps an unsaved edit when the loaded-state poll replaces the plugin", async () => {
+    const w = await openPane("pixlstash_tagger");
+    form(w).vm.$emit("update:modelValue", { threshold_offset: -0.2 });
+    await nextTick();
+
+    w.vm.taggerPlugins = w.vm.taggerPlugins.map((p) => ({ ...p, is_loaded: true }));
+    await nextTick();
+
+    expect(form(w).props("modelValue")).toEqual({ threshold_offset: -0.2 });
+  });
+
+  it("keeps an unsaved edit when the settings object is replaced by an equal copy", async () => {
+    const w = await openPane("pixlstash_tagger");
+    form(w).vm.$emit("update:modelValue", { threshold_offset: -0.2 });
+    await nextTick();
+
+    w.vm.taggerSettings = JSON.parse(JSON.stringify(w.vm.taggerSettings));
+    w.vm.taggerPlugins = JSON.parse(JSON.stringify(w.vm.taggerPlugins));
+    await nextTick();
+
+    expect(form(w).props("modelValue")).toEqual({ threshold_offset: -0.2 });
+  });
+
+  it("does reseed when the saved params really change", async () => {
+    const w = await openPane("pixlstash_tagger");
+    w.vm.taggerSettings = {
+      ...w.vm.taggerSettings,
+      plugins: { pixlstash_tagger: { params: { threshold_offset: 0.3 } } },
+    };
+    await nextTick();
+
+    expect(form(w).props("modelValue")).toEqual({ threshold_offset: 0.3 });
+  });
+});

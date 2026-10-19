@@ -47,7 +47,7 @@
   min-width: 0;
   padding: 0;
   position: relative;
-  z-index: 1;
+  z-index: var(--z-raised);
   gap: 0;
   background: transparent;
   border-bottom: none;
@@ -128,13 +128,15 @@
   }
 }
 
+/* Olive marks, words stay text: the underline is the selection, the label ink. */
 .sidebar-view-tab.active {
   background: transparent;
-  color: rgb(var(--v-theme-accent));
-  border-bottom-color: rgb(var(--v-theme-accent));
+  color: rgb(var(--v-theme-sidebar-text));
+  border-bottom-color: var(--selected-ink);
 }
 
-.sidebar-view-tab:hover:not(.active) {
+.sidebar-view-tab:hover {
+  background: var(--hover-wash);
   color: rgb(var(--v-theme-sidebar-text));
 }
 
@@ -199,15 +201,6 @@
   line-height: 1.5;
 }
 
-.sidebar-no-projects-btn :deep(.v-btn__content) {
-  font-size: var(--text-sm);
-  padding: var(--space-1) var(--space-2) var(--space-1) var(--space-2);
-}
-
-.sidebar-no-projects-btn--folders {
-  min-width: 190px;
-}
-
 /* Project tree (Projects tab flat tree) */
 .sidebar-project-tree-add {
   display: flex;
@@ -228,7 +221,7 @@
 
 .sidebar-project-tree-add:hover {
   color: rgb(var(--v-theme-sidebar-text));
-  background: rgba(var(--v-theme-accent), 0.08);
+  background: var(--hover-wash);
 }
 
 .sidebar-project-tree-node {
@@ -260,9 +253,7 @@
 }
 
 .sidebar-project-tree-row:hover {
-  background:
-    linear-gradient(var(--hover-wash), var(--hover-wash)),
-    rgba(var(--v-theme-sidebar-text), 0.05);
+  background: var(--hover-wash);
   color: rgb(var(--v-theme-sidebar-text));
 }
 
@@ -276,7 +267,6 @@
 /* Drop-target highlight (drag pictures onto a project to assign them) -
    mirrors .sidebar-list-item.droppable used by character/set rows. */
 .sidebar-project-tree-row.droppable {
-  filter: brightness(1.2);
   background: rgb(var(--v-theme-primary));
   color: rgb(var(--v-theme-on-primary));
 }
@@ -290,8 +280,8 @@
 /* Drop-target highlight while dragging a character/set onto a project */
 .sidebar-project-tree-row.project-move-target,
 .sidebar-project-tree-subsection.project-move-target {
-  background: rgba(var(--v-theme-primary), 0.22);
-  outline: 2px dashed rgb(var(--v-theme-primary));
+  background: var(--active-wash);
+  outline: 2px dashed var(--active-bar);
   outline-offset: -2px;
   border-radius: var(--radius-sm);
 }
@@ -390,7 +380,7 @@
 }
 
 .sidebar-project-tree-action-btn--danger:hover {
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
 }
 
 /* Sub-sections under an expanded project */
@@ -415,7 +405,7 @@
 }
 
 .sidebar-project-tree-subheader:hover {
-  background: rgba(var(--v-theme-accent), 0.08);
+  background: var(--hover-wash);
   color: rgb(var(--v-theme-sidebar-text));
 }
 
@@ -462,11 +452,6 @@
   padding-left: 0;
 }
 
-.sidebar-no-projects-btn--folders :deep(.v-btn__content) {
-  white-space: nowrap;
-  font-size: var(--text-sm);
-}
-
 .sidebar-collapsed-project-wrap {
   position: relative;
   width: 100%;
@@ -475,67 +460,23 @@
   align-items: center;
 }
 
-.sidebar-collapsed-project-menu {
+/* The surface and rows are the shared `.ctx-*` menu; these only place it. */
+.sidebar-collapsed-project-menu,
+.sidebar-collapsed-project-submenu {
   position: fixed;
-  z-index: 300;
-  background: rgb(var(--v-theme-surface));
-  border: 1px solid rgba(var(--v-theme-border), 0.4);
-  border-radius: var(--radius-md);
-  box-shadow: none;
-  overflow: hidden;
+  z-index: var(--z-dropdown);
   min-width: 180px;
-  white-space: nowrap;
-}
-
-.sidebar-collapsed-project-menu .sidebar-project-menu-item,
-.sidebar-collapsed-project-menu .sidebar-project-menu-add,
-.sidebar-collapsed-project-submenu .sidebar-project-menu-item,
-.sidebar-collapsed-project-submenu .sidebar-project-menu-add {
-  color: rgb(var(--v-theme-on-surface));
-}
-
-/* The rail is reserved on the base (see .sidebar-project-menu-item) so `.active`
-   only recolours it. The previous rule added the border here and tried to cancel
-   it with padding the base already carried, moving the label 3px on select. */
-.sidebar-collapsed-project-menu .sidebar-project-menu-item.active,
-.sidebar-collapsed-project-submenu .sidebar-project-menu-item.active {
-  background: rgba(var(--v-theme-primary), 0.18);
-  color: rgb(var(--v-theme-on-primary));
-  font-weight: 600;
-  border-left-color: rgb(var(--v-theme-primary));
 }
 
 .sidebar-collapsed-project-submenu {
-  position: fixed;
-  z-index: 301;
-  background: rgb(var(--v-theme-surface));
-  border: 1px solid rgba(var(--v-theme-border), 0.4);
-  border-radius: var(--radius-md);
-  overflow: hidden;
-  min-width: 180px;
+  z-index: var(--z-dropdown);
   max-height: 60vh;
   overflow-y: auto;
-  white-space: nowrap;
 }
 
-.sidebar-project-menu-separator {
-  height: 1px;
-  background: rgba(var(--v-theme-border), 0.3);
-  margin: var(--space-1) 0;
-}
-
-.sidebar-project-menu-has-sub {
-  position: relative;
-}
-
+/* The parent row stays washed while its submenu is open. */
 .sidebar-project-menu-has-sub.sub-open {
-  background: rgba(var(--v-theme-accent), 0.06);
-}
-
-.sidebar-project-menu-chevron {
-  margin-left: auto;
-  opacity: 0.45;
-  flex-shrink: 0;
+  background: var(--hover-wash);
 }
 
 .sidebar-collapsed-item--scrapheap {
@@ -556,17 +497,15 @@
 
 .sidebar-collapsed-flyout-menu {
   position: fixed;
-  z-index: 300;
-  background: rgb(var(--v-theme-surface));
-  border: 1px solid rgba(var(--v-theme-border), 0.4);
-  border-radius: var(--radius-md);
+  z-index: var(--z-dropdown);
   display: flex;
   flex-direction: column;
   overflow: hidden;
   max-height: 60vh;
   min-width: 200px;
   width: max-content;
-  white-space: nowrap;
+  /* The header runs flush to the top edge. */
+  padding-top: 0;
 }
 
 .sidebar-collapsed-flyout-header {
@@ -600,23 +539,9 @@
   flex: 1;
 }
 
+/* Rows carry a 32px thumbnail, so they keep block padding around it. */
 .sidebar-collapsed-flyout-item {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
-  cursor: pointer;
-  color: rgb(var(--v-theme-on-surface));
-  transition: background 0.12s;
-}
-
-.sidebar-collapsed-flyout-item:hover {
-  background: rgba(var(--v-theme-tertiary), 0.25);
-}
-
-.sidebar-collapsed-flyout-item.active {
-  background: rgba(var(--v-theme-primary), 0.15);
-  color: rgb(var(--v-theme-on-primary));
+  padding-block: var(--space-2);
 }
 
 .sidebar-collapsed-flyout-thumb {
@@ -625,13 +550,6 @@
   border-radius: var(--radius-sm);
   object-fit: cover;
   flex-shrink: 0;
-}
-
-.sidebar-collapsed-flyout-label {
-  font-size: var(--text-base);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex: 1;
 }
 
 .sidebar-collapsed-flyout-item-actions {
@@ -659,82 +577,7 @@
 
 .sidebar-collapsed-flyout-item-actions .v-icon:hover {
   opacity: 1;
-  background: rgba(var(--v-theme-tertiary), 0.35);
-}
-
-.sidebar-project-menu-section-label {
-  padding: var(--space-3) var(--space-3) var(--space-1);
-  font-size: var(--text-2xs);
-  font-weight: var(--weight-semibold);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: rgb(var(--v-theme-sidebar-text));
-}
-
-/* The project menu's background is a 38% `tertiary` TINT over `sidebar`, not a
-   solid `tertiary` fill, so `on-tertiary` is the wrong foreground here: an
-   `on-<x>` token is authored against a solid, full-opacity `<x>` fill and is
-   simply a different colour on a tint (measured 1.43-1.70:1 in light). On a
-   tint the foreground is the surface's own. See design-system-handoff.md §9.2. */
-.sidebar-project-menu-item {
-  display: flex;
-  align-items: center;
-  width: 100%;
-  box-sizing: border-box;
-  padding: var(--space-2) var(--space-3);
-  /* Reserved rail: `.active` recolours it, never adds it. */
-  border-left: 3px solid transparent;
-  cursor: pointer;
-  appearance: none;
-  background: transparent;
-  font-family: inherit;
-  font-size: var(--text-sm);
-  text-align: left;
-  color: rgb(var(--v-theme-on-surface));
-  transition:
-    background 0.1s,
-    color 0.1s;
-  gap: var(--space-3);
-  min-height: 26px;
-}
-
-.sidebar-project-menu-item:hover {
-  background: rgba(var(--v-theme-accent), 0.08);
-  color: rgb(var(--v-theme-on-surface));
-}
-
-.sidebar-project-menu-item.active {
-  background: rgba(var(--v-theme-tertiary), 0.3);
-  color: rgb(var(--v-theme-on-surface));
-  font-weight: 600;
-}
-
-.sidebar-project-menu-item-label {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sidebar-project-menu-add {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-2) var(--space-3);
-  font-size: var(--text-sm);
-  font-weight: var(--weight-semibold);
-  cursor: pointer;
-  color: rgba(var(--v-theme-on-surface), 0.65);
-  border-top: 1px solid rgba(var(--v-theme-border), 0.25);
-  min-height: 26px;
-  transition:
-    background 0.1s,
-    color 0.1s;
-}
-
-.sidebar-project-menu-add:hover {
-  background: rgba(var(--v-theme-accent), 0.08);
-  color: rgb(var(--v-theme-on-surface));
+  background: var(--hover-wash);
 }
 
 /* Sidebar right edge for counts */
@@ -772,7 +615,7 @@
   scrollbar-color: rgb(var(--v-theme-accent)) rgba(var(--v-theme-shadow), 0.15);
   box-sizing: border-box;
   /* One rule for "chrome rail meets the grid canvas", shared with
-     `.stats-sidebar`'s border-left so both rails present the same edge. */
+     the inspector's (`AppInspector`) border-left so both rails present the same edge. */
   border-right: 1px solid rgb(var(--v-theme-border));
 }
 
@@ -784,15 +627,19 @@
   right: 0;
   bottom: 0;
   width: 6px;
-  z-index: 6;
+  z-index: var(--z-raised);
   cursor: ew-resize;
   background: transparent;
   touch-action: none;
   transition: background 0.15s ease;
 }
-.sidebar-resize-handle:hover,
+.sidebar-resize-handle:hover {
+  background: var(--hover-wash);
+}
+
+/* Flush against the rail's clipped edge, so the ring is drawn inset. */
 .sidebar-resize-handle:focus-visible {
-  background: rgba(var(--v-theme-accent), 0.4);
+  box-shadow: var(--focus-ring-inset);
   outline: none;
 }
 
@@ -876,7 +723,6 @@
   display: flex;
   align-items: center;
   border-radius: var(--radius-md);
-  outline: none;
 }
 
 .sidebar-brand-logo-link:hover .sidebar-brand-logo {
@@ -913,7 +759,7 @@
 .sidebar-update-available {
   font-size: var(--text-2xs);
   line-height: 1;
-  color: rgba(var(--v-theme-accent), 0.8);
+  color: rgb(var(--v-theme-sidebar-text));
   text-decoration: none;
   white-space: nowrap;
 }
@@ -941,7 +787,7 @@
 }
 
 .sidebar-update-security {
-  color: rgb(var(--v-theme-warning));
+  color: rgb(var(--v-theme-surface-warning));
 }
 
 .sidebar-update-security:hover {
@@ -949,7 +795,7 @@
 }
 
 .sidebar-update-security--high {
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
 }
 
 .sidebar-update-security--high:hover {
@@ -985,10 +831,10 @@
   width: 3px;
   height: 60%;
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-  background: rgb(var(--v-theme-primary));
+  background: var(--active-bar);
   transition: transform 0.18s ease;
   pointer-events: none;
-  z-index: 1;
+  z-index: var(--z-raised);
 }
 
 .sidebar-collapsed-row.active::before {
@@ -1082,18 +928,10 @@
 
 .sidebar-collapsed-item--add-plus {
   position: relative;
-  z-index: 1;
+  z-index: var(--z-raised);
   font-size: calc(var(--sidebar-thumb-size) * 0.42) !important;
   width: calc(var(--sidebar-thumb-size) * 0.42) !important;
   height: calc(var(--sidebar-thumb-size) * 0.42) !important;
-}
-
-.sidebar-collapsed-item--add:hover {
-  background: rgba(var(--v-theme-primary), 0.18) !important;
-  border-color: rgba(var(--v-theme-primary), 0.5) !important;
-  color: rgb(var(--v-theme-primary)) !important;
-  filter: none !important;
-  box-shadow: none !important;
 }
 
 .sidebar-collapsed-item.droppable {
@@ -1103,9 +941,7 @@
 }
 
 .sidebar-collapsed-item:hover {
-  filter: brightness(1.03);
-  background-color: rgba(var(--v-theme-accent), 0.18);
-  box-shadow: inset 0 0 0 1px rgba(var(--v-theme-accent), 0.22);
+  background-color: var(--hover-wash);
 }
 
 .sidebar-collapsed-item--has-flyout {
@@ -1132,7 +968,7 @@
   letter-spacing: 0.07em;
   text-transform: uppercase;
   min-height: clamp(18px, calc(var(--sidebar-thumb-size) * 0.65), 24px);
-  padding-top: clamp(2px, calc(var(--sidebar-thumb-size) * 0.1), 8px);
+  padding-top: clamp(var(--space-1), calc(var(--sidebar-thumb-size) * 0.1), var(--space-3));
   padding-bottom: var(--space-1);
   padding-right: var(--sidebar-header-action-right-edge) !important;
   display: flex;
@@ -1161,20 +997,8 @@
   cursor: pointer;
 }
 
-.sidebar-section-toggle:focus-visible,
-.sidebar-list-item:focus-visible,
-.sidebar-collapsed-item:focus-visible,
-.sidebar-collapsed-flyout-item:focus-visible,
-.sidebar-project-menu-item:focus-visible,
-.sidebar-header-actions button:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-  position: relative;
-  z-index: 1;
-}
-
 .sidebar-section-header--collapsible:hover {
-  background: rgba(var(--v-theme-accent), 0.08);
+  background: var(--hover-wash);
   color: rgb(var(--v-theme-sidebar-text));
 }
 
@@ -1215,13 +1039,13 @@
   border-bottom: 0;
 }
 
-/* Inset, not the token's outer ring: these rows run edge to edge in the
-   sidebar, so an outer 3px stroke is clipped on both sides. Same colour, same
-   width - `inset var(--focus-ring)` expands to `inset 0 0 0 3px accent`. */
-.sidebar-list-item:focus-visible,
-.sidebar-collapsed-item:focus-visible {
+/* Inset, not the global outline: these rows run edge to edge in the sidebar or
+   a menu, so an outer ring with its gap is clipped on both sides. Everything
+   else here (the dock's icons, header actions) takes the global ring. */
+.sidebar-section-toggle:focus-visible,
+.sidebar-list-item:focus-visible {
+  box-shadow: var(--focus-ring-inset);
   outline: none;
-  box-shadow: inset var(--focus-ring);
 }
 
 .sidebar-scroll {
@@ -1230,17 +1054,13 @@
   overflow-x: hidden;
   overflow-y: auto;
   padding: 0px 0 0;
-  /* Shared subtle scrollbar treatment - keep in sync with .grid-scroll-wrapper in ImageGrid.vue */
-  scrollbar-color: rgba(var(--v-theme-on-surface), 0.05) transparent;
+  /* Shared amber scrollbar treatment - keep in sync with .grid-scroll-wrapper in ImageGrid.vue */
+  scrollbar-color: rgb(var(--v-theme-accent)) transparent;
   scrollbar-width: thin;
   display: flex;
   flex-direction: column;
   align-items: stretch;
   background: transparent;
-}
-
-.sidebar-scroll:hover {
-  scrollbar-color: rgba(var(--v-theme-on-surface), 0.18) transparent;
 }
 
 .sidebar-scroll::-webkit-scrollbar {
@@ -1314,7 +1134,7 @@
 }
 
 .sidebar-readonly-notice-btn:hover {
-  background: rgba(var(--v-theme-accent), 0.28);
+  background-image: linear-gradient(var(--hover-wash), var(--hover-wash));
 }
 
 .sidebar-readonly-notice-logo {
@@ -1365,7 +1185,6 @@
 }
 
 .sidebar-list-item.droppable {
-  filter: brightness(1.2);
   background: rgb(var(--v-theme-primary));
   color: rgb(var(--v-theme-on-primary));
 }
@@ -1407,72 +1226,11 @@
 
 .sidebar-move-menu {
   position: fixed;
-  z-index: 9999;
-  background: color-mix(
-    in srgb,
-    rgb(var(--v-theme-tertiary)) 38%,
-    rgb(var(--v-theme-sidebar))
-  );
-  border: 1px solid rgba(var(--v-theme-border), 0.4);
-  border-radius: var(--radius-md);
+  z-index: var(--z-overlay);
   min-width: 180px;
   max-width: 300px;
   max-height: 420px; /* keep in sync with MOVE_MENU_MAX_H in the script */
   overflow-y: auto;
-  padding: var(--space-2) 0;
-  box-shadow: 0 4px 16px rgba(var(--v-theme-shadow), 0.3);
-  white-space: nowrap;
-}
-
-.sidebar-move-menu-group-header {
-  padding: var(--space-3) var(--space-3) var(--space-2);
-  font-size: var(--text-2xs);
-  font-weight: var(--weight-semibold);
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: rgba(var(--v-theme-on-tertiary), 0.45);
-  margin-top: var(--space-2);
-}
-
-.sidebar-move-menu-group-header:first-child {
-  margin-top: 0;
-}
-
-.sidebar-move-menu-group-header--current {
-  color: rgba(var(--v-theme-primary), 0.8);
-}
-
-.sidebar-move-menu-item {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
-  font-size: var(--text-base);
-  cursor: pointer;
-  color: rgb(var(--v-theme-on-tertiary));
-  overflow: hidden;
-  text-overflow: ellipsis;
-  transition: background 0.12s;
-}
-
-.sidebar-move-menu-check {
-  flex-shrink: 0;
-  opacity: 0.7;
-}
-
-.sidebar-move-menu-item--create {
-  border-bottom: 1px solid rgba(var(--v-theme-border), 0.3);
-  margin-bottom: var(--space-1);
-  font-style: italic;
-  opacity: 0.85;
-}
-
-.sidebar-move-menu-item--checked .sidebar-move-menu-check {
-  opacity: 1;
-}
-
-.sidebar-move-menu-item:hover {
-  background: rgba(var(--v-theme-tertiary), 0.25);
 }
 
 .sidebar-list-icon {
@@ -1493,7 +1251,9 @@
 }
 
 .sidebar-list-icon .v-icon,
-.sidebar-collapsed-item .v-icon {
+.sidebar-list-icon svg,
+.sidebar-collapsed-item .v-icon,
+.sidebar-collapsed-item svg {
   color: rgb(var(--v-theme-sidebar-text));
 }
 
@@ -1504,6 +1264,14 @@
   font-size: calc(var(--sidebar-thumb-size) * 0.92) !important;
   width: calc(var(--sidebar-thumb-size) * 0.92) !important;
   height: calc(var(--sidebar-thumb-size) * 0.92) !important;
+}
+
+/* An inline SVG mark (Workflows' ComfyUI logomark) is cropped to its own edge,
+   with none of an MDI glyph's internal margin, so it takes a smaller box to
+   read the same size as the line-art icons beside it. */
+.sidebar-collapsed-item svg {
+  width: calc(var(--sidebar-thumb-size) * 0.75);
+  height: calc(var(--sidebar-thumb-size) * 0.75);
 }
 
 .sidebar-list-label {
@@ -1565,10 +1333,6 @@
   transform: scale(1.04);
 }
 
-.sidebar-list-item:hover .sidebar-character-thumb {
-  border-color: rgba(var(--v-theme-accent), 0.6);
-}
-
 .sidebar-collapsed-item {
   position: relative;
   overflow: hidden;
@@ -1585,7 +1349,7 @@
   top: 72px;
   left: 20px;
   transform: translateY(-50%);
-  z-index: 1200;
+  z-index: var(--z-dropdown);
   color: rgb(var(--v-theme-on-error));
   /* Solid, not 80%: `on-error` is authored against the SOLID fill (4.86:1 light,
      4.68:1 dark). Blending the fill toward the surface lightens it and drops
@@ -1605,25 +1369,6 @@
 /* The scan spinner sits between the label and the count so the count never
    moves when a scan starts: a number that jumps is a number people stop
    trusting. */
-/* Separates the duplicate entry from the object's own actions. It is a
-   different kind of thing: everything above edits or shares the object, this
-   opens a task about it. */
-.sidebar-ctx-divider {
-  height: 1px;
-  margin: var(--space-2) var(--space-3);
-  background: rgb(var(--v-theme-divider));
-}
-
-/* The count on a context-menu row. Not a badge: it sits in the row's flow
-   rather than overlaying a host, so it takes the row's own quiet foreground. */
-.sidebar-ctx-count {
-  margin-left: auto;
-  padding-left: var(--space-3);
-  font-size: var(--text-xs);
-  font-variant-numeric: tabular-nums;
-  color: rgba(var(--v-theme-sidebar-text), 0.6);
-}
-
 .sidebar-dedup-scanning {
   display: inline-flex;
   align-items: center;
@@ -1688,7 +1433,7 @@
   margin-right: var(--space-2);
   border-radius: var(--radius-sm);
   color: rgb(var(--v-theme-on-primary));
-  background: rgba(var(--v-theme-primary), 0.7);
+  background: rgb(var(--v-theme-primary));
   position: relative;
   top: -2px;
 }
@@ -1719,6 +1464,11 @@
   pointer-events: none;
 }
 
+/* No olive glyph on the olive selection wash. */
+.sidebar-list-item.active .sidebar-shared-icon {
+  color: var(--active-text);
+}
+
 .sidebar-lock-icon {
   color: rgba(var(--v-theme-on-surface), 0.55);
   flex-shrink: 0;
@@ -1745,7 +1495,7 @@
   color: rgba(var(--v-theme-on-surface), 0.85);
   /* Keep pointer events so the lock-reason title shows on hover. */
   pointer-events: auto;
-  z-index: 2;
+  z-index: var(--z-raised);
 }
 
 .add-character-inline {
@@ -1767,12 +1517,11 @@
 }
 
 .add-character-inline:hover {
-  background: rgba(var(--v-theme-accent), 0.85);
-  color: rgb(var(--v-theme-on-primary)) !important;
+  background: var(--hover-wash);
 }
 
 .clear-selection-inline {
-  color: rgb(var(--v-theme-primary)) !important;
+  color: rgb(var(--v-theme-sidebar-text)) !important;
   font-size: var(--text-base);
   cursor: pointer;
   background: transparent;
@@ -1789,7 +1538,7 @@
 }
 
 .clear-selection-inline:hover {
-  background: rgba(var(--v-theme-primary), 0.15);
+  background: var(--hover-wash);
 }
 
 .edit-character-inline,
@@ -1814,8 +1563,7 @@
 
 .edit-character-inline:hover,
 .edit-set-inline:hover {
-  background: rgba(var(--v-theme-primary), 0.15);
-  color: rgb(var(--v-theme-primary)) !important;
+  background: var(--hover-wash);
 }
 
 .delete-character-inline {
@@ -1839,7 +1587,7 @@
 
 .delete-character-inline:hover {
   background: rgba(var(--v-theme-error), 0.15);
-  color: rgb(var(--v-theme-error)) !important;
+  color: rgb(var(--v-theme-surface-error)) !important;
 }
 
 /* Items within People/Sets sit one step under their section header, which puts
@@ -1882,14 +1630,14 @@
 .sidebar-inline-notice {
   position: fixed;
   transform: translateY(-50%);
-  background: rgba(var(--v-theme-secondary), 0.75);
+  background: rgb(var(--v-theme-secondary));
   color: rgb(var(--v-theme-on-secondary));
   padding: var(--space-3) var(--space-4);
   border-radius: var(--radius-pill);
   font-size: var(--text-base);
   white-space: nowrap;
   pointer-events: none;
-  z-index: 1000 !important;
+  z-index: var(--z-drawer) !important;
 }
 
 @media (hover: none) and (pointer: coarse) {
@@ -1977,12 +1725,7 @@
 }
 
 .sidebar-folder-section-header:hover {
-  background:
-    linear-gradient(
-      rgba(var(--v-theme-accent), 0.08),
-      rgba(var(--v-theme-accent), 0.08)
-    ),
-    rgba(var(--v-theme-sidebar-text), 0.05);
+  background: var(--hover-wash);
   color: rgb(var(--v-theme-sidebar-text));
 }
 
@@ -2012,7 +1755,6 @@
 
 .sidebar-folder-section-edit-btn:hover {
   opacity: 1;
-  color: rgb(var(--v-theme-primary));
 }
 
 .sidebar-folder-root {
@@ -2031,7 +1773,7 @@
 .sidebar-folder-actions {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--space-1);
   flex-shrink: 0;
   opacity: 0;
   pointer-events: none;
@@ -2051,13 +1793,13 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   color: inherit;
   opacity: 0.72;
 }
 
 .sidebar-folder-action-btn:hover {
-  background: rgba(var(--v-theme-accent), 0.18);
+  background: var(--hover-wash);
   opacity: 1;
 }
 
@@ -2079,7 +1821,7 @@
 }
 
 .sidebar-folder-status--pending_mount {
-  color: rgb(var(--v-theme-warning, 255, 152, 0));
+  color: rgb(var(--v-theme-surface-warning));
 }
 
 .sidebar-folder-status--scanning {
@@ -2089,7 +1831,7 @@
 }
 
 .sidebar-folder-status--mount_error {
-  color: rgb(var(--v-theme-error, 244, 67, 54));
+  color: rgb(var(--v-theme-surface-error));
 }
 
 .sidebar-folder-loading-row {
@@ -2106,82 +1848,23 @@
 }
 
 .sidebar-folder-error-row {
-  color: rgba(var(--v-theme-error, 244, 67, 54), 0.8);
+  color: rgba(var(--v-theme-surface-error), 0.8);
 }
 
 /* ── Sidebar context menu ────────────────────────────── */
 .sidebar-ctx-menu {
   position: fixed;
-  z-index: 2000;
-  background: rgb(var(--v-theme-surface));
-  border: 1px solid rgba(var(--v-theme-on-surface), 0.14);
-  border-radius: var(--radius-md);
-  box-shadow: var(--elevation-3);
-  padding: var(--space-2) 0;
+  z-index: var(--z-overlay);
   min-width: 140px;
   max-width: 260px;
   user-select: none;
 }
 
-.sidebar-ctx-item {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  width: 100%;
-  padding: var(--space-3) var(--space-4);
-  font-size: var(--text-sm);
-  color: rgb(var(--v-theme-on-surface));
-  text-align: left;
-  white-space: nowrap;
-  transition: background 0.1s;
-}
-
-/* Truncate long resource names in share items so the menu can't overflow. */
-.sidebar-ctx-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-
-.sidebar-ctx-item:hover {
-  background: rgba(var(--v-theme-on-surface), 0.08);
-}
-
-.sidebar-ctx-item--danger {
-  color: rgb(var(--v-theme-error));
-}
-
-.sidebar-ctx-item--disabled {
-  opacity: 0.38;
-  cursor: default;
-  pointer-events: none;
-}
-
-button.sidebar-ctx-item:disabled {
-  opacity: 0.38;
-  cursor: default;
-  pointer-events: none;
-}
-
-button.sidebar-ctx-item:disabled:hover {
-  background: transparent;
-}
-
-.sidebar-ctx-item--has-arrow {
-  justify-content: flex-start;
-}
-
-.sidebar-ctx-arrow {
-  margin-left: auto;
-  opacity: 0.5;
-  font-size: var(--text-md);
-  line-height: 1;
-}
-
+/* A 12px mark centred in the row's 16px leading glyph slot. */
 .sidebar-ctx-color-dot {
   width: 12px;
   height: 12px;
+  margin: 0 var(--space-1);
   border-radius: 50%;
   flex-shrink: 0;
 }
@@ -2189,7 +1872,7 @@ button.sidebar-ctx-item:disabled:hover {
 /* Appearance panel (icon / color picker) that floats next to the context menu */
 .sidebar-ctx-appearance-panel {
   position: fixed;
-  z-index: 2100;
+  z-index: var(--z-overlay);
   background: rgb(var(--v-theme-surface));
   border: 1px solid rgba(var(--v-theme-on-surface), 0.14);
   border-radius: var(--radius-md);
@@ -2248,12 +1931,12 @@ button.sidebar-ctx-item:disabled:hover {
 }
 
 .sidebar-ctx-icon-btn--cards-large:hover {
-  background: rgba(var(--v-theme-on-surface), 0.08);
+  background: var(--hover-wash);
 }
 
 .sidebar-ctx-icon-btn--cards-large.selected {
-  border-color: rgba(var(--v-theme-on-surface), 0.65);
-  background: rgba(var(--v-theme-on-surface), 0.1);
+  border-color: var(--active-bar);
+  background: var(--active-wash);
 }
 
 .sidebar-ctx-icon-grid {
@@ -2295,12 +1978,12 @@ button.sidebar-ctx-item:disabled:hover {
 }
 
 .sidebar-ctx-icon-btn:hover {
-  background: rgba(var(--v-theme-on-surface), 0.08);
+  background: var(--hover-wash);
 }
 
 .sidebar-ctx-icon-btn.selected {
-  border-color: rgba(var(--v-theme-on-surface), 0.65);
-  background: rgba(var(--v-theme-on-surface), 0.1);
+  border-color: var(--active-bar);
+  background: var(--active-wash);
 }
 
 .sidebar-ctx-color-section-header {
@@ -2326,7 +2009,6 @@ button.sidebar-ctx-item:disabled:hover {
   height: 26px;
   border-radius: var(--radius-md);
   border: 2px solid transparent;
-  outline: none;
   padding: 0;
   box-sizing: border-box;
   aspect-ratio: 1 / 1;
@@ -2338,38 +2020,26 @@ button.sidebar-ctx-item:disabled:hover {
 
 .sidebar-ctx-color-swatch:hover {
   transform: scale(1.12);
-  z-index: 1;
+  z-index: var(--z-raised);
 }
 
 .sidebar-ctx-color-swatch.selected {
   border-color: #fff;
   transform: scale(1.12);
-  z-index: 1;
-}
-
-.sidebar-ctx-icon {
-  flex-shrink: 0;
-  opacity: 0.7;
-}
-
-.folder-type-card {
-  border-radius: var(--radius-lg);
-}
-
-.folder-type-title {
-  font-size: var(--text-md);
-  font-weight: var(--weight-semibold);
-  padding: var(--space-5) var(--space-5) var(--space-3);
-}
-
-.folder-type-body {
-  padding: var(--space-3) var(--space-5) 0;
+  z-index: var(--z-raised);
 }
 
 .folder-type-subtitle {
-  margin: 0 0 var(--space-3);
+  margin: 0;
   font-size: var(--text-sm);
   color: rgba(var(--v-theme-on-surface), 0.62);
+}
+
+.share-dialog-hint {
+  margin: 0;
+  font-size: var(--text-base);
+  line-height: var(--leading-body);
+  color: rgba(var(--v-theme-on-surface), 0.85);
 }
 
 .folder-type-options {
@@ -2392,8 +2062,7 @@ button.sidebar-ctx-item:disabled:hover {
 }
 
 .folder-type-option:hover {
-  border-color: rgba(var(--v-theme-primary), 0.6);
-  background: rgba(var(--v-theme-primary), 0.08);
+  background: var(--hover-wash);
 }
 
 .folder-type-option-text {
@@ -2412,36 +2081,15 @@ button.sidebar-ctx-item:disabled:hover {
   color: rgba(var(--v-theme-on-surface), 0.62);
 }
 
-.folder-type-actions {
-  padding: var(--space-3) var(--space-5) var(--space-4);
-}
-
-.relocate-card {
-  border-radius: 14px;
-}
-
-.relocate-title {
-  font-size: 1.04rem;
-  font-weight: 700;
-  padding: 16px 18px 8px;
-}
-
-.relocate-body {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 8px 18px 0;
-}
-
 .relocate-path-block {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--space-2);
 }
 
 .relocate-path-label {
-  font-size: 0.74rem;
-  font-weight: 700;
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
   opacity: 0.68;
   text-transform: uppercase;
 }
@@ -2450,45 +2098,46 @@ button.sidebar-ctx-item:disabled:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: rgba(var(--v-theme-surface-variant), 0.35);
-  padding: 8px 10px;
-  font-family: monospace;
-  font-size: 0.82rem;
+  padding: var(--space-3) var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
 }
 
 .relocate-destination-row {
   display: flex;
-  align-items: flex-start;
-  gap: 8px;
+  align-items: center;
+  gap: var(--space-3);
 }
 
-.relocate-destination-row .v-text-field {
+.relocate-destination-input {
   flex: 1;
+  min-width: 0;
+}
+
+.relocate-browse-btn {
+  flex-shrink: 0;
 }
 
 .relocate-warning {
-  font-size: 0.8rem;
-  line-height: 1.35;
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
   color: rgba(var(--v-theme-on-surface), 0.72);
 }
 
 .relocate-error {
-  font-size: 0.8rem;
-  color: rgb(var(--v-theme-error));
+  font-size: var(--text-sm);
+  color: rgb(var(--v-theme-surface-error));
   background: rgba(var(--v-theme-error), 0.08);
-  border: 1px solid rgba(var(--v-theme-error), 0.22);
-  border-radius: 6px;
-  padding: 8px 10px;
+  border: 1px solid rgba(var(--v-theme-surface-error), 0.22);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-3);
 }
 
 .relocate-result {
-  font-size: 0.8rem;
-  color: rgb(var(--v-theme-accent));
-}
-
-.relocate-actions {
-  padding: 10px 16px 14px;
+  font-size: var(--text-sm);
+  color: rgb(var(--v-theme-on-surface));
 }
 
 /* A fixed destination rendered as a real button rather than a clickable div,

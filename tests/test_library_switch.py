@@ -12,6 +12,7 @@ not apply), and until it succeeds nothing has been given up.
 import os
 import sqlite3
 import tempfile
+from pathlib import Path
 import threading
 import time
 
@@ -19,7 +20,12 @@ import pytest
 from sqlmodel import delete, select
 
 from pixlstash.db_models import Picture
-from pixlstash.hub.registry import read_vault_uuid
+from pixlstash.utils.image_processing.image_utils import THUMBNAIL_DIR_NAME
+from pixlstash.hub.registry import (
+    TEMP_VAULT_FILENAME,
+    VAULT_FILENAME,
+    read_vault_uuid,
+)
 from pixlstash.server import Server
 from pixlstash.services.library_switch_service import (
     LibrarySwitchError,
@@ -675,22 +681,32 @@ class TestRefusingRequestsMidSwap:
         request_thread = threading.Thread(target=request)
         switch_thread = threading.Thread(target=switch)
         request_thread.start()
-        assert auth_entered.wait(timeout=10)
-        switch_thread.start()
-        deadline = time.monotonic() + 5
-        while server.library_coordinator.state is not SwitchState.SWITCHING:
-            assert time.monotonic() < deadline
-            time.sleep(0.01)
-        assert not switch_done.is_set()
-        assert server.vault.image_root == original.path
-
-        release_auth.set()
-        request_thread.join(timeout=10)
-        switch_thread.join(timeout=20)
-        assert request_done.is_set() and switch_done.is_set()
-        assert errors == []
-        assert server.vault.image_root == target.path
-        server.library_switch.switch_to(original.uuid)
+        try:
+            try:
+                assert auth_entered.wait(timeout=10)
+                switch_thread.start()
+                deadline = time.monotonic() + 5
+                while server.library_coordinator.state is not SwitchState.SWITCHING:
+                    assert time.monotonic() < deadline
+                    time.sleep(0.01)
+                assert not switch_done.is_set()
+                assert server.vault.image_root == original.path
+            finally:
+                # Inside the try, so an assertion that fires still releases and
+                # joins the paused handler instead of leaving it parked on
+                # release_auth.wait(10) holding its authentication lease.
+                release_auth.set()
+                request_thread.join(timeout=10)
+                if switch_thread.ident is not None:  # unstarted if the pause failed
+                    switch_thread.join(timeout=20)
+            assert request_done.is_set() and switch_done.is_set()
+            assert errors == []
+            assert server.vault.image_root == target.path
+        finally:
+            # Likewise for the library itself: a failure here used to skip the
+            # restore and leave the rest of the module on the wrong library.
+            if server.library_registry.active_library().uuid != original.uuid:
+                server.library_switch.switch_to(original.uuid)
 
     def test_http_admission_refuses_before_authentication(self, server, monkeypatch):
         from fastapi.testclient import TestClient
@@ -861,3 +877,214 @@ def _clean_pictures(server):
     server.vault.db.run_task(
         lambda session: (session.exec(delete(Picture)), session.commit())
     )
+
+
+class TestPromotingAFirstImport:
+    """A folder becomes a library when the import into it finishes.
+
+    Until then its database sits under a temporary name, so an abort leaves
+    the folder exactly as PixlStash found it - see
+    business/plans/pixlstash-temp-vault-first-import-plan.md.
+    """
+
+    @pytest.fixture
+    def pending_library(self, server, tmp_path):
+        """A library mid-first-import, made active as the real flow makes it."""
+        original = server.library_registry.active_library()
+        folder = tmp_path / "holiday-snaps"
+        folder.mkdir()
+        library = server.library_registry.create(
+            str(folder), f"Holiday {tmp_path.name}", pending_import=True
+        )
+        server.library_switch.switch_to(library.uuid)
+        yield server.library_registry.by_uuid(library.uuid)
+        server.library_switch.switch_to(original.uuid)
+
+    def test_promoting_renames_the_database_and_keeps_what_was_indexed(
+        self, server, pending_library
+    ):
+        folder = Path(pending_library.path)
+        server.vault.db.run_task(
+            lambda session: (
+                session.add(Picture(file_path="beach.jpg", pixel_sha="b" * 40)),
+                session.commit(),
+            )
+        )
+        assert (folder / TEMP_VAULT_FILENAME).is_file()
+        assert not (folder / VAULT_FILENAME).exists()
+
+        promoted = server.library_switch.promote_pending_vault(pending_library)
+
+        assert promoted.pending_import_at is None
+        assert (folder / VAULT_FILENAME).is_file()
+        assert not (folder / TEMP_VAULT_FILENAME).exists()
+        # Reopened, serving, and carrying every row the import wrote.
+        assert server.vault.image_root == pending_library.path
+        assert server.auth.vault_db is server.vault.db
+        assert _picture_count(server) == 1
+
+    def test_a_promoted_library_is_one_the_owner_can_see(self, server, pending_library):
+        assert pending_library.uuid not in [
+            lib.uuid
+            for lib in server.library_registry.list_libraries(
+                include_pending_import=False
+            )
+        ]
+
+        server.library_switch.promote_pending_vault(pending_library)
+
+        assert pending_library.uuid in [
+            lib.uuid
+            for lib in server.library_registry.list_libraries(
+                include_pending_import=False
+            )
+        ]
+
+    def test_an_ordinary_library_has_nothing_to_promote(self, server):
+        active = server.library_registry.active_library()
+
+        with pytest.raises(LibrarySwitchError, match="already a library"):
+            server.library_switch.promote_pending_vault(active)
+
+    def test_it_refuses_to_rename_over_a_vault_that_is_already_there(
+        self, server, pending_library
+    ):
+        """Nothing is promoted onto an existing library, whatever the mark says."""
+        (Path(pending_library.path) / VAULT_FILENAME).write_bytes(b"not mine")
+
+        with pytest.raises(LibrarySwitchError, match="already exists"):
+            server.library_switch.promote_pending_vault(pending_library)
+
+        # Refused before anything closed: the session is still serving.
+        assert server.vault.image_root == pending_library.path
+        assert (
+            server.library_registry.by_uuid(pending_library.uuid).pending_import_at
+            is not None
+        )
+
+    def test_a_failed_rename_leaves_the_import_where_it_was(
+        self, server, pending_library, monkeypatch
+    ):
+        """The window between closing and reopening, with the rename lost.
+
+        Windows makes this reachable for real: a scanner holding the file makes
+        `os.replace` fail. The library must come back under the temporary name,
+        still pending, still serving - not vanish because the mark said
+        `vault.db` while the file was still the other one.
+        """
+        folder = Path(pending_library.path)
+        real_replace = os.replace
+
+        def refuse_this_one(src, dst, *args, **kwargs):
+            if str(src) == str(folder / TEMP_VAULT_FILENAME):
+                raise OSError("held by another process")
+            return real_replace(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr(os, "replace", refuse_this_one)
+
+        with pytest.raises(LibrarySwitchError, match="could not be finished|held by"):
+            server.library_switch.promote_pending_vault(pending_library)
+
+        monkeypatch.undo()
+        still = server.library_registry.by_uuid(pending_library.uuid)
+        assert still.pending_import_at is not None, "the import is not finished"
+        assert (folder / TEMP_VAULT_FILENAME).is_file()
+        assert not (folder / VAULT_FILENAME).exists()
+        # Reopened under the name the file actually has: the session survives.
+        assert server.vault.image_root == pending_library.path
+        assert server.auth.vault_db is server.vault.db
+
+
+class TestDiscardingAFirstImport:
+    """The answer was no, so the folder goes back to being the owner's."""
+
+    @pytest.fixture
+    def pending_library(self, server, tmp_path):
+        original = server.library_registry.active_library()
+        folder = tmp_path / "holiday-snaps"
+        folder.mkdir()
+        (folder / "beach.jpg").write_bytes(b"not really a jpeg, but a file")
+        library = server.library_registry.create(
+            str(folder), f"Holiday {tmp_path.name}", pending_import=True
+        )
+        server.library_switch.switch_to(library.uuid)
+        yield server.library_registry.by_uuid(library.uuid)
+        if server.library_registry.active_library().uuid != original.uuid:
+            server.library_switch.switch_to(original.uuid)
+
+    def test_discarding_leaves_the_folder_exactly_as_it_was(
+        self, server, pending_library
+    ):
+        folder = Path(pending_library.path)
+        (folder / THUMBNAIL_DIR_NAME).mkdir()
+        (folder / THUMBNAIL_DIR_NAME / "beach_thumb.webp").write_bytes(b"thumb")
+
+        server.library_switch.discard_pending_library(pending_library)
+
+        assert sorted(p.name for p in folder.iterdir()) == ["beach.jpg"], (
+            "the owner's picture, and nothing else PixlStash left behind"
+        )
+        assert (folder / "beach.jpg").read_bytes() == b"not really a jpeg, but a file"
+        assert server.library_registry.by_uuid(pending_library.uuid) is None
+
+    def test_a_previous_librarys_folders_are_not_this_imports_to_delete(
+        self, server, tmp_path
+    ):
+        """A restored backup holds an old library's snapshots and caches."""
+        original = server.library_registry.active_library()
+        folder = tmp_path / "restored"
+        (folder / "snapshots").mkdir(parents=True)
+        (folder / "snapshots" / "old.sqlite.zst").write_bytes(b"history")
+        (folder / "tmp").mkdir()
+        (folder / "tmp" / "face.png").write_bytes(b"face")
+        (folder / "beach.jpg").write_bytes(b"a picture")
+        library = server.library_registry.create(
+            str(folder), f"Restored {tmp_path.name}", pending_import=True
+        )
+        try:
+            server.library_switch.switch_to(library.uuid)
+            (folder / THUMBNAIL_DIR_NAME).mkdir(exist_ok=True)
+
+            server.library_switch.discard_pending_library(
+                server.library_registry.by_uuid(library.uuid)
+            )
+
+            assert (folder / "snapshots" / "old.sqlite.zst").read_bytes() == b"history"
+            assert (folder / "tmp" / "face.png").read_bytes() == b"face"
+            assert not (folder / THUMBNAIL_DIR_NAME).exists(), "this one was ours"
+        finally:
+            if server.library_registry.active_library().uuid != original.uuid:
+                server.library_switch.switch_to(original.uuid)
+
+    def test_the_session_lands_on_a_library_that_is_not_that_folder(
+        self, server, pending_library
+    ):
+        landed = server.library_switch.discard_pending_library(pending_library)
+
+        assert landed.path != pending_library.path
+        assert server.vault.image_root == landed.path
+        assert server.auth.vault_db is server.vault.db
+        assert landed.pending_import_at is None
+
+    def test_a_real_library_is_never_discarded(self, server):
+        """Discarding one would delete something the owner kept."""
+        active = server.library_registry.active_library()
+
+        with pytest.raises(LibrarySwitchError, match="not an unfinished import"):
+            server.library_switch.discard_pending_library(active)
+
+    def test_adding_the_same_folder_again_offers_it_as_pictures(
+        self, server, pending_library
+    ):
+        """The loop closes: no vault.db means it reads as a folder again."""
+        folder = Path(pending_library.path)
+
+        server.library_switch.discard_pending_library(pending_library)
+
+        assert not (folder / VAULT_FILENAME).exists()
+        assert not (folder / TEMP_VAULT_FILENAME).exists()
+        again = server.library_registry.create(
+            str(folder), f"Second go {folder.name}", pending_import=True
+        )
+        assert again.pending_import_at is not None
+        server.library_registry.forget(again.id)

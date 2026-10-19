@@ -22,10 +22,14 @@ vi.mock("../utils/apiClient", () => ({
 import { apiClient } from "../utils/apiClient";
 import {
   editModels,
+  fetchWorkflowSets,
   forgetModels,
   listAdapters,
   listCheckpoints,
+  putMemberVerdict,
+  putSetVerdict,
   setAdapterAttachments,
+  setWorkflowSetsHidden,
 } from "./modelShelf";
 
 /** The `params` object of the single GET this call made. */
@@ -144,5 +148,52 @@ describe("api/modelShelf the rest of the wire", () => {
   it("forgetModels posts to the forget route", async () => {
     await forgetModels([3]);
     expect(apiClient.post).toHaveBeenCalledWith("/models/forget", { ids: [3] });
+  });
+});
+
+describe("api/modelShelf verdicts", () => {
+  it("PUTs the set verdict under its combo key with the answer as the body", async () => {
+    await putSetVerdict("3,12", "no");
+    expect(apiClient.put).toHaveBeenCalledWith(
+      "/models/workflow-sets/verdicts/3%2C12",
+      { verdict: "no" },
+    );
+  });
+
+  it("PUTs a member verdict under the set and the model", async () => {
+    await putMemberVerdict("3,12", 12, "problem");
+    expect(apiClient.put).toHaveBeenCalledWith(
+      "/models/workflow-sets/verdicts/3%2C12/members/12",
+      { verdict: "problem" },
+    );
+  });
+});
+
+describe("api/modelShelf hidden workflow sets (#1869)", () => {
+  it("PUTs the keys and the flag to the library's hidden list", async () => {
+    apiClient.put.mockResolvedValue({ data: { hidden_sets: ["hand:10"] } });
+    const after = await setWorkflowSetsHidden(["hand:10"], true);
+    expect(apiClient.put).toHaveBeenCalledWith("/models/workflow-sets/hidden", {
+      keys: ["hand:10"],
+      hidden: true,
+    });
+    expect(after).toEqual(["hand:10"]);
+  });
+
+  it("sends hidden false to show a set again", async () => {
+    await setWorkflowSetsHidden(["hand:10"], false);
+    expect(apiClient.put).toHaveBeenCalledWith("/models/workflow-sets/hidden", {
+      keys: ["hand:10"],
+      hidden: false,
+    });
+  });
+
+  it("reads hidden_sets off the set payload", async () => {
+    apiClient.get.mockResolvedValue({
+      data: { hand_made: [], hidden_sets: ["hand:10"] },
+    });
+    const sets = await fetchWorkflowSets();
+    expect(apiClient.get).toHaveBeenCalledWith("/models/workflow-sets");
+    expect(sets.hidden_sets).toEqual(["hand:10"]);
   });
 });

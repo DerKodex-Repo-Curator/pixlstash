@@ -15,7 +15,8 @@
       >{{ announcement }}</span
     >
 
-    <span class="search-result-status" :title="statusSentence">
+    <span class="search-result-status">
+      <Tooltip :text="statusSentence" activator="parent" />
       <v-progress-circular
         v-if="imagesLoading"
         indeterminate
@@ -69,16 +70,16 @@
           transition="scale-transition"
         >
           <template #activator="{ props: menuProps }">
-            <button
+            <AppBarButton
               v-bind="menuProps"
-              class="stack-btn search-result-tune-btn"
-              type="button"
+              class="search-result-tune-btn"
+              shape="round"
+              icon="tune-variant"
               :aria-label="tuneAccessibleName"
-              :title="tuneAccessibleName"
+              :tooltip="tuneAccessibleName"
               :aria-disabled="imagesLoading ? 'true' : undefined"
               aria-haspopup="dialog"
             >
-              <v-icon size="18">mdi-tune-variant</v-icon>
               <span class="search-result-threshold-value">
                 {{ thresholdPercent }}%
               </span>
@@ -88,7 +89,7 @@
               <span v-if="refsEngaged" class="search-result-threshold-refs">
                 · {{ minRefs }}/{{ referenceCount }}
               </span>
-            </button>
+            </AppBarButton>
           </template>
           <div class="threshold-panel">
             <div class="threshold-group">
@@ -111,7 +112,7 @@
                   aria-label="Decrease match strength by 1 percent"
                   @click="stepThreshold(-0.01)"
                 >
-                  <v-icon size="18">mdi-minus</v-icon>
+                  <v-icon size="24">mdi-minus</v-icon>
                 </button>
                 <input
                   :id="strengthId"
@@ -131,21 +132,19 @@
                   aria-label="Increase match strength by 1 percent"
                   @click="stepThreshold(0.01)"
                 >
-                  <v-icon size="18">mdi-plus</v-icon>
+                  <v-icon size="24">mdi-plus</v-icon>
                 </button>
               </div>
-              <p class="threshold-group-hint">
-                How closely a face has to resemble a reference.
-              </p>
+              <p class="threshold-group-hint">{{ copy.strengthHint }}</p>
             </div>
 
-            <!-- Dropped entirely below two references: a slider whose only legal
-                 position is its minimum is chrome, not a control. -->
+            <!-- Dropped when the slider would have one legal position: that is
+                 chrome, not a control. -->
             <div v-if="showRefs" class="threshold-group">
               <div class="threshold-group-head">
-                <label class="section-label" :for="refsId"
-                  >Reference faces</label
-                >
+                <label class="section-label" :for="refsId">{{
+                  copy.agreementLabel
+                }}</label>
                 <output class="threshold-readout" :for="refsId" aria-live="off"
                   >{{ minRefs }} of {{ referenceCount }}</output
                 >
@@ -154,17 +153,17 @@
                 <button
                   class="threshold-step"
                   type="button"
-                  :disabled="minRefs <= 1"
-                  aria-label="Require one fewer reference face"
+                  :disabled="minRefs <= agreementMin"
+                  :aria-label="`Require one fewer ${copy.agreementUnit}`"
                   @click="stepMinRefs(-1)"
                 >
-                  <v-icon size="18">mdi-minus</v-icon>
+                  <v-icon size="24">mdi-minus</v-icon>
                 </button>
                 <input
                   :id="refsId"
                   class="search-result-threshold-input"
                   type="range"
-                  min="1"
+                  :min="agreementMin"
                   :max="referenceCount"
                   step="1"
                   :value="minRefs"
@@ -175,15 +174,13 @@
                   class="threshold-step"
                   type="button"
                   :disabled="minRefs >= referenceCount"
-                  aria-label="Require one more reference face"
+                  :aria-label="`Require one more ${copy.agreementUnit}`"
                   @click="stepMinRefs(1)"
                 >
-                  <v-icon size="18">mdi-plus</v-icon>
+                  <v-icon size="24">mdi-plus</v-icon>
                 </button>
               </div>
-              <p class="threshold-group-hint">
-                How many of them have to agree at that strength.
-              </p>
+              <p class="threshold-group-hint">{{ copy.agreementHint }}</p>
             </div>
 
             <!-- The count repeated inside, so tuning does not require looking
@@ -194,17 +191,51 @@
       </div>
     </template>
 
+    <!-- Narrow a text search to the pictures whose TEXT matched. Offered only
+         once there is a text match to narrow to, and never beside the face
+         search's tuning (the two modes cannot both be armed; if they ever are,
+         the tuning wins). A re-cut of the fetched rows, not a new search. -->
+    <template v-if="showTextSwitch">
+      <span class="search-result-rule" aria-hidden="true"></span>
+      <span
+        class="search-result-scope"
+        role="group"
+        aria-label="Show matches from"
+      >
+        <button
+          type="button"
+          class="search-result-scope-opt"
+          :aria-pressed="!textMatchesOnly"
+          :aria-disabled="imagesLoading ? 'true' : undefined"
+          @click="setTextMatchesOnly(false)"
+        >
+          All
+        </button>
+        <button
+          type="button"
+          class="search-result-scope-opt"
+          :aria-pressed="textMatchesOnly"
+          :aria-disabled="imagesLoading ? 'true' : undefined"
+          @click="setTextMatchesOnly(true)"
+        >
+          <v-icon size="14" aria-hidden="true">mdi-format-title</v-icon>
+          In text
+          <span class="search-result-scope-count">{{ textMatchCount }}</span>
+        </button>
+      </span>
+      <span class="search-result-rule" aria-hidden="true"></span>
+    </template>
+
     <div class="search-result-actions">
-      <button
+      <AppBarButton
         v-if="showSearchAll"
-        class="stack-btn"
-        type="button"
-        title="Search everything, not just this category"
+        shape="round"
+        icon="magnify-expand"
+        tooltip="Search everything, not just this category"
         @click="$emit('search-all')"
       >
-        <v-icon size="18">mdi-magnify-expand</v-icon>
         <span class="search-all-label">Search everything</span>
-      </button>
+      </AppBarButton>
 
       <!-- The one accent-weight action in the pill: it is the only bulk WRITE.
            The count is on the button, never "all" - the blast radius has to be
@@ -214,43 +245,67 @@
            `Assign 14`, which was §7's intent. Ellipsising the whole label
            instead produced `Assign 2 t…`, a truncation mid-preposition that
            reads as a bug and loses the count's neighbour anyway. -->
-      <button
+      <AppButton
         v-if="assignTarget"
-        class="assign-btn"
-        type="button"
-        :disabled="assignCount === 0 || assignBusy"
+        variant="primary"
+        :icon-left="copy.assignIcon"
+        :disabled="assignCount === 0"
+        :loading="assignBusy"
         :aria-label="assignAccessibleName"
-        :title="assignAccessibleName"
+        :tooltip="assignAccessibleName"
         @click="$emit('assign')"
       >
-        <v-icon size="18">mdi-account-check-outline</v-icon>
         <span class="assign-label"
-          >Assign {{ assignCount
+          >{{ copy.assignVerb }} {{ assignCount
           }}<span v-if="assignFromSelection"> selected</span
           ><span class="assign-target">to {{ assignTarget }}</span></span
         >
-      </button>
+      </AppButton>
 
-      <button
-        class="stack-btn clear-search-btn"
-        type="button"
-        :title="clearTitle"
+      <AppBarButton
+        class="clear-search-btn"
+        shape="round"
+        icon="magnify-close"
+        :tooltip="clearTitle"
         :aria-keyshortcuts="ownsEscape ? 'Escape' : undefined"
         @click="$emit('clear')"
       >
-        <v-icon size="18" class="clear-search-glyph">mdi-magnify-close</v-icon>
         <span class="clear-search-label">Clear search</span>
         <!-- aria-hidden: the accessible name stays the verb, and the
              machine-readable copy is aria-keyshortcuts above
              (visual-language.md §13). -->
         <kbd v-if="ownsEscape" class="key-hint" aria-hidden="true">Esc</kbd>
-      </button>
+      </AppBarButton>
     </div>
   </div>
 </template>
 
 <script setup>
 import { computed, onUnmounted, ref, useId, watch } from "vue";
+import AppBarButton from "./AppBarButton.vue";
+import AppButton from "./AppButton.vue";
+import Tooltip from "./Tooltip.vue";
+
+const SUGGEST_COPY = {
+  person: {
+    strengthHint: "How closely a face has to resemble a reference.",
+    agreementLabel: "Reference faces",
+    agreementHint: "How many of them have to agree at that strength.",
+    agreementUnit: "reference face",
+    agreementNoun: "reference faces",
+    assignVerb: "Assign",
+    assignIcon: "account-check-outline",
+  },
+  set: {
+    strengthHint: "How closely a picture has to resemble the set as a whole.",
+    agreementLabel: "Tags in common",
+    agreementHint: "How many of the set's defining tags a picture has to carry.",
+    agreementUnit: "tag",
+    agreementNoun: "set tags",
+    assignVerb: "Add",
+    assignIcon: "playlist-plus",
+  },
+};
 
 const props = defineProps({
   imagesLoading: { type: Boolean, default: false },
@@ -276,11 +331,25 @@ const props = defineProps({
   assignFromSelection: { type: Boolean, default: false },
   assignBusy: { type: Boolean, default: false },
   /**
+   * What the suggestion search is for: `person` ("Suggest more pictures of",
+   * #636) or `set` (#1489). Picks the copy, and the agreement knob's floor -
+   * reference faces start at one, set tags at zero (off).
+   */
+  suggestKind: {
+    type: String,
+    default: "person",
+    validator: (value) => ["person", "set"].includes(value),
+  },
+  /**
    * Esc reaches THIS half (nothing is selected). Only the control Esc will
    * actually hit wears the keycap: an aria-keyshortcuts on a button that will
    * not get the key is a 4.1.2 lie.
    */
   ownsEscape: { type: Boolean, default: true },
+  /** Results of a text search that matched text in the picture. 0 hides the switch. */
+  textMatchCount: { type: Number, default: 0 },
+  /** The switch is on "In text": the grid shows only those results. */
+  textMatchesOnly: { type: Boolean, default: false },
 });
 
 const emit = defineEmits([
@@ -289,7 +358,11 @@ const emit = defineEmits([
   "update:threshold",
   "update:min-refs",
   "assign",
+  "update:text-matches-only",
 ]);
+
+const copy = computed(() => SUGGEST_COPY[props.suggestKind]);
+const agreementMin = computed(() => (props.suggestKind === "set" ? 0 : 1));
 
 const strengthId = useId();
 const refsId = useId();
@@ -305,10 +378,24 @@ const showThreshold = computed(() => Number.isFinite(props.threshold));
 
 const thresholdPercent = computed(() => Math.round(props.threshold * 100));
 
-const showRefs = computed(() => props.referenceCount > 1);
+// Kept up while narrowed even if the count reads 0, so "All" stays reachable.
+const showTextSwitch = computed(
+  () =>
+    !showThreshold.value &&
+    (props.textMatchCount > 0 || props.textMatchesOnly),
+);
+
+function setTextMatchesOnly(value) {
+  if (props.imagesLoading || value === props.textMatchesOnly) return;
+  emit("update:text-matches-only", value);
+}
+
+const showRefs = computed(() => props.referenceCount > agreementMin.value);
 
 // The agreement knob is "on" only above its floor. See the trigger markup.
-const refsEngaged = computed(() => showRefs.value && props.minRefs > 1);
+const refsEngaged = computed(
+  () => showRefs.value && props.minRefs > agreementMin.value,
+);
 
 // The trigger's accessible name spells both knobs out. Its visible label is two
 // numbers and a separator, which is legible next to the count it shapes but is
@@ -317,9 +404,13 @@ const refsEngaged = computed(() => showRefs.value && props.minRefs > 1);
 const tuneAccessibleName = computed(() => {
   const base = `Tune suggestions. Match strength ${thresholdPercent.value}%`;
   if (!showRefs.value) return `${base}.`;
-  return props.minRefs > 1
-    ? `${base}, on at least ${props.minRefs} of ${props.referenceCount} reference faces.`
-    : `${base}, on any of ${props.referenceCount} reference faces.`;
+  const noun = copy.value.agreementNoun;
+  if (refsEngaged.value) {
+    return `${base}, on at least ${props.minRefs} of ${props.referenceCount} ${noun}.`;
+  }
+  return props.suggestKind === "set"
+    ? `${base}, whatever the ${noun}.`
+    : `${base}, on any of ${props.referenceCount} ${noun}.`;
 });
 
 const statusSentence = computed(() => {
@@ -333,9 +424,10 @@ const statusSentence = computed(() => {
 // count is in both, and never "all": the blast radius of a bulk write has to be
 // visible before the click.
 const assignAccessibleName = computed(() => {
+  const verb = copy.value.assignVerb;
   const base = props.assignFromSelection
-    ? `Assign ${props.assignCount} selected to ${props.assignTarget}`
-    : `Assign ${props.assignCount} to ${props.assignTarget}`;
+    ? `${verb} ${props.assignCount} selected to ${props.assignTarget}`
+    : `${verb} ${props.assignCount} to ${props.assignTarget}`;
   if (!props.assignFromSelection || props.assignCount === props.statusCount) {
     return base;
   }
@@ -369,7 +461,7 @@ function onMinRefsInput(event) {
 function stepMinRefs(delta) {
   const next = Math.min(
     props.referenceCount,
-    Math.max(1, props.minRefs + delta),
+    Math.max(agreementMin.value, props.minRefs + delta),
   );
   emit("update:min-refs", next);
 }
@@ -390,7 +482,7 @@ const announcementSource = computed(() => {
   // Both knobs in the one sentence, for the same reason the percentage is: two
   // regions racing over one drag is the defect §6.4 was written about.
   return refsEngaged.value
-    ? `${cut}, on at least ${props.minRefs} of ${props.referenceCount} reference faces`
+    ? `${cut}, on at least ${props.minRefs} of ${props.referenceCount} ${copy.value.agreementNoun}`
     : cut;
 });
 
@@ -494,7 +586,7 @@ onUnmounted(() => {
   /* The one property that behaves identically across engines. Do NOT hand-roll
      ::-webkit-slider-thumb / ::-moz-range-track. The track itself follows
      `color-scheme`, which style.css pins per theme. */
-  accent-color: rgb(var(--v-theme-accent));
+  accent-color: rgb(var(--v-theme-primary));
 }
 
 .threshold-panel {
@@ -552,8 +644,8 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  width: 32px;
-  height: 32px;
+  width: var(--control-h-bar);
+  height: var(--control-h-bar);
   border-radius: var(--radius-sm);
   color: rgb(var(--v-theme-on-surface));
 }
@@ -561,7 +653,7 @@ onUnmounted(() => {
   background: var(--hover-wash);
 }
 .threshold-step:disabled {
-  opacity: 0.35;
+  opacity: var(--opacity-disabled);
   cursor: default;
 }
 
@@ -573,55 +665,55 @@ onUnmounted(() => {
   color: rgba(var(--v-theme-on-surface), 0.65);
 }
 
+/* All | In text. The segmented recipe (Segmented.vue, buttons.md), as toggle
+   buttons with aria-pressed: it narrows a view rather than setting a value. */
+.search-result-scope {
+  display: inline-flex;
+  flex: none;
+  padding: var(--space-2);
+  background: var(--track-trough);
+  box-shadow: inset 0 0 0 1px var(--track-ring);
+  border-radius: var(--radius-md);
+}
+
+.search-result-scope-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--control-h-sm);
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
+  white-space: nowrap;
+  transition:
+    background var(--dur-1) var(--ease-standard),
+    color var(--dur-1) var(--ease-standard);
+}
+
+.search-result-scope-opt[aria-pressed="false"]:hover {
+  background: var(--hover-wash);
+  color: rgb(var(--v-theme-on-surface));
+}
+
+.search-result-scope-opt[aria-pressed="true"] {
+  background: rgb(var(--v-theme-primary));
+  color: rgb(var(--v-theme-on-primary));
+  box-shadow: var(--elevation-1);
+}
+
+.search-result-scope-opt[aria-pressed="true"]:not([aria-disabled="true"]):hover {
+  background-image: var(--hover-shade);
+}
+
+.search-result-scope-count {
+  font-variant-numeric: tabular-nums;
+}
+
 .search-result-actions {
   display: inline-flex;
   align-items: center;
   gap: var(--space-3);
-}
-
-/* Quiet control recipe. Mirrors `.stack-btn` in the selection half - scoped
-   styles cannot share it, and lifting it to a global would put a pill-specific
-   recipe in everyone's cascade. Keep the two in step. */
-.stack-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: rgb(var(--v-theme-on-background));
-  padding: 0 10px;
-  border-radius: var(--radius-sm);
-  font-size: var(--text-base);
-  font-family: inherit;
-  height: 40px;
-  white-space: nowrap;
-}
-.stack-btn:hover:not(:disabled) {
-  background: rgba(var(--v-theme-on-background), 0.12);
-}
-.stack-btn:disabled {
-  opacity: 0.35;
-  cursor: default;
-}
-
-.assign-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 40px;
-  padding: 0 var(--space-4);
-  border-radius: var(--radius-sm);
-  background: rgb(var(--v-theme-accent));
-  color: rgb(var(--v-theme-on-accent));
-  font-size: var(--text-base);
-  font-family: inherit;
-  font-weight: var(--weight-medium);
-  white-space: nowrap;
-}
-.assign-btn:hover:not(:disabled) {
-  filter: brightness(1.1);
-}
-.assign-btn:disabled {
-  opacity: 0.35;
-  cursor: default;
 }
 
 .assign-label {
@@ -656,7 +748,7 @@ onUnmounted(() => {
   font-size: var(--text-2xs);
   border: 1px solid currentColor;
   border-radius: var(--radius-sm);
-  padding: 0 4px;
+  padding: 0 var(--space-2);
   opacity: 0.55;
 }
 
@@ -683,9 +775,6 @@ onUnmounted(() => {
   .key-hint {
     display: none;
   }
-  .clear-search-btn {
-    padding: 0 10px;
-  }
 }
 
 @container selbar (max-width: 560px) {
@@ -695,8 +784,7 @@ onUnmounted(() => {
 }
 
 @media (hover: none) and (pointer: coarse) {
-  .stack-btn,
-  .assign-btn {
+  .bar-btn {
     height: var(--bar-height);
   }
   /* The one thing touch still needs from the old §7 rule: the panel's own

@@ -14,6 +14,8 @@ import { computed } from "vue";
 import { useBreadcrumb } from "../composables/useBreadcrumb";
 import { useVersionCheck } from "../composables/useVersionCheck";
 import WordmarkLogo from "./WordmarkLogo.vue";
+import AppBarButton from "./widgets/AppBarButton.vue";
+import Tooltip from "./widgets/Tooltip.vue";
 
 const props = defineProps({
   installType: { type: String, default: "pip" },
@@ -75,16 +77,15 @@ const close = () => desktop?.windowClose?.();
         <img src="/Logo.png" alt="PixlStash logo" class="titlebar-logo" />
       </a>
       <WordmarkLogo class="titlebar-name" />
-      <button
+      <AppBarButton
         v-if="activeLibraryName"
-        type="button"
+        icon="bookshelf"
         class="titlebar-library"
-        :title="`Open Libraries settings. Active library: ${activeLibraryName}`"
+        :tooltip="`Open Libraries settings. Active library: ${activeLibraryName}`"
         @click="emit('open-libraries')"
       >
-        <v-icon size="15" aria-hidden="true">mdi-bookshelf</v-icon>
-        <span>{{ activeLibraryName }}</span>
-      </button>
+        <span class="bar-btn-label">{{ activeLibraryName }}</span>
+      </AppBarButton>
       <nav
         v-if="breadcrumb.length"
         class="titlebar-breadcrumb"
@@ -97,9 +98,9 @@ const close = () => desktop?.windowClose?.();
             v-if="crumb.to"
             type="button"
             class="titlebar-bc-crumb is-link"
-            :title="`Go to ${crumb.label}`"
             @click="navigateBreadcrumb(crumb)"
           >
+            <Tooltip :text="`Go to ${crumb.label}`" activator="parent" />
             {{ crumb.label }}
           </button>
           <span v-else class="titlebar-bc-crumb" :title="crumb.label">{{
@@ -116,23 +117,22 @@ const close = () => desktop?.windowClose?.();
         target="_blank"
         rel="noopener noreferrer"
         :class="securityUpdateClass"
-        :title="securityUpdateTitle"
-        >&#x2191; v{{ latestVersion
+        ><Tooltip :text="securityUpdateTitle || ''" activator="parent" />&#x2191; v{{ latestVersion
         }}{{ latestSecurityLevel ? " security" : " available"
         }}<span
           v-if="latestSecurityLevel"
           class="titlebar-update-warn"
           aria-hidden="true"
-        >⚠️</span></a
-      ><button
-        type="button"
-        class="titlebar-update-dismiss"
-        aria-label="Dismiss update alert"
-        :title="`Dismiss v${latestVersion} update alert`"
-        @click.prevent="dismissUpdateAlert"
+          >⚠️</span
+        ></a
       >
-        &times;
-      </button>
+      <!-- no-drag is inherited from .titlebar-update. -->
+      <AppBarButton
+        icon="close"
+        aria-label="Dismiss update alert"
+        :tooltip="`Dismiss v${latestVersion} update alert`"
+        @click.prevent="dismissUpdateAlert"
+      />
     </div>
     <div v-if="!isMac" class="titlebar-controls">
       <button
@@ -233,7 +233,6 @@ const close = () => desktop?.windowClose?.();
   align-items: center;
   flex-shrink: 0;
   border-radius: var(--radius-sm);
-  outline: none;
   -webkit-app-region: no-drag;
 }
 
@@ -276,32 +275,16 @@ const close = () => desktop?.windowClose?.();
   padding: 0 var(--space-4);
 }
 
+/* Chrome in the strip (AppBarButton); only its reach and its no-drag are its own. */
 .titlebar-library {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
   min-width: 0;
   max-width: 220px;
-  padding: var(--space-1) var(--space-2);
-  border: 1px solid rgb(var(--v-theme-border));
-  border-radius: var(--radius-sm);
-  color: rgb(var(--v-theme-on-background));
-  font-family: var(--font-ui);
-  font-size: var(--text-xs);
-  line-height: 1;
   -webkit-app-region: no-drag;
 }
 
-.titlebar-library span {
+.titlebar-library .bar-btn-label {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.titlebar-library:hover {
-  border-color: rgb(var(--v-theme-accent));
-  background: var(--hover-wash);
+  max-width: none;
 }
 
 /* Breadcrumb: current-view path, inline after the version. */
@@ -375,7 +358,7 @@ const close = () => desktop?.windowClose?.();
   align-items: center;
   font-size: var(--text-2xs);
   line-height: 1;
-  color: rgba(var(--v-theme-accent), 0.95);
+  color: rgb(var(--v-theme-on-background));
   text-decoration: none;
   white-space: nowrap;
 }
@@ -394,35 +377,19 @@ const close = () => desktop?.windowClose?.();
 }
 
 .titlebar-update-security {
-  color: rgb(var(--v-theme-warning));
+  color: rgb(var(--v-theme-surface-warning));
 }
 
 .titlebar-update-security:hover {
-  color: rgba(var(--v-theme-warning), 0.85);
+  color: rgba(var(--v-theme-surface-warning), 0.85);
 }
 
 .titlebar-update-security--high {
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
 }
 
 .titlebar-update-security--high:hover {
-  color: rgba(var(--v-theme-error), 0.85);
-}
-
-.titlebar-update-dismiss {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  width: 12px;
-  height: 12px;
-  font-size: var(--text-2xs);
-  line-height: 1;
-  color: rgba(var(--v-theme-on-background), 0.5);
-}
-
-.titlebar-update-dismiss:hover {
-  color: rgba(var(--v-theme-on-background), 0.9);
+  color: rgba(var(--v-theme-surface-error), 0.85);
 }
 
 .titlebar-controls {
@@ -442,7 +409,7 @@ const close = () => desktop?.windowClose?.();
 }
 
 .tb-btn:hover {
-  background: rgba(var(--v-theme-on-surface), 0.1);
+  background: var(--hover-wash);
   opacity: 1;
 }
 

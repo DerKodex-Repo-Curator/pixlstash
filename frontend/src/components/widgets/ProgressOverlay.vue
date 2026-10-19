@@ -30,14 +30,16 @@
     <div v-if="total != null" class="progress-overlay__meta">
       {{ count }} / {{ total }}
     </div>
-    <button
+    <AppButton
       v-if="abortLabel"
+      variant="danger"
+      block
+      on-dark
       class="progress-overlay__abort"
-      type="button"
       @click="emit('abort')"
     >
       {{ abortLabel }}
-    </button>
+    </AppButton>
   </div>
   <!-- Outside the `v-if` on purpose: a live region inserted at the same moment
        as its first text is not reliably announced, so the run's opening line
@@ -83,6 +85,7 @@
  *   abort - When the abort button is clicked.
  */
 import { computed } from "vue";
+import AppButton from "./AppButton.vue";
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -148,9 +151,11 @@ const announcement = computed(() => {
 
 <style scoped>
 .progress-overlay {
+  /* Amber on a dark panel keeps the bright amber in both themes (#1413). */
+  --v-theme-accent: var(--v-theme-dark-surface-accent);
   position: absolute;
   right: 12px;
-  z-index: 120;
+  z-index: var(--z-floating);
   background: rgba(var(--v-theme-dark-surface), 0.85);
   color: rgb(var(--v-theme-on-dark-surface));
   padding: var(--space-3) var(--space-4);
@@ -245,18 +250,6 @@ const announcement = computed(() => {
 
 .progress-overlay__abort {
   margin-top: var(--space-3);
-  width: 100%;
-  background: rgb(var(--v-theme-error));
-  color: rgb(var(--v-theme-on-error));
-  border-radius: var(--radius-sm);
-  padding: var(--space-2) var(--space-3);
-  font-size: var(--text-sm);
-  font-weight: var(--weight-semibold);
-  transition: background var(--dur-2) var(--ease-standard);
-}
-
-.progress-overlay__abort:hover {
-  background: rgba(var(--v-theme-error), 0.85);
 }
 
 /* On the failed card the button's own error fill sits on an error background
@@ -268,7 +261,13 @@ const announcement = computed(() => {
   color: rgb(var(--v-theme-on-error));
 }
 
-.progress-overlay--error .progress-overlay__abort:hover {
-  background: rgba(var(--v-theme-on-error), 0.28);
+/* AppButton's filled hover is a `--hover-shade` background-image; darkening a
+   translucent ink wash on red reads as nothing, so this one steps the wash up
+   instead. The selector repeats AppButton's `:not()` pair so it outranks the
+   shade rather than tying with it on source order. */
+.progress-overlay--error
+  .progress-overlay__abort:not(:disabled):not([aria-disabled="true"]):hover {
+  background-color: rgba(var(--v-theme-on-error), 0.28);
+  background-image: none;
 }
 </style>

@@ -184,6 +184,9 @@ class ExportUtils:
             index = getattr(feature, f"{feature_type}_index", 0)
             if index < 0 or not feature.bbox:
                 continue
+            if getattr(feature, "frame_index", 0) != 0:
+                # Measured on a later frame of an animated GIF; img is frame 0.
+                continue
             bbox = feature.bbox
             crop = img.crop(bbox)
             if scale < 1.0:
@@ -484,16 +487,21 @@ class ExportUtils:
         elif query:
             logger.debug("Exporting pictures using search query: {}".format(query))
 
-            def find_by_text(session, query):
-                words = re.findall(r"\b\w+\b", query.lower())
-                query_full = "A photo of " + query
+            words = re.findall(r"\b\w+\b", query.lower())
+            query_full = "A photo of " + query
+            # Encoded on this thread, never inside the database task - see
+            # ``Picture.semantic_search`` for why an encode must not hold the
+            # DB writer.
+            query_embedding = server.vault.generate_text_embedding(query_full)
+
+            def find_by_text(session):
                 return [
                     r[0]
                     for r in Picture.semantic_search(
                         session,
                         query_full,
                         words,
-                        text_to_embedding=server.vault.generate_text_embedding,
+                        query_embedding=query_embedding,
                         offset=0,
                         limit=sys.maxsize,
                         threshold=threshold,
@@ -502,7 +510,7 @@ class ExportUtils:
                     )
                 ]
 
-            pics = server.vault.db.run_task(find_by_text, query)
+            pics = server.vault.db.run_task(find_by_text)
         else:
             logger.debug("Exporting pictures using list filters")
             from pixlstash.routes.pictures import select_pictures_for_listing
@@ -623,6 +631,8 @@ class ExportUtils:
                     if getattr(face, "face_index", 0) < 0:
                         continue
                     if not face.bbox:
+                        continue
+                    if getattr(face, "frame_index", 0) != 0:
                         continue
                     total_items += 1
 

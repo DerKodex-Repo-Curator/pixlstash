@@ -37,10 +37,8 @@ from pixlstash.db_models import (
     User,
 )
 from pixlstash.server import Server
-from pixlstash.services import scrapheap_service
-from pixlstash.tasks import (
-    scrapheap_retention_purge_finder as scrapheap_retention_purge_finder_module,
-)
+from pixlstash.services import scrapheap_service, workflow_ghost_service
+from pixlstash.tasks import base_task_finder as base_task_finder_module
 from pixlstash.tasks.scrapheap_retention_purge_finder import (
     ScrapheapRetentionPurgeFinder,
 )
@@ -234,15 +232,15 @@ def test_soft_delete_stamps_deleted_at(server, tmp_path):
     )
     assert _get_picture(server, pic_id).deleted_at is None
 
-    before = datetime.now(timezone.utc).replace(tzinfo=None)
+    before = datetime.now(timezone.utc)
     delete_resp = client.delete(f"/pictures/{pic_id}")
     assert delete_resp.status_code == 200, delete_resp.text
-    after = datetime.now(timezone.utc).replace(tzinfo=None)
+    after = datetime.now(timezone.utc)
 
     pic = _get_picture(server, pic_id)
     assert pic.deleted is True
     assert pic.deleted_at is not None, "Soft-delete must stamp deleted_at"
-    stamped = pic.deleted_at.replace(tzinfo=None)
+    stamped = pic.deleted_at
     assert before <= stamped <= after
 
 
@@ -271,12 +269,12 @@ def test_redelete_does_not_extend_the_window(server, tmp_path):
     delete_resp = client.delete(f"/pictures/{pic_id}")
     assert delete_resp.status_code == 200, delete_resp.text
     original = _get_picture(server, pic_id).deleted_at
-    old = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=5)
+    old = datetime.now(timezone.utc) - timedelta(days=5)
     _set_deleted_at(server, pic_id, old)
 
     delete_resp = client.delete(f"/pictures/{pic_id}")
     assert delete_resp.status_code == 200, delete_resp.text
-    assert _get_picture(server, pic_id).deleted_at.replace(tzinfo=None) == old, (
+    assert _get_picture(server, pic_id).deleted_at == old, (
         "A second DELETE on an already-deleted picture must not restamp deleted_at"
     )
     assert original is not None
@@ -347,7 +345,7 @@ def test_migration_backfills_deleted_at_for_existing_scrapheap_rows():
             cols = {r[1] for r in conn.execute("PRAGMA table_info(picture)").fetchall()}
             assert "deleted_at" not in cols
 
-        before = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
+        before = datetime.now(timezone.utc).replace(microsecond=0)
         up = _run_alembic(["upgrade", "head"], db_url)
         assert up.returncode == 0, f"{up.stdout}\n{up.stderr}"
 
@@ -365,7 +363,10 @@ def test_migration_backfills_deleted_at_for_existing_scrapheap_rows():
             assert rows[2001] is not None, (
                 "An already-scrapheaped row must be backfilled to the migration time"
             )
-            backfilled = datetime.fromisoformat(str(rows[2001]))
+            # Stored as naive-UTC text, whatever the Python side reads back.
+            backfilled = datetime.fromisoformat(str(rows[2001])).replace(
+                tzinfo=timezone.utc
+            )
             assert backfilled >= before - timedelta(seconds=5), (
                 "Backfill must be the MIGRATION time (a full fresh window), not an "
                 f"older value: {backfilled} < {before}"
@@ -519,11 +520,11 @@ def test_the_first_sweep_runs_on_a_host_that_booted_moments_ago(
     _set_deleted_at(
         server,
         pic_id,
-        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400),
+        datetime.now(timezone.utc) - timedelta(days=400),
     )
 
     monkeypatch.setattr(
-        scrapheap_retention_purge_finder_module,
+        base_task_finder_module,
         "time",
         _JustBootedClock(uptime_s=1.0),
     )
@@ -555,7 +556,7 @@ def test_the_finder_still_respects_its_interval_after_a_check(server, tmp_path):
     _set_deleted_at(
         server,
         pic_id,
-        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400),
+        datetime.now(timezone.utc) - timedelta(days=400),
     )
 
     finder = ScrapheapRetentionPurgeFinder(vault=server.vault)
@@ -581,7 +582,7 @@ def test_purge_removes_expired_unprotected_and_skips_protected(server, tmp_path)
         delete_resp = client.delete(f"/pictures/{pid}")
         assert delete_resp.status_code == 200, delete_resp.text
 
-    long_ago = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400)
+    long_ago = datetime.now(timezone.utc) - timedelta(days=400)
     _set_deleted_at(server, unprot_id, long_ago)
     _set_deleted_at(server, prot_id, long_ago)
 
@@ -627,7 +628,7 @@ def test_purge_task_refuses_a_protected_id_handed_to_it_directly(server, tmp_pat
     _set_deleted_at(
         server,
         prot_id,
-        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400),
+        datetime.now(timezone.utc) - timedelta(days=400),
     )
 
     task = ScrapheapRetentionPurgeTask(server.vault, [prot_id])
@@ -658,7 +659,7 @@ def test_finder_never_selects_a_protected_picture(server, tmp_path):
     _set_deleted_at(
         server,
         prot_id,
-        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400),
+        datetime.now(timezone.utc) - timedelta(days=400),
     )
 
     due = scrapheap_service.find_due_retention_picture_ids(
@@ -681,7 +682,7 @@ def test_purge_keeps_pictures_inside_the_window(server, tmp_path):
     _set_deleted_at(
         server,
         pic_id,
-        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=29),
+        datetime.now(timezone.utc) - timedelta(days=29),
     )
 
     assert _run_purge_sweep(server) is None, "29 days < the 30-day window"
@@ -714,7 +715,7 @@ def test_never_disables_the_purge_entirely(server, tmp_path):
     _set_deleted_at(
         server,
         pic_id,
-        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=9999),
+        datetime.now(timezone.utc) - timedelta(days=9999),
     )
     server.vault.set_scrapheap_retention(None, None)
 
@@ -741,7 +742,7 @@ def test_a_fresh_reduction_spares_every_age_then_expires(server, tmp_path):
         delete_resp = client.delete(f"/pictures/{pid}")
         assert delete_resp.status_code == 200, delete_resp.text
 
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = datetime.now(timezone.utc)
     _set_deleted_at(server, young_id, now - timedelta(days=30, hours=12))
     _set_deleted_at(server, old_id, now - timedelta(days=400))
     # The reduction happened just now, so the floor is ~1 day out.
@@ -782,7 +783,7 @@ def test_lowering_the_window_spares_an_ancient_scrapheap(server, tmp_path):
     _set_deleted_at(
         server,
         pic_id,
-        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400),
+        datetime.now(timezone.utc) - timedelta(days=400),
     )
 
     # "Never" -> 30 through the real endpoint, exactly as the dropdown does.
@@ -829,9 +830,7 @@ def test_no_grace_for_pictures_deleted_after_the_reduction(server, tmp_path):
     assert delete_resp.status_code == 200, delete_resp.text
 
     now = datetime.now(timezone.utc)
-    _set_deleted_at(
-        server, pic_id, now.replace(tzinfo=None) - timedelta(days=30, hours=12)
-    )
+    _set_deleted_at(server, pic_id, now - timedelta(days=30, hours=12))
     # Reduction happened BEFORE this picture was deleted -> no grace, 30-day window.
     server.vault.set_scrapheap_retention(30, now - timedelta(days=90))
 
@@ -889,7 +888,7 @@ def test_auto_purge_never_destroys_a_locked_set_member(server, tmp_path):
     _set_deleted_at(
         server,
         pic_id,
-        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400),
+        datetime.now(timezone.utc) - timedelta(days=400),
     )
 
     # Layer 1: never a candidate.
@@ -927,7 +926,7 @@ def test_auto_purge_resumes_once_the_set_is_unlocked(server, tmp_path):
     _set_deleted_at(
         server,
         pic_id,
-        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400),
+        datetime.now(timezone.utc) - timedelta(days=400),
     )
     assert _run_purge_sweep(server) is None
 
@@ -965,7 +964,7 @@ def test_task_re_checks_the_deadline_and_refuses_an_in_window_picture(server, tm
     _set_deleted_at(
         server,
         pic_id,
-        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1),
+        datetime.now(timezone.utc) - timedelta(days=1),
     )
 
     assert ScrapheapRetentionPurgeTask(server.vault, [pic_id]).run() == {
@@ -995,7 +994,7 @@ def test_restore_then_redelete_between_planning_and_purge_is_safe(server, tmp_pa
     _set_deleted_at(
         server,
         pic_id,
-        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400),
+        datetime.now(timezone.utc) - timedelta(days=400),
     )
 
     finder = ScrapheapRetentionPurgeFinder(vault=server.vault)
@@ -1379,7 +1378,7 @@ def test_the_auto_purge_needs_no_confirmation(server, tmp_path):
     _set_deleted_at(
         server,
         pic_id,
-        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400),
+        datetime.now(timezone.utc) - timedelta(days=400),
     )
 
     assert _run_purge_sweep(server)["purged"] == 1
@@ -1471,7 +1470,7 @@ def test_auto_purge_does_not_destroy_a_picture_restored_mid_purge(
     doomed_id, doomed_path = _make_reference_picture(
         server, str(tmp_path / "doomed"), "doomed.png", allow_delete=True
     )
-    old = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400)
+    old = datetime.now(timezone.utc) - timedelta(days=400)
     for pid in (restored_id, doomed_id):
         delete_resp = client.delete(f"/pictures/{pid}")
         assert delete_resp.status_code == 200, delete_resp.text
@@ -2082,7 +2081,7 @@ def test_impact_count_matches_what_a_sweep_actually_destroys(server, tmp_path):
         _set_deleted_at(
             server,
             pid,
-            datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=100),
+            datetime.now(timezone.utc) - timedelta(days=100),
         )
         old_ids.append(pid)
     # Inside a 30-day window, so not part of the impact.
@@ -2094,7 +2093,7 @@ def test_impact_count_matches_what_a_sweep_actually_destroys(server, tmp_path):
     _set_deleted_at(
         server,
         young_id,
-        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=5),
+        datetime.now(timezone.utc) - timedelta(days=5),
     )
 
     # Current window is the default 30; preview a drop to... nothing lower
@@ -2150,7 +2149,7 @@ def test_impact_excludes_protected_and_locked(server, tmp_path):
         _set_deleted_at(
             server,
             pid,
-            datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400),
+            datetime.now(timezone.utc) - timedelta(days=400),
         )
     _lock_picture_in_set(server, locked_id)
 
@@ -2184,7 +2183,7 @@ def test_impact_counts_pictures_expiring_during_the_grace_day(server, tmp_path):
     _set_deleted_at(
         server,
         pic_id,
-        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=29, hours=12),
+        datetime.now(timezone.utc) - timedelta(days=29, hours=12),
     )
     assert (
         client.patch(
@@ -2208,7 +2207,7 @@ def test_impact_is_zero_when_not_a_reduction(server, tmp_path):
     _set_deleted_at(
         server,
         pic_id,
-        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400),
+        datetime.now(timezone.utc) - timedelta(days=400),
     )
     # Current window is the default 30.
     for candidate in (30, 60, 90, 120):
@@ -2235,7 +2234,7 @@ def test_impact_has_no_side_effects(server, tmp_path):
     _set_deleted_at(
         server,
         pic_id,
-        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400),
+        datetime.now(timezone.utc) - timedelta(days=400),
     )
     assert (
         client.patch(
@@ -2300,7 +2299,7 @@ def test_sql_pushdown_selects_exactly_what_the_python_scan_did(server, tmp_path)
     """Equivalence over a mixed population: protected, locked, stack-frozen,
     in-window, due, and NULL deleted_at."""
     client = _client(server)
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = datetime.now(timezone.utc)
     made = {}
 
     def _mk(name, *, allow_delete=True, age_days=400):
@@ -2387,7 +2386,7 @@ def test_paging_is_correct_when_many_rows_share_one_deleted_at(server, tmp_path)
     ]
     resp = client.request("DELETE", "/api/v1/pictures", json={"picture_ids": ids})
     assert resp.status_code == 200, resp.text
-    shared = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400)
+    shared = datetime.now(timezone.utc) - timedelta(days=400)
     for pid in ids:
         _set_deleted_at(server, pid, shared)
     assert len({_get_picture(server, pid).deleted_at for pid in ids}) == 1, (
@@ -2434,7 +2433,7 @@ def test_deadline_boundary_is_inclusive(server, tmp_path):
     assert delete_resp.status_code == 200, delete_resp.text
 
     now = datetime.now(timezone.utc).replace(microsecond=0)
-    _set_deleted_at(server, pic_id, (now - timedelta(days=30)).replace(tzinfo=None))
+    _set_deleted_at(server, pic_id, (now - timedelta(days=30)))
 
     assert scrapheap_service.find_due_retention_picture_ids(
         server.vault, now, 30, None, 100
@@ -2460,7 +2459,7 @@ def test_sweep_skips_the_scan_entirely_inside_the_grace_floor(server, tmp_path):
     _set_deleted_at(
         server,
         pic_id,
-        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400),
+        datetime.now(timezone.utc) - timedelta(days=400),
     )
     assert (
         scrapheap_service.find_due_retention_picture_ids(
@@ -2547,7 +2546,7 @@ def test_config_save_never_purges_synchronously(server, tmp_path):
     _set_deleted_at(
         server,
         pic_id,
-        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=9999),
+        datetime.now(timezone.utc) - timedelta(days=9999),
     )
 
     client.patch(
@@ -2614,7 +2613,7 @@ def test_a_fresh_install_purges_nothing_however_old_the_scrapheap(server, tmp_pa
     _set_deleted_at(
         server,
         pic_id,
-        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=9999),
+        datetime.now(timezone.utc) - timedelta(days=9999),
     )
 
     server._server_config.pop(scrapheap_service.RETENTION_DAYS_KEY, None)
@@ -2685,7 +2684,7 @@ def test_turning_auto_purge_on_deliberately_still_purges(server, tmp_path):
     _set_deleted_at(
         server,
         pic_id,
-        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400),
+        datetime.now(timezone.utc) - timedelta(days=400),
     )
     assert _run_purge_sweep(server) is None, "Off means off"
 
@@ -2734,7 +2733,7 @@ def test_turning_auto_purge_on_reports_its_blast_radius(server, tmp_path):
         _set_deleted_at(
             server,
             pic_id,
-            datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400),
+            datetime.now(timezone.utc) - timedelta(days=400),
         )
 
     resp = client.get("/server-config/scrapheap-retention/impact", params={"days": 30})
@@ -2774,7 +2773,7 @@ def test_listing_exposes_purge_at_and_auto_purge_exempt(server, tmp_path):
     for pid in (unprot_id, prot_id):
         delete_resp = client.delete(f"/pictures/{pid}")
         assert delete_resp.status_code == 200, delete_resp.text
-    deleted_at = datetime(2026, 7, 1, 12, 0)
+    deleted_at = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
     _set_deleted_at(server, unprot_id, deleted_at)
     _set_deleted_at(server, prot_id, deleted_at)
 
@@ -2813,8 +2812,12 @@ def test_listing_purge_at_reflects_the_reduction_grace_floor(server, tmp_path):
         assert delete_resp.status_code == 200, delete_resp.text
 
     reduced_at = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
-    old_deleted_at = datetime(2026, 1, 1, 12, 0)  # deadline long past
-    young_deleted_at = datetime(2026, 7, 5, 12, 0)  # deadline still ahead
+    old_deleted_at = datetime(
+        2026, 1, 1, 12, 0, tzinfo=timezone.utc
+    )  # deadline long past
+    young_deleted_at = datetime(
+        2026, 7, 5, 12, 0, tzinfo=timezone.utc
+    )  # deadline still ahead
     _set_deleted_at(server, old_id, old_deleted_at)
     _set_deleted_at(server, young_id, young_deleted_at)
     server.vault.set_scrapheap_retention(30, reduced_at)
@@ -2842,7 +2845,7 @@ def test_listing_purge_at_matches_what_the_sweep_does(server, tmp_path):
     _set_deleted_at(
         server,
         pic_id,
-        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400),
+        datetime.now(timezone.utc) - timedelta(days=400),
     )
     server.vault.set_scrapheap_retention(30, datetime.now(timezone.utc))
 
@@ -2872,7 +2875,7 @@ def test_listing_agrees_with_the_sweep_about_a_locked_picture(server, tmp_path):
     _set_deleted_at(
         server,
         pic_id,
-        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400),
+        datetime.now(timezone.utc) - timedelta(days=400),
     )
 
     row = _scrapheap_listing(client)[pic_id]
@@ -2976,7 +2979,7 @@ def test_listing_marks_a_stack_sibling_freeze_as_locked(server, tmp_path):
         _set_deleted_at(
             server,
             pid,
-            datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400),
+            datetime.now(timezone.utc) - timedelta(days=400),
         )
     _lock_picture_in_set(server, member_id)
 
@@ -3020,7 +3023,7 @@ def test_sweep_still_finds_due_work(server, tmp_path):
     _set_deleted_at(
         server,
         pic_id,
-        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400),
+        datetime.now(timezone.utc) - timedelta(days=400),
     )
     due = scrapheap_service.find_due_retention_picture_ids(
         server.vault, datetime.now(timezone.utc), 30, None, 100
@@ -3059,3 +3062,98 @@ def test_listing_exposes_retention_fields_in_the_grid_projection(server, tmp_pat
     rows = {row["id"]: row for row in resp.json()}
     assert "purge_at" in rows[pic_id]
     assert rows[pic_id]["auto_purge_exempt"] is False
+
+
+# ── Ghost retention: the OTHER purge-policy setting (§B4) ────────────────────
+#
+# It lives here rather than in a module of its own because this server is
+# already warm and is the one that owns the purge, and because the two settings
+# are read the same way and fail in OPPOSITE directions on a config we cannot
+# parse. Asserting that side by side is what keeps the asymmetry deliberate.
+
+
+def test_ghost_retention_defaults_to_covered_only(server):
+    """A fresh install keeps a ghost only where a surviving picture covers it."""
+    resp = _client(server).get("/server-config/ghost-retention")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["workflow_ghost_retention"] == "covered"
+    assert body["workflow_ghost_retention_choices"] == ["off", "covered", "on"]
+
+
+def test_saving_a_ghost_position_reaches_the_vault_and_destroys_nothing(
+    server, tmp_path
+):
+    """The save is a statement about FUTURE purges, never a purge itself."""
+    client = _client(server)
+    pic_id, path = _make_reference_picture(
+        server, str(tmp_path / "ghostrefs"), "ghost-save.png", allow_delete=True
+    )
+    delete_resp = client.delete(f"/pictures/{pic_id}")
+    assert delete_resp.status_code == 200
+    try:
+        for position in ("off", "on", "covered"):
+            resp = client.patch(
+                "/server-config/ghost-retention",
+                json={"workflow_ghost_retention": position},
+            )
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["workflow_ghost_retention"] == position
+            assert server.vault.ghost_retention == position
+        assert _get_picture(server, pic_id) is not None
+        assert os.path.isfile(path)
+        assert _ledger_flags_for(server, path) == []
+    finally:
+        client.patch(
+            "/server-config/ghost-retention",
+            json={"workflow_ghost_retention": "covered"},
+        )
+
+
+def test_an_unknown_ghost_position_is_refused_rather_than_stored(server):
+    """422, not a silent fall-through to the default.
+
+    The reader's fail-safe (an unparseable stored value means keep NOTHING) is
+    the last line of defence, not the first: a value that reaches the endpoint
+    is rejected before it can be written.
+    """
+    client = _client(server)
+    before = client.get("/server-config/ghost-retention").json()
+    resp = client.patch(
+        "/server-config/ghost-retention", json={"workflow_ghost_retention": "sometimes"}
+    )
+    assert resp.status_code == 422, resp.text
+    assert client.get("/server-config/ghost-retention").json() == before
+
+
+def test_a_ghost_position_is_matched_case_and_space_blind(server):
+    client = _client(server)
+    try:
+        resp = client.patch(
+            "/server-config/ghost-retention",
+            json={"workflow_ghost_retention": " On "},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["workflow_ghost_retention"] == "on"
+    finally:
+        client.patch(
+            "/server-config/ghost-retention",
+            json={"workflow_ghost_retention": "covered"},
+        )
+
+
+def test_the_two_purge_settings_fail_in_opposite_directions():
+    """An unreadable config falls to whichever position holds LESS data.
+
+    For the retention window that is "Never" — do not license a deletion. For
+    ghosts it is "off" — do not license keeping a destroyed picture's thumbnail
+    and prompt. The two look inconsistent side by side and are not, so the pair
+    is asserted together rather than each in its own file.
+    """
+    assert scrapheap_service.read_retention_days({"scrapheap_retention_days": "?"}) is (
+        None
+    )
+    assert (
+        workflow_ghost_service.read_ghost_retention({"workflow_ghost_retention": "?"})
+        == workflow_ghost_service.GHOST_RETENTION_OFF
+    )

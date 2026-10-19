@@ -19,7 +19,7 @@
         variant="ghost"
         icon-left="refresh"
         :loading="loading"
-        title="Look for runs that have appeared since this list was read"
+        tooltip="Look for runs that have appeared since this list was read"
         aria-label="Reload the training runs"
         @click="reload"
       />
@@ -91,7 +91,7 @@
             loading="lazy"
           />
           <div v-else class="tr-card-preview tr-card-preview--none">
-            <v-icon size="20">mdi-image-off-outline</v-icon>
+            <v-icon size="18">mdi-image-off-outline</v-icon>
             <span>No previews</span>
           </div>
 
@@ -146,33 +146,36 @@
               type="button"
               aria-haspopup="menu"
               :aria-expanded="countMenuOpen"
-              :title="countTitle"
             >
+              <Tooltip :text="countTitle" activator="parent" />
               <AiToolkitIcon :size="16" />
               <span>{{ chosen.length.toLocaleString() }}</span>
               <span class="selbar-size">· {{ fileCountLabel }}</span>
-              <v-icon size="15" class="selbar-chevron">mdi-menu-down</v-icon>
+              <v-icon size="16" class="selbar-chevron">mdi-menu-down</v-icon>
             </button>
           </template>
-          <div class="shelf-menu" role="menu">
+          <div class="ctx-menu shelf-menu" role="menu"
+            tabindex="-1"
+            @keydown="onMenuKeydown"
+          >
             <button
-              class="shelf-mi"
+              class="ctx-item"
               type="button"
               role="menuitem"
               @click="selectAll"
             >
-              <v-icon size="16">mdi-select-all</v-icon>
-              <span>Select all shown</span>
+              <v-icon class="ctx-icon">mdi-select-all</v-icon>
+              <span class="ctx-label-text">Select all shown</span>
             </button>
             <button
-              class="shelf-mi"
+              class="ctx-item"
               type="button"
               role="menuitem"
               @click="clearSelection"
             >
-              <v-icon size="16">mdi-close</v-icon>
-              <span>Clear selection</span>
-              <span class="shelf-mi-kbd">Esc</span>
+              <v-icon class="ctx-icon">mdi-close</v-icon>
+              <span class="ctx-label-text">Clear selection</span>
+              <span class="ctx-shortcut">Esc</span>
             </button>
           </div>
         </v-menu>
@@ -198,17 +201,20 @@
               type="button"
               aria-haspopup="menu"
               :aria-expanded="stepMenuOpen"
-              title="Choose which checkpoints of this run to take"
             >
+              <Tooltip
+                text="Choose which checkpoints of this run to take"
+                activator="parent"
+              />
               <span>{{ stepsLabel }}</span>
-              <v-icon size="15" class="selbar-chevron">mdi-menu-down</v-icon>
+              <v-icon size="16" class="selbar-chevron">mdi-menu-down</v-icon>
             </button>
           </template>
-          <div class="shelf-menu">
+          <div class="ctx-menu shelf-menu">
             <label
               v-for="cp in single.checkpoints"
               :key="cp.filename"
-              class="shelf-mi tr-step"
+              class="ctx-item tr-step"
             >
               <input
                 v-model="chosenSteps"
@@ -216,8 +222,10 @@
                 :value="cp.step ?? null"
                 :disabled="working"
               />
-              <span>{{ cp.step === null ? "Final" : `Step ${cp.step}` }}</span>
-              <span class="tr-step-size">{{ formatModelSize(cp.size) }}</span>
+              <span class="ctx-label-text">{{
+                cp.step === null ? "Final" : `Step ${cp.step}`
+              }}</span>
+              <span class="ctx-meta">{{ formatModelSize(cp.size) }}</span>
             </label>
           </div>
         </v-menu>
@@ -230,27 +238,33 @@
               type="button"
               aria-haspopup="menu"
               :aria-expanded="destMenuOpen"
-              title="Which folder the checkpoints are copied into"
             >
+              <Tooltip
+                text="Which folder the checkpoints are copied into"
+                activator="parent"
+              />
               <v-icon size="16">mdi-folder-outline</v-icon>
               <span>{{ destinationName }}</span>
-              <v-icon size="15" class="selbar-chevron">mdi-menu-down</v-icon>
+              <v-icon size="16" class="selbar-chevron">mdi-menu-down</v-icon>
             </button>
           </template>
-          <div class="shelf-menu" role="menu">
+          <div class="ctx-menu shelf-menu" role="menu"
+            tabindex="-1"
+            @keydown="onMenuKeydown"
+          >
             <button
               v-for="folder in destinations"
               :key="folder.id"
-              class="shelf-mi"
+              class="ctx-item"
               type="button"
               role="menuitemradio"
               :aria-checked="folder.id === destinationId"
               @click="destinationId = folder.id"
             >
-              <v-icon size="16">{{
-                folder.id === destinationId ? "mdi-check" : "mdi-blank"
-              }}</v-icon>
-              <span>{{ folder.path }}</span>
+              <span class="ctx-label-text">{{ folder.path }}</span>
+              <v-icon v-if="folder.id === destinationId" class="ctx-check"
+                >mdi-check</v-icon
+              >
             </button>
           </div>
         </v-menu>
@@ -262,21 +276,19 @@
           size="sm"
           :loading="working"
           :disabled="!canSubmit"
-          :title="deletesSource ? deleteWarning : undefined"
+          :tooltip="deletesSource ? deleteWarning : ''"
           @click="submit"
         >
           {{ confirmLabel }}
         </AppButton>
 
-        <button
-          class="selbar-btn"
-          type="button"
-          title="Clear the selection (Esc)"
+        <AppBarButton
+          shape="round"
+          icon="close"
+          tooltip="Clear the selection (Esc)"
           aria-label="Clear the selection"
           @click="clearSelection"
-        >
-          <v-icon size="18">mdi-close</v-icon>
-        </button>
+        />
       </div>
     </div>
 
@@ -325,12 +337,15 @@ import { VIcon, VMenu } from "vuetify/components";
 
 import AiToolkitIcon from "../widgets/AiToolkitIcon.vue";
 import AppButton from "../widgets/AppButton.vue";
+import AppBarButton from "../widgets/AppBarButton.vue";
+import Tooltip from "../widgets/Tooltip.vue";
 import { importRun, listRuns, runSampleUrl } from "../../api/modelImports";
 import { useModelFoldersStore } from "../../stores/useModelFoldersStore";
 import { useModelShelfStore } from "../../stores/useModelShelfStore";
 import { useNoticeStore } from "../../stores/useNoticeStore";
 import { errorDetail } from "../../utils/apiError";
 import { formatModelSize } from "../../utils/modelShelf";
+import { onMenuKeydown } from "../../utils/menuKeyboard.js";
 
 const emit = defineEmits(["set-folder", "count"]);
 
@@ -671,8 +686,11 @@ watch(
   (list) => {
     const stillThere = list.some((f) => f.id === destinationId.value);
     if (destinationId.value != null && stillThere) return;
-    const managed = list.find((f) => f.kind === "managed");
-    destinationId.value = managed?.id ?? list[0]?.id ?? null;
+    // The default folder from the Model folders dialog, which is the managed
+    // store until the owner picks another.
+    const preferred =
+      list.find((f) => f.is_default) ?? list.find((f) => f.kind === "managed");
+    destinationId.value = preferred?.id ?? list[0]?.id ?? null;
   },
   { immediate: true },
 );
@@ -840,17 +858,19 @@ function batchReceipt(imported, failed) {
   border-color: rgb(var(--v-theme-border));
 }
 
+/* The global ink outline, drawn inside the card: the grid is the scroll
+   container, so an outside ring on the first row would be clipped. An outline
+   rather than the inset shadow, so it cannot fight the checked rail. */
 .tr-card:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
+  outline-offset: calc(var(--focus-width) * -1);
 }
 
 /* The shelf row's own recipe, verbatim: a `--rail-w` rail down the left edge.
    The same object, which is the strongest cue that these are two views of one
    shelf - and it survives desaturation, which a wash alone does not. */
 .tr-card--checked {
-  border-color: rgb(var(--v-theme-primary));
-  box-shadow: inset var(--rail-w) 0 0 rgb(var(--v-theme-primary));
+  border-color: var(--active-bar);
+  box-shadow: var(--selection-edge);
 }
 
 .tr-card-shot {
@@ -905,8 +925,8 @@ function batchReceipt(imported, failed) {
 }
 
 .tr-card--checked .tr-card-check {
-  background: rgb(var(--v-theme-accent));
-  color: rgb(var(--v-theme-on-accent));
+  background: rgb(var(--v-theme-primary));
+  color: rgb(var(--v-theme-on-primary));
   opacity: 1;
 }
 
@@ -922,7 +942,7 @@ function batchReceipt(imported, failed) {
    being judged. (The photo grid does wash its whole tile - legal there, because
    the user already knows the photo.) */
 .tr-card--checked .tr-card-body {
-  background: rgba(var(--v-theme-primary), 0.12);
+  background: var(--active-wash);
 }
 
 .tr-card-name {
@@ -944,17 +964,6 @@ function batchReceipt(imported, failed) {
 .tr-card-note {
   font-size: var(--text-xs);
   color: rgba(var(--v-theme-on-background), 0.7);
-}
-
-.tr-step {
-  cursor: pointer;
-}
-
-.tr-step-size {
-  margin-left: auto;
-  padding-left: var(--space-3);
-  font-size: var(--text-xs);
-  color: rgba(var(--v-theme-on-surface), 0.7);
 }
 
 .tr-loading {
@@ -997,7 +1006,7 @@ function batchReceipt(imported, failed) {
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-md);
   background: rgba(var(--v-theme-warning), 0.12);
-  border: 1px solid rgba(var(--v-theme-warning), 0.35);
+  border: 1px solid rgba(var(--v-theme-surface-warning), 0.35);
   font-size: var(--text-sm);
   color: rgb(var(--v-theme-on-background));
 }

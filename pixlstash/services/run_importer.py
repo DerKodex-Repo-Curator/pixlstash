@@ -56,7 +56,7 @@ from typing import Callable, Optional
 
 from pixlstash.hub.db import HubDatabase
 from pixlstash.pixl_logging import get_logger
-from pixlstash.services.model_folder_scanner import STATE_PRESENT
+from pixlstash.services.model_folder_scanner import STATE_PRESENT, TAKEN_FROM_KINDS
 from pixlstash.services.model_mover import (
     PARTIAL_SUFFIX,
     STATUS_CANCELLED,
@@ -310,10 +310,10 @@ class RunImporter:
         )
         if row is None:
             raise MoveRefused("No such destination folder.", status_code=404)
-        if row["kind"] == "source":
+        if row["kind"] in TAKEN_FROM_KINDS:
             raise MoveRefused(
-                "A source folder is where runs are taken from, never a place to "
-                "import them into."
+                "That folder is taken from, never a place to import runs into: "
+                "an ai-toolkit output root or the Downloads folder."
             )
         if not os.path.isdir(row["path"]):
             raise MoveRefused(
@@ -560,7 +560,10 @@ class RunImporter:
         mtime = os.stat(target).st_mtime_ns
         now = _utcnow()
         base_model = (info.base_model if info else None) or run.base_model
-        triggers = (info.trigger_words if info else None) or run.trigger_words
+        # The other way round from the base model: `trigger_word` in the config
+        # is the word the trainer was told to use, while the header's are every
+        # tag in its frequency table.
+        triggers = run.trigger_words or (info.trigger_words if info else None)
         with self._hub.transaction() as conn:
             conn.execute(
                 "INSERT INTO model (file_kind, kind, sha256, display_name, "

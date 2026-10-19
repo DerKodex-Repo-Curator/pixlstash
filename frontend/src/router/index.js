@@ -22,7 +22,26 @@ import App from "../App.vue";
 //   /insights                               → About your library (read-only findings)
 //   /moves                                  → Moves made outside PixlStash (reconciliation queue)
 //   /models                                 → Model shelf (adapters/checkpoints)
+//   /models?model=<id>                      → …opened on that model (a Recipe chip's link)
 //   /models/runs                            → ai-toolkit training runs, the shelf's second view
+//   /workflows                              → the Workflows grid (one card per workflow)
+//   /workflows?topology=<hash>              → …opened on the first workflow holding that
+//                                            topology (the Recipe section's Open, for a
+//                                            picture the hub has not keyed yet)
+//   /workflows?workflow=<id>                → …selected by workflow ID, rail open on its
+//                                            Workflow tab (the Recipe section's and the Run
+//                                            popup's Open; the MCP recipe's workflow_link)
+//   /workflows?workflow=<id>&tab=recipes    → …with the rail open on its Recipes tab
+//                                            (the Recipe tab's "Matches your saved recipe X"
+//                                            banner, #1480; honoured by WorkflowTab)
+//   /workflows?workflow=<id>&edit=loras     → …with Edit LoRAs… open on it (#1478)
+//   /workflows?workflow=<id>&edit=loras&drop_lora=<filename>
+//                                          → …and that LoRA's loader already deleted
+//                                            (Save as recipe's "The workflow" answer).
+//                                            `edit` and `drop_lora` are one-shot: the
+//                                            rail takes them off the URL once honoured.
+//                                            Built by `utils/loraChain.editLorasRoute`,
+//                                            honoured by WorkflowTab.
 //   /ref-folder/:id                         → Reference folder view (id = numeric)
 //   /import-folder/:id                      → Import folder view (id = numeric)
 //
@@ -33,6 +52,27 @@ import App from "../App.vue";
 //                                  have no id of their own (a subfolder, or a
 //                                  folder an insight points at).
 //   ?overlay=<pictureId>         → Open ImageOverlay for that picture
+//   ?from=<path>                 → Where closing that overlay goes, for the
+//                                  destinations that replace the grid the
+//                                  lightbox lives in. Its producer is the
+//                                  Workflows grid's COVER TILES (#1455): a
+//                                  cover opens the picture it draws on the
+//                                  library route, and the close comes back to
+//                                  /workflows. The shelf's picture tiles were
+//                                  the first producer and went with the shelf
+//                                  in F1b; anything else opening the overlay
+//                                  sends no `from`, and its close takes the
+//                                  absent branch - stay put, drop ?overlay=.
+//                                  **F7's "Show all N pictures" deliberately
+//                                  does not set it.** A cover tile opens one
+//                                  PICTURE from a screen with no grid, so the
+//                                  close has nowhere to land; F7's chip
+//                                  navigates to the grid itself and the grid
+//                                  IS the destination. Setting `from` there
+//                                  would send the first close back to
+//                                  /workflows and out of the 184 pictures the
+//                                  reader just asked to browse.
+//                                  (see utils/overlayRoute.js)
 //   ?review=board                → Open the tag-review overlay on the health board
 //   ?review=<reviewId>           → …on that review (open session or archived receipt)
 //   ?review_project=<id>         → Board scope: project
@@ -57,6 +97,7 @@ const routes = [
   { path: "/moves", name: "moves", component: App },
   { path: "/models", name: "models", component: App },
   { path: "/models/runs", name: "models-runs", component: App },
+  { path: "/workflows", name: "workflows", component: App },
   // The runs were briefly a destination of their own. They are a view of the
   // shelf, so the old path redirects rather than 404s - it was published.
   { path: "/training-runs", redirect: "/models/runs" },

@@ -70,11 +70,14 @@
               type="button"
               draggable="true"
               :disabled="tagActionLoading.includes(t.name)"
-              :title="`On all ${totalWithTagData} selected - click to remove, drag to rejected to remove`"
               @dragstart="onCurrentTagDragStart($event, t)"
               @dragend="onDragEnd"
               @click="removeTagFromAll(t)"
             >
+              <Tooltip
+                :text="`On all ${totalWithTagData} selected - click to remove, drag to rejected to remove`"
+                activator="parent"
+              />
               <span class="tag-chip-label">{{
                 formatSentinelTag(t.name)
               }}</span>
@@ -92,11 +95,14 @@
               type="button"
               draggable="true"
               :disabled="tagActionLoading.includes(t.name)"
-              :title="`On ${t.count} of ${totalWithTagData} - click to add to all, drag to rejected to remove`"
               @dragstart="onCurrentTagDragStart($event, t)"
               @dragend="onDragEnd"
               @click="addTagToRemaining(t)"
             >
+              <Tooltip
+                :text="`On ${t.count} of ${totalWithTagData} - click to add to all, drag to rejected to remove`"
+                activator="parent"
+              />
               <span class="tag-chip-label">{{
                 formatSentinelTag(t.name)
               }}</span>
@@ -174,11 +180,14 @@
               draggable="true"
               :disabled="predActionLoading.includes(p.tag)"
               :style="{ '--pred-confidence': p.avgConf }"
-              :title="`Rejected on ${p.count} image${p.count !== 1 ? 's' : ''}, avg ${(p.avgConf * 100).toFixed(0)}%, needs +${(p.avgNeeded * 100).toFixed(0)}% to auto-accept - click to confirm all, drag to current to confirm`"
               @dragstart="onRejectedTagDragStart($event, p)"
               @dragend="onDragEnd"
               @click="confirmPredictionOnAll(p)"
             >
+              <Tooltip
+                :text="`Rejected on ${p.count} image${p.count !== 1 ? 's' : ''}, avg ${(p.avgConf * 100).toFixed(0)}%, needs +${(p.avgNeeded * 100).toFixed(0)}% to auto-accept - click to confirm all, drag to current to confirm`"
+                activator="parent"
+              />
               <span class="tag-chip-label">{{ p.tag }}</span>
               <span class="tag-chip-count"
                 >{{ p.count }}/{{ fetchedPredictionData.length }}</span
@@ -206,14 +215,14 @@
           {{ suggestionStatus }}
         </p>
         <div class="plugin-menu-actions">
-          <button
-            class="stack-btn"
-            type="button"
-            :disabled="!tagInput.trim() || tagLoading"
+          <AppButton
+            variant="primary"
+            :disabled="!tagInput.trim()"
+            :loading="tagLoading"
             @click="applyTag"
           >
-            {{ tagLoading ? "Applying..." : "Apply to All" }}
-          </button>
+            Apply to All
+          </AppButton>
         </div>
         <div v-if="tagError" class="plugin-menu-error" role="alert">
           {{ tagError }}
@@ -224,59 +233,67 @@
         <div v-if="!isReadOnly" class="tag-autogen-section">
           <div class="tag-new-label">Auto-generate</div>
           <div class="plugin-menu-actions tag-autogen-row">
-            <button
-              class="stack-btn stack-btn--secondary"
-              type="button"
-              :disabled="generateTagsLoading"
-              :title="`Reset and regenerate tags for all ${selectedCount} selected image${selectedCount !== 1 ? 's' : ''}`"
+            <AppButton
+              :loading="generateTagsLoading"
+              :tooltip="`Reset and regenerate tags for all ${selectedCount} selected image${selectedCount !== 1 ? 's' : ''}`"
               @click="generateTagsForAll()"
             >
-              <v-icon v-if="generateTagsLoading" size="14" class="spin"
-                >mdi-loading</v-icon
-              >
-              {{
-                generateTagsLoading
-                  ? "Queuing..."
-                  : "Generate tags with default tagger"
-              }}
-            </button>
+              Generate tags with default tagger
+            </AppButton>
             <v-menu
               v-model="taggerMenuOpen"
               :close-on-content-click="true"
               location="bottom end"
             >
               <template #activator="{ props: menuProps }">
-                <button
-                  class="stack-btn stack-btn--secondary stack-btn--icon-only"
-                  type="button"
-                  title="Generate tags with a specific tagger..."
+                <AppButton
+                  icon-left="chevron-down"
+                  icon-only
+                  tooltip="Generate tags with a specific tagger..."
+                  aria-label="Generate tags with a specific tagger"
                   :disabled="generateTagsLoading"
                   v-bind="menuProps"
                   @click="fetchTaggerPlugins"
-                >
-                  <v-icon size="14">mdi-chevron-down</v-icon>
-                </button>
-              </template>
-              <v-list density="compact" min-width="180">
-                <v-list-item
-                  v-if="taggerPluginsLoading"
-                  disabled
-                  title="Loading..."
                 />
-                <template v-if="!taggerPluginsLoading">
-                  <v-list-item
+              </template>
+              <div
+                class="ctx-menu"
+                role="menu"
+                tabindex="-1"
+                style="min-width: 180px"
+                @keydown="onMenuKeydown"
+              >
+                <button
+                  v-if="taggerPluginsLoading"
+                  type="button"
+                  class="ctx-item"
+                  role="menuitem"
+                  disabled
+                >
+                  Loading...
+                </button>
+                <template v-else>
+                  <button
                     v-for="plugin in taggerPlugins"
                     :key="plugin.name"
-                    :title="plugin.display_name || plugin.name"
+                    type="button"
+                    class="ctx-item"
+                    role="menuitem"
                     @click="generateTagsForAll(plugin.name)"
-                  />
-                  <v-list-item
+                  >
+                    {{ plugin.display_name || plugin.name }}
+                  </button>
+                  <button
                     v-if="!taggerPlugins.length"
+                    type="button"
+                    class="ctx-item"
+                    role="menuitem"
                     disabled
-                    title="No taggers available"
-                  />
+                  >
+                    No taggers available
+                  </button>
                 </template>
-              </v-list>
+              </div>
             </v-menu>
           </div>
           <div v-if="generateTagsError" class="plugin-menu-error">
@@ -290,8 +307,9 @@
     </div>
   </div>
 
-  <!-- Autocomplete dropdown (teleported to body) -->
-  <Teleport to="body">
+  <!-- Autocomplete dropdown, on the overlay stack so it clears the dialog or
+       lightbox the panel sits in. -->
+  <StackLayer :open="suggestionsVisible">
     <div
       v-if="suggestionsVisible"
       id="tb-tag-suggestions"
@@ -324,7 +342,7 @@
         <span v-if="i === 0" class="sb-tag-autocomplete-tab-hint">TAB</span>
       </div>
     </div>
-  </Teleport>
+  </StackLayer>
 </template>
 
 <script setup>
@@ -340,10 +358,15 @@ import {
   rejectTagPrediction,
 } from "../../api/tags";
 import { resetPicturesTags } from "../../api/pictures";
+import { confirmRetag } from "../../composables/confirmRetag";
 import { listTaggers } from "../../api/taggers";
 import { getUserConfig } from "../../api/config";
 import { isSentinelTag, formatSentinelTag } from "../../utils/tags.js";
 import { errorDetail } from "../../utils/apiError";
+import { onMenuKeydown } from "../../utils/menuKeyboard.js";
+import AppButton from "../widgets/AppButton.vue";
+import Tooltip from "../widgets/Tooltip.vue";
+import StackLayer from "../widgets/StackLayer.vue";
 
 const MAX_TAG_FETCH = 100;
 const MAX_PREVIEW_IMAGES = 16;
@@ -758,6 +781,7 @@ async function generateTagsForAll(model = null) {
     .map((id) => Number(id))
     .filter((id) => Number.isFinite(id) && id > 0);
   if (!ids.length || generateTagsLoading.value) return;
+  if (!(await confirmRetag(ids.length))) return;
   generateTagsLoading.value = true;
   generateTagsError.value = "";
   generateTagsSuccess.value = "";
@@ -1118,21 +1142,15 @@ defineExpose({ focus: () => tagInputRef.value?.focus() });
   gap: var(--space-2);
 }
 
-.stack-btn--icon-only {
-  padding: 0 var(--space-3);
-  min-width: unset;
-  flex-shrink: 0;
-}
-
 .plugin-menu-error {
   margin-top: var(--space-3);
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
   font-size: var(--text-sm);
 }
 
 .plugin-menu-success {
   margin-top: var(--space-3);
-  color: rgb(var(--v-theme-success));
+  color: rgb(var(--v-theme-surface-success));
   font-size: var(--text-sm);
 }
 
@@ -1146,11 +1164,6 @@ defineExpose({ focus: () => tagInputRef.value?.focus() });
   color: rgb(var(--v-theme-on-background));
   padding: 0 var(--space-3);
   font-size: var(--text-base);
-  outline: none;
-}
-
-.tag-menu-input:focus {
-  border-color: rgba(var(--v-theme-primary), 0.8);
 }
 
 .tag-data-loading {
@@ -1226,17 +1239,17 @@ defineExpose({ focus: () => tagInputRef.value?.focus() });
 }
 
 .tag-chips-row--drop-target {
-  outline: 2px dashed rgba(var(--v-theme-primary), 0.55);
+  outline: 2px dashed var(--active-bar);
   outline-offset: 3px;
-  background: rgba(var(--v-theme-primary), 0.06);
+  background: var(--active-wash);
   border-radius: var(--radius-md);
 }
 
 .tag-drop-collapsed-zone {
   height: 36px;
   border-radius: var(--radius-md);
-  border: 2px dashed rgba(var(--v-theme-primary), 0.55);
-  background: rgba(var(--v-theme-primary), 0.06);
+  border: 2px dashed var(--active-bar);
+  background: var(--active-wash);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1272,7 +1285,7 @@ defineExpose({ focus: () => tagInputRef.value?.focus() });
 
 .tag-chip--all:hover:not(:disabled) {
   background: rgba(var(--v-theme-error), 0.18);
-  border-color: rgba(var(--v-theme-error), 0.55);
+  border-color: rgba(var(--v-theme-surface-error), 0.55);
 }
 
 .tag-chip--some {
@@ -1283,20 +1296,19 @@ defineExpose({ focus: () => tagInputRef.value?.focus() });
 
 .tag-chip--some:hover:not(:disabled) {
   opacity: 1;
-  background: rgba(var(--v-theme-primary), 0.12);
+  background: var(--hover-wash);
   border-style: solid;
-  border-color: rgba(var(--v-theme-primary), 0.45);
 }
 
 .tag-chip--penalised {
-  color: rgb(var(--v-theme-error)) !important;
-  border-color: rgba(var(--v-theme-error), 0.55) !important;
+  color: rgb(var(--v-theme-surface-error)) !important;
+  border-color: rgba(var(--v-theme-surface-error), 0.55) !important;
   background: rgba(var(--v-theme-error), 0.12) !important;
 }
 
 .tag-chip--penalised:hover:not(:disabled) {
   background: rgba(var(--v-theme-error), 0.22) !important;
-  border-color: rgba(var(--v-theme-error), 0.75) !important;
+  border-color: rgba(var(--v-theme-surface-error), 0.75) !important;
 }
 
 .tag-chip--sentinel {
@@ -1334,9 +1346,8 @@ defineExpose({ focus: () => tagInputRef.value?.focus() });
 
 .tag-chip--prediction:hover:not(:disabled) {
   opacity: 1;
-  background: rgba(var(--v-theme-primary), 0.14);
+  background: var(--hover-wash);
   border-style: solid;
-  border-color: rgba(var(--v-theme-primary), 0.55);
 }
 
 .tag-chip-count {
@@ -1380,7 +1391,6 @@ defineExpose({ focus: () => tagInputRef.value?.focus() });
 
 .sb-tag-autocomplete-dropdown {
   position: fixed;
-  z-index: 9999;
   background: color-mix(in srgb, rgb(var(--v-theme-surface)) 92%, transparent);
   backdrop-filter: blur(6px);
   border: 1px solid rgba(var(--v-theme-primary), 0.3);
@@ -1404,9 +1414,12 @@ defineExpose({ focus: () => tagInputRef.value?.focus() });
   text-overflow: ellipsis;
 }
 
-.sb-tag-autocomplete-item:hover,
+.sb-tag-autocomplete-item:hover {
+  background: var(--hover-wash);
+}
 .sb-tag-autocomplete-item--active {
-  background: rgba(var(--v-theme-primary), 0.22);
+  background: var(--active-wash);
+  color: var(--active-text);
 }
 
 .sb-tag-autocomplete-tab-hint {
@@ -1523,53 +1536,9 @@ defineExpose({ focus: () => tagInputRef.value?.focus() });
   min-width: 340px;
 }
 
-.stack-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  color: rgb(var(--v-theme-on-background));
-  padding: 0 var(--space-3);
-  border-radius: var(--radius-sm);
-  font-size: var(--text-base);
-  font-family: inherit;
-  height: 40px;
-  white-space: nowrap;
-}
-
-.stack-btn:hover:not(:disabled) {
-  background: rgba(var(--v-theme-on-background), 0.12);
-}
-
-.stack-btn:disabled {
-  opacity: 0.35;
-  cursor: default;
-}
-
-.stack-btn--secondary {
-  border: 1px solid rgba(var(--v-theme-on-surface), 0.25);
-}
-
-.stack-btn--secondary:hover:not(:disabled) {
-  border-color: rgba(var(--v-theme-primary), 0.5);
-  background: rgba(var(--v-theme-primary), 0.08);
-}
-
 .tag-autogen-section {
   margin-top: var(--space-4);
   border-top: 1px solid rgba(var(--v-theme-on-surface), 0.1);
   padding-top: var(--space-3);
-}
-
-@keyframes spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-.spin {
-  animation: spin 0.8s linear infinite;
 }
 </style>

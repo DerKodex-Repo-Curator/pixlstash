@@ -23,12 +23,14 @@ from typing import Callable, Optional
 
 from pixlstash.hub.db import HubDatabase, default_hub_path
 from pixlstash.hub.engine import HubEngine
+from pixlstash.utils.media_files import has_media_files
 from pixlstash.hub.registry import (
     Library,
     LibraryError,
     LibraryRegistry,
     NotAVaultError,
     VAULT_FILENAME,
+    remove_library_made_entries,
     validate_vault_folder,
 )
 from pixlstash.pixl_logging import get_logger
@@ -305,6 +307,7 @@ def bootstrap_hub(
     """
     hub = HubDatabase(hub_path or default_hub_path())
     registry = LibraryRegistry(hub)
+    _sweep_unfinished_imports(registry)
     library = registry.active_library()
     if library is None:
         library = _register_first_library(registry, configured_image_root)
@@ -367,6 +370,67 @@ def _legacy_owner_present(vault_path: str) -> bool:
         vault.close()
 
 
+def _sweep_unfinished_imports(registry: LibraryRegistry) -> None:
+    """Clear away first imports that no longer have a process running them.
+
+    A library whose row still says pending has one of two histories, and the
+    folder tells them apart:
+
+    * **No ``vault.db``** - the import never finished. Nothing resumes it: the
+      owner is asked about the folder again, which is simpler than resuming a
+      half-answered question and is what makes a crash behave like the abort it
+      effectively was. The temporary database and the thumbnails that import
+      made go with it; no picture file is touched.
+    * **A ``vault.db``** - the rename happened and the process died before it
+      could clear the mark. The library is real; clear the mark and carry on.
+
+    Runs before the active library is read, so a swept row cannot be opened as
+    the library this start-up serves.
+    """
+    for library in registry.list_libraries():
+        if not library.pending_import_at:
+            continue
+        folder = library.path
+        if os.path.isfile(os.path.join(folder, VAULT_FILENAME)):
+            logger.info(
+                "%s was renamed before the last shutdown; marking its import finished",
+                folder,
+            )
+            registry.finish_pending_import(library.id)
+            continue
+        logger.info(
+            "Clearing away an unfinished import into %s: its database never "
+            "became a library, so the folder is given back",
+            folder,
+        )
+        for name in (
+            library.vault_filename,
+            f"{library.vault_filename}-wal",
+            f"{library.vault_filename}-shm",
+        ):
+            path = os.path.join(folder, name)
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError as exc:
+                logger.warning("Could not remove %s: %s", path, exc)
+        remove_library_made_entries(library)
+        try:
+            # `forget`, not `detach`: a detached row revives when the folder
+            # is added again, and it would come back still pending.
+            #
+            # `allow_active` because the row usually IS the active one: the
+            # desktop's first run writes the chosen folder into
+            # `server-config.json` and start-up registers it as the library,
+            # before the owner has answered anything. Nothing is open yet -
+            # this runs before the active library is read.
+            registry.forget(library.id, allow_active=True)
+        except LibraryError as exc:
+            logger.warning(
+                "Could not forget the unfinished import into %s: %s", folder, exc
+            )
+
+
 def _register_first_library(
     registry: LibraryRegistry,
     image_root: str,
@@ -394,7 +458,9 @@ def _register_first_library(
             # `unique_name=False`: the name is this function's own hardcoded
             # label, not something a person typed, and a hub already holding a
             # "Library 1" must not be a hub that cannot boot.
-            return registry.attach(image_root, "Library 1", unique_name=False)
+            return registry.attach(
+                image_root, "Library 1", unique_name=False, check_folder_overlap=False
+            )
         except NotAVaultError as exc:
             if _is_environmental_failure(exc):
                 # Locked, unreadable, full: the file may be perfectly good and
@@ -425,7 +491,15 @@ def _register_first_library(
             set_aside_unusable_vault(vault_path)
             return registry.register_pending(image_root, "Library 1")
 
-    return registry.register_pending(image_root, "Library 1")
+    # A folder the owner pointed at that already holds pictures is a folder
+    # they have not answered the import question for yet, exactly as it would
+    # be through `POST /libraries` - and this is the path the desktop's first
+    # run takes, so the rule has to live here too or it covers Settings only.
+    return registry.register_pending(
+        image_root,
+        "Library 1",
+        pending_import=has_media_files(image_root),
+    )
 
 
 def _identity_payload(
@@ -700,7 +774,7 @@ def _offer_a_usable_library(
 
     alternatives = [
         other
-        for other in registry.list_libraries()
+        for other in registry.list_libraries(include_pending_import=False)
         if other.uuid != library.uuid and _library_opens(other)
     ]
     chosen = prompt(library, reason, alternatives) if prompt and alternatives else None

@@ -6,7 +6,13 @@ import { useFilterStore } from "../stores/useFilterStore.js";
 import { useSelectionStore } from "../stores/useSelectionStore.js";
 import { useDedupStore } from "../stores/useDedupStore.js";
 import { useGridFetch } from "./useGridFetch.js";
-import { getPictureCount, streamPictures } from "../api/pictures";
+import { useSearchStore } from "../stores/useSearchStore.js";
+import { filterChips } from "../utils/filterChips.js";
+import {
+  getPictureCount,
+  searchPictures,
+  streamPictures,
+} from "../api/pictures";
 
 // Mock the pictures API module so streaming-path tests can control the count
 // and stream responses. The overlay-defer test below returns before any
@@ -66,6 +72,7 @@ function makeHarness({
     exportProgress: reactive({ visible: false, percent: 0, message: "" }),
     reverseImageSearchPictureIds: ref([]),
     faceLikenessSearchFaceId: ref(null),
+    textSearchResults: ref(null),
   };
 
   const sortStore = useSortStore();
@@ -85,7 +92,6 @@ function makeHarness({
     triggerNewImageHighlight: vi.fn(),
     updateVisibleThumbnails: vi.fn(),
     fetchThumbnailsBatch: vi.fn(),
-    maybeRefreshOverlayForComfyui: vi.fn(),
     startSmartScoreProgress,
     completeSmartScoreProgress,
     onGridFetchStart: vi.fn(),
@@ -225,6 +231,121 @@ describe("useGridFetch streaming path", () => {
     );
   });
 
+  // *Show all N pictures* on a workflow card (F7). The chip is set on one
+  // screen and read on another, so the half that could rot in silence is this
+  // one: the strip would go on showing "Workflow: X" over the whole library.
+  it("sends workflow on the stream and count requests when a workflow chip is on", async () => {
+    getPictureCount.mockResolvedValue({ count: 2 });
+    streamPictures.mockResolvedValue({ pictures: [{ id: 51 }, { id: 52 }] });
+
+    const { grid } = makeHarness();
+    useFilterStore().workflowFilter = [{ id: "auto:abc123", name: "Cinematic" }];
+
+    await grid.fetchAllGridImages({ force: true });
+
+    expect(streamPictures.mock.calls[0][0]).toContain("workflow=auto%3Aabc123");
+    expect(getPictureCount.mock.calls[0][0]).toContain("workflow=auto%3Aabc123");
+  });
+
+  it("sends one workflow param per ticked workflow, and no LoRA beside two (#1797)", async () => {
+    getPictureCount.mockResolvedValue({ count: 2 });
+    streamPictures.mockResolvedValue({ pictures: [{ id: 51 }, { id: 52 }] });
+
+    const { grid } = makeHarness();
+    useFilterStore().workflowFilter = [
+      { id: "auto:a", name: "A", lora: "asset:feed", loraName: "Ada" },
+      { id: "manual:b", name: "B" },
+    ];
+
+    await grid.fetchAllGridImages({ force: true });
+
+    for (const url of [
+      streamPictures.mock.calls[0][0],
+      getPictureCount.mock.calls[0][0],
+    ]) {
+      expect(new URLSearchParams(url).getAll("workflow")).toEqual([
+        "auto:a",
+        "manual:b",
+      ]);
+      expect(url).not.toContain("workflow_lora");
+    }
+  });
+
+  it("sends the workflow and the LoRA for the Workflow tab's *Show N*", async () => {
+    getPictureCount.mockResolvedValue({ count: 1 });
+    streamPictures.mockResolvedValue({ pictures: [{ id: 51 }] });
+
+    const { grid } = makeHarness();
+    useFilterStore().workflowFilter = [
+      {
+        id: "auto:core",
+        lora: "asset:feed",
+        name: "Ada in Cinematic",
+      },
+    ];
+
+    await grid.fetchAllGridImages({ force: true });
+
+    for (const url of [
+      streamPictures.mock.calls[0][0],
+      getPictureCount.mock.calls[0][0],
+    ]) {
+      expect(url).toContain("workflow=auto%3Acore");
+      expect(url).toContain("workflow_lora=asset%3Afeed");
+      expect(url).not.toContain("workflow_key");
+      expect(url).not.toContain("workflow_stack");
+    }
+  });
+
+  it("omits workflow once the chip is removed", async () => {
+    getPictureCount.mockResolvedValue({ count: 1 });
+    streamPictures.mockResolvedValue({ pictures: [{ id: 61 }] });
+
+    const { grid } = makeHarness();
+    const filterStore = useFilterStore();
+    filterStore.workflowFilter = [{ id: "auto:abc123", name: "Cinematic" }];
+    // What the chip's × does, through the same list the strip draws from.
+    filterChips(filterStore)
+      .find((chip) => chip.key === "workflow:auto:abc123")
+      .remove();
+
+    await grid.fetchAllGridImages({ force: true });
+
+    expect(filterStore.workflowFilter).toEqual([]);
+    expect(streamPictures.mock.calls[0][0]).not.toContain("workflow=");
+    expect(getPictureCount.mock.calls[0][0]).not.toContain("workflow=");
+  });
+
+  // "No character" and "In no set" are independent (#1488): each alone narrows
+  // the unassigned view to its own half, both together are the whole of it.
+  it.each([
+    [true, false, "unassigned_by=character"],
+    [false, true, "unassigned_by=set"],
+    [true, true, null],
+  ])(
+    "no character %s, in no set %s sends %s",
+    async (noCharacter, noSet, expected) => {
+      getPictureCount.mockResolvedValue({ count: 1 });
+      streamPictures.mockResolvedValue({ pictures: [{ id: 71 }] });
+
+      const { grid } = makeHarness();
+      const filterStore = useFilterStore();
+      filterStore.noCharacterFilter = noCharacter;
+      filterStore.noSetFilter = noSet;
+
+      await grid.fetchAllGridImages({ force: true });
+
+      for (const url of [
+        streamPictures.mock.calls[0][0],
+        getPictureCount.mock.calls[0][0],
+      ]) {
+        expect(url).toContain("character_id=UNASSIGNED");
+        if (expected) expect(url).toContain(expected);
+        else expect(url).not.toContain("unassigned_by");
+      }
+    },
+  );
+
   // "all" is the absence of the filter, not a value the backend knows.
   it("omits stack_state when the Stacks filter is on Any", async () => {
     getPictureCount.mockResolvedValue({ count: 1 });
@@ -237,5 +358,45 @@ describe("useGridFetch streaming path", () => {
 
     expect(streamPictures.mock.calls[0][0]).not.toContain("stack_state");
     expect(getPictureCount.mock.calls[0][0]).not.toContain("stack_state");
+  });
+});
+
+describe("useGridFetch text search: narrowing to text matches (#1197)", () => {
+  const ROWS = [
+    { id: 1, text_match: true },
+    { id: 2, text_match: false },
+    { id: 3, text_match: true },
+  ];
+
+  beforeEach(() => {
+    searchPictures.mockReset();
+    searchPictures.mockResolvedValue(ROWS);
+  });
+
+  it("narrows the fetched rows to text matches without searching again", async () => {
+    const { grid, refs } = makeHarness();
+    const searchStore = useSearchStore();
+    searchStore.searchQuery = "coffee";
+
+    await grid.fetchAllGridImages({ force: true });
+    expect(refs.allGridImages.value.map((r) => r.id)).toEqual([1, 2, 3]);
+    expect(refs.textSearchResults.value.rows).toHaveLength(3);
+
+    searchStore.textMatchesOnly = true;
+    await grid.fetchAllGridImages({ textMatchRecut: true });
+    expect(refs.allGridImages.value.map((r) => r.id)).toEqual([1, 3]);
+
+    searchStore.textMatchesOnly = false;
+    await grid.fetchAllGridImages({ textMatchRecut: true });
+    expect(refs.allGridImages.value.map((r) => r.id)).toEqual([1, 2, 3]);
+    expect(searchPictures).toHaveBeenCalledTimes(1);
+  });
+
+  it("any other fetch searches again", async () => {
+    const { grid } = makeHarness();
+    useSearchStore().searchQuery = "coffee";
+    await grid.fetchAllGridImages({ force: true });
+    await grid.fetchAllGridImages({ force: true });
+    expect(searchPictures).toHaveBeenCalledTimes(2);
   });
 });

@@ -27,10 +27,10 @@
         :tabindex="focused ? 0 : -1"
         :aria-pressed="tile.pressed"
         :aria-label="tile.ariaLabel"
-        :title="tile.title"
         @click.stop="emit('pick', tile, i)"
         @contextmenu.prevent.stop="emit('toggle', tile, i)"
       >
+        <Tooltip :text="tile.title || ''" activator="parent" />
         <!-- The IMG sizes its own box: the stored width/height are the raw file
              dimensions and ignore EXIF rotation, so a portrait phone shot
              reports landscape numbers. The browser decodes the rotated pixels,
@@ -86,7 +86,6 @@
           v-if="loadThumbnails && tile.chip"
           class="gsmart"
           aria-hidden="true"
-          :title="tile.chip.title"
         >
           <v-icon size="12">{{ tile.chip.icon }}</v-icon>
           {{ tile.chip.text }}
@@ -135,6 +134,8 @@
 
 import { computed, ref, useSlots, watch } from "vue";
 
+import Tooltip from "./Tooltip.vue";
+
 import {
   DEFAULT_THUMBNAIL_SIZE_LEVEL,
   stripHeightForSizeLevel,
@@ -156,7 +157,7 @@ const MAX_THUMB_RATIO = 2.4;
  * @property {string} [title] - the tooltip: the gesture, and the key when the
  *   row is focused.
  * @property {boolean} [pressed] - `aria-pressed`, when the tile is a toggle.
- * @property {boolean} [cover] - draws the accent border.
+ * @property {boolean} [cover] - draws the selection (olive) border.
  * @property {boolean} [marked] - draws the warning border: this tile is
  *   evidence the row's primary button is about to act on.
  * @property {boolean} [out] - left out of the stack; the IMAGE fades.
@@ -174,8 +175,8 @@ const MAX_THUMB_RATIO = 2.4;
  * @property {string} [markIcon] - bottom-left glyph chip, the alternative
  *   tenant of the same corner.
  * @property {string} [centreIcon] - the centred tick over an excluded tile.
- * @property {{icon: string, text: string, title: string}} [chip] - the
- *   bottom-right hover chip.
+ * @property {{icon: string, text: string}} [chip] - the bottom-right hover
+ *   chip. Pointer-inert, so it carries no tip of its own.
  * @property {{width: number, height: number}} [box] - stored dimensions, for
  *   the placeholder's shape estimate only.
  */
@@ -330,7 +331,7 @@ watch(
 }
 
 /* The member cursor: a RAIL, not a ring.
-   The tile's border already carries two meanings (accent = cover, warning =
+   The tile's border already carries two meanings (olive = cover, warning =
    marked as a stranger) and a third would be a third colour on one edge nobody
    could read. The rail sits outside the tile's box entirely, so it composes
    with either border instead of competing with it. */
@@ -362,17 +363,18 @@ watch(
 }
 
 .gthumb--cover {
-  border-color: rgb(var(--v-theme-accent));
+  border-color: var(--active-bar);
 }
 
 /* Marked as a stranger: the tile the primary button is about to move out.
    Deliberately NOT the excluded fade. A marked tile is the row's EVIDENCE, and
    fading it would say "inert" about the only tiles that are not; the border is
-   the 3:1 UI job the warning token is authored for. One treatment for both the
+   a warning drawn as a mark, so it takes `surface-warning`, the foreground
+   family. One treatment for both the
    engine's marks and the user's, because they behave identically and compose
    into the one list the button acts on. */
 .gthumb--marked {
-  border-color: rgb(var(--v-theme-warning));
+  border-color: rgb(var(--v-theme-surface-warning));
 }
 
 /* An excluded candidate stays visible and stays clickable: it is a choice the
@@ -523,7 +525,7 @@ watch(
       rgb(var(--v-theme-warning)) 26%,
       transparent
     );
-    color: rgb(var(--v-theme-warning));
+    color: rgb(var(--v-theme-dark-surface-warning));
   }
 }
 
@@ -537,7 +539,7 @@ watch(
       rgb(var(--v-theme-warning)) 26%,
       transparent
     );
-    color: rgb(var(--v-theme-warning));
+    color: rgb(var(--v-theme-dark-surface-warning));
   }
 }
 

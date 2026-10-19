@@ -1,0 +1,968 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  downloadBatches,
+  evidenceLine,
+  fillFromPictures,
+  fillFromSets,
+  handMadeCard,
+  handMadeName,
+  headModel,
+  hideSetsVerb,
+  rowBaseModel,
+  kindCounts,
+  offerQuestion,
+  orderRows,
+  setCard,
+  setGroups,
+  setName,
+  setSlots,
+  sharingLabel,
+  slotSuggestions,
+  worksWith,
+} from "./workflowSets";
+
+// The shelf's own kinds, not the design's words: `file_kind` is what the API
+// serves and a fixture spelling it "Diffusion" would test nothing.
+function model(id, name, kind = "checkpoint", extra = {}) {
+  return {
+    id,
+    name,
+    kind,
+    filename: `${name}.safetensors`,
+    file_size: 1000,
+    ...extra,
+  };
+}
+
+function combination(
+  key,
+  models,
+  { recipes = 1, pictures = 1, covers = [], runs = 0 } = {},
+) {
+  return {
+    key,
+    models,
+    recipes,
+    history_runs: runs,
+    picture_count: pictures,
+    // `{picture_id, version}`, which is what the route serves. NOT a URL: an
+    // `<img src>` never reaches the Axios interceptor, so the card builds the src
+    // through `pictureThumbnailUrl` and these stay records all the way.
+    covers: covers.map((id) => ({ picture_id: id, version: `v${id}` })),
+  };
+}
+
+const CKPT = model(1, "realvisXL_v5");
+const VAE = model(2, "sdxl_vae", "vae");
+const VAE_2 = model(3, "vae-ft-mse", "vae");
+const CLIP = model(4, "clip_l", "text_encoder");
+const LORA = model(5, "filmgrain_xl", "adapter");
+const OTHER_CKPT = model(6, "juggernautXL_v9");
+
+// Three recipes under `realvisXL_v5` and one under another checkpoint. The VAE and
+// the encoder are in both groups, which is the overlap this whole axis exists for.
+const BASE = combination("1,2,4", [CKPT, VAE, CLIP], {
+  recipes: 5,
+  pictures: 94,
+  covers: [11, 12, 13],
+});
+const WITH_LORA = combination("1,2,4,5", [CKPT, VAE, CLIP, LORA], {
+  recipes: 3,
+  pictures: 44,
+  covers: [12, 21],
+});
+const SWAPPED_VAE = combination("1,3,4", [CKPT, VAE_2, CLIP], {
+  recipes: 2,
+  pictures: 28,
+});
+const UNRELATED = combination("2,4,6", [OTHER_CKPT, VAE, CLIP], {
+  recipes: 4,
+  pictures: 96,
+});
+const ALL = [BASE, WITH_LORA, SWAPPED_VAE, UNRELATED];
+
+describe("setGroups", () => {
+  it("draws one group per base model, strongest evidence first", () => {
+    const groups = setGroups(ALL);
+
+    // By the GROUP's own total, not by its strongest single recipe: juggernaut
+    // has the biggest one combination (96 pictures) and realvis has the biggest
+    // set (94 + 44 + 28 = 166), and it is the set the card stands for.
+    expect(groups.map((g) => g.key)).toEqual(["model:1", "model:6"]);
+    expect(groups.map((g) => g.head.name)).toEqual([
+      "realvisXL_v5",
+      "juggernautXL_v9",
+    ]);
+    // Summed across the group's combinations, not taken from one of them.
+    const realvis = groups[0];
+    expect(realvis.recipes).toBe(5 + 3 + 2);
+    expect(realvis.pictures).toBe(94 + 44 + 28);
+  });
+
+  it("holds the union of everything the base model has run with", () => {
+    const realvis = setGroups(ALL).find((g) => g.key === "model:1");
+
+    // Both VAEs, though they never ran together: that is what a union is, and the
+    // tray says so in words rather than the data pretending otherwise.
+    expect(realvis.models.map((m) => m.name)).toEqual([
+      "realvisXL_v5",
+      "sdxl_vae",
+      "vae-ft-mse",
+      "clip_l",
+      "filmgrain_xl",
+    ]);
+  });
+
+  it("gives each member its OWN evidence, not the group's total", () => {
+    const realvis = setGroups(ALL).find((g) => g.key === "model:1");
+    const by = Object.fromEntries(realvis.models.map((m) => [m.name, m]));
+
+    // The LoRA ran in one of the three combinations, so it says so - it does not
+    // inherit the group's 10 recipes or 166 pictures.
+    expect([by.filmgrain_xl.recipes, by.filmgrain_xl.pictures]).toEqual([
+      3, 44,
+    ]);
+    // The shared VAE ran in two of them.
+    expect([by.sdxl_vae.recipes, by.sdxl_vae.pictures]).toEqual([8, 138]);
+    // The head is in all three.
+    expect(by.realvisXL_v5.recipes).toBe(10);
+  });
+
+  it("counts how many OTHER groups each member is in", () => {
+    const realvis = setGroups(ALL).find((g) => g.key === "model:1");
+    const by = Object.fromEntries(realvis.models.map((m) => [m.name, m]));
+
+    // `sdxl_vae` and `clip_l` serve both checkpoints; the LoRA serves one.
+    expect(by.sdxl_vae.otherSets).toBe(1);
+    expect(by.clip_l.otherSets).toBe(1);
+    expect(by.filmgrain_xl.otherSets).toBe(0);
+    expect(by["vae-ft-mse"].otherSets).toBe(0);
+  });
+
+  it("keys on the head's id, so two files of one name stay apart", () => {
+    const twinA = combination("8,2", [model(8, "twin"), VAE], { pictures: 5 });
+    const twinB = combination("9,2", [model(9, "twin"), VAE], { pictures: 4 });
+
+    expect(setGroups([twinA, twinB])).toHaveLength(2);
+  });
+
+  it("carries a member's uncertainty forward from any one witness", () => {
+    const sure = combination("1,2", [CKPT, VAE], { pictures: 9 });
+    const unsure = combination("1,2,4", [
+      CKPT,
+      { ...VAE, ambiguous: true },
+      CLIP,
+    ]);
+
+    const group = setGroups([sure, unsure])[0];
+    const vae = group.models.find((m) => m.id === VAE.id);
+
+    // One witness that could not pin the file down is enough; a cleaner second
+    // witness does not unmake the first.
+    expect(vae.ambiguous).toBe(true);
+    expect(group.models.find((m) => m.id === CKPT.id).ambiguous).toBe(false);
+  });
+
+  it("pools the covers across a group's recipes, deduplicated, best first", () => {
+    const realvis = setGroups(ALL).find((g) => g.key === "model:1");
+
+    // 11, 12, 13 from BASE and 12, 21 from WITH_LORA: 12 once, capped at three.
+    expect(realvis.covers.map((c) => c.picture_id)).toEqual([11, 12, 13]);
+    expect(realvis.covers[0]).toEqual({ picture_id: 11, version: "v11" });
+  });
+
+  it("reads the server's own kind order rather than re-deciding it", () => {
+    // A Flux group carries no `checkpoint` row: the head is the diffusion file the
+    // server put first, and nothing here may fall back to the VAE.
+    const flux = combination("10,11", [
+      model(10, "flux1-dev", "unknown"),
+      model(11, "ae", "vae"),
+    ]);
+    expect(setGroups([flux])[0].head.name).toBe("flux1-dev");
+    expect(headModel(combination("", []))).toBeNull();
+  });
+
+  it("handles an empty library without inventing a group", () => {
+    expect(setGroups([])).toEqual([]);
+    expect(setGroups(undefined)).toEqual([]);
+  });
+});
+
+describe("setCard", () => {
+  const realvis = () => setGroups(ALL).find((g) => g.key === "model:1");
+
+  it("is named by the base model, with its kind beside it", () => {
+    const card = setCard(realvis());
+    expect(card.name).toBe("realvisXL_v5");
+    expect(card.kindLabel).toBe("Checkpoint");
+  });
+
+  it("tallies the rest by kind, which is what the grid is scanned for", () => {
+    // The shape of the set - two VAEs, one encoder, one LoRA - without opening
+    // anything. The head is not in its own tally.
+    expect(setCard(realvis()).kinds).toEqual([
+      "VAE 2",
+      "Text encoder 1",
+      "LoRA 1",
+    ]);
+  });
+
+  it("states the facts the card's last row carries", () => {
+    expect(setCard(realvis()).facts).toEqual([
+      "5 models",
+      "10 recipes",
+      "166 pictures",
+    ]);
+  });
+
+  it("says so when nothing else has ever run with it", () => {
+    const alone = combination("1", [CKPT], { recipes: 2, pictures: 3 });
+    const card = setCard(setGroups([alone])[0]);
+    expect(card.kinds).toEqual([]);
+    expect(card.facts).toEqual(["1 model", "2 recipes", "3 pictures"]);
+  });
+});
+
+describe("setCard from ComfyUI runs (#1565)", () => {
+  const ran = combination("1,2,4", [CKPT, VAE, CLIP], {
+    recipes: 0,
+    pictures: 0,
+    runs: 1,
+  });
+
+  it("marks a card only ComfyUI ran, and prints no zero counts", () => {
+    const card = setCard(setGroups([ran])[0]);
+    expect(card.fromComfyUI).toBe(true);
+    expect(card.facts).toEqual(["3 models", "1 ComfyUI run"]);
+  });
+
+  it("marks a card with recipes elsewhere but no picture here (open question a)", () => {
+    const elsewhere = combination("1,2,4", [CKPT, VAE, CLIP], {
+      recipes: 2,
+      pictures: 0,
+      runs: 3,
+    });
+    const card = setCard(setGroups([elsewhere])[0]);
+    expect(card.fromComfyUI).toBe(true);
+    expect(card.facts).toEqual(["3 models", "2 recipes", "3 ComfyUI runs"]);
+  });
+
+  it("orders run-only groups by their runs", () => {
+    // The key would put model:1 first; the runs must win.
+    const once = combination("1", [CKPT], { recipes: 0, pictures: 0, runs: 1 });
+    const often = combination("6", [OTHER_CKPT], {
+      recipes: 0,
+      pictures: 0,
+      runs: 5,
+    });
+    expect(setGroups([once, often]).map((g) => g.key)).toEqual([
+      "model:6",
+      "model:1",
+    ]);
+  });
+
+  it("does not mark a card any picture backs", () => {
+    const pictured = combination("1,2", [CKPT, VAE], { pictures: 1 });
+    const card = setCard(setGroups([ran, pictured])[0]);
+    expect(card.fromComfyUI).toBe(false);
+    expect(card.facts).toEqual([
+      "3 models",
+      "1 recipe",
+      "1 picture",
+      "1 ComfyUI run",
+    ]);
+  });
+});
+
+describe("kindCounts", () => {
+  it("writes a count of one out, so a tally does not read as a label", () => {
+    expect(kindCounts([VAE])).toEqual(["VAE 1"]);
+  });
+
+  it("keeps the members' own order rather than sorting alphabetically", () => {
+    expect(kindCounts([VAE, CLIP, LORA])).toEqual([
+      "VAE 1",
+      "Text encoder 1",
+      "LoRA 1",
+    ]);
+  });
+});
+
+describe("evidenceLine", () => {
+  it("prints a run-only entry's runs alone, and runs only when there are some", () => {
+    expect(evidenceLine({ recipes: 0, pictures: 0, historyRuns: 2 })).toBe(
+      "2 ComfyUI runs",
+    );
+    expect(evidenceLine({ recipes: 1, pictures: 0, historyRuns: 0 })).toBe(
+      "1 recipe · 0 pictures",
+    );
+    expect(evidenceLine({ recipes: 1, pictures: 3, historyRuns: 1 })).toBe(
+      "1 recipe · 3 pictures · 1 ComfyUI run",
+    );
+  });
+});
+
+describe("sharingLabel", () => {
+  it("names the count, because a list of seventeen is not readable", () => {
+    expect(sharingLabel(0)).toBe("Only in this set");
+    expect(sharingLabel(1)).toBe("Also in 1 other set");
+    expect(sharingLabel(17)).toBe("Also in 17 other sets");
+  });
+});
+
+describe("hideSetsVerb", () => {
+  const shown = { hidden: false };
+  const hidden = { hidden: true };
+
+  it("is no row at all over no set", () => {
+    expect(hideSetsVerb([])).toBeNull();
+  });
+
+  it("hides, counting only the sets still shown", () => {
+    expect(hideSetsVerb([shown])).toMatchObject({
+      hide: true,
+      label: "Hide workflow set",
+    });
+    // The receipt says "Hid 2 sets" over this selection, so the row does too.
+    expect(hideSetsVerb([shown, hidden, shown])).toMatchObject({
+      hide: true,
+      label: "Hide 2 workflow sets",
+    });
+  });
+
+  it("shows again only when every one is already hidden", () => {
+    expect(hideSetsVerb([hidden])).toMatchObject({
+      hide: false,
+      label: "Show workflow set again",
+    });
+    expect(hideSetsVerb([hidden, hidden])).toMatchObject({
+      hide: false,
+      label: "Show 2 workflow sets again",
+    });
+  });
+});
+
+describe("worksWith", () => {
+  it("ranks companions by the recipes backing each pairing", () => {
+    const { companions, recipes } = worksWith(ALL, VAE.id);
+    // sdxl_vae ran in BASE (5), WITH_LORA (3) and UNRELATED (4): 12 recipes.
+    expect(recipes).toBe(12);
+    expect(companions.map((c) => [c.name, c.recipes])).toEqual([
+      ["clip_l", 12],
+      ["realvisXL_v5", 8],
+      ["juggernautXL_v9", 4],
+      ["filmgrain_xl", 3],
+    ]);
+    // The bar is the ranking against the strongest pairing, not a share of all.
+    expect(companions[0].share).toBe(100);
+    expect(companions[1].share).toBe(67);
+  });
+
+  it("reads the COMBINATIONS, so a union cannot invent a pairing", () => {
+    // The two VAEs are in one group and have never run together. Answering from
+    // the group's union would report each as the other's companion; answering from
+    // the combinations cannot. This is the whole reason the payload is not folded
+    // into unions on the way in.
+    expect(worksWith(ALL, VAE.id).companions.map((c) => c.name)).not.toContain(
+      "vae-ft-mse",
+    );
+    const group = setGroups(ALL).find((g) => g.key === "model:1");
+    expect(group.models.map((m) => m.name)).toContain("vae-ft-mse");
+  });
+
+  it("never lists the model itself and says which sets it is in", () => {
+    const { companions, sets } = worksWith(ALL, CKPT.id);
+    expect(companions.some((c) => c.id === CKPT.id)).toBe(false);
+    expect(sets.map((s) => s.key)).toEqual(["1,2,4", "1,2,4,5", "1,3,4"]);
+  });
+
+  it("carries a companion's uncertainty forward from any one witness", () => {
+    const sure = combination("1,2", [CKPT, VAE]);
+    const unsure = combination("1,2", [CKPT, { ...VAE, ambiguous: true }]);
+    expect(worksWith([sure, unsure], CKPT.id).companions[0].ambiguous).toBe(
+      true,
+    );
+  });
+
+  it("answers for a model no recipe names without throwing", () => {
+    expect(worksWith(ALL, 999)).toEqual({
+      companions: [],
+      recipes: 0,
+      historyRuns: 0,
+      sets: [],
+    });
+  });
+
+  it("ranks by recipes plus ComfyUI runs, so the bar is the order", () => {
+    // #1565: a run is a witness too, so the bar must not be empty, and it must
+    // never be longer than the bar of a companion ranked above it.
+    const ran = combination("1,6", [CKPT, OTHER_CKPT], {
+      recipes: 0,
+      pictures: 0,
+      runs: 2,
+    });
+    const { companions, historyRuns } = worksWith([...ALL, ran], CKPT.id);
+    expect(historyRuns).toBe(2);
+    const last = companions.at(-1);
+    expect([last.name, last.recipes, last.historyRuns]).toEqual([
+      "juggernautXL_v9",
+      0,
+      2,
+    ]);
+    expect(last.share).toBeGreaterThan(0);
+
+    const busy = combination("1,6", [CKPT, OTHER_CKPT], {
+      recipes: 0,
+      pictures: 0,
+      runs: 40,
+    });
+    const ranked = worksWith([...ALL, busy], CKPT.id).companions;
+    expect(ranked[0].name).toBe("juggernautXL_v9");
+    const shares = ranked.map((c) => c.share);
+    expect(shares).toEqual([...shares].sort((a, b) => b - a));
+  });
+});
+
+describe("setName", () => {
+  it("names a combination by the files that identify it", () => {
+    expect(setName(WITH_LORA)).toBe("realvisXL_v5 · sdxl_vae · clip_l");
+  });
+
+  it("keeps an adapter out of the name even when it would fit", () => {
+    // With the adapter SECOND, `.slice(0, 3)` would include it, so this is the
+    // fixture that can tell the filter from the cut.
+    const loraFirst = combination("1,5,2,4", [CKPT, LORA, VAE, CLIP]);
+    expect(setName(loraFirst)).toBe("realvisXL_v5 · sdxl_vae · clip_l");
+  });
+
+  it("falls back to the members it has when a set is all adapters", () => {
+    expect(setName(combination("5", [LORA]))).toBe("filmgrain_xl");
+  });
+});
+
+describe("hand-made sets (#1520)", () => {
+  const shelfRow = (id, name, fileKind, base = "SDXL") => ({
+    id,
+    sha256: `h${id}`,
+    file_kind: fileKind,
+    display_name: name,
+    filename: `${name}.safetensors`,
+    base_model: base,
+  });
+  const slotMember = (id, name, slot, extra = {}) => ({
+    sha256: `h${id}`,
+    slot,
+    label: name,
+    on_shelf: true,
+    id,
+    name,
+    base_model: "SDXL",
+    ...extra,
+  });
+
+  const rows = [
+    shelfRow(1, "RealVis XL", "checkpoint"),
+    shelfRow(2, "Film Grain", "adapter"),
+    shelfRow(3, "Soft Light", "adapter"),
+    shelfRow(4, "Ink Wash", "adapter"),
+    shelfRow(5, "Flux LoRA", "adapter", "Flux"),
+    shelfRow(6, "Tagger", "engine"),
+  ];
+  const mine = { id: 1, members: [slotMember(1, "RealVis XL", "checkpoint")] };
+  const other = {
+    id: 2,
+    members: [
+      slotMember(9, "Juggernaut", "checkpoint"),
+      slotMember(3, "Soft Light", "lora"),
+    ],
+  };
+  const combinations = [
+    {
+      key: "1,4",
+      recipes: 2,
+      picture_count: 2,
+      models: [
+        { id: 1, name: "RealVis XL", kind: "checkpoint" },
+        { id: 4, name: "Ink Wash", kind: "adapter" },
+      ],
+    },
+  ];
+
+  it("ranks your sets, then recipes with the checkpoint, then the base model, then all", () => {
+    const sections = slotSuggestions({
+      set: mine,
+      slotId: "lora",
+      rows,
+      sets: [mine, other],
+      combinations,
+    });
+    const names = Object.fromEntries(
+      sections.map((s) => [s.id, s.items.map((r) => r.display_name)]),
+    );
+    expect(names).toEqual({
+      sets: ["Soft Light"],
+      checkpoint: ["Ink Wash"],
+      base: ["Film Grain"],
+      all: ["Flux LoRA"],
+    });
+  });
+
+  it("is one unfiltered list until a checkpoint is chosen, and never offers an engine", () => {
+    const sections = slotSuggestions({
+      set: { id: 3, members: [] },
+      slotId: "other",
+      rows,
+      sets: [],
+      combinations,
+    });
+    expect(sections).toHaveLength(1);
+    const names = sections[0].items.map((r) => r.display_name);
+    expect(names).not.toContain("Tagger");
+    expect(names).toContain("RealVis XL");
+  });
+
+  it("filters by the typed text and leaves out what the set already holds", () => {
+    const held = {
+      ...mine,
+      members: [...mine.members, slotMember(2, "Film Grain", "lora")],
+    };
+    const sections = slotSuggestions({
+      set: held,
+      slotId: "lora",
+      rows,
+      sets: [held],
+      combinations,
+      query: "  in",
+    });
+    const offered = sections
+      .filter((s) => !s.held)
+      .flatMap((s) => s.items.map((r) => r.display_name));
+    expect(offered).toEqual(["Ink Wash"]);
+    // A match the set already holds is not offered, but comes back so the
+    // picker can say why the search does not list it.
+    const heldSection = sections.find((s) => s.held);
+    expect(heldSection.items.map((r) => r.display_name)).toEqual(["Film Grain"]);
+  });
+
+  // Nanoseconds, as the API serves `newest_file_mtime`.
+  const HOUR_NS = 3600 * 1e9;
+  const at = (hours) => ({ newest_file_mtime: 1.8e18 + hours * HOUR_NS });
+
+  it("leads with what was downloaded within two hours of what the set holds", () => {
+    const shelf = [
+      { ...shelfRow(1, "RealVis XL", "checkpoint"), ...at(0) },
+      { ...shelfRow(2, "Film Grain", "adapter"), ...at(1.5) },
+      { ...shelfRow(3, "Soft Light", "adapter"), ...at(-3) },
+      { ...shelfRow(4, "Ink Wash", "adapter"), ...at(-1) },
+      shelfRow(5, "Undated", "adapter"),
+    ];
+    const sections = slotSuggestions({
+      set: mine,
+      slotId: "lora",
+      rows: shelf,
+      sets: [mine],
+      combinations: [],
+      order: "newest",
+    });
+    expect(sections[0].id).toBe("together");
+    expect(sections[0].items.map((r) => r.display_name)).toEqual([
+      "Film Grain",
+      "Ink Wash",
+    ]);
+    // Offered once: not again under the base model.
+    const rest = sections.slice(1).flatMap((s) => s.items);
+    expect(rest.map((r) => r.display_name)).toEqual(["Soft Light", "Undated"]);
+  });
+
+  it("has no download section when nothing was downloaded within two hours of the set's models", () => {
+    const sections = slotSuggestions({
+      set: { id: 3, members: [slotMember(3, "Soft Light", "lora")] },
+      slotId: "lora",
+      rows: [
+        { ...shelfRow(3, "Soft Light", "adapter"), ...at(0) },
+        { ...shelfRow(2, "Film Grain", "adapter"), ...at(3) },
+        { ...shelfRow(4, "Ink Wash", "adapter"), ...at(2.5) },
+      ],
+      sets: [],
+      combinations: [],
+      order: "oldest",
+    });
+    expect(sections.map((s) => s.id)).toEqual(["all"]);
+    expect(sections[0].label).toBe("All LoRAs");
+    expect(sections[0].items.map((r) => r.display_name)).toEqual([
+      "Ink Wash",
+      "Film Grain",
+    ]);
+  });
+
+  it("names, sorts and filters by the shelf's name, and still finds the filename (#1574)", () => {
+    const file = (id, filename, extra = {}) => ({
+      id,
+      sha256: `f${id}`,
+      file_kind: "checkpoint",
+      display_name: null,
+      filename,
+      base_model: "SDXL",
+      ...extra,
+    });
+    const shelf = [
+      file(20, "Juggernaut_XL.fp8.safetensors"),
+      // The shelf calls this "Flux.1 Dev": first by what is shown, last by
+      // what is on disk.
+      file(21, "zz_flux1-dev.safetensors", { matched_name: "Flux.1 Dev" }),
+    ];
+    const ids = (query) =>
+      slotSuggestions({
+        set: { id: 3, members: [] },
+        slotId: "checkpoint",
+        rows: shelf,
+        sets: [],
+        combinations: [],
+        query,
+      })[0].items.map((r) => r.id);
+    expect(ids("")).toEqual([21, 20]);
+    // Typing the drawn name finds it though the file spells it differently.
+    expect(ids("flux.1 d")).toEqual([21]);
+    // What is on disk still matches: the quant postfix the name drops.
+    expect(ids(".fp8.")).toEqual([20]);
+  });
+
+  it("names the base-model group plainly and folds the other base models", () => {
+    const sections = slotSuggestions({
+      set: mine,
+      slotId: "lora",
+      rows,
+      sets: [mine],
+      combinations: [],
+    });
+    const base = sections.find((s) => s.id === "base");
+    const all = sections.find((s) => s.id === "all");
+    expect(base.label).toBe("SDXL LoRAs");
+    expect(all.label).toBe("Other base models");
+    expect(all.collapsed).toBe("1 more for another base model");
+  });
+
+  it("fills from pictures with what ran beside the checkpoint, in its own slot", () => {
+    expect(fillFromPictures(mine, combinations, rows)).toMatchObject([
+      { id: 4, slot: "lora" },
+    ]);
+    expect(
+      fillFromPictures({ id: 5, members: [] }, combinations, rows),
+    ).toEqual([]);
+  });
+
+  it("labels a fill item with both witnesses it is ranked by (#1565)", () => {
+    const both = [
+      {
+        key: "1,4",
+        models: [
+          { id: 1, name: "ckpt", kind: "checkpoint" },
+          { id: 4, name: "lora", kind: "adapter" },
+        ],
+        recipes: 1,
+        history_runs: 30,
+        picture_count: 1,
+      },
+    ];
+    expect(fillFromPictures(mine, both, rows)[0].detail).toBe(
+      "LoRA · 1 recipe · 30 ComfyUI runs",
+    );
+  });
+
+  it("offers a second checkpoint from pictures, in the Checkpoint slot (#1690)", () => {
+    const withRefiner = [
+      ...combinations,
+      {
+        key: "1,7",
+        recipes: 1,
+        picture_count: 1,
+        models: [
+          { id: 1, name: "RealVis XL", kind: "checkpoint" },
+          { id: 7, name: "Refiner", kind: "checkpoint" },
+        ],
+      },
+    ];
+    const items = fillFromPictures(mine, withRefiner, [
+      ...rows,
+      shelfRow(7, "Refiner", "checkpoint"),
+    ]).map((item) => [item.id, item.slot]);
+    expect(items).toEqual([
+      [4, "lora"],
+      [7, "checkpoint"],
+    ]);
+  });
+
+  it("reads the evidence of every checkpoint of a two-model set, each model once (#1690)", () => {
+    const pair = {
+      id: 8,
+      members: [
+        slotMember(1, "Wan High", "checkpoint"),
+        slotMember(7, "Wan Low", "checkpoint"),
+      ],
+    };
+    const runs = [
+      ...combinations,
+      {
+        key: "7,2,4",
+        recipes: 1,
+        picture_count: 1,
+        models: [
+          { id: 7, name: "Wan Low", kind: "checkpoint" },
+          { id: 2, name: "Film Grain", kind: "adapter" },
+          { id: 4, name: "Ink Wash", kind: "adapter" },
+        ],
+      },
+    ];
+    const shelf = [...rows, shelfRow(7, "Wan Low", "checkpoint")];
+    expect(fillFromPictures(pair, runs, shelf).map((item) => item.id)).toEqual(
+      [4, 2],
+    );
+    const used = slotSuggestions({
+      set: pair,
+      slotId: "lora",
+      rows: shelf,
+      sets: [pair],
+      combinations: runs,
+    }).find((section) => section.id === "checkpoint");
+    expect(used.label).toBe("Used with these checkpoints");
+    expect(used.items.map((row) => row.id)).toEqual([4, 2]);
+  });
+
+  it("fills from a set with other sets' members, never their checkpoint", () => {
+    expect(fillFromSets(mine, [mine, other])).toMatchObject([
+      { id: 3, slot: "lora", from: ["Juggernaut"] },
+    ]);
+  });
+
+  it("lists every slot with its ＋, Checkpoint's too once it holds one (#1690)", () => {
+    const keys = setSlots(mine).map(({ slot, items }) => [
+      slot.id,
+      items.map((i) => i.key),
+    ]);
+    expect(keys).toEqual([
+      ["checkpoint", ["m:h1", "add:checkpoint"]],
+      ["text_encoder", ["add:text_encoder"]],
+      ["vae", ["add:vae"]],
+      ["lora", ["add:lora"]],
+      ["other", ["add:other"]],
+    ]);
+  });
+
+  it("puts the merge offer's ghosts before each slot's ＋ (#1523)", () => {
+    const incomplete = {
+      id: 9,
+      members: [{ sha256: "h3", slot: "lora", on_shelf: true, id: 3 }],
+      offer: {
+        picture_count: 0,
+        recipes: 2,
+        models: [
+          { id: 1, sha256: "h1", slot: "checkpoint" },
+          { id: 5, sha256: "h5", slot: "lora" },
+        ],
+      },
+    };
+    const keys = setSlots(incomplete).map(({ slot, items }) => [
+      slot.id,
+      items.map((i) => i.key),
+    ]);
+    expect(keys).toEqual([
+      ["checkpoint", ["g:h1", "add:checkpoint"]],
+      ["text_encoder", ["add:text_encoder"]],
+      ["vae", ["add:vae"]],
+      ["lora", ["m:h3", "g:h5", "add:lora"]],
+      ["other", ["add:other"]],
+    ]);
+    // No picture in this library: counted in recipes instead.
+    expect(handMadeCard(incomplete).offer).toEqual({
+      adds: 2,
+      who: "2 recipes",
+      rest: " used this with 2 models the set does not have.",
+      text: "2 recipes used this with 2 models the set does not have.",
+      model: null,
+    });
+  });
+
+  it("asks about one offered model by kind and name (#1523)", () => {
+    const set = {
+      offer: {
+        picture_count: 0,
+        recipes: 1,
+        models: [{ id: 5, sha256: "h5", slot: "lora", kind: "adapter", name: "detailTweakerXL" }],
+      },
+    };
+    // The set is short a model; the recipe needs nothing.
+    expect(offerQuestion(set)).toEqual({
+      adds: 1,
+      who: "1 recipe",
+      rest: " ran this with a model the set does not have.",
+      text: "1 recipe ran this with a model the set does not have. Add it?",
+      model: { kind: "LoRA", name: "detailTweakerXL" },
+    });
+    expect(offerQuestion({ offer: { ...set.offer, picture_count: 1204 } }).who).toBe(
+      "1204 pictures",
+    );
+    expect(offerQuestion({})).toBeNull();
+  });
+
+  it("says the offered model's precision, which its name has lost", () => {
+    const offer = {
+      picture_count: 50,
+      recipes: 1,
+      models: [
+        { id: 6, sha256: "h6", slot: "text_encoder", kind: "text_encoder", name: "qwen3vl 4b", quant: "fp8_e4m3" },
+      ],
+    };
+    expect(offerQuestion({ offer }).model.quant).toBe("FP8");
+  });
+
+  it("compares base models the way the server fills a member's", () => {
+    // A fuzzy guess is not the base model; the folded raw label is.
+    expect(
+      rowBaseModel({
+        base_model: "sdxl_base_v1-0",
+        base_model_folded: "SDXL 1.0",
+        base_model_canonical: "SDXL",
+        base_model_source: "filename_fuzzy",
+      }),
+    ).toBe("SDXL 1.0");
+    expect(
+      rowBaseModel({
+        base_model: "sdxl_base_v1-0",
+        base_model_folded: "SDXL 1.0",
+        base_model_canonical: "SDXL 1.0",
+        base_model_source: "filename",
+      }),
+    ).toBe("SDXL 1.0");
+    expect(rowBaseModel({ base_model: "MyBase" })).toBe("MyBase");
+  });
+
+  it("names a set by its own name, its checkpoint's, or Untitled set", () => {
+    expect(handMadeName({ name: "Kit", members: mine.members })).toBe("Kit");
+    expect(handMadeName(mine)).toBe("RealVis XL");
+    expect(handMadeName({ members: [] })).toBe("Untitled set");
+    expect(handMadeCard({ id: 4, members: [] })).toMatchObject({
+      handMade: true,
+      incomplete: true,
+      name: "Untitled set",
+    });
+  });
+});
+
+describe("a set whose base model is not on the shelf", () => {
+  // What the server sends for a Flux recipe whose diffusion file is gone: its
+  // support files alone, and the file it loaded under `missing`.
+  const FLUX_VAE = model(7, "flux-vae-bf16", "vae");
+  const T5 = model(8, "t5xxl_fp16", "text_encoder");
+  const gone = (key, ids, extra) => ({
+    ...combination(key, [FLUX_VAE, T5], extra),
+    missing: [{ name: "flux1-dev.sft", workflow_ids: ids }],
+  });
+
+  it("is named after the missing file, not its VAE", () => {
+    const head = headModel(gone("7,8+flux1-dev.sft", ["auto:a"]));
+    expect(head).toMatchObject({
+      id: null,
+      missing: true,
+      name: "flux1-dev.sft",
+      workflowIds: ["auto:a"],
+    });
+  });
+
+  it("is one group across combinations, with every workflow that loads it", () => {
+    const groups = setGroups([
+      gone("7,8+flux1-dev.sft", ["auto:b"], { pictures: 5 }),
+      { ...gone("8+flux1-dev.sft", ["auto:a", "auto:b"]), models: [T5] },
+    ]);
+    expect(groups.map((g) => g.key)).toEqual(["missing:flux1-dev.sft"]);
+    expect(groups[0].head.workflowIds).toEqual(["auto:a", "auto:b"]);
+    expect(groups[0].head.workflowsByName).toEqual({
+      "flux1-dev.sft": ["auto:a", "auto:b"],
+    });
+    // Every on-shelf file is a member; the missing head is not one of them.
+    expect(new Set(groups[0].models.map((m) => m.id))).toEqual(new Set([7, 8]));
+  });
+
+  it("draws its card as missing, its name read as the shelf reads one", () => {
+    const card = setCard(setGroups([gone("7,8+flux1-dev.sft", [])])[0]);
+    expect(card.name).toBe("flux1 dev");
+    expect(card.kindLabel).toBe("Missing");
+    expect(card.missing).toBe(true);
+    expect(card.kinds).toEqual(["VAE 1", "Text encoder 1"]);
+  });
+
+  it("keeps every missing file and its workflows on the card it is filed under", () => {
+    const pair = {
+      ...combination("8+pair", [T5]),
+      missing: [
+        { name: "high.safetensors", workflow_ids: ["auto:h"] },
+        { name: "low.safetensors", workflow_ids: ["auto:l"] },
+      ],
+    };
+    const [group] = setGroups([pair]);
+    expect(group.key).toBe("missing:high.safetensors");
+    expect(group.head.names).toEqual(["high.safetensors", "low.safetensors"]);
+    expect(group.head.workflowIds).toEqual(["auto:h", "auto:l"]);
+    // Per file too: a fix replaces one file in the workflows loading IT.
+    expect(group.head.workflowsByName).toEqual({
+      "high.safetensors": ["auto:h"],
+      "low.safetensors": ["auto:l"],
+    });
+  });
+
+  it("draws no card for a combination with no base model at all", () => {
+    const loose = combination("2,5", [VAE, LORA]);
+    expect(headModel(loose)).toBeNull();
+    expect(setGroups([loose, BASE]).map((g) => g.key)).toEqual(["model:1"]);
+  });
+
+  it("leaves a set with a checkpoint on the shelf led by it", () => {
+    const both = { ...combination("1,7", [CKPT, FLUX_VAE]), missing: [] };
+    expect(headModel(both).id).toBe(CKPT.id);
+  });
+});
+
+describe("a card's automatic name", () => {
+  it("never carries the file's extension", () => {
+    const plain = model(9, "moody_v1", "checkpoint", {
+      name: "moodyMix_v1.safetensors",
+      filename: "moodyMix_v1.safetensors",
+    });
+    expect(setCard(setGroups([combination("9", [plain])])[0]).name).not.toMatch(
+      /safetensors/,
+    );
+  });
+
+  it("keeps a name a person gave the file", () => {
+    const named = model(9, "My Mix", "checkpoint", {
+      filename: "moodyMix_v1.safetensors",
+    });
+    expect(setCard(setGroups([combination("9", [named])])[0]).name).toBe(
+      "My Mix",
+    );
+  });
+});
+
+describe("model list order", () => {
+  const HOUR_NS = 3600 * 1e9;
+  const row = (name, hours) => ({
+    id: name,
+    display_name: name,
+    newest_file_mtime: hours === null ? null : 1.8e18 + hours * HOUR_NS,
+  });
+  const names = (rows) => rows.map((r) => r.display_name);
+  const rows = [row("b", 0), row("a", 5), row("c", null), row("d", 1)];
+
+  it("orders by name, newest or oldest file date, the undated last both ways", () => {
+    expect(names(orderRows(rows, "name"))).toEqual(["a", "b", "c", "d"]);
+    expect(names(orderRows(rows, "newest"))).toEqual(["a", "d", "b", "c"]);
+    expect(names(orderRows(rows, "oldest"))).toEqual(["b", "d", "a", "c"]);
+  });
+
+  it("cuts date-ordered rows into downloads at gaps over two hours", () => {
+    const batches = downloadBatches(orderRows(rows, "newest"));
+    expect(batches.map((b) => names(b.rows))).toEqual([["a"], ["d", "b"], ["c"]]);
+    expect(batches[2].at).toBeNull();
+    expect(batches[1].at).toBe((1.8e18 + HOUR_NS) / 1e6);
+  });
+});

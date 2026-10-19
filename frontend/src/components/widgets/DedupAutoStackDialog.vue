@@ -177,7 +177,6 @@ function rowValue(key) {
   <AppDialog
     :open="open"
     title="Auto-stack exact matches"
-    :width="520"
     @close="emit('close')"
   >
     <p class="as-lede">
@@ -236,18 +235,18 @@ function rowValue(key) {
   display: flex;
   align-items: flex-start;
   gap: var(--space-2);
-  margin: var(--space-5) 0 0;
+  margin: 0;
   padding: var(--space-3);
   border-radius: var(--radius-md);
   background: rgba(var(--v-theme-warning), 0.12);
-  border: 1px solid rgba(var(--v-theme-warning), 0.35);
+  border: 1px solid rgba(var(--v-theme-surface-warning), 0.35);
   font-size: var(--text-xs);
   line-height: var(--leading-body);
   color: rgb(var(--v-theme-on-surface));
 }
 
 .as-rows {
-  margin: var(--space-5) 0 0;
+  margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
@@ -291,7 +290,7 @@ function rowValue(key) {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  margin: var(--space-5) 0 0;
+  margin: 0;
   font-size: var(--text-xs);
   color: rgba(var(--v-theme-on-surface), 0.6);
 }

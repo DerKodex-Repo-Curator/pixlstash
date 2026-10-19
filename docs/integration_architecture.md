@@ -26,12 +26,10 @@
 16. [Versioning](#16-versioning)
 17. [Integration Pitfalls](#17-integration-pitfalls)
 18. [Integration Diagrams](#18-integration-diagrams)
-19. [Duplicates Queue API (v1.9)](#19-duplicates-queue-api-v19)
-20. [Folder-Structure Read API (v1.11, Phase 2)](#20-folder-structure-read-api-v111-phase-2)
-21. [About your library (v1.11)](#21-about-your-library-v111)
-22. [Folder-Structure Commit API (v1.11, Phase 3)](#22-folder-structure-commit-api-v111-phase-3)
-23. [Layout & Move API (v1.11, Phase 4b)](#23-layout--move-api-v111-phase-4b)
-24. [Move Reconciliation API (v1.11, Phase 5)](#24-move-reconciliation-api-v111-phase-5)
+19. [Duplicates Queue API](#19-duplicates-queue-api)
+20. [Folder-Structure API: read, commit, layout and moves](#20-folder-structure-api-read-commit-layout-and-moves) — incl. [20.1 Read](#201-read), [20.2 Commit](#202-commit), [20.3 Layout & Move](#203-layout--move), [20.4 Move Reconciliation](#204-move-reconciliation)
+21. [About your library](#21-about-your-library)
+22. [Text in Pictures](#22-text-in-pictures)
 
 ---
 
@@ -52,7 +50,7 @@ PixlStash is designed to be served from **one origin**: the FastAPI server hosts
 
 - All REST endpoints live under **`/api/v1/`** (constant `API_V1_PREFIX` in [server.py](../pixlstash/server.py)).
 - The `apiClient` request interceptor automatically prepends `/api/v1` to any relative URL that does not already start with it — frontend code can call `apiClient.get('/pictures')` and have it routed to `/api/v1/pictures`.
-- WebSocket endpoints are **also under `/api/v1/`**: `/api/v1/ws/updates` and `/api/v1/ws/comfyui`.
+- The WebSocket endpoint is **also under `/api/v1/`**: `/api/v1/ws/updates`.
 - Auth endpoints follow the same rule: `POST /api/v1/login`, `POST /api/v1/logout`, `GET /api/v1/check-session`.
 - Static assets are served at `/assets/*` (Vite bundle output) and the SPA shell at `/` (serves `frontend/dist/index.html`).
 
@@ -60,7 +58,13 @@ PixlStash is designed to be served from **one origin**: the FastAPI server hosts
 
 ---
 
-### 2.1 The `/dedup` contract (v1.9)
+### 2.1 The `/dedup` contract
+
+The contract is written in two places: this section holds the full route table
+and the rules the frontend leans on (including the stack-members route, which
+§19 only names), and [§19 Duplicates Queue API](#19-duplicates-queue-api) holds
+the per-route detail, including the mixed-stacks routes. Read both, and change
+both together.
 
 The duplicate queue was built by two lanes at once, so the agreement is written
 down rather than inferred from either side. The client half lives in
@@ -78,6 +82,10 @@ copy, reconciled against `routes/dedup.py` as shipped (2026-07-29).
 | `POST /dedup/verdicts/keep-separate` | the "different pictures" verdict | `VerdictResponse` |
 | `POST /dedup/verdicts/reopen` | un-resolve a group (clearing a stacked verdict also dissolves its stack) | `{ signature, previous_verdict, reopened_at, group_returned_to_queue, batch_id, unstacked_picture_ids }` |
 | `POST /dedup/auto-stack` | bulk-stack the exact tier, `dry_run` first | `{ batch_id, dry_run, groups, pictures, scope, dry_run_summary, results, failures }` |
+| `GET /dedup/mixed-stacks` | live stacks that do not hold together at the given threshold (§19) | `{ threshold, total, kept_total, live_stack_count, offset, limit, next_offset, stacks }` |
+| `POST /dedup/mixed-stacks/{stack_id}/split` | move the stranded members out of a mixed stack (§19) | `{ stack_id, split_picture_ids, remaining_picture_ids, stack_dissolved, batch_id }` |
+| `POST /dedup/mixed-stacks/{stack_id}/unstack` | dissolve a mixed stack (§19) | as split |
+| `POST` / `DELETE /dedup/mixed-stacks/{stack_id}/keep` | set / clear the durable Keep dismissal (§19) | `{ stack_id, dismissed, created, removed, membership_fingerprint, member_count }` |
 
 Shapes and rules the frontend depends on:
 
@@ -290,7 +298,30 @@ created. Design: `docs/design/keep-cover-only.md`; backend: §22.12 of
 | `POST /stacks/keep-cover-only` | collapse every eligible stack to its cover | `KeepCoverOnlyResponse` |
 
 Both take the same body: `{ stack_ids?: int[], picture_ids?: int[], batch_id?:
-string }`. At least one id list must be non-empty (400 otherwise); they are
+string, keep_recipes?: bool, keep_every_ghost?: bool }`.
+
+**`keep_recipes: true` is Keep recipes only (#1315)**, the same routes and the
+same rules below with one more condition per copy: it moves only if it could be
+made again after the Scrapheap is emptied. The rest stay live and are counted,
+one reason each, in `pictures_staying_no_recipe`, `_model_missing`,
+`_no_thumbnail` and `_ghost_not_kept`. A
+stack with no such copy is a fifth stack bucket,
+`stacks_skipped_nothing_reproducible`, and `ghost_retention` says which retention
+position the plan assumed. `keep_every_ghost: true` plans under `on`, and the
+real call sets the server's `workflow_ghost_retention` to `on` before anything
+moves, once the plan has something to move (a failure to save it raises with
+nothing moved): the dialog re-previews when that box changes so the figure stays the
+button's. The op type is `stack.keep_recipes_only`; the setting change is not
+part of its undo. A copy that stays is left out of the metadata union. The
+response carries `pictures_staying` (the same stacks the preview counts) and
+`ghost_retention`.
+
+**Send `expected_picture_ids` on the real call**, the preview's
+`picture_ids_moving`. Keep recipes only is the first mode whose inputs move
+while the dialog is open (a background finder writes a thumbnail, an import
+covers an instance hash, a model reaches the shelf), so a plan that has **grown**
+is a **409** that moves nothing: preview again and re-confirm. A plan that
+shrank still runs. At least one id list must be non-empty (400 otherwise); they are
 unioned, and **the unit is the stack**, any picture named pulls in its whole
 stack, so a partial selection inside a stack collapses the whole stack. Loose
 pictures name no stack and are ignored.
@@ -423,16 +454,1001 @@ preview, the run and the ghosting. Five points where the wiring is load-bearing:
   optimistic local copy of a count only the server can compute, and an undo has
   no local grid op at all.
 
+### 2.2b One recipe read, and one graph read (#1313)
+
+Two routes, and the split is by **question**, not by caller:
+
+| Route | Answers | Costs |
+|---|---|---|
+| `GET /comfyui/pictures/{id}/recipe` | **What the picture was made with** — prompts, models with strengths, settings, seed, the shelf rows, the resolution lock, `workflow_id` (the workflow the picture's variant is in, #1623, or the live manual workflow whose run made it), `workflow_version` (which version of that manual workflow's document made it: the one a PixlStash Run submitted, or the one a ComfyUI-made picture's editor graph equals exactly; null when not known and for an automatic workflow; the version may since have been pruned), `topology_hash` (**derived from the graph this answer shows**, not from the picture's stored column, which describes whichever chunk the extraction pass read). Reads the graph that *executed*; for a picture carrying only the editor `workflow` chunk it rebuilds that into one first (`converted_from_editor_graph: true`), and answers for A1111 pictures through their infotext. | one file read; a ComfyUI `/object_info` read when the pre-flight is asked for, **and for an editor-graph picture either way** (from a one-minute cache) |
+| `GET /comfyui/pictures/{id}/workflow` | **The graph's bytes**, in the editor's format — what Copy, Download and paste-into-ComfyUI need. | one file read |
+
+`?preflight=false` on the recipe read skips the ComfyUI round-trip. The
+lightbox's Recipe tab asks that way, because it re-reads on every filmstrip step
+and a round-trip per arrow-key is not affordable; the Remix dialog keeps the
+default, because it is about to run the recipe and needs to know whether it can.
+`preflight.checked` is then `false`, which already means *the question was not
+asked* — never that the recipe passed. **The one exception is a picture whose
+only graph is the editor `workflow` chunk**: rebuilding that needs
+`/object_info`, so without it there is nothing to report at all rather than
+merely nothing to judge, and the flag cannot switch the read off. The map is
+reused for a minute, so the filmstrip still steps for the cost of one file
+read — and the graph is still not *judged* against it, so `preflight.checked`
+stays `false` on a request that asked for no check. A ComfyUI that cannot be
+reached at all answers `reason: "comfyui_unreachable"` rather than
+`"editor_graph"`: one is a machine to start and the other is a fact about the
+file, and reporting the second for the first reads as permanent.
+
+The tab fetches the graph route
+separately and **only when the workflow box is opened**: the graph is the one
+large thing here.
+
+Field-level rules neither side may drift from:
+
+1. **`seed_text` is what a client prints, never `seed`.** ComfyUI draws seeds up
+   to `2**64 - 1`; a JavaScript `Number` loses digits above `2**53`, so
+   rendering `seed` shows the wrong seed for about half of real ones. `seed`
+   stays a number for the callers that had it.
+2. **`model_slots[].model_id` / `.verified` and `inputs` are owner-only.** They
+   name rows of the owner's shelf and *other* pictures' ids and content hashes;
+   a picture-scoped token is refused those pictures on every other route, so it
+   gets the filename and the strength — which are in the graph it can already
+   read — and nothing about the library.
+3. **`settings` is one dict, from `extract_recipe_extras`.** ComfyUI keys are
+   `steps`, `cfg`, `guidance`, `sampler_name`, `scheduler`, `denoise`, `width`,
+   `height`; an A1111 picture sends A1111's own names through the same field, so
+   a client renders whatever keys arrive rather than branching on `source`.
+   **The first node naming a field wins**, which is iteration order, not
+   execution order: a graph that samples twice reports one pass's steps beside
+   another's CFG, and the block must not be read as "the settings of the pass
+   that made this picture".
+
+**`/workflow` carries no recipe fields.** It briefly did, in this branch, before
+B5 (#1397) landed the recipe read; serving the same facts twice from two
+implementations is how two vocabularies drift permanently apart, so the recipe
+half was moved onto `/recipe` and deleted here.
+
+### 2.2c The `/models/workflow-sets` contract (#1438)
+
+One read behind the model shelf's `Workflow set` axis (plus the hand-made set
+writes of rule 8 and the verdict writes of rule 9), and the split of work
+across the seam is the whole of the contract: **the server resolves the evidence
+and groups nothing; the client folds** (rule 9's checks are counted for the
+client's unions, never served as a grouping).
+
+| Route | Answers | Costs |
+|---|---|---|
+| `GET /models/workflow-sets` | **Which shelf models a kept picture or a stored ComfyUI run proves ran together** — one entry per *combination* (the exact model ids one or more recipes or runs bound), with its recipe count, its `history_runs` (finished ComfyUI runs, #1565, counted apart), its picture count and up to three cover thumbnails as `{picture_id, version}`, plus `no_set`: the ids in none of those combinations, i.e. the models **no kept
+picture in this library and no stored ComfyUI run used with a base model** (engines excluded - see rule 1). A combination carries `missing: [{name, workflow_ids}]` for base models its recipes load that the shelf does not hold; one with no base model, on the shelf or missing, is listed for *Works with* but drawn as no set. A combination whose only base is missing may have an empty `models`. | two passes over `workflow_recipe_asset` (every row, then only the base-model widget rows for `missing`) and one over `comfyui_history_model`, plus the `workflow_model_fix` and variant-to-workflow reads, plus the `GROUP BY workflow_structural_hash` and the `ROW_NUMBER()` cover window the shelf's `used by` counts and the workflows grid already run |
+
+Rules neither side may drift from:
+
+1. **Co-occurrence is evidence; its absence is not.** No combination is withheld
+   for lacking a pairing, `no_set` is returned rather than dropped, and a member
+   the evidence could only reach through a basename several shelf rows answer to
+   carries `ambiguous: true` and is still listed. A ComfyUI run never sets
+   `ambiguous`: only unambiguous matches were stored. A client may not render a
+   missing companion as incompatible, which is why the *Works with* dialog
+   closes with that sentence in as many words.
+2. **Membership is not stored and overlaps.** A model appears in every
+   combination it has run in; nothing is written, no column on `model` names a
+   set, and the answer is derived per request. A client must not cache it as a
+   property of a row.
+3. **`models` arrives in ONE order and the client reads its head.** Checkpoint,
+   then `unknown`, then VAE, text encoder, adapter, engine. The head is the file
+   the set is named after, which is how a Flux or Wan set with no `checkpoint`
+   row gets a name without the client inventing a second fallback rule. When
+   the head is not a checkpoint or `unknown` (or `models` is empty) and
+   `missing` is non-empty, the set's base is off the shelf: `headModel` names
+   it after `missing[0]` (keyed `missing:<name>`). When `missing` is empty too
+   the combination is support files or LoRAs alone: `headModel` returns null
+   and the grid draws no card, while *Works with* still reads it. A card's
+   name is read through `modelName`, never the raw filename.
+4. **The GROUPING is the client's, and the payload stays per-combination.** The
+   server proposes no grouping at all: `setGroups` (`utils/workflowSets.js`) unions
+   the combinations under each head to make the cards, while the combinations
+   themselves stay in hand — `worksWith` needs them to answer a pairwise question
+   exactly, since a union would report two VAEs as each other's companions on the
+   strength of sharing a checkpoint, and each member's own recipe and picture
+   counts come from the combinations that name it. **A client must not collapse
+   this payload to unions on the way in.**
+5. **Scoped to the ACTIVE library**, unlike `POST /models/companions`, which
+   counts every recipe the hub holds. A delete warning must keep a file some
+   other library needs; this grid is a picture of what the library in front of
+   the reader has made, so a recipe with no kept picture here is not a set.
+   **A stored ComfyUI run is the exception (#1565):** a combination with no
+   kept picture here and no stored run is not a set, but one with a run is,
+   drawn with no cover. `history_runs` is hub-wide because ComfyUI's history
+   is a fact about the machine, not about a library; the client marks a card
+   "Ran in ComfyUI" when its pictures are 0 and its runs are not. Nothing
+   reads ComfyUI's history since #1854, so the stored runs are the ones
+   recorded until then and `history_runs` no longer grows.
+6. **A cover is two facts, not a path.** `{picture_id, version}`, and the client
+   builds the URL with `pictureThumbnailUrl` (`api/pictures.js`). An `<img src>`
+   never reaches the Axios interceptor, so a path served from here arrives with
+   no `/api/v1` prefix and no share token appended, and the browser asks the page
+   origin for a route it does not serve — every cover broken. It is also why this
+   route spells no URL of its own beside `routes/workflows.py`'s; that one sends a
+   path and pays for it with `workflowCoverUrl` on the client to put it right.
+7. **Owner-only, and read once.** It sizes the whole vault one card at a time and
+   names a picture per cover, so it is on the shelf's owner tier with no
+   per-object scope to narrow it to. The client fetches it when something needs
+   it and again after a scan, never on a filter tick.
+8. **Hand-made sets ride on the same payload (#1520).** Each combination carries
+   `covered_by` (ids of the owner's sets holding all its models on the shelf),
+   `no_set` omits on-shelf set members, and `hand_made` lists the sets, newest
+   first: `{id, name, created_at, updated_at, cloned, incomplete,
+   checkpoint_ids, picture_count, recipes, covers, members}`, each member `{sha256, slot, label,
+   on_shelf, id, name, filename, kind, base_model, file_size}`. They are written
+   by `POST /models/workflow-sets` (201, the set), `PATCH` and `DELETE
+   /models/workflow-sets/{set_id}` (the set; `{deleted: set}`),
+   `POST .../{set_id}/members` (`{set, added: [sha256]}`) and
+   `POST .../{set_id}/members/remove` (`{set, removed: [{sha256, slot,
+   label}]}`), all owner-only. `cloned` is set by the create (`cloned: true`,
+   a copy of a set from pictures) and never changes; the client never swaps a
+   cloned set for the set from pictures it matches. **Undo is the client re-posting what a write
+   returned**: a deleted set's members as `{sha256, slot, label}`, removed
+   members the same way, added ones through `members/remove`. No server-side
+   undo exists. A refusal is a 409 whose `detail` is the sentence to show.
+   **The merge offer (#1523)** rides on each set too: `offer` (null, or
+   `{head_id, head_name, picture_count, recipes, covers, models: [{id, sha256,
+   name, kind, slot, picture_count, recipes}]}`), `declined` (sha256s kept out)
+   and `kept_separate` (pictures here those hold back). The server decides the
+   offer; the client draws it as ghosts and merges by posting `models` to
+   `members` with their `slot`. `PUT .../{set_id}/declines` (`{sha256: [...]}`,
+   the whole list) answers `{set, previous}`, and putting `previous` back is
+   the undo. `picture_count` counts this library; `recipes` counts every one.
+   The offer reads recipe combinations only: one only ComfyUI ran is covered
+   by a set like any other but never offered, since the offer is worded in
+   pictures and recipes. **Hidden sets are the ACTIVE library's own (#1869)**:
+   the payload carries `hidden_sets` (the set keys this library leaves off the
+   grid) and `PUT /models/workflow-sets/hidden` (`{keys: [...], hidden}`) sets
+   them, answering `{hidden_sets}` - the whole new list, so a hide needs no
+   re-read. A key is the client's own (`model:<head id>`, or `missing:<filename>`
+   when the head is off the shelf, `hand:<id>` for a hand-made set), opaque to
+   the server; the route is owner-only and writes hub rows only.
+   **Hidden models are the active library's own too**: `PUT /models/hidden`
+   (`{ids: [...], hidden}`) answers `{hidden_models}`, the whole new list of
+   `model.id`s. Every `/adapters` and `/checkpoints` row carries
+   `hidden: bool` and this payload carries `hidden_models`. The server never
+   drops a hidden row from those lists, since the client also names models
+   from them; **the client leaves a hidden model out of anything it offers**
+   (the shelf's rows, cards and trays, the rail, the set choosers, the Run
+   popup's and Edit LoRAs' pickers), and the server does the same in the
+   offers it builds (`model-swap`, `people`).
+9. **PixlStash's check and the owner's verdicts ride on it too, keyed by
+   `combo_key`** (`docs/ideas/workflow-set-verdicts.md`; backend §25,
+   "Workflow sets: PixlStash's check and the owner's verdict"). `set_checks`
+   is a list of `{combo_key, member_ids, evidence: {together, checked,
+   passing}, check, verdict, suspects, member_verdicts}`: `check` is one of
+   `none | pending | too_few | pass | fail | unavailable`, `verdict` is
+   `yes | no | null` (the owner's), each suspect is `{model_id, with_failed,
+   with_total, without_failed, without_total, verdict}` with `verdict`
+   `problem | not_problem | null`, and `member_verdicts` is
+   `[{model_id, verdict}]`, every member answered about, suspect today or not.
+   **The one place the server reads the client's grouping**, and only to know
+   which unions to count: it computes a check for the union `setGroups` draws
+   per head (every kind shown, covered combinations left out) and for each
+   hand-made set's on-shelf members, and nothing else about the payload
+   changes. **The join is the key, never the position**: the client takes the
+   member ids it draws, sorts them ascending, joins them with `,` and looks
+   that up; a union the `Show` filter shrank has a key that is not served, and
+   the card then shows no check, never a neighbour's. The owner answers with
+   `PUT /models/workflow-sets/verdicts/{combo_key}` (`{verdict: "yes"|"no"}`)
+   and `PUT .../verdicts/{combo_key}/members/{model_id}` (`{verdict:
+   "problem"|"not_problem"}`), cleared by `DELETE` on the same paths, all
+   owner-only. Each answers `{combo_key, [model_id,] verdict, previous}`;
+   writing `previous` back (or `DELETE` when it is null) is the undo. A
+   non-canonical key or a wrong verdict word is a 422; a `model_id` not in the
+   key is a 404, and so is an id not on the shelf when recording (clearing
+   skips that check, so an answer naming a model that left can still go). A verdict belongs to its exact key:
+   members change, no verdict, and the server clears nothing. The model's own
+   shelf row (`GET /adapters`, `GET /adapters/{sha256}`, `GET /checkpoints`)
+   carries `set_verdicts: [{combo_key, names, verdict}]`, the owner's member
+   answers about that model, `names` being the set's members in shelf names,
+   base model first.
+   The same rows carry `hash_pending: bool` beside `sha256`. A null `sha256`
+   with `hash_pending` true is a file the hash worker has not read yet; with
+   it false the row never gets a hash (an engine, or an entry in a folder
+   PixlStash declares, where a cached HuggingFace repo is a directory), so a
+   set can never keep it and **the client must not say it is still hashing**:
+   the Models rail leaves such a row out.
+   The same rows carry `trigger_words` as a **list** (it was a JSON string
+   before trigger words could be set) and `trigger_words_source`: `recorded`
+   for what the file or the owner stored, `character` when the list is the name
+   of the person the model is attached to standing in for a word nobody
+   recorded, null when it is empty. `PATCH /models` takes `trigger_words` as
+   the complete list. `[]` is "this model needs no trigger word" and sticks:
+   no default and no later scan overrules it. `null` is "not set", which
+   brings the person default back. An editor may show a `character` default but
+   must not write it back unchanged, or the name is stored and stops following
+   a rename.
+   The same rows carry `suggested_kind`, `suggested_by`, `suggested_fields`
+   and `kind_decided` (#1962, backend §25.11): the kind every recorded
+   workflow loading a checkpoint or Unclassified model loads it as, and
+   whether a person has decided its kind. The client offers the suggestion
+   only while `kind_decided` is false. Any `file_kind` write on `PATCH /models`
+   sets it; `suggest_kind: false` sets it alone and `suggest_kind: true`
+   clears it (`null` is a 400); sent beside `file_kind`, `suggest_kind`
+   decides the mark.
+
+### 2.3 The `/workflows` contract
+
+The Workflows view (implementation plan §F1/§F2, the v1.12 grid and its
+writes, and since #1623 one entry per WORKFLOW rather than per card: the card
+key is internal storage and no path, body or answer names it). Running a
+workflow is the run route further down this section. **Removed by #1623**:
+`PUT /workflows/{key}/slots`, `PUT /workflows/{key}/lora-promotion`,
+`POST /workflows/{key}/unstack`, `POST /workflows/stacks`,
+`PUT /workflows/stacks/{id}/order` and `POST /workflows/stacks/{id}/unstack`,
+and later `POST /workflows/merge` and `POST /workflows/{id}/split` (workflows
+are automatic; nothing moves a topology between them). Forgetting ghosts is not here either: it is two
+purges beside the retention setting,
+`DELETE /server-config/ghost-retention/ghosts` and
+`.../model-ghosts?expected=N`, whose counts `GET /server-config/ghost-retention`
+returns as `picture_ghosts` and `model_ghosts` (Settings › Privacy,
+`PrivacySection`). The client sends the model count it showed as `expected`,
+and a `409` means the set changed and nothing was forgotten.
+
+| Route | Purpose | Response |
+|---|---|---|
+| `GET /api/v1/workflows?include_hidden=&include_one_offs=` | The Workflows grid: one entry per WORKFLOW, in cover-rank order (#1623) | `{cards: [WorkflowCard], one_offs, hidden}`. An entry is `{id, name, type, type_label, imported, manual, from_name, origin_category, versions, version, version_at, hidden, models, loras, picture_count, rating, rating_counts, covers, saved_recipe_count, defaults, base_topology, topologies, specials, variant_count, last_used, created_at, changed_at, rank, ghosts, model_ghosts, recipe_values, default_recipe}`. `id` is the workflow id, opaque to the client: `auto:<64 hex>` (a digest of its core and its base-model families) for an automatic workflow, or `manual:<uuid hex>` for a **manual** one - a stored document of its own (imported, a built-in, a duplicate, fixed copy, clone, LoRA edit or extracted recipe), never grouped with another. `type` is `txt2img`, `img2img`, `inpaint`, `outpaint`, `upscale`, `video` (a graph that saves a video or animation, whatever its latent; tested first) or null, and `type_label` is it in words (`Video`). `manual: bool` says which (the card's "Manual" badge), and `from_name: string | null` names the workflow or recipe a manual one was made from, as it was called then ("from <name>"; null for an import). `origin_category` is the Workflows view's origin filter: `comfyui` for a manual workflow an earlier build pulled from ComfyUI's saved workflows (`origin` `pull`; nothing is pulled since #1854, so no new workflow gets it, and it is how the ones left behind are listed together to select and delete), `pictures` for an automatic one, `own` for every other manual one (import, inbox, built-in, duplicate, fixed copy, clone, chain edit, extract). `versions` is how many versions of a manual workflow's document are kept (a graph saved over a workflow is a new version of it, never a new workflow; version 1 and the newest 49 are kept), `version` the current one's number (numbers are never reused, so past 50 it is more than `versions`) and `version_at` when it was stored; `1`, `1` and null for an automatic workflow. A manual workflow has `topologies: []`, `base_topology: null` and `variant_count: 0`; its `models` and `loras` are read off its document (a slot carries no `slot_label` there), and its counts, rating, covers and `recipe_values` are the pictures its own runs made (`picture.run_workflow_id`), which no automatic workflow counts while it lives. Its default recipe is its document's own values, addressed by its own slot labels (never `core:`). **Every figure is the whole workflow's**: counts, rating, covers, `ghosts` and `model_ghosts` over every variant of every topology in it; `models` and `loras` are its **base card's** slots (the base topology - one this library has kept pictures of, then most stages, then LoRA loaders, then kept pictures, so per library - and its busiest card), and a LoRA slot carries no `name`, because which LoRA fills it is the recipe's business. Where those slots hold no base-model slot at all (the slot list is cached per topology off one variant, and a blank or pre-#1416 shelf loader leaves none), the base model named by most of the workflow's variants (a shelf id the shelf no longer holds names none) is added with no `slot_label`; a base-model slot whose name is null (forgotten) is left as it is. `recipe_values: {checkpoints: [{name, pictures}], loras: [{name, pictures}]}` is what the workflow's kept pictures used, most used first, each `name` spelled as the picture listing's `comfyui_model` / `comfyui_lora` filters take it, so `GET /pictures?workflow=<id>&comfyui_model=<name>` lists exactly the pictures counted. `topologies` (sorted) is every graph shape the workflow holds. `default_recipe` and `defaults` are **null and empty on this route** (the recipe samples stored runs per workflow) and filled on the detail route and every write's answer. **Gone since #1623**: `key`, `member_keys`, `members`, `stack_id`, `stack_size`, `differs_by`, `differs_by_detail`, `topology_hash`, `recipe_loras` and each slot's `mark`. An automatic workflow with no picture and no saved recipe whose every file data step 7 made a live manual workflow is that manual workflow's twin and is **never listed or counted** (#1720); it still opens on the detail route. The two flags widen what is LISTED, never what is counted: `one_offs` and `hidden` (decided per workflow, `hidden` from `workflow_group_attr`) are taken over the same sets whatever the flags say. `hidden` on an entry is true on this route only for one `include_hidden` let in, and **on the detail route it is always the workflow's own state**. **`name` is never null**: the owner's name, else the workflow FILE of its base card (else of any of its cards) without its extension, else `"<model>: <Type> + <post-processing>"` built from the base card's base models as the model shelf names them (every named slot of its first base kind, joined ` + ` and each name once, so a Wan 2.2 pair reads `Wan 2.2 High + Wan 2.2 Low: Video`; which loader holds which file is never claimed), else `"<Type> + <post-processing>"`, else `"Workflow"`; generated names that collide first gain the core traits not every one of them shares (` + Two-Pass`, ` + Refine`, ` + Model per Pass`, ` + Likeness Gate`, ` + 2 References`; #1722), and whatever still collides is numbered `(2)`, `(3)`, the workflows the grid draws by default first and then in id order, so the one on screen is never "(2)" of a hidden sibling or a one-off. **Two names that differ only by their stages collide** (`Text to Image` and `Text to Image + Upscale`): a stage is on or off per run, so the trait is what tells them apart. A name that does not collide never carries a trait, and a typed negative prompt is never one (core rule v5 groups it with a zeroed one). `specials` is the base topology's, from `upscale`, `face_detailer`, `seed_variance` and `intermediate_save` (the last two are never printed in a generated name): null is "not read yet", `[]` is "read, has none". Every slot carries `title`, the shelf's name for the file, which a client shows in preference to `name`. Every slot also carries `filename`, the value its recipe recorded (null on a recipe's LoRA slot and where nothing was recorded, but kept on a shelf loader whose id the shelf no longer holds, whose `name` is null), spelled as `default_recipe.models[].filename` spells it, so a client matches a recipe model to its slot by that value rather than by a derived name. A shelf loader's slot (`checkpoint_id`) is named by the shelf file its id names, never by the id, and its `name` is null (forgotten) once the shelf does not hold it. `covers` are `{url, picture_id, thumbnail_width, thumbnail_height, square_crop_x, square_crop_y, square_crop_side, superseded}`, `url` API-relative, the crop fields independently nullable |
+| `GET /api/v1/workflows/{workflow_id}` | One workflow opened | `{card, notes, hidden, variants: [WorkflowVariant], pins, graph_base_models, model_fixes, kind_offers}`. `card` carries `default_recipe: {sampled, models: [{address, kind, filename, provenance, shelf_filename}], loras: [{asset, filename, sha256, strength, provenance}], values: [WorkflowDefault], stages: {stage: bool}}` and `defaults` = its `values`. An address is `<slot_label>/<input_name>`, the slot label a `core:<label>` every topology of the workflow shares or a base-topology label for a stage node; `provenance` is `best`, `all` or `edited`; on a shelf loader (`checkpoint_id`) `filename` is the shelf row id a run writes back and `shelf_filename` the file it names, `(model no longer on the shelf)` when the shelf has no such row, or null when the row has no file to name (and on every other loader); `stages` names each optional stage the base graph has and whether the recipe runs it, and `stage_details: {stage: text}` says which kind a stage is where it can be several (`upscale`: "Upscale model (4x-ultrasharp)", "Ultimate SD Upscale (…)", "Latent upscale and second pass", "Resize"); the Workflow tab shows it as a tooltip on the stage's name and the Run popup beside its checkbox. `variants` is every variant of every topology; a variant's `assets: [{widget, name, shelf_filename}]` keep the recorded value as `name`, and on a shelf loader `shelf_filename` names the file the id names, as on the default recipe. `pins` (`workflow_group_pins`) is `null` when nobody has pinned and `[]` when everything is unpinned. `graph_base_models` is filled only when `models` name no base model, read off the base card's runnable graph; a shelf loader's id there is served as the file it names; for a row the shelf no longer holds or holds without a file, the file the same node names in the source picture's editor `workflow` graph; else the same `(model no longer on the shelf)` / `(unnamed shelf model)` words. `model_fixes` are the base topology's. `kind_offers: [{address, model_id, file_kind, suggested_kind, suggested_by, suggested_fields}]` (#1962) are the default-recipe loaders whose shelf model the shelf files as a checkpoint or Unclassified while every workflow loads it as the kind that loader takes, until a person decides its kind. A malformed id is a 422 (a card key included), an unknown one a 404 |
+| `GET /api/v1/workflows/{workflow_id}/pictures?limit=` | Ids for one workflow's pictures, newest first | `[int]` |
+
+The writes, every one of them `OWNER_ONLY` and every one of them raising a
+`workflows_changed` event naming workflow ids (§8) on the way out:
+
+| Route | Purpose | Body → Response |
+|---|---|---|
+| `PATCH /api/v1/workflows/{workflow_id}` | Name, notes, hidden (`workflow_group_attr`) | `{name?, notes?, hidden?}` → the opened workflow. Fields **not sent** stand; an explicit `null` name or notes clears it |
+| `GET /api/v1/workflows/{workflow_id}/lora-summary` | The workflow's LoRAs (the inspector's pile) | `?cover=<picture id>` → `{workflow_id, pictures, shared: [LoraUse], varying: [LoraUse], without: LoraUse \| null, cover_asset}`, a `LoraUse` being `{asset, filename, name, on_shelf, sha256, pictures, picture_ids}`, `sha256` the one shelf LoRA file it resolves to by content digest (null when the shelf holds none, or several files answer), which is exactly what `PUT …/default-lora` accepts. `shared` is in every kept picture of the workflow; `varying` is the rest, most pictures first; `without` the pictures that loaded none of `varying` (its `asset` is empty). `asset` is the stored graphs' `asset:<sha256>` reference, which the picture listing's `workflow_lora` takes; `filename`/`name` are null for a forgotten name. `workflow_lora` on the listing only narrows `workflow`: alone, or not an `asset:` reference, it matches nothing |
+| `PUT /api/v1/workflows/{workflow_id}/model-fix` | Replace a model the workflow's base graph loads (a missing checkpoint, VAE or text encoder), or undo that | `{was, now, slot_kind?}` → the opened workflow; `now: null` undoes. `was` is the file as the graph names it, `now` a **checkpoint, VAE or text encoder** on the shelf, stored in the shelf's spelling (404 otherwise). **The shelf kind of `now` is the kind of slot it fixes** (`workflow_identity.model_fix_kind`: a base-model widget, `vae_name`, or a `clip_name*` on anything but a CLIP vision loader), so a same-named file in a slot of another kind is never rewritten. The cover flag reads the widget-keyed asset rows, and confirms a `clip_name` match against the variant's stored slots, so a CLIP vision loader holding a replaced text encoder's file name is not flagged. `slot_kind` (`checkpoint` \| `vae` \| `text_encoder`) may say it too: 422 when `now` is not of that kind, and an undo carrying it undoes only that kind. 409 when no variant of the workflow's graph loads `was` in a slot of that kind, or when another original is already replaced by `now` in that slot; 422 when both name one file. A `was` that is itself a replacement is resolved to the original it replaced, so fixes never chain. Where cards merge onto the fixed one, **its** name, pins and defaults win; undoing does not bring back the attributes of a card that merged into it. **The card keeps its pictures**: the fix is keyed per topology and slot, so a sibling card of the same graph with the replacement in that slot folds onto the original's key too, and a digest (`ckpt_sha256`) or shelf-id slot cannot be fixed this way (`workflow_model_fix`), and `workflow_cards.fixed_slots` reads the replacement as the original in the card key, so pictures made with `now` are filed on this card and the topology's cards are re-keyed in one transaction, as a slot flip does. A run and `GET …/graph` load `now` wherever the graph names `was` (matched by file, not folder), reported in `substitutions`. **Where ComfyUI does not list `now` for that loader** (not in its model folders, or a file type it cannot read), a VAE or text encoder fix swaps the loader node for `PixlStashVAELoader` / `PixlStashCLIPLoader`, node id and links kept, addressing the files by shelf SHA-256 (a Dual loader's two onto `clip_sha256` / `clip_sha256_2`, its `type` carried over; #1605). Refused, leaving the file missing, for a GGUF file, a file the hasher has not read, a Triple loader, an output past the first in use, a `type` our node does not list, or a ComfyUI without ComfyUI-PixlStash. A checkpoint fix is never swapped here: one ComfyUI does not list is written anyway where the run would load it off the shelf through `PixlStashCheckpointLoader` (the pack's loader present with its `shelf` widget, ComfyUI on this computer, one shelf row with a present copy, no `weight_dtype` cast; no digest needed), and the run swaps that loader in as it does for any shelf checkpoint ComfyUI lacks. The swap is recorded (`workflow_loader_swap`) when the graph is submitted or opened in ComfyUI, never by a preflight, on the graph as sent (after the saver swap and any repair), so the swapped graph's pictures card here too. The shelf file must have a digest and a present copy. The detail carries `model_fixes: [{slot_label, was, now, slot_kind}]`, `slot_kind` naming the Workflow tab row (Checkpoint, VAE, Text encoder) the fix belongs to; each cover carries `superseded: true` when its picture was made with `was`, and such covers sort after every other (the card draws no mark for it since #1850, and the Workflow tab no longer shows or writes a fix: its only frontend caller is the Models shelf's *Replace missing…*). The fix acts on the base topology and re-keys its cards internally; the workflow keeps its id |
+| `PUT /api/v1/workflows/{workflow_id}/default-lora` | One of the workflow's LoRAs in or out of its default recipe (#1653, the pile's *Add to default*) | `{asset, include, strength?}` → the opened workflow. `asset` is the `asset:<sha256>` reference `lora-summary` lists (a hash of the file's NAME, not its content: the default recipe's `loras[].asset` is the same reference, and is what a client joins the two on, never `sha256`); it must be one of this workflow's pictures' LoRAs (404 otherwise) and have a `sha256` in `lora-summary`, the same resolution (409 otherwise: not on the shelf, or the shelf cannot tell which file). `include: true` stores `lora:<sha256>` at `strength`, else the strength most used by the runs that loaded it (up to 200, newest first), else 1; `false` stores `off`; `null` drops the edit, which may name it by `sha256` (the default recipe's `loras[].sha256`) in place of `asset`, so an edit stays removable after its file leaves the shelf (404 when there is no such edit). Every other default row stands |
+| `PUT /api/v1/workflows/{workflow_id}/defaults` | The default recipe's PARAMETER edits, whole (`workflow_group_default`) | `{defaults: [{slot_label, input_name, value, name?}]}` → the opened workflow, the values back as `provenance: "edited"` in `default_recipe.values`. `name` is what the parameter is shown as (`workflow_group_parameter_name`, served back as `WorkflowDefault.name`): left out, a stored name stands; `""` clears it; a row left out of the set takes its name with it. Stored as text and served as the value a graph takes (`30` → `30`, `true` → `true`), and text stays text (`"1024"` → `"1024"`). An address naming a model loader's file or a `lora:` is a 422, and those rows (the default recipe's models and LoRAs, which the conversion writes) are never touched by this write |
+| `GET /api/v1/workflows/{workflow_id}/form-inputs` | The graph inputs a parameter can be made of (Expose a parameter, and the drop-down options of the parameter rows) | → `{nodes: [{node_id, title, class_type, inputs: [{slot_label, input_name, value, kind, options, exposed}]}]}`. Every literal input a run sets by address, less the prompts, seeds, picture batch, picture loaders, model and LoRA loaders, the save node, text credentials and text of several lines. `kind` is `number` \| `text` \| `boolean` \| `choice` from ComfyUI's `object_info` and `options` a choice's list; both null where ComfyUI did not answer, does not know the node, or declares a list it names no choices of. `exposed` marks an input that is a `default_recipe.values` row already; any other becomes one by naming its `slot_label` / `input_name` in `PUT …/defaults` (the row then carries `exposed: true`, and a later write without it removes the row), and is asked for by the Run form once `PUT …/pins` names it. `node_id` is for display only. 409 with no graph, 400 for a graph that will not reduce |
+| `PUT /api/v1/workflows/{workflow_id}/pins` | The pinned parameters, whole (`workflow_group_pins`, stored as addresses) | `{pins: [{slot_label, input_name}] \| null}` → the same. `[]` is everything unpinned, `null` forgets the choice |
+| `PUT /api/v1/workflows/{workflow_id}/inputs` | The picture-input setup, whole, **per library** (`workflow_group_picture_input`) | `{inputs: [{slot_label, input_name, mode, pixel_sha?, picture_id?}]}` → the same, each pin as the `pixel_sha` stored. `mode: "fixed"` must carry a `pixel_sha` or a `picture_id` (422 otherwise); a `picture_id` is stored as that picture's content, and one that is not a kept picture is a 400; 503 when no library is open. **It replaces the whole set, so a client writes back only a set it has read**: every run pre-flight returns it as `RunGroup.picture_inputs` (#1457) A run reads the setup back by workflow and puts a `core:` address on the run graph's own slot label before filling it |
+
+Running a workflow (v1.12 B7), also `OWNER_ONLY` — which is **narrower** than
+the `PICTURE_SCOPED` run routes in `comfyui.py`, because a workflow is a
+whole-library identity rather than one caller's picture. Neither route raises
+`workflows_changed`: a run makes a picture, and the workflow it ran is
+unchanged.
+
+| Route | Purpose | Body → Response |
+|---|---|---|
+| `POST /api/v1/workflows/run/preflight[?cached=true]` | What a run would do, doing none of it | The body below → `{ok, runs, groups: [RunGroup]}`. `cached=true` judges against ComfyUI's `/object_info` as last read (a minute at most) instead of reading it again: for a screen that only draws the answer (the Workflow tab's missing-model mark, asked on every selection), never for the check before a run. A group of a manual workflow carries `workflow_version`, the version of its document it runs (after Run's check against ComfyUI), which the run's pictures record (`picture.run_workflow_version`); null for an automatic one |
+| `POST /api/v1/workflows/run` | Run it. The body's `waited` (#1850, a `WorkflowChanges` or absent) is what waited on the workflow as the caller read it when it laid its form: the `waiting` of the `GET …/changes` the Run popup read on open, whole. It is a statement and not a write (what waits is not changed), validated as any `WorkflowChanges`, and kept with `ran` as what the run saw, so a later save with `from_run` keeps a change made after that read (in another window, before Run was pressed) and clears only what the run saw. Absent (an API or MCP caller), what waits when the run arrives is taken as seen; `{}` says nothing waited. Read only for a run of a workflow by itself (`workflow_id`): ignored with pictures or a saved recipe, which keep no run's set, and by the pre-flight; not remembered where what waits is stale by then | The same body → `{status, runs, groups, prompts: [{workflow_id, prompt_id}], error}`; `status: "refused"` with `prompts: []` when nothing was submittable, and `status: "partial"` with `error` (why the next submission was not queued) when ComfyUI stopped taking a batch part-way |
+| `POST /api/v1/workflows/run/opening` | Hold a run for the owner's ComfyUI to open: the Run popup's *Open in ComfyUI*. Owner-only | The run's body → `{opening, workflow_id}`. Builds the graph that run would submit, as `GET …/graph` builds the workflow's own (Run's plan with none of Run's repairs, ComfyUI-PixlStash nodes in place of the stock ones as `?pixlstash_nodes=true` puts them, credential widgets blanked), with the run in it: prompt, values, models, LoRAs, stages, and the seed (`fixed`: the one sent; `new`: a fresh one; `keep`: the graph's own, or the one picture's). The pictures it puts in are uploaded into ComfyUI's input folder as a run uploads them, where the run would not be refused; a selection feeding an input opens with its first picture. Where the pack's Picture Loader goes in, it names the picture the run put in that input, also over a picture pinned to it: the request's own pick beats a pin in a run, and so here. `count`, `stack`, `destination` and `label` are read by nothing. The graph is held **in memory** for ten minutes (eight at most, the oldest dropped; a restart forgets them) under `opening`, 32 hex characters, and `GET /api/v1/workflows/{workflow_id}/graph?run=<opening>` answers it. The app then opens ComfyUI at `?pixlstash_run=<opening>&pixlstash_of=<workflow_id>`, which the ComfyUI-PixlStash node's `open_run.js` reads. Nothing is queued or stored, and no event is raised. `400` for a body that comes to several workflows (pictures of several, with no `target`), `409` where there is no graph to open, and the run's own `400`/`404`/`422` for a body that cannot be read |
+| `GET /api/v1/workflows/runs/{prompt_id}` | How one of those runs stands (#1839). Owner-only | → `{prompt_id, status, message, stopped, picture_ids}`: `status` is `running`, `completed` (with the pictures it added) or `failed`, whose `message` is the sentence the app shows (the node that failed and why) and whose `stopped` is true for a run that was interrupted or taken off ComfyUI's queue. A `completed` run's `message` is null unless it made a picture the library already had: exact duplicates are not imported twice, so a run repeated on its own seed adds nothing and says so there. Kept in memory for the newest 500 runs; 404 for a prompt nobody queued here and for a run started in another library. MCP's `run_workflow` polls it and answers with it; the SPA hears the same ending as a `plugin_progress` event (§8) |
+
+The body, identical on both: **exactly one source** — `picture_ids`,
+`saved_recipe_id` or `workflow_id` (400 otherwise; `workflow_key` is no longer a
+source, #1623) — plus an optional `target` workflow id that runs *that*
+workflow instead over the pictures selected. A `workflow_id` or `target` runs
+the workflow's base graph with its default recipe applied under the request; a
+run of pictures alone runs each picture's own graph with no workflow default.
+Each `RunGroup` carries `workflow_id`: the one named, or the workflow of the
+picture's variant (null for a picture in none). Then `prompt`, `negative`, `loras: [{node_id, field, sha256,
+strength_model?, strength_clip?}]` (**one slot is a node AND a field**, so a
+stacker's `lora_name_1` and `lora_name_2` are two slots), `values:
+[{slot_label, input_name, value}]` addressed the way a card's defaults are,
+`count`, `seed_mode: "new" | "keep" | "fixed"` with `seed`,
+`destination: {set_id?, project_id?, character_id?}`, `character_id`,
+`character_ids`, `inputs:
+[{slot_label, input_name, picture_id}]`, `replay`, `stack` and
+`allow_unchecked`.
+
+**`character_ids` is who the run's pictures are of**, and when sent it is the
+whole answer, whatever the LoRAs say (`[]` is nobody): the Run popup's
+*Pictures are of* list, which the owner can shorten or add to. Left out, the
+people whose LoRAs the graph loads are linked, or else `character_id`, the
+older single person, for a graph whose LoRAs name nobody. One person is linked
+as a drop onto a person links them (their largest face, once faces are read);
+several are each given the face they look most like, strongest pair first,
+once faces are read, and anyone left without one takes the largest face nobody
+took. Neither is
+`destination.character_id`, which files the pictures into the person's
+reference set and names no face.
+
+**`inputs` fills the card's picture inputs (#1457), and is usually empty.**
+The server answers each input in order: the body's entry (`picture_id: null`
+means "the selection goes here"), a `fixed` pin whose picture is still kept, on
+a `replay` the picture's own original (below), a
+stored `selection` fed from `picture_ids`, and then — over the whole card —
+**the one input still open when exactly one is, which the selection fills with
+nothing in the body saying so.** A two-input card with a pinned reference
+therefore runs on a selection with an empty `inputs`, and so does "Make more
+like these". The body needs an entry only for a picture picked for this run, or
+to say which input the selection feeds when two or more are open. An entry
+naming an input no resolved card has is a 400; one naming a picture that is not
+kept, or whose file is gone, is a 404. At most one entry may take the selection
+(422). Pictures are uploaded into ComfyUI's input folder **only after every
+refusal is decided**, once per distinct picture per request; the pre-flight
+uploads nothing.
+
+**`replay: true` says the one picture named is the workflow's own output**
+("Run recipe"), not a picture to run it over. A picture input then takes what
+that picture's run loaded, where the library still holds it (`fill:
+"original"`, with its `picture_id`), after the body's entry and a pin and ahead
+of the selection; an input whose original is not known is filled as usual, and
+once any original is named the picture itself goes only where the body sends
+it. The Run popup sends it only for a picture opened on its own recipe (Run
+recipe, Make more like these… on one picture), so an edit of an edit still
+reads the edit. Ignored unless the request names exactly one picture.
+
+Each `RunGroup` carries `picture_inputs: [{slot_label, input_name, title, mode,
+pixel_sha, picture_id, picture_missing, fill}]`: every picture input of the
+card, enumerated from the graph with the stored setup over it. `fill` is how
+this run answers it — `request`, `fixed`, `original`, `selection`, `graph` (open, and the
+file the graph already names is on this ComfyUI, so it runs as authored) or
+`null` (unfilled). `picture_missing` is a pin whose picture has gone: an empty
+slot to choose again, not a separate refusal.
+
+Seven rules the client must not re-derive:
+
+1. **With several pictures and no `target`, the server groups them by each
+   picture's recipe.** A selection spanning three cards is three groups, each
+   carrying the pictures that chose it — not one run of the first card over all
+   of them.
+2. **`reasons` empty is the only thing that means "this would run".** Each
+   entry is `{code, …payload}` from a closed set: `comfyui_not_configured`,
+   `comfyui_unreachable`, `ui_format: {file_name, detail?, problems?}` (an editor-format
+   file the server could not convert: `detail` is the converter's first sentence,
+   `problems` all of them, ComfyUI not answering being its own sentence),
+   `missing_nodes: {nodes}`,
+   `missing_models: {models: [{file, folder}]}` (read off the graph with
+   the owner's model fixes applied; where a fix's replacement is missing too,
+   `file` is the replacement and never the original it stands in for),
+   `pack_outdated: {models: [{file, folder}]}` (a checkpoint or diffusion
+   model ComfyUI lacks and the shelf holds, which the run would load through
+   `PixlStashCheckpointLoader` but for a running pack from before its `shelf`
+   widget; moved out of
+   `missing_models`, it blocks the batch the same way, and the Workflow tab and
+   the Run popup word it as "restart ComfyUI"), `a1111`,
+   `picture_input_unfilled: {inputs: [{slot_label, input_name, title}]}`,
+   `no_lora_loader`,
+   `pixlstash_nodes: {nodes: [{node_id, class_type, title, why, kind?, id?}]}`,
+   `no_save_node`, `no_runnable_source`,
+   `lora_not_skippable: {node_id, field, file, message}`,
+   `stage_not_skippable: {stage, message}`,
+   `missing_choices: {choices: [{node_id, class_type, field, value, options,
+   replacement}]}` - a `sampler_name` or `scheduler` this ComfyUI does not
+   list, `replacement` being `euler` / `simple` when listed, else the first
+   option. The body answers it with `choices: [{node_id, field, value}]`,
+   applied after `values` and for that run only; the Run popup offers each as
+   a select and re-asks.
+   `picture_input_unfilled` replaced `fixed_input_deleted` in #1457 with the
+   same payload shape plus each input's `title` (a slot label is a hash); a client that only knows the old code no longer
+   recognises the refusal and must fall back to its generic sentence. It names
+   the open inputs the graph cannot run on as they stand, and blocks its group,
+   not the batch.
+   A code and never a sentence: one batch mixes sources, and a panel grouping
+   "these four are missing the same model" cannot do it from prose.
+   **Four group fields are facts rather than refusals** and must not be read
+   as reasons: `substitutions`, `bypassed_loras: [{file, folder, node_id,
+   class_type, field, requested}]`, `unplaced_loras: [{filename, sha256,
+   node_id, reason}]` and `replaced_nodes: [{node_id, class_type, replacement,
+   consumers}]`. Each says what this run will do differently from what the
+   graph or the saved recipe says, on the pre-flight and on the run alike.
+   `requested: true` marks a loader the owner skipped with `skip_loras`
+   (#1478); `false` is one the server bypassed because this ComfyUI lacks its
+   file, or, with `recipe: true`, because the default recipe leaves its LoRA
+   out: that file is not missing, and a client must not print it as one.
+   `unplaced_loras` names a saved recipe's LoRA that is not applied: the
+   workflow has no loader left for it, or the shelf cannot identify it.
+   `skip_loras` is refused (400) on a run spanning several cards: a node id
+   names one loader on one graph.
+   `swapped_loaders: [{node_id, class_type, file, sha256, requested}]` is a
+   fifth fact of the same kind: a core LoRA loader whose file this ComfyUI
+   lacks, loading the shelf LoRA through the ComfyUI-PixlStash loader by its
+   hash instead of being refused. `requested: true` is a swap for a LoRA this
+   request named (`loras`, `add_loras`); `false` is the workflow's own recipe
+   LoRA. `replaced_nodes` and the `requested: false` swaps are repairs the
+   server makes on every run and no set of changes can say, so the Run popup
+   reports them and does not offer them for saving (#1850). What it does offer
+   to keep is the run's `models`, `loras`, `skip_loras`, stages and changed
+   `values`, through `POST …/save` and `…/save-as-new` (below).
+   `add_loras: [{sha256, strength_model, strength_clip}]` adds shelf LoRAs in
+   loaders of their own, spliced in after the model source on the run's copy:
+   no slot is named and nothing the graph loads is replaced, so it works on a
+   graph with no loader. A LoRA the graph already loads has its strengths set
+   instead. A splice that cannot be made is the reason `lora_not_insertable`
+   (`{detail}`, the server's sentence); with ComfyUI unreachable the run is
+   refused as `comfyui_unreachable`, and `allow_unchecked` does not run it
+   without the LoRA (400).
+   **A run by `workflow_id` goes without any LoRA attached to a person**: the
+   loader holding one is bypassed on the run's copy and not reported in
+   `bypassed_loras`, and `default_recipe.loras` does not list it. A run from
+   `picture_ids` or `saved_recipe_id` keeps it. `add_loras` is how a client
+   says who a workflow run is of (the Run popup's person picker).
+   `skip_stages: ["upscale" | "face_detailer" | "seed_variance" | "intermediate_save"]` (#1621)
+   switches an optional
+   stage off for the run: its nodes are bypassed on the run's copy and what
+   only they read is pruned. A card that has no such stage runs unchanged; one
+   whose stage cannot be taken out (a FaceDetailer's mask or pipe is read, a
+   hires fix in pixel space, or ComfyUI is unreachable) is
+   `stage_not_skippable`, never a full run. A resize that prepares an img2img
+   input is not the upscale stage and stays. `seed_variance` (a
+   SeedVarianceEnhancer on the conditioning) is a stage too, taken out with
+   the sampler it feeds left in place.
+   `keep_stages` (#1849) is the other half: a stage the default recipe has
+   switched off stays in for this run. A stage named in both is a 422.
+   `workflow_id` (#1622) is a source beside `picture_ids` and
+   `saved_recipe_id` (`workflow_key` is not, since #1623): `auto:<64 hex>`
+   or an owner's group id (422 when malformed, 404 when unknown). The server applies the
+   workflow's **default recipe** under the body, so a client need not send
+   defaults back; `values`, `models` and `loras` win over it address by
+   address. `models: [{address, filename | sha256}]` loads a model at a loader
+   address (`core:<label>/<widget>`). Each group carries `workflow_id` and
+   `flags: [{code, address, was, now, ...}]`, facts rather than reasons:
+   `family_mismatch` (a model for another family or modality than the one it
+   replaced, still run) and `model_not_applied` (ComfyUI cannot load it,
+   not even off the shelf through a ComfyUI-PixlStash loader; the loader
+   keeps its file), and `prompt_not_applied` with its `side` (a
+   `prompt` or `negative` the request sent that the graph has no place for;
+   said, never dropped). Each resolved group also carries `prompt:
+   {positive_settable, negative_settable, positive_text}`: whether a prompt
+   has anywhere to go, and the graph's own positive prompt before the
+   request's was written. The Run popup offers no prompt box where
+   `positive_settable` is false, and opens an otherwise empty box on
+   `positive_text`.
+3. **A missing model blocks the whole batch**, mixed or not, and so does an
+   unreachable ComfyUI. Every group's `runs` goes to zero and nothing is
+   submitted — including the groups whose own `reasons` are empty.
+   **A missing LoRA is the exception** (#1463). A LoRA is optional, so where
+   its loader *can* be taken out of the graph — consumers rewired to its own
+   inputs, ComfyUI's own bypass — it is, and then it is no longer missing from
+   the graph at all: nothing blocks, `missing_models` does not mention it, and
+   it is named in `bypassed_loras` instead. Everything else — a checkpoint, a
+   VAE, a text encoder, a ControlNet — still blocks, because the graph cannot
+   run without it. **Where the loader cannot be taken out, the LoRA keeps its
+   refusal and is still a `missing_models` entry with folder `loras`**: a
+   **stacker** whose other slots are filled (taking the node out would drop
+   adapters that *are* installed), a loader nothing can be rewired around, and
+   a reference this hub can no longer name (`(forgotten model)` — the file may
+   be installed and only the name is lost). A LoRA the *request* asked to add
+   is also never bypassed: the owner asked for that one by name.
+   **`bypassed_loras` is only ever set on a group that is actually being
+   submitted**, and is cleared again when a missing model elsewhere zeroes the
+   batch — it says "the run goes ahead without this LoRA", which must not
+   appear beside a refusal.
+   **A missing seed node is repaired the same way** (#1463): a custom seed node
+   this ComfyUI lacks (rgthree's `Seed (rgthree)` and its kin) is dropped, its
+   links become literals the run's seed pass then writes, and it is named in
+   `replaced_nodes` rather than in `missing_nodes`. Only where it feeds exactly
+   one input, that input is a seed the run writes, and its own seed is a real
+   value (not a `-1` placeholder); otherwise it stays a `missing_nodes`
+   refusal, independent of `seed_mode`.
+   `replaced_nodes` follows the same rule as `bypassed_loras`: set only on a
+   submitted group, cleared when the batch is zeroed.
+   **A bypassed run lands on its own card**, as a substituted one does: taking
+   a node out changes the topology, so the pictures it produces carry the
+   submitted graph and are filed under a different variant (and card) than
+   the one that was run.
+4. **A new run is NOT stacked with the picture it came from** unless the body
+   says `stack: true`. This is where it differs from the retired
+   `POST /comfyui/run_recipe` (#1410), which stacked by default: that replayed
+   one picture's own graph, so the output genuinely was another take of it,
+   while this runs a card. With `stack: true` and a selection feeding an input,
+   **each selected picture is its own source**: its outputs join its own stack,
+   not the first picture's.
+5. **`allow_unchecked` is the consent rule and it does something.** Without it
+   an uninspectable ComfyUI (`comfyui_unreachable` / `comfyui_not_configured`)
+   blocks the batch and nothing is submitted. With it the runs go ahead **and
+   the reason is still reported**, because the fact stays true. Consent reaches
+   no other code: a missing model is a fact that *was* established, so a
+   consented batch missing one is still refused. It does not reach a `loras`
+   entry either: a filename slot is resolved against what that ComfyUI lists,
+   so with nothing to resolve against the run is a 400 rather than one that
+   quietly keeps whatever LoRA the stored graph named. A digest slot needs no
+   list and goes through. `skip_loras` is not consented past either: with
+   ComfyUI unreachable, a skip is `lora_not_skippable`, because nothing says
+   what to wire in the loader's place.
+6. **The two routes answer identically, including their errors.** A body that
+   cannot be interpreted against this card is a `400`/`404`/`422` **on both** —
+   two sources named, an unknown `saved_recipe_id`, a malformed key,
+   `seed_mode: "fixed"` with no `seed`, `seed_mode: "keep"` on a source that
+   keeps none, a LoRA addressed to a slot the graph has not, a picture input
+   the card has not, a picture that is not kept, or the total runs over
+   `MAX_RUNS_PER_REQUEST`. Everything else — including a LoRA that
+   is on the shelf but not in this ComfyUI — is a reason code. A pre-flight
+   that 400s where the run returns reasons would not be a dry run.
+
+7. **A selection feeding an input is the run's repeat axis.** Such a group runs
+   once per selected picture, times `count`, and `runs` (and the cap) count that
+   product: 40 pictures at `count` 5 is 200 runs.
+
+**`count` is the number of pictures.** The run sets every picture batch to a
+literal 1 (`pin_batch_size`; the rule is `is_picture_batch`): a `batch_size` on
+any node ComfyUI says outputs a `LATENT`, wired or not, except where it means a
+chunk size or a multi-view count (`RebatchLatents`, the Zero123/SV3D batch
+nodes). A graph saved with `batch_size: 4`, or with a primitive setting it,
+therefore does not turn `count` 1 into four pictures, and the parameter list
+offers neither. A batch the graph builds afterwards (`RepeatLatentBatch`) is
+left as authored, and so is a batch of pictures in a graph that saves a video,
+where it is the animation's frames; a video latent's batch (it counts frames in
+`length`) is still pinned, to one video.
+
+**Edited defaults are overrides applied at run time and never written back into
+a graph.** The stored document is content-addressed, so rewriting it would
+change the identity of the very card being run.
+
+**`seed_mode: "keep"` needs a source that carries a seed.** Tiers 1 and 2 do;
+tier 3 does not, because a stored instance document nulls its seeds by design,
+so `keep` there is a 400 rather than `count` identical images at seed 0.
+
+**`seed_mode: "keep"` on a recipe keeps the recipe's seed, not the graph's.**
+Run for one picture that no input reads (`picture_ids` of one, the group's
+source), the seeds are read off that picture's own embedded graph and written
+by node id and input, whichever tier supplied the graph: a workflow's saved
+document stores no seed, and a card's best picture is another picture. An
+input the picture's graph numbers otherwise takes the picture's first seed.
+With `saved_recipe_id` it is the row's kept seed. Only a run with neither
+keeps the seed of the graph it resolved.
+
+**A failure part way through the submissions answers `status: "partial"`** with
+the prompt ids already queued. They are running in ComfyUI whatever the request
+returns, and an id nobody was told about is a generation the owner cannot find,
+cancel or attribute.
+
+One rule the writes add to the ones below: a `{workflow_id}` is `auto:`
+followed by a 64-hex core hash or `manual:` followed by a 32-hex uuid
+(`utils/workflow_ids.WORKFLOW_ID_PATTERN`) — anything else, a card key or a
+bare 32-hex id included, is a 422.
+
+The file gestures (v1.12 B8, plus Clone with new models), all `OWNER_ONLY`. Each
+one acts on the workflow's **base card** and resolves its graph the same three
+tiers the run does, so a workflow the library only knows from its pictures
+exports and duplicates like any other:
+
+| Route | Purpose | Response |
+|---|---|---|
+| `GET /api/v1/workflows/{workflow_id}/export` | The workflow as a file to give away: its base graph with its default recipe applied - values and models written, LoRA loaders outside the recipe and stages it runs without bypassed where ComfyUI says how - then scrubbed, keeping the default recipe's LoRA slots (a loader that could not be bypassed is emptied) | `{filename, workflow, removed: [string], source: "file" \| "picture" \| "instance"}`; a loader taken out is reported as `"LoRA slots that are part of the look"` |
+| `GET /api/v1/workflows/{workflow_id}/graph` | The workflow's one graph (a manual workflow's stored document, an automatic one's base card's graph) with its default recipe applied (values, LoRAs, stages, models, model fixes), as the owner would save it; **Run is this plus a count, a seed roll, the saver swap, the repairs and the import.** Built by Run's own `_plan(..., opening=True)` so the two cannot drift. It is built from the version PixlStash has stored, whatever the workflow's origin: ComfyUI is not asked for a newer one. What opens is linked to the workflow: a save of the file it is opened as comes back as the workflow's next version (`PUT …/graph`, #1852), and anything else in ComfyUI reaches PixlStash only when the owner hands it over (import, the watched inbox, the node's *Export to PixlStash*). Stated the other way round, the five things Run adds are what Open leaves out, each so the graph survives a save in ComfyUI or because a read must have no side effect: a ComfyUI-PixlStash saver is not swapped for `SaveImage`, the batch size is not pinned to 1 (there is no count), the picture inputs keep the graph's own values (filling them uploads pictures into ComfyUI's input folder), the repair registry does not run (a missing LoRA's loader stays for the owner to fix), and a graph Run would refuse is answered anyway. **When no graph could be built** (an editor document that will not convert) the answer is a 409 whose `detail` names the reason code and then the converter's sentence, whatever the workflow's origin; a graph nested too deeply to walk is a 409 too, as for Export. The seed is a parameter like the rest - the default recipe's, else the graph's own - and only a seed still null (a stored recipe's) gets a fresh one, so `seedless` is always false; credential widgets are blanked. For *Open in ComfyUI*: the Workflow tab opens the configured ComfyUI at `?pixlstash_workflow=<workflow_id>`; the ComfyUI-PixlStash node (`web/js/open_workflow.js`) strips the param so a reload does not refetch, fetches this through `/pixlstash/workflow_graph` with its configured API token, which must be an owner token (a scoped or READ token gets 403). It asks with `waiting=true&all_stages=true` and opens **`editor`**, the layout the workflow was last saved from ComfyUI with, when the answer has one **and it is that graph**: `app.loadGraphData`, `workflow`'s values written over the canvas node by node, then the canvas converted (`graphToPrompt`) and compared with `workflow`, nodes, links and values (`differsFrom`). PixlStash sends a layout only while `workflow` is wired as the graph the layout arrived with, but it stored the two on the saver's word, so this check at the moment of use is what binds them; a layout that fails it is dropped for `workflow` through `app.loadApiJson`, auto-arranged, as a workflow with no layout is. It then links the canvas to the workflow, **automatic or manual** (`extra.pixlstash_workflow_id`), and to the file it is about to become (`extra.pixlstash_file`), puts the loader for people where **`people_loader`** says (`{model: {node_id, output}, clip, rewires: [{node_id, field, type}], places: [{model, clip, rewires}], reason}`: `plan_lora_insertion`'s splice, one loader per entry of `places`, which holds several where the graph loads the same model several times; `model`, `clip` and `rewires` repeat the one place for a node from before `places`, and beside several places `model` is null and `reason` tells that node to update rather than let it place the first alone; `null` where the Run popup would show no Person field, a `reason` and no `model` where the graph cannot be spliced, which the node toasts; a loader the layout kept is reused, with nobody picked), saves the tab as `pixlstash/<name>.json` in ComfyUI's workflows so Ctrl+S asks for no filename, and warns on `forgotten` (its `seedless` branch cannot fire any more). **A save of that file is sent back** (`web/js/save_workflow.js`, on the workflow store's `saveWorkflow` action) through `/pixlstash/workflows/save` to `PUT …/graph` below, **and of no other canvas**: ComfyUI writes `extra` into every picture a canvas makes and every duplicate of its tab, so the id alone names a workflow and authorises no save; a canvas whose path is not its `pixlstash_file` is told so and sends nothing (the menu's *Save to PixlStash* is the reader saying they mean it). An older node (no `save_workflow.js`; `GET /comfyui/pixlstash-node`'s `saves_back` false) opens a copy that never comes back, and the Workflow tab's button says *Open a copy in ComfyUI* for it. The answer no longer carries `comfyui_file`, `needs_conversion` or `detail`; a node that still reads them finds no `comfyui_file` and uses `workflow`. **`?pixlstash_nodes=true` puts ComfyUI-PixlStash nodes in place of stock ones** (`swap_in_pack_nodes`), last and only where this ComfyUI lists the pack's class: `SaveImage` becomes `PixlStashPictureSaver` and `SaveVideo` `PixlStashVideoSaver` on the same inputs, so a picture or video queued by hand in ComfyUI comes back to PixlStash (a setting the pack's saver does not take, such as a current Save Video's `codec`, is left to that saver's default; a wire it has no place for keeps the stock saver), and a core single-slot LoRA loader, a `VAELoader` or a `CLIPLoader` whose file the shelf holds a copy of becomes `PixlStashAdapterLoader`, `PixlStashVAELoader` or `PixlStashCLIPLoader`, keyed by its digest (the VAE and CLIP loaders on a model fix's terms, `run_service.plan_pixlstash_swap`: a CLIP on a `device` other than the default, of a `type` the pack's loader does not list, or a GGUF file stays). Ids and wiring are kept, and a title that was only the stock node's name becomes the new node's. The node sends it on every open unless the link also carries `pixlstash_original=1`, which the Workflow tab's *Open original in ComfyUI* (the More menu) adds; without the parameter the graph holds the workflow's own nodes, which is what the MCP server's export and an older node get. **Without it the answer also carries `shelf_only`** (#1950): the files the graph names that this ComfyUI does not list and the open with the parameter would load off the shelf (`_with_pack_nodes` tried on a copy, Load Image left out so no picture is fetched), so the node can say why ComfyUI shows them missing and point at the adapted open; empty with the parameter and where ComfyUI could not be asked. **The picture loader and the checkpoint loader go in with whose their id is** (#1912): each names a row by an id that starts at 1 in every library and on every shelf, so an id alone is not trusted in a graph read back out of a picture (#1521), and a picture queued from the opened graph is one the workflow may run from next. `LoadImage` becomes `PixlStashPictureLoader` on `picture_ids` and `library` (the library's uuid), naming the picture where the library is known to hold it: one pinned to the input (Fixed), else a file a run uploaded, whose name carries the picture's content, else a file in ComfyUI's input folder (or the `[output]`/`[temp]` folder its name is annotated with) whose content the library holds (fetched through ComfyUI's `/view` and hashed as a picture's `pixel_sha` is). Anywhere else it goes in empty (`picture_ids` blank, `library` set), even where ComfyUI holds the file: that loader then picks pictures by its own sort until the owner browses for one. `CheckpointLoaderSimple`, and `UNETLoader` with its default `weight_dtype`, become `PixlStashCheckpointLoader` on `checkpoint_id` and `shelf` (the shelf's own id, `GET /checkpoints`' `shelf`) only where the shelf holds one row of that file with a copy present **and ComfyUI is on this computer** (`comfyui_link_service.locate`), since that loader cannot fetch a file. Neither goes in on a pack whose node has no widget for whose the id is. The node's own pickers write the same two widgets, from what the two lists they already read say: `GET /pictures` names its library in the `X-PixlStash-Library` response header, for the owner and ComfyUI's link key only (a share link is not told), and `GET /checkpoints` answers `shelf`. Neither is a route the link key did not already reach. **A layout is matched whichever of a pair each node is** (`SWAPPED_CLASSES`: the stock node, or the one put in its place): which it is follows the shelf, the library and the pins on the day, so the layout is kept under the stock classes and the node that opens it replaces one with the other on the canvas before its check (`open_workflow.js::swapNodes`). `PUT …/graph` compares what it is sent with the stored graph as it opens with these nodes too, with numbers read as a canvas writes them (a default the swap wrote as `1.0` comes back `1`), so a canvas saved untouched stores no version, and a run of a graph that holds the pack's savers submits the stock ones again (`swap_pixlstash_savers`). `?waiting=true` applies the workflow's unsaved changes (#1849), so what opens is the unsaved graph (changes made before the workflow got another version are left out, and `waiting_applied` says so; `GET …/changes` says the same beforehand as `stale`, from the one test); `?all_stages=true` leaves in a stage the default recipe runs without, for a graph that will be saved back with `PUT …/graph`. `?run=<opening>` answers instead the graph the Run popup held for this workflow (`POST /workflows/run/opening`): the other parameters do not apply to it, and it is `404` once it is no longer held or for any other workflow | `{name, workflow, source, seedless, forgotten, shelf_only, version, waiting_applied, editor, people_loader}`; `workflow` is always the graph, and `version` is what `PUT …/graph` takes back as `read_version`. `editor`: the layout kept from the last save from ComfyUI, else, for a manual workflow imported from an editor file, that file; or null (neither, or the graph is wired otherwise now). `people_loader`: where the loader for people goes, `{model, clip, rewires, places, reason}`, or null for no loader |
+| `POST /api/v1/workflows/{workflow_id}/duplicate` | A second copy of the base graph, as a new manual workflow | `201 {name, workflow_id}`: the manual workflow's name and id (`from_name` on its card names the source) |
+| `POST /api/v1/workflows/{workflow_id}/fixed-copy` | A copy with this ComfyUI's repairs applied, as a new manual workflow. No frontend caller since #1850, when the Run popup's *Save fixed workflow* went | `201 {name, workflow_id, changes}`, `workflow_id` the new manual one; 409 nothing to fix; 503 no ComfyUI |
+| `GET /api/v1/workflows/{workflow_id}/changes` | What waits on the workflow, unsaved, and what its last run changed (#1849; `docs/backend_architecture.md` §13, "Saving over a workflow") | `{workflow_id, version, waiting, count, stale, ran, save: {open, reason}, save_as_new: {open, reason}, ran_save}`. `stale` is true when what waits was made against a version of the workflow that is no longer its current one (false when nothing waits): Save is then closed with that reason and `GET …/graph?waiting=true` opens the workflow without what waits, so it is what tells that case from a Save closed for a checkpoint change, where the opened graph does carry the changes. `ran` is only what the last run changed against the workflow, and `ran_save` is Save for `ran` by itself, the set a save with `from_run` writes (null when `ran` is). `waiting` and `ran` are `WorkflowChanges`: `{models: [{address, filename \| sha256}], loras: [{node_id, field, sha256, strength_model, strength_clip}], skip_loras: [{node_id, field}], stages: {stage: bool}, values: [{slot_label, input_name, value}]}`, the fields a run body already has. `reason` is the sentence to print when a verb is closed: a change of a checkpoint this machine has, or changes made before the workflow got another version |
+| `PUT /api/v1/workflows/{workflow_id}/changes` | Replace what waits with a `WorkflowChanges` body; an empty one discards. A LoRA attached to a person is left out. `DELETE` discards | The same state. The card's `unsaved_changes` (grid and detail) is the count; `CHANGED_WORKFLOWS` names the workflow |
+| `POST /api/v1/workflows/{workflow_id}/save` | Save: what waits, with `{changes?}` on top, written over the workflow as its next version; stages and parameters become its defaults and make no version by themselves. Body `{changes?, version?, from_run?, dry_run?}`; `version` is the one `changes` was made against and is checked when sent. With `from_run`, `changes` are what a run was made with (`ran`) and are saved by themselves, with nothing that waited laid under them: a run is the workflow with its request on top and never uses what waits, so a waiting change the run carried is in `ran` already and one the owner put back for the run is not saved. **Of what waits, that save clears only what the run had seen**: a change that waits exactly as it waited when the run was made (the server remembers that set with `ran`) goes, saved or not; a change that did not wait then, or waits with another answer, was made after the run and stays waiting, carried onto the version the save made, so Save is still offered for it. Of those, one the save has just written, or that the saved graph already holds, is dropped as done, and one the saved graph can no longer take (a LoRA set on a loader the save removed) is dropped and named in `not_kept`. With nothing remembered of the run, everything that waits is kept. A set that is `stale` already is left exactly as it is, and does not close this save. Every other save clears what waited. `dry_run` answers the verbs for the set the save would write and writes nothing | `{workflow_id, version, new_workflow: false, left_out, still_waiting, not_kept}`; `still_waiting` is how many changes wait on the workflow after the save (0 unless `from_run`), `not_kept` a `WorkflowChanges` of the changes made after the run that were dropped because the saved graph has no loader for them, or null; `409` with the verb's `reason` as `detail` when Save is closed, or when a change could not be made in the graph; `503` when a LoRA change needs ComfyUI and it does not answer |
+| `POST /api/v1/workflows/{workflow_id}/save-as-new` | Save as new: the same graph stored as a new manual workflow, `{name, changes?, from_run?, dry_run?}`; this workflow is left as it was and what waited is cleared. Open for every set of changes. With `from_run`, `changes` alone are the set, as for Save, and of what waits on THIS workflow only what the run had seen is cleared: what was changed after the run waits on as it did, on the version this workflow still has | `201 {workflow_id, name, new_workflow: true, version: 1, left_out, still_waiting, not_kept}`, `workflow_id` the new workflow and `still_waiting` the count left on the one saved from (`not_kept` is always null here: its graph did not change); a dry run is `200` |
+| `GET /api/v1/workflows/{workflow_id}/versions` | The versions kept, newest first | `{workflow_id, version, versions: [{version, created_at, source, reason, current}]}`; `source` is how the version arrived (`comfyui` for one saved from ComfyUI's canvas, which is what the Workflow tab's *Saved from ComfyUI* line reads) and `reason` its words: `LoRAs edited`, `models changed`, `saved from a run`, `from ComfyUI`, `from an assistant`, `went back to version 2`, `as PixlStash first read it`, or null for the version a workflow arrived as. Empty for an automatic workflow nobody has saved over |
+| `POST /api/v1/workflows/{workflow_id}/versions/{version}/restore` | Go back: the earlier graph becomes the newest version; nothing is removed | The same list, as it is after going back: newest first, its first row the new copy (`current: true`, `source: "revert:<n>"`) and the row directly under it the version just left, which is what an undo goes back to. That holds at the cap too (going back prunes the oldest version after version 1, never the one left) and when the version left was saved from ComfyUI; `404` for a version it does not keep, `409` for the one it has |
+| `PUT /api/v1/workflows/{workflow_id}/graph` | A whole API-format graph saved over the workflow, for one edited outside PixlStash: `{workflow, editor?, opening?, read_version?, waiting_applied?, source: "comfyui" \| "mcp", name?, as_new?}`. `as_new: true` stores the graph as a **new** workflow and leaves this one as it was, whatever the graph holds: what the ComfyUI-PixlStash node sends for a canvas opened from the Run popup (`extra.pixlstash_save_as_new` in the canvas), whose graph is this workflow with one run's changes in it. The new workflow is named `<name> (from a run)` unless `name` says otherwise, takes the graph as sent (the run's prompt and seed with it), and the node links the canvas to it, so the saves after are its versions. `opening` names one opening in ComfyUI: the version a save supersedes is taken away when it was saved from the same opening and nothing was made on it (no picture ran it, no recipe was saved while it was current), so the saves of an opening are one version; no version is ever rewritten. `source` is the caller's to say only for a key not bound to an address: the ComfyUI link key always saves as `comfyui`. `editor` is the editor document `workflow` was converted from (ComfyUI's `graphToPrompt` hands over both): kept as the workflow's **layout**, one per workflow, scrubbed of people's picks and the graph's credentials, and handed back by `GET …/graph` while what opens is still wired as the graph it arrived with; it is never a version, so the same graph laid out another way answers `unchanged` and replaces only the layout. Refused with the save (`422`) when it nests past 64 levels. A multi-adapter loader holding no adapter (the loader for people, with nobody picked or its people just left out) is taken out of the graph before it is compared or stored. Versions with `source` `comfyui` are counted apart from the rest (49 kept, as for the rest), so they prune only each other. Both documents are held to the stored-workflow size before anything walks them. Callers: the MCP server's `import_workflow_graph` with a `workflow_id`, and ComfyUI saving a workflow opened from PixlStash (#1852) | `{workflow_id, name, version, new_workflow, reason, unchanged, replaced_newer, left_out: [{node_id, class_type, field, file, sha256, character_ids, lora, people}], parameters: [{label, slot_label, input_name, was, now}], not_saved: ["prompt" \| "seed"]}`. `parameters`: what the graph changed, which is the workflow's value from then on, also over one the owner typed. `not_saved`: the graph's prompt or seed differed and the workflow kept its own; a graph differing by nothing else is `unchanged`. `new_workflow`: the graph replaces a base model this machine has, or was sent `as_new`, so it was stored as a new workflow. `replaced_newer`: the workflow had a newer version than `read_version`, and was saved anyway. `left_out`: LoRAs attached to a person, which no workflow stores, with the names to say it in (`lora`, `people`). `422` for an editor document as `workflow`, or for an `editor` that is not one; `413` for either past the size a stored workflow may be |
+| `GET /api/v1/workflows/{workflow_id}/people` | Who a run of the workflow can be of: each person with a LoRA for its checkpoint's base model. The one rule the Run popup's Person field and the people loader in ComfyUI share; the loader's people view asks it (through `/pixlstash/workflow_people`) on a canvas opened from PixlStash | `{workflow_id, family, family_label, people: [{id, name, loras: [{sha256, filename, name, trigger_words}]}], clash, unknown, note}`. `family_label`: what a person calls `family` (`Krea 2`), which the ComfyUI adapter loaders fill their `base_model` in with; null where `family` is. `note`: why nobody is offered, in the Run popup's words; null when somebody is |
+| `GET /api/v1/workflows/{workflow_id}/lora-chain` | The LoRA chain in apply order, for the editor (#1478) and for the Run popup's LoRA rows on a run of a workflow by itself (#1850) | `{workflow_id, editable, refusal, source, clip_source, sink: {summary, consumers}, loaders: [{node_id, class_type, field, filename, name, strength, strength_clip, sha256, on_shelf}], added_loader_class, lanes: [{source, sampler: {node_id, class_type, title}, sink, loaders, added_loader_class}], branch_note}`; ComfyUI down is still a 200 with `editable: false`; where the model forks `loaders` is the trunk and `lanes` one entry per pass (empty for a straight chain; `source` null on the chain and set per lane when each pass loads its own model); `branch_note` says why loaders past a further branch are left as they are |
+| `PUT /api/v1/workflows/{workflow_id}/lora-chain` | A copy with the chain as the owner left it: `{entries: [{node_id?, sha256?, strength?}], lanes?: [[entry…]…], name?, dry_run, overwrite?}`, `lanes` one list per lane of the read, in its order. `overwrite: true` saves over this workflow instead of as a copy (`name` is not read): it gets a new version, which is its graph from then on, and the versions before are kept (an automatic workflow's first overwrite keeps the graph read off its pictures as version 1). The card's `versions`, `version` and `version_at` say so | `201 {dry_run, name, workflow_id, overwritten, changes: [{kind, node_id, text}]}`; a dry run is `200` with `name` and `workflow_id` null; an overwrite is `200` with this workflow's id, `overwritten: true` and `name` null |
+| `GET /api/v1/workflows/{workflow_id}/model-swap[?checkpoint_id=][&replacing=&slot_kind=[&cached=true]]` | The graph's model files (each resolved to one shelf row or `null`), the shelf's checkpoints, VAEs and text encoders; with `checkpoint_id`, the companions recipes, and the ComfyUI runs already recorded (`history_runs`; nothing reads ComfyUI's history since #1854, so they no longer grow), have run beside it (or, when none has, the files whose layout its family declares, `via: "declared"`) and the LoRAs/ControlNets trained on another family **With `replacing`** (the Workflow tab's "Replace with…" for `PUT …/model-fix`, #1596, and the Run popup's model rows, its missing-checkpoint offer among them: one read per row, shared within one popup, #1850), `replacements: [{id, filename, display_name, via, loader, likely}]` answers instead (`likely`: the one shelf file of the kind whose name reads as the missing one's, renamed, by `SequenceMatcher` over the names without extensions, not where two do or the precisions differ; offered first, past the go-with and base-model filters but not the loader one), and `replacements_narrowed` says whether a checkpoint's offer was held to a base model, and `replacements_reason` (`no_checkpoint` \| `none_go_with_it` \| `none_loadable` \| `needs_pixlstash_nodes`) says why it is empty. With a `slot_kind` of `vae` or `text_encoder` and no `likely` replacement, `refile: {id, filename, display_name, file_kind}` (#1962) names the one shelf model whose name reads that way but which the shelf files as a checkpoint or Unclassified, so the offer cannot see it: only where both names carry a word for that kind (`vae`; `t5`, `clip`, `encoder`, …), nobody has decided its kind and no recorded workflow loads it as anything else. Filed as `slot_kind`, it is the `likely` replacement wherever the loader can load it; the read never re-files it. Every filter is required, a checkpoint's base model only while a loadable one has it: a VAE or text encoder must go with the graph's base model (`propose_companions`: the owner's workflow sets, then recipes and ComfyUI runs; `declared` is the untested cold case), a checkpoint must share the missing one's base model (its shelf row's, else the one base model the graph's LoRAs and ControlNets agree on; unnarrowed when neither says, or when no loadable checkpoint has it, so a guessed base model never leaves nothing to pick), and every kind must be loadable by every loader naming the file, checked with the rewrite's own rule (`listed_as`) when ComfyUI answers and by file type when it does not, so a core loader is never offered GGUF. Read off the graph with the owner's fixes applied; 409 when it loads the file in no slot a fix can fill (of `slot_kind`, when given), or in slots of two kinds and `slot_kind` does not say which. A file the loader does not list is offered anyway when a run can load it through a PixlStash loader (`PUT …/model-fix`'s swap rule, `plan_pixlstash_swap`; a checkpoint by shelf row through `PixlStashCheckpointLoader`, only with ComfyUI on this computer, `swap_in_pack_nodes`), with `loader` naming that node; `needs_pixlstash_nodes` says that is the only thing missing. With `&cached=true` (the Workflow tab, which asks once per model row of every workflow selected) what each loader lists is read from the one-minute `/object_info` cache instead of from ComfyUI; the Run popup asks without it, and a run checks its picks against a fresh read either way | `{slots: [{filename, kind, model}], checkpoints, vaes, text_encoders, checkpoint_family, checkpoint_modality, proposals: {vae, text_encoder: [{id, filename, display_name, family, via, recipes, history_runs}]}, flags: [{filename, kind, base_model, family, modality}]}`, and with `replacing`, `replacements: [{id, filename, display_name, via, loader, likely}]`, `replacements_narrowed`, `replacements_reason` and `refile: {id, filename, display_name, file_kind} \| null`. `modality` is `image`, `video` or null (the base model does not fold to a known one); a LoRA or ControlNet is flagged when its family OR its modality differs from the checkpoint's, the flags name both modalities when they differ, and the `family` proposal step never crosses modalities. `checkpoints` is filled on the call without `checkpoint_id` only, narrowed to what the workflow's first base loader could load |
+| `POST /api/v1/workflows/{workflow_id}/set-clone-plans` | What the Workflow tab's *Use a set…* reads (#1850; it turns a plan's `swaps` into unsaved model picks and writes nothing), and before it what Clone onto a workflow set drew: per set asked, the files the clone takes from it and the graph's model loaders before and after, run through the clone's own rewrite on a copy (nothing is written). **Read off the graph a run submits**, with the owner's replacements for models this machine lacks applied (`PUT …/model-fix`), so every file the plan names for the graph (`swaps` keys, `takes` keys, `loaders[].was`, `base_filename`, `unpaired_bases`) is the one its loader loads, the replacement where there is one, as the fix names it; and a set holding the original a replacement stands in for is no swap, since naming that file on this workflow loads the replacement. Body `{sets: [{key, checkpoint_ids, model_ids, picks?}]}`, the client's set keys, each set's checkpoints (or diffusion files; a two-model graph takes one per base loader) and its other shelf models; `picks` is the owner's own pairing, a VAE or text-encoder file of the graph -> the model of `model_ids` its loaders take (422 when it names another model, or one model twice) | `{base_filename, base_model, plans: [{key, fit, reason, base_model, keeps_loras, swaps, unpaired_bases, takes, choices, maps_cleanly, loaders: [{node_id, kind, was_class, now_class, was, now, pack, installed, was_type, now_type}]}]}`. `fit` is `same_base_model` \| `same_family` \| `other` \| `wont_load` (with `reason`: no checkpoint, "Needs a <loader>", a file ComfyUI does not list, or "Used for <types>, not <type>": **like for like only**, so a set whose checkpoints' recipes are all of another kind of workflow than this one is refused, the kind being the workflow type with a video workflow told apart by whether its graph loads a picture, `Text to Video` or `Image to Video`; a checkpoint no recipe names is refused nothing); `keeps_loras` is false whenever either base model is unknown; `takes` is each VAE or text-encoder file of the graph -> the set's model id its loaders take (changed or not: a file the graph already loads is kept, the rest are paired by name) and `choices` the set's model ids by loader kind (`vae`, `clip`), which together are what a re-plan's `picks` is built from; `maps_cleanly` is true when the set's checkpoints, VAEs and text encoders fill the graph's loaders of those kinds one for one and, onto another family, every CLIP loader takes the type the new model loads as (never for `wont_load`); `was_type`/`now_type` are a CLIP loader's `type` before and in the clone (null for other loaders); `pack` names the node pack a changed `now_class` comes from, `installed` whether ComfyUI has it (null when not asked) |
+| `POST /api/v1/workflows/{workflow_id}/clone-with-models` | No frontend caller since #1850, when the clone dialogs went (a model is changed on the Workflow tab and saved). A copy of the base graph with model files replaced, named as asked, as a **new manual workflow** made from this one (`from_name`), never folded into it. A file of another type swaps its loader's class too (a `.gguf` into `UNETLoader` makes it `UnetLoaderGGUF`), and a class ComfyUI lacks gets its file unchecked rather than a refusal. Body `{name, swaps: {graph filename: new filename}, loras?}`; `loras`, in `PUT …/lora-chain`'s `{entries, lanes}` shape and read against the original's chain, rewires the LoRAs (`{entries: []}` removes them) and needs ComfyUI (503). All or nothing: 409, and no file, when any swap could not be written (`not_in_graph`, `not_on_comfyui`, `several_on_comfyui`) or when every swap names the file already loaded. `verified` is false when any name went in unchecked | `201 {name, workflow_id, swapped, unswapped: [{was, now, reason}], loaders: [{node_id, was, now, pack, installed}], verified}` |
+| `DELETE /api/v1/workflows/{workflow_id}` | Delete a **manual** workflow: its document goes to the trash by way of the watched inbox, its pictures return to the automatic workflow their graph is in and its saved recipes become unfiled | `{deleted, workflow_id}`, `deleted` the workflow's name; **409 on an automatic id** (hide it instead) |
+| `POST /api/v1/recipes/{recipe_id}/extract-workflow` | Make a saved recipe a manual workflow: the graph Run would build for it (the run planner's own), seeds and picture inputs left for a run, ComfyUI not asked. Works for a recipe whose workflow is gone, on the graph it was saved from | `201 {workflow_id, name}`, the new manual workflow and the recipe's name; 404 no such recipe; 409 no graph left to build on |
+| `GET /api/v1/recipes?unfiled=true` | The saved recipes on no workflow this machine holds (NULL, deleted or moved): the Workflows view's "Unfiled recipes", each offering Extract workflow and Delete. Extract is disabled, with its reason, on a row whose `extractable` is false: the card it was saved from is gone too (a deleted manual workflow's), so extraction would 409 | `[SavedRecipeOut]`, the list route's own shape, `pictures` always 0 (no credit), plus `extractable` (null in every other listing); 400 with a `workflow_id` |
+| `GET /api/v1/recipes/{recipe_id}/export` | The saved recipe as a file | `{filename, recipe, shares: [string]}` |
+| `GET /api/v1/recipes/used?workflow_id=…` | Every look this workflow's own pictures were made with (filed as the grid files them, `predicate_filter.filed_as`: a live manual workflow's are its runs, by `run_workflow_id`, and an automatic workflow's are its variants' less those), a saved recipe's included and flagged `saved`. `workflow_id` repeats for a selection of several and the answer is the union. **The Recipes tab's list, filled without anybody pressing Save** | `[{prompt, loras: [{filename}], pictures, cover_picture_id, saved}]` |
+
+Five rules the client must not re-derive:
+
+1. **The workflow export is scrubbed and the recipe export is not, and that is
+   the whole difference between them.** The export blanks the prompt and
+   caption targets **and every other widget a person could have written in**,
+   nulls seeds, empties every LoRA slot that does not load a LoRA of the
+   workflow's default recipe (#1623; before it, every slot not marked
+   `structural`) — **by filename and by digest** — strips `_meta` titles, blanks picture file
+   names and anything in a widget named like a key or a password, resets output
+   paths (`filename_prefix` names a folder on the owner's disk), drops
+   `checkpoint_id` (a row id in this machine's database), and drops any model
+   name the model shelf cannot vouch for along with the *folder* of the ones it
+   can. A recipe
+   *is* the prompt and the LoRA names, so its export withholds nothing and
+   says so in `shares` instead — which is the list the export dialog puts in
+   front of the owner before they agree to it.
+2. **`removed` names categories, never values.** "prompts", "seeds", "LoRA
+   slots that are part of the look", "node titles", "picture file names",
+   "where the pictures were saved", "the folders your models are filed in",
+   "model names this machine does not hold", "values in fields named like a key
+   or a password". "node titles" appears only when a title is not ComfyUI's own
+   default (the node's class name), so a category in this list always means
+   something a person put there. A forgotten model name sitting in
+   a LoRA widget reports as the **model** category, not the LoRA one: it is a
+   forgotten model name, and calling it "part of the look" would tell the owner
+   the opposite of what happened. A response repeating the prompt
+   it withheld would be the leak the scrub exists to stop, so a client wanting
+   to tell the owner what came out renders these strings and has nothing else
+   to render.
+3. **A model name the shelf does not hold does not travel, and that is
+   stricter than the Ghosts filter on purpose.** Forgetting a model's name
+   deletes its hub rows and rewrites no graph, so a picture's embedded
+   metadata still names the forgotten LoRA in full and resolving a source from
+   that picture would carry it straight back out. The export checks the shelf
+   rather than the ghost list, so a name nobody on this machine holds is blank
+   in the file — including a name the ghost list can no longer see because
+   forgetting it is what removed it from there. **Prose is found by widget
+   name across the whole graph**, never by asking which node the sampler
+   reads: that question returns nothing for a hires-fix graph with two
+   samplers, and names widgets (`text`) that an SDXL encoder (`text_g`,
+   `text_l`) does not have. Three further rules catch prose no widget name
+   announces: a raw-string primitive (`PrimitiveStringMultiline`, `String
+   Literal`) handing its value into an encoder, the reducer's own backstop (a
+   newline, or longer than a filename can be), and whitespace — a combo token
+   ComfyUI would offer has none, and a filename is tested for first. What is
+   left is a single word, on an unknown node, in a widget no rule names.
+4. **Duplicate and Insert loader make a manual workflow and never change
+   one.** Each is a new record named `… (copy)` / `… (LoRA)` (identical copies
+   are allowed; no file is written), both are **unscrubbed** — they stay on this machine
+   and are meant to run — and both emit `workflows_changed` with
+   `reason: "imported"`. Insert loader reaches the owner's ComfyUI for
+   `object_info` (503 when it cannot) and answers 409, with the sentence, where
+   the splice cannot be made honestly: no model source, several models or text
+   encoders. A node that already loads a LoRA its own way does not stop it: the
+   loader goes in the MODEL path alongside it. **It
+   chooses no LoRA**: the loader lands at ComfyUI's own widget defaults, the
+   way dropping the node in ComfyUI would leave it, so the client tells the
+   owner to pick one rather than presenting the copy as ready to run.
+5. **Delete is for a manual workflow only.** An automatic workflow is not a
+   record, and `DELETE` answers 409 telling the client to hide it instead —
+   its variants and its pictures always stay either way. A manual one's
+   document goes to the system trash through the watched inbox; its pictures
+   stay, back on their automatic workflow.
+
+Five things the two sides have agreed and neither may drift from:
+
+1. **The list is one row per topology, never per recipe.** ~192 rows against
+   ~617 on the owner's library. The frontend never flattens the variants into
+   the list, and the backend never returns them there.
+2. **Both hashes are 64-character SHA-256 hex, checked and not trusted**, on
+   every route. A malformed one is a 422 naming the parameter.
+
+   A well-formed hash this machine has never filed is a **404 on the two routes
+   that resolve a hub object** (`/variants` and `/recipes/{h}/graph`), because
+   an empty 200 there would read as "this workflow has no variants" rather than
+   "this machine does not have it". It is **200 with an empty list on
+   `/pictures`**, and that is not an inconsistency: that route never opens the
+   hub. It asks the vault which of *its* pictures carry the hash, and "none"
+   is the true and complete answer for a topology this library never used —
+   which is the same answer a topology the hub *does* know gets when its
+   pictures are all in the Scrapheap. Making it 404 would buy a hub round trip
+   per tile strip in order to distinguish two states the caller draws
+   identically.
+3. **`assets` is a SET and `adapter_slots` is a count, and they answer
+   different questions.** A topology row's `assets` are the distinct files its
+   variants name *between them*, de-duplicated server-side; `adapter_slots` is
+   how many adapters **one run** loads. The frontend builds the row's only
+   identifying line from the second, never from the length of the first — the
+   owner's largest family is 159 character LoRAs in one slot, and a descriptor
+   built from the names claims the graph loads all 159 at once. A **variant**
+   carries no `adapter_slots` and needs none: every name on a recipe is a file
+   that run actually loaded, so the client counts them there.
+
+4. **An empty `assets` list is a state, not a missing field.** Forgetting a
+   model's name is a row delete in the hub, so the graph stays and only the
+   ability to say which model it was is gone. `forgotten_models` counts those
+   (read off the document's unresolved asset references; a maximum over
+   variants on a topology row), so the client says "3 models, names forgotten"
+   (or "a, b, names forgotten", with no number beside a union of names) and
+   keeps "no model names" for a graph that names none. `ghosts` (this
+   library's picture ghosts) and `model_ghosts` (names for models not on the
+   shelf) are what the toolbar's Ghosts toggle filters on, client-side.
+5. **`runnable` is always `false`, and it is in the payload rather than in a
+   comment.** The stored document has its parameters, seeds and prompts nulled
+   and names its assets by an opaque reference — which is what lets a workflow
+   outlive the pictures it made — so it describes the graph and will not open in
+   ComfyUI. What ships as a download is
+   `GET /workflows/{workflow_id}/export` below, which resolves a runnable graph and
+   scrubs it; this route's document is for reading, not for opening.
+
+Every route is `OWNER_ONLY`. That is a decision, not a default: the counts are
+read across every non-deleted picture in the vault, so a scoped token holding
+them would learn the size of the whole library one workflow at a time. There is
+therefore no scoped/narrowed variant of these routes, and adding one means adding
+a narrowing parameter and a policy to check it against.
+
+**The cards (v1.12 B3) sit beside the topology list, not on top of it.** The
+shipped Workflows shelf reads `GET /workflows` and keeps working until F1b
+swaps the route; B9 then moves the grid onto `/workflows` itself. Six things
+the two sides have agreed:
+
+1. **The entry's shape is `frontend/src/utils/workflowCard.js`, and the
+   backend serves that document** with no mapping layer. Since #1623 it is one
+   entry per workflow keyed `id`, and the fields are the ones in the `GET
+   /workflows` row above; each slot is `{name, title, icon, base_model,
+   base_model_folded, sha256, base_model_family, mark, mark_tab, mark_colors,
+   mark_icon, mark_letters, mark_band, kind, quant, slot_label}` (the `mark*` fields are #1951's named
+   tile, not the pre-#1623 card mark), and the stack
+   fields are gone. The historical notes below that speak of a card, a stack
+   or a mark describe the contract before #1623.
+
+   **`cover_ids` pairs with `covers` by POSITION, and that is the contract.**
+   Same order, same length, built from one candidate list. It exists because
+   the Workflows grid opens the picture a cover draws (#1455) and the only
+   other route to that id is to parse it out of the thumbnail URL — a path
+   shape, not an interface. A client pairs the two before it drops an empty
+   entry, or the strip opens the wrong picture from the right tile
+   (`utils/workflowCard.js:coverPictures`); the server side is asserted by
+   `tests/test_workflows_api.py::test_cover_ids_name_the_pictures_the_cover_strip_draws`
+   and, where an owner-chosen cover rebuilds the strip, by the chosen-cover
+   test beside it.
+
+   **`name` is never null**, and that is part of the contract rather than a
+   convenience. `workflow_attr.name` is written only on an explicit rename, so
+   most cards have none — and the card's name row is its only identifying text
+   while `InfoPopover` puts it straight into an `aria-label`, so a null renders
+   an empty row and the label "About null". The server resolves it: the owner's
+   name, else the workflow file that runs the card (without its extension),
+   else the card described from what it loads and does — `Krea 2: Text to
+   Image + FaceDetailer` — else, with no base model to name, what it does
+   (`Upscale`), else `Workflow`. The described one names the base model as the
+   model shelf names it (every one of a two-loader graph such as a Wan 2.2
+   high + low pair, joined ` + `, once each, never saying which is which) and falls back to the filename stem for a model this
+   machine has never scanned. Two cards that would print one generated name are
+   numbered (`Upscale (2)`, in `workflow_id` order); the ⓘ panel carries what
+   the number does not say.
+
+   **A slot's `name` is DERIVED, and `quant` is what was taken out of it.** The
+   server serves `model_utils.derive_model_name(...)` — no folder, no
+   extension, no quantization postfix — so a chip reads `t5xxl` rather than
+   `t5xxl_fp8_e4m3fn.safetensors`, and the card's own generated `name` row
+   (`_display_name`) loses the postfix with it. `null`, never `""`, for a slot
+   whose name the recipe did not record; a name that is *nothing but* its
+   quant falls back to the file's own string, the way a model shelf row does.
+   `quant` is one canonical id (`bf16`, `fp8_e4m3`, `q4_k_m`, `int8`,
+   `mixed`), null where nothing records it — the model shelf's own column
+   where this machine holds the file, the filename postfix otherwise. **It is
+   an id and not a label**: `FP8 E4M3` is display copy and lives in the client
+   (`utils/modelShelf.quantBadge`), the way slot kinds already do. A client
+   showing the name must show the badge beside it, or two quantization builds
+   of one model read identically.
+
+   `GET /pictures/{id}/recipe`'s `model_slots` carry the same `quant` under
+   the same rules, so the overlay and the card agree; its `name` stays RAW
+   there, because it is the model shelf lookup's own key and what the chip's
+   hover text shows.
+2. **Two layers reach the client: a workflow and a recipe.** An entry is a
+   **workflow** (`id`), and every value that used to tell cards or stack
+   members apart - a checkpoint, a LoRA, a parameter, a stage on or off - is a
+   **recipe** value: the workflow's `default_recipe`, a saved recipe's
+   overrides over it, or one run's body. No route names a card key, a slot
+   mark or a stack member any more; the card (topology plus non-LoRA models)
+   and the `workflow_recipe` / `structural_hash` tier, which this API calls a
+   **variant**, are internal storage a workflow's figures are counted over. A
+   *saved recipe* is the look a person keeps, filed on its `workflow_id`, so
+   `saved_recipe_count` is a real count rather than a placeholder.
+3. **`rating` and `rank` are different numbers and neither substitutes for the
+   other.** `rating` is the plain mean of the stars a card has and is `null`
+   when it has none; `rank` is the Bayesian mean the grid is *ordered* by,
+   smoothed towards the library's own mean rating, and is meaningless shown on
+   its own. A card nobody rated has `rating: null` and a `rank` near the
+   library average, which is the point of having both. `rating_counts` is
+   the five integers behind `rating`: how many kept pictures carry each star,
+   1★ first (a cleared 0 counts in none).
+
+   **`last_used` (v1.12 F1a) is the third of these and is nobody else's job.**
+   It is when a kept picture was last made by any variant of the card, in the
+   same ISO spelling `GET /workflows` already serves, and `null` when the card
+   has no kept pictures. The Workflows grid offers *Recently used* beside *Your
+   ratings* and *Picture count*, and nothing already on the card carries it:
+   `rank` is a rating and `covers` is an order, not a date. A client sorting by
+   it puts `null` BELOW every dated card — reading "never" as a date is how a
+   workflow with nothing to show would outrank every workflow made before 1970.
+
+   **`created_at` and `changed_at` date the workflow itself**, for *Recently
+   created* and *Recently changed*, with the same `null`-last rule. A manual
+   workflow: its document's storing and its newest version (a graph saved
+   over it). An automatic one: the first and the newest of its
+   recipes the hub has seen (`workflow_recipe.first_seen_at`), a new variant
+   being the workflow changing. The owner's edits to name, notes or defaults
+   carry no date and do not move either.
+4. **The grid draws one card per workflow (#1623).** A workflow is a group of
+   variants sharing a core and a set of base-model families (`auto:<64 hex>`,
+   opaque; one topology can hold several); its card is the base card's
+   (`base_topology`), with counts, covers and rank over every card of every
+   topology in it, and `topologies` lists them all. There are no
+   stacks on the wire any more: `stack_size`, `stack_id`, `member_keys`,
+   `members`, `differs_by` and `differs_by_detail` are gone, with the stack
+   routes that addressed them. What used to tell stack members apart — a
+   checkpoint, a LoRA — is a recipe value now: `recipe_values` counts the
+   checkpoints and LoRAs the workflow's kept pictures used, and each name is a
+   value `GET /pictures?workflow=<id>&comfyui_model=…` (or `comfyui_lora`)
+   filters on.
+5. **Nothing is precomputed, and `cards` is not everything.** The grid is three
+   vault queries in one session — one `GROUP BY workflow_structural_hash`, one
+   `ROW_NUMBER()` window and one `GROUP BY workflow_id` over the saved recipes,
+   plus the model and LoRA values behind `recipe_values` — joined in memory to
+   the hub's card rows, with no aggregate table, so no client may assume a
+   figure is stable across a rating or an import. Hidden cards and one-offs are
+   excluded and returned as the counts `hidden` and `one_offs`; both still open
+   by key on the detail route, because hiding is a decision about the grid
+   rather than a deletion.
+
+   **A one-off is all four of**: fewer than three pictures, never rated, never
+   imported as a file, and with no saved recipe on it. The fourth clause is
+   B6's: saving a look is the plainest statement that somebody means to run a
+   workflow again, so a card carrying one is never folded into the count.
+
+   **Any stored workflow counts as imported**: One-Offs is for workflows
+   known from their pictures alone, so a stored workflow is listed the
+   moment it arrives. The test is the card's wire `imported`, "has a file".
+
+6. **A card can have no variant at all, and `variant_count: 0` is how a client
+   knows (#1466).** ComfyUI saves in *editor* format unless somebody
+   deliberately exports the API one, and an editor-format file names its widget
+   values by position: filing it writes a topology and no recipe, so its card
+   key is the topology's alone and no `workflow_variant` row carries it. Such a
+   card is a stored workflow file and nothing else — no pictures, no cached
+   slot list, and a null `core_hash`, so it is a workflow of its own,
+   `auto:<topology_hash>`, unless another card of its topology has a core.
+
+   **Its `models` and `loras` are recovered from the file, not read off a
+   recipe**, and they carry the same fields as any other card's: `name` is the
+   graph's own string put through `derive_model_name` (see §2.3's slot note),
+   `title`, `icon` and the two `base_model` spellings are
+   the model shelf's where the shelf holds the file, and `kind` is the loader's real slot
+   (`unet` for a Flux graph, never `checkpoint` by default). `slot_label` is
+   null on every one of them, because a slot label is an address inside a
+   stored topology and this card has none — so nothing here can be the target
+   of a write. A LoRA recovered this way is named: it is in the file, and
+   there is no recipe to fill it.
+
+   **An empty row is "not read", never "has none" — and that is per ROW.**
+   The recovery finds loaders by class, over `MODEL_FILENAME_FIELDS` (through
+   `model_filename_fields`, which also reads a ComfyUI-MultiGPU wrapper as the
+   loader it wraps), and no
+   list of classes is every loader there is: a graph can have its LoRAs
+   recovered and its base model missed, so a non-empty `models` does not mean
+   the card was read either. A client renders any empty row on a
+   `variant_count: 0` card as unread; `checkpointUnread` and `lorasUnread` in
+   `utils/workflowCard.js` are the shipped reading of it.
+
+   `mark`, `mark_tab`, `mark_colors`, `mark_icon`, `mark_letters` and
+   `mark_band` (#1951) are the tile the server names for a slot of a known
+   base model, the same six fields as on
+   its `GET /checkpoints` or `GET /adapters` row
+   (`known_base_models.model_tile`), so a client draws the tile without a
+   table of its own; all null keeps the generated mark. The card draws it; the
+   ComfyUI pack does not read these fields yet.
+
+   `icon`, `base_model` and `base_model_folded` are served on **every** card's
+   slots, not only
+   these: they are what the model shelf draws a model with, and a card that has
+   to draw itself out of its models rather than its pictures would otherwise
+   need a second request per model to do it.
+
+   `sha256` and `base_model_family` name the shelf file a slot loads and the
+   family of the base model the shelf identified it as
+   (`model_shelf_service.base_model_family`: filename guesses included, the
+   same value as `base_model_family` on its `GET /adapters` or
+   `GET /checkpoints` row, where `family` stays the stated-only one). Both are
+   null where the shelf does not hold the file or the name could be more than
+   one file. They let a client narrow workflows to a LoRA's base model, and
+   match the checkpoint against a hand-made workflow set, without another
+   request: Create with LoRA… does both (`frontend/src/utils/loraWorkflows.js`).
+
+   **Every way in makes a manual workflow, and no file.** `POST
+   /api/v1/comfyui/workflows/import` answers `{status, name, matched: false,
+   workflow_id}`, always a new manual workflow (identical copies allowed;
+   `overwrite` and `keep_both` are gone with the folder). The watched inbox
+   deduplicates on `workflow_origin` only, so a restart
+   re-imports nothing. `POST /api/v1/comfyui/workflows/{workflow_name}/card`
+   (`OWNER_ONLY`) makes a **built-in** workflow file a manual workflow once
+   (`origin: builtin`) and answers `{name, workflow_id}`: Edit with ComfyUI
+   asks it for the Flux.2 Klein edit workflow and opens the Run popup on the
+   id. 404 for an unknown name or a user file (data step 7 made that a
+   workflow already, and one deleted must not come back), 409 when it is not
+   a workflow. A document past `MAX_WORKFLOW_FILE_BYTES` serialised is a 413
+   on every route that stores one.
+
+   **The first read that needs a manual workflow's graph converts it on the
+   server and stores the conversion**: the inspector's defaults
+   (`GET /api/v1/workflows/{id}` and every write answering with it), Run,
+   preflight, Open in ComfyUI and the file gestures (`_card_source`). All of
+   them read the document through
+   `workflow_card_service.converted_manual_document`, which converts an
+   editor document that has no conversion yet with `convert_ui_graph_to_api`
+   against ComfyUI's `object_info` (cached a minute, failures too) and stores
+   the API graph as `api_document` on the version it converted, exactly where
+   the node's conversion goes. **Stored only while that version is still the
+   current one and only where no conversion is stored**, both checked in the
+   write transaction (`set_manual_api_document(..., keep_stored=True)`). Every
+   later read, and every reader (parameters, defaults, models, the LoRA
+   chain, Run), then sees the same graph whether or not ComfyUI answers. A
+   refusal (ComfyUI not answering, a node it lacks, a widget count that does
+   not match) stores nothing, still answers `ui_format`, and the next read
+   tries again. There is no manual step. Extract workflow from a saved recipe
+   asks ComfyUI nothing, so it converts nothing. An editor-format workflow FILE is
+   still converted per read and never stored (`_converted_document`).
+
+   **A conversion from ComfyUI wins over the server's (#1530).** `POST
+   /api/v1/comfyui/workflows/convert` (`OWNER_ONLY`) takes `{name, workflow,
+   output}`: what ComfyUI's own `app.graphToPrompt()` returns for the workflow
+   on its canvas, sent by the ComfyUI-PixlStash node one workflow at a time,
+   the gesture starting in ComfyUI. `workflow` is matched against the manual
+   workflows' documents by content (stored first, as an import would, when
+   nothing matches), and `output` is stored as the API document of every one
+   holding it; the document itself is never changed. A manual workflow then
+   runs and takes parameters from the API graph. The response is `{name,
+   matched, workflow_id, left_out}`: the (first) manual workflow, whether it
+   already held the document, and the LoRAs attached to a person that the
+   graph loaded (`{node_id, class_type, field, sha256, character_ids, lora,
+   people}`). Those are no part of a workflow (rule 4 of #1846): they are
+   taken out of the stored `output` row by row, the loader for picking people
+   comes off, and the editor document is stored without the picks (#1852).
+   It is never a version of another workflow. It replaces a conversion the server stored; the
+   server's never replaces one already there, so whichever arrived first,
+   ComfyUI's is the one kept. Parameters and defaults are read from the stored
+   conversion only; a client reads a manual workflow with no defaults and
+   which will not run (`ui_format`) as an editor document the server could
+   not convert, and offers Open in ComfyUI.
+
+**The file-keyed workflow routes are retired (#1410).** `GET` / `PUT
+/api/v1/comfyui/workflows/{workflow_name}/inputs` (#1305), `GET .../parameters`
+and `PUT .../pins` (#1306), `POST .../run` (#1307), and `POST
+/api/v1/comfyui/run_i2i`, `run_t2i` and `run_recipe` are gone. They addressed a
+workflow by **file name**; a card is content-addressed and carries its own
+defaults, pins, inputs and slots, so the contract for all of it is the card
+routes above plus `POST /api/v1/workflows/run` (§2.2 and §11.2). The hub's
+file-keyed `workflow_picture_input` and `workflow_parameter_pins` tables stop
+being read; the hub is append-only, so they are not dropped.
+
+**Where a LoRA loader would go (#1376).**
+`GET /api/v1/comfyui/pictures/{id}/recipe` carries `lora_insertion: {plan,
+reason}` when its `lora_slots` is empty, `plan` being `{model: {node_id, class_type, output}, clip: … | null,
+rewires: [{node_id, class_type, field, type}], also: [{model, clip, rewires}],
+pixlstash_loader}` (`also` holding one more splice per further copy of a model
+the graph loads several times, empty otherwise) and `null`
+with a `reason` when no loader can go in (several different models or text encoders, a
+second model chain of another kind, a CLIP source that reads the model, no
+model, a link neither end can type - a node this ComfyUI lacks read by an input
+whose type is unknown too - ComfyUI unreachable). A node loading a LoRA its own
+way, or a missing node whose reader declares a non-model type (a seed from an
+uninstalled pack), does not stop it.
+`pixlstash_loader` says the digest loader could be the one
+inserted, which needs the ComfyUI-PixlStash pack installed. A run recomputes
+the plan rather than trusting one sent back, and the loader is the run's, never
+written into the stored file.
+
+**The list's LoRA slots carry no `value`** (#1310). Each row of
+`GET /api/v1/comfyui/workflows` reports `lora_slots` as `{node_id, class_type,
+field, by}`, `by` being `filename` for a core loader and `digest` for a
+ComfyUI-PixlStash one; a stacker's slots share a `node_id` and differ by
+`field`, and an empty list means the graph has no loader. The values are on
+the card detail read and on the picture-scoped
+`GET /api/v1/comfyui/pictures/{id}/recipe`. The list is `OWNER_ONLY`, like
+`GET /api/v1/workflows`: it names every stored workflow file, whatever the
+Workflows view hides, so no share-link token reads it.
+
+`GET /api/v1/comfyui/workflows` carries `has_selection_input` and `runnable`
+(a save node, in API format). The selection path offers a runnable workflow
+where `has_selection_input` is true, and the toolbar one where it is false.
+
+**The pictures a workflow made (v1.12 B5; `workflow` since #1623).**
+`GET /api/v1/pictures` takes `workflow=<workflow id>`, which is how a workflow
+opens onto its own grid without a route of its own: the server resolves the
+workflow to the variants filed under its topologies
+(`workflow_card_reads.variants_in_workflow`) and matches
+`picture.workflow_structural_hash` against them. It narrows like every other
+filter on that route, so `workflow=<id>&comfyui_model=<value>` is "this
+workflow's pictures made with that checkpoint" - which is what a
+`recipe_values` entry is for - and `workflow_lora=<asset:…>` narrows it to one
+LoRA file. `workflow` is repeatable (#1797): `workflow=<a>&workflow=<b>` is the
+pictures of either, OR'd like `comfyui_model`; `workflow_lora` narrows only a
+single workflow and matches nothing beside several. **A workflow no picture was made with answers with an empty grid,
+never the whole library**; a client that treats "no results" as "filter
+ignored" would be reading it backwards. The id itself comes from a workflow
+read, or from `GET /api/v1/comfyui/pictures/{id}/recipe` (§11.2), which reports
+the workflow the picture's own variant is in. `workflow_key` and
+`workflow_stack` are gone with the card and the stack.
+
 ---
 
-### 2.3 The `/libraries` contract (v1.11)
+### 2.4 The `/libraries` contract
 
 Six routes, and the split between them is a locality split rather than a
 read/write one.
 
 | Route | Tier | Shape |
 |---|---|---|
-| `GET /libraries` | `owner_only` | `{ libraries[], can_manage, in_docker, cli_hint }` |
+| `GET /libraries` | `owner_only` | `{ libraries[], can_manage, in_docker, cli_hint, importing_uuid, importing_name, importing_path }` |
 | `GET /libraries/inspect?path=` | `local_owner_only` | one verdict (below) |
 | `POST /libraries` | `local_owner_only` | `{ path, name? }` → the library, `201` |
 | `PATCH /libraries/{library_uuid}` | `local_owner_only` | `{ name }` → the library |
@@ -454,7 +1470,7 @@ given a visible reason instead of controls that each fail.
 | `verdict` | `can_add` | Means |
 |---|---|---|
 | `attached` | `false` | This exact folder is a registered library (`library` names it). `picture_count` is still what is on disk, indexed or not: a desktop first run creates the vault in a folder that may already hold pictures, and the empty library asks this to know whether to offer bringing them in |
-| `overlaps` | `false` | A registered library contains it, or it contains one (`library` names it) |
+| `overlaps` | `false` | A registered library contains it, or it contains one (`library` names it); or it overlaps a watch or reference folder of any registered library (`library` is `null`, `detail` names it) |
 | `vault` | `true` | A vault nothing is using — `POST /libraries` attaches it |
 | `pictures` | `true` | Pictures, no vault — `POST /libraries` starts a library over them |
 | `empty` | `true` | Neither — `POST /libraries` starts a fresh one |
@@ -484,6 +1500,22 @@ the row, so the `inert_share_links` it reports stop working rather than being
 revoked, and adding the same folder again revives the row — same uuid, same
 tokens live again. The active library is refused (`409`); switch away first.
 
+**A token is good in one library unless the owner says otherwise (#1787).** A
+bearer token used while another library is active is answered `403 Token
+belongs to a different library`, and for a token that names no resource the
+detail goes on to say how to lift that. `PUT /users/me/token/{token_id}/libraries`
+with `{"all_libraries": true}` makes the token act on whichever library is
+active; `false` pins it to the library active now. It answers `{status, id,
+all_libraries}`, `400` for a share link (its ids mean something else in the
+next library) or a full-access ComfyUI link key from before the ComfyUI scope (`source_bound` with scope `ALL`), and `403` to anyone but the owner's own session on the local
+network (`LOCAL_OWNER_ONLY`, and never a token, not even a full-access one
+asking about itself), which is why minting cannot set it and the client makes
+two calls. `GET
+/users/me/token` reports `all_libraries` per row. `AccountSection` shows it as
+the **Every library** switch and `ConnectAgentDialog` as **Use in every
+library**; both read `can_manage` from `GET /libraries` to know whether this
+caller may change it, the same answer the Libraries tab is told.
+
 `PATCH` and `DELETE` take the **uuid only**, and only of an **attached**
 library. The registry's `get` also accepts a row id and a name, which is right
 for a CLI a person types at; over HTTP the handlers resolve through `by_uuid`,
@@ -496,6 +1528,48 @@ library already forgotten is a `404`, not a second `200`.
 not: these routes are hub-only and deliberately keep answering when no vault is
 open, which is the state an owner recovers from. Detach is the exception because
 it reads which library is active, and mid-swap that is the one thing moving.
+
+**Moving pictures between libraries is a picture route, not a library one.**
+`POST /pictures/move-to-library` (`local_owner_only`, the switch's tier) takes
+`{ picture_ids, library_uuid }` and answers
+`{ library_name, moved_count, moved[], skipped_locked[], copied_but_locked[],
+copied_but_not_moved[], copied_source_unknown[], skipped_already_there[],
+skipped_scrapheaped[], failed[] }`.
+`moved[]` names the pictures that left for this library's Scrapheap, in one undo
+batch, so the
+grid treats them exactly as it treats a `DELETE /pictures` (ghosted tiles, one
+Undo) and `ImageGrid.deleteSelected` serves both. The four `skipped`/`failed`
+lists say why the others are **still here**: a locked set freezes them, the
+other library already has the same file, has it in its Scrapheap, or the file
+could not be copied. An id in `copied_but_locked[]` was copied into the
+destination, but a set became locked before the source soft delete, so it
+remains in both libraries. The
+notice reports this separately and explains that Undo does not remove the
+destination copy. `copied_but_not_moved[]` reports copies whose sources stayed
+live after source Scrapheap processing failed, with the same destination-copy
+warning. On a processing exception, the server re-reads deletions and locks
+in one source read task: committed deletions go in `moved[]`, still-live locked
+sources in `copied_but_locked[]`, and other live sources in
+`copied_but_not_moved[]`. If that recovery read also fails, committed destination
+copies are reported in `copied_source_unknown[]` instead: the source may be live
+or soft-deleted, so neither `moved[]` nor a kept-source list can be asserted.
+`moved_count` counts confirmed moves only. The client warns about this
+uncertainty and refreshes source grid/sidebar state rather than dropping or
+ghosting unknown IDs as confirmed moves. Undo does not remove destination
+copies. These outcome lists do not overlap. Chunked moves share one
+`X-Operation-Batch-Id` gesture id, so one Undo restores every completed chunk.
+The client refreshes the grid and
+sidebar after a failed chunk, including when its server outcome is unknown.
+The client drops and counts `moved[]` and nothing else: an
+id the server did not act on (already deleted from another tab) is in no list,
+and inferring "moved" from that absence would announce a move that did not
+happen. `404` for an unknown library, `409` when
+it is the active one, cannot be opened, or a switch or another move is running,
+`403` for a remote owner or a token that covers only the active library. The
+menus list `libraries[]` minus the active and the unreachable, and nothing
+unless `can_manage`, so the entry is absent with one library and for a session
+the route would refuse. Backend: `docs/backend_architecture.md`
+§14, *Moving pictures to another library*.
 
 ---
 
@@ -594,7 +1668,6 @@ Two endpoints, both under the API prefix:
 | Endpoint | Used by | Purpose |
 |----------|---------|---------|
 | `GET /api/v1/ws/updates` | [App.vue](../frontend/src/App.vue) | Vault-wide events (pictures, tags, characters, plugin progress) |
-| `GET /api/v1/ws/comfyui?clientId=…` | [ComfyUiRunner.vue](../frontend/src/components/io/ComfyUiRunner.vue) | ComfyUI workflow execution stream |
 
 ### Lifecycle (`/ws/updates`)
 
@@ -632,12 +1705,12 @@ The backend's [EventType](../pixlstash/event_types.py) enum names are **not** se
 
 | Field | Type | Description |
 |---|---|---|
-| `type` | string | Wire type. Picture/mutation events: `picture_imported` \| `pictures_changed` \| `tags_changed` \| `descriptions_changed` \| `characters_changed` \| `plugin_progress`. Snapshot/restore events (carry snapshot/restore info rather than `picture_ids`): `snapshot_created` \| `snapshot_deleted` \| `restore_started` \| `restore_completed` \| `restore_failed`. Machine/vault events (carry neither): `vram_oom` \| `external_moves_pending`. |
+| `type` | string | Wire type. Picture/mutation events: `picture_imported` \| `pictures_changed` \| `tags_changed` \| `descriptions_changed` \| `characters_changed` \| `plugin_progress`. Snapshot/restore events (carry snapshot/restore info rather than `picture_ids`): `snapshot_created` \| `snapshot_deleted` \| `restore_started` \| `restore_completed` \| `restore_failed`. Machine/vault events (carry neither): `vram_oom` \| `external_moves_pending`. Library-object events (carry their own ids rather than `picture_ids`): `workflows_changed` \| `models_arrived`. |
 | `event` | string | Backend `EventType.name`; diagnostic only, not part of the behavioural contract. |
 | `source` | `"ui"` \| `"external"` | Coarse origin class. `"ui"` = an attributable owner action through the SPA; `"external"` = work that originated outside the UI (watch/reference folders, external API writes, background ML finishers, externally-run ComfyUI). Defaults to `"external"`. |
 | `origin_client_id` | `string` \| `null` | The `X-Client-Id` of the originating tab, or `null` for background/external work. **The primary signal** — a tab recognises the echo of its own change by matching this against its own id. |
 | `picture_ids` | `number[]` | Affected picture ids. |
-| `fields` | `string[]` (optional) | Columns that changed (e.g. `["smart_score"]`); drives the silent-vs-sort-changed decision. Omitted for edits that may affect any view (user edits, imports). Two values are **not** columns and name a routing class instead: `detections` (card content) and `stack_count` (the stack's live member count, derived by the listing endpoint and re-read by its own targeted call). See §8.2. |
+| `fields` | `string[]` (optional) | Columns that changed (e.g. `["smart_score"]`); drives the silent-vs-sort-changed decision. Omitted for edits that may affect any view (user edits, imports). Three values are **not** columns and name a routing class instead: `detections` (card content), `pixels` (the picture's own bytes were rewritten — see §8.3) and `stack_count` (the stack's live member count, derived by the listing endpoint and re-read by its own targeted call). See §8.2. |
 | `change_kind` | `"added"` \| `"updated"` \| `"removed"` \| `"restored"` (optional) | Set at the emit site where cheap (`removed` on deletes is free; `added` is implicit for `picture_imported`). **Omitted entirely when unset** — the SPA infers `added` for `picture_imported` and falls back to `updated` otherwise. `"restored"` is a scrapheap comeback (undo of a move, or `POST /pictures/scrapheap/restore`): the card returns, but the picture is **not** new to the vault, so the sidebar must not raise its NEW marker for it. The value set is a closed allowlist on **both** ends — `WsBroadcasterMixin.CHANGE_KINDS` and `resolveChangeKind` — and each silently degrades an unknown kind (the backend drops the field, the SPA falls back to `updated`), so the two move together or not at all. |
 
 Per-type payload specifics (all carry the envelope fields above):
@@ -649,9 +1722,11 @@ Per-type payload specifics (all carry the envelope fields above):
 | `characters_changed` | Character created/updated/deleted or face reassigned | — | Refresh sidebar (character list) |
 | `tags_changed` | Tags or tag predictions changed | `picture_ids: number[]` | Bump `wsTagUpdate` so affected grid cards re-render |
 | `descriptions_changed` | Picture descriptions/captions changed | `picture_ids: number[]` | Refresh affected descriptions |
-| `plugin_progress` | Image plugin run progress | `plugin`, `progress`, `total`, `picture_id` | Update `wsPluginProgress` for the plugin progress UI |
+| `plugin_progress` | Image plugin run progress; with `plugin: "ComfyUI"`, how a run ended (`status` `completed` or `failed`, `run_id` `comfyui-<prompt_id>`, `workflow_id` the workflow that ran; a `failed` one carries the sentence to show in `message`, naming the node that failed and why, and `stopped: true` when the run was interrupted or taken off ComfyUI's queue; a `completed` one carries `notice`, null or the sentence saying it made a picture the library already had, counted only for pictures imported before the run began so a watched output folder's import of the run's own file is not one) | `plugin`, `progress`, `total`, `picture_id` | Update `wsPluginProgress` for the plugin progress UI; for a ComfyUI run `App.vue` asks `useTasksStore` for a poll at once, so the run's row goes with its ending (the row itself is `GET /workers/progress`'s `runs`), raises a failure as a notice (and a `completed` run's `notice` as an info one), and records it on its workflow (`useRunDialogStore.failures`), which the workflow's card and the Workflow tab show until it is dismissed or run again |
 | `vram_oom` | A GPU task ran out of VRAM: emitted before each retry, then once more to close the sequence | `attempt` (the attempt this frame is about, 1-based), `max_attempts`, `gave_up`, `recovered`, `task_type` (diagnostic only) | One keyed notice (`vram-oom`), updated in place by the later frames. Exactly one closing frame: `recovered` (that attempt succeeded) or `gave_up` (the sequence ended without the work). **`gave_up` with `attempt < max_attempts` is an early stop** — the task died of something else, or the app is shutting down — and the SPA promises no later retry for it; only an exhausted sequence says the work will be tried again. The retry frames carry an explicit timeout longer than the backend's pause, or the card would expire between frames and stop coalescing. |
 | `external_moves_pending` | A reference-folder scan queued one or more moves the owner made outside PixlStash for reconciliation (v1.11 Phase 5) | — (no count; the queue is reclassified live, so a number on the wire could already be stale) | Debounced (3s) re-fetch of `GET /moves/pending`, so a burst of scans settling around the same time re-fetches once |
+| `workflows_changed` | A workflow changed (v1.12 B4, workflow ids since #1623): a workflow file imported or dropped in the watched inbox, a workflow named/annotated/hidden, its default-recipe parameters, pins or picture inputs written, a model fixed, or a saved recipe written; and (#1696) the background base-model family pass (`reidentify_families`, run by `WorkflowCardBackfillFinder`) moving variants, which retires `auto:` ids at runtime; and the ComfyUI extraction filing new pictures onto workflows (`MissingComfyUIExtractionFinder`, reason `pictures`) | `keys: string[]` - **workflow ids** (`auto:<64 hex>` or `manual:<uuid hex>`) since #1623, never card keys; the field keeps its name. May be empty; for `regrouped`, every old and new id involved. `reason: "imported" \| "changed" \| "stacks" \| "recipes" \| "regrouped" \| "pictures"` (`stacks` has no producer since the stack routes went; `regrouped` is the family pass and `pictures` the extraction, both `source: "external"`, `origin_client_id: null`). `renamed: {[retired id]: string}` - each retired id and the id that took most of its variants, so a tab holding one (a selection, an open inspector) can follow it; string keys and values only, **always present**, `{}` for every other reason and for a pass whose old ids all live on | Every tab but the writer (the `origin_client_id` echo is skipped) hands it to `useWorkflowsStore.onWorkflowsChanged`, debounced (1s) so an inbox burst re-reads once: the selection follows `renamed`, `reason: "recipes"` bumps the Recipes tab, and `GET /workflows` is re-read only if the grid has been read. That re-read keeps every card that reads exactly as before as its old object, so only the changed cards redraw. **Deliberately carries no workflow**: its counts, cover strip and rank are computed per request across the whole vault, so anything on the wire would be re-read anyway. `reason` is a hint about what moved, not a contract — the value set is a closed allowlist on the backend (`WORKFLOW_CHANGE_REASONS`, module level in `ws/broadcaster.py`) that **degrades an unknown value to `changed`** rather than rejecting it, so a client must treat any value as "look again" |
+| `models_arrived` | Models were moved onto the shelf from the watched Downloads folder (backend §25.10) | `model_ids: number[]` - the hub `model.id`s registered. A "look again" nudge: no row on the wire | Owner sockets only (`!isReadOnly`): `useModelShelfStore().onModelsArrived()` raises the sidebar Models row's `new` tag (cleared when the shelf is opened) and, if the shelf has been read, re-reads it with `markNew` so the arrivals wear the row `New` badge |
 | `snapshot_created` / `snapshot_deleted` | Vault snapshot created or deleted | snapshot info (id, kind, …) | Refresh the snapshots panel |
 | `restore_started` / `restore_completed` / `restore_failed` | Vault restore lifecycle | restore info | Drive the restore progress/result UI |
 
@@ -695,8 +1770,10 @@ The picture-event policy lives in [`useGridRealtimeSync.js`](../frontend/src/com
 Two field classes are decided **before** the origin dispatch, because for both
 of them the origin makes no difference to what has to happen:
 
-- **Card-content fields** (`detections`) → a targeted per-card
-  `refreshGridImage`, never a pill and never a reshuffle.
+- **Card-content fields** (`detections`, `pixels`) → never a pill and never a
+  reshuffle. `detections` takes a targeted per-card `refreshGridImage`; `pixels`
+  takes `applyRotatedCards` instead, and is the one card op that is **not**
+  deferred under an open overlay. See §8.3.
 - **Stack facets** (`stack_count`) → **one batched** `refreshStackFacets(ids)`
   read for the whole event, never a pill, never a reshuffle, and never the
   per-card path: `stack_count` is derived per stack by the listing endpoint and
@@ -704,6 +1781,7 @@ of them the origin makes no difference to what has to happen:
   repair a stack badge. Uniform across origins for the same reason `restored`
   is: the acting tab has no optimistic local copy of a server-computed count,
   and an undo (Ctrl+Z, the toolbar, the lightbox) has no local grid op at all.
+
   There is no `MAX_TARGETED_UPDATE` escalation here, deliberately: one read is
   not a fetch storm, and the reload it would escalate to is precisely what must
   not happen while a ghost window is open.
@@ -711,6 +1789,80 @@ of them the origin makes no difference to what has to happen:
 Both require **every** named field to be in the class. Mixed fields fall through
 to the ordinary dispatch, so a cover that also gained a score still gets the
 sort treatment its own (separate) announcement carries.
+
+### 8.3 `pixels` and `orientation`: the picture's own bytes
+
+`fields: ["pixels"]` means the FILE was rewritten, so two things the client
+holds are stale at once: the thumbnail URL and its cache token (which come from
+`POST /pictures/thumbnails`, never from `GET /pictures/{id}/metadata`) and, for
+a turn, the `orientation` every surface builds its display URL's `?v=o<n>` from.
+A client told only `updated` re-reads metadata it already has and goes on
+painting the picture it was already painting.
+
+**Five producers stamp `pixels`, and only two of them are turns — those two
+stamp `orientation` alongside it, which is how a client tells them apart:**
+
+| Producer | Fields | A turn? |
+|---|---|---|
+| `POST /pictures/rotate` | `["orientation", "pixels"]` | yes |
+| the operation-log restore behind undo/redo (`_emit`) | `["orientation", "pixels"]` for an orientation; `["pixels"]` for a location | orientation only |
+| `ThumbnailGenerationTask` | `["pixels"]` | no — a regenerated bitmap, up to 64 ids per batch |
+| `POST /pictures/layout/move-to-match` and `LayoutMoveTask` | `["file_path", "pixels"]` | no — the path moved |
+
+The grid does not care which it was: the thumbnail is re-read either way, so it
+keys its applier on `pixels` and uses `orientation` only to decide whether to
+defer. The **lightbox** cares about nothing else — its `<img>` URL is built from
+the picture id, the format and the orientation, so a regenerated thumbnail and a
+moved file leave it untouched, while a turn moves the `?v=o<n>` AND invalidates
+the boxes and the text drawn in the file's own coordinate space. Its
+`wsOrientationUpdate` signal therefore fires on `orientation`, not on `pixels`.
+
+**Naming the turn is what removed the guesswork.** An earlier revision of this
+feature raised the overlay's signal on `pixels` and inferred the turn by
+comparing the orientation before and after a metadata read. That was wrong three
+ways: the read can be discarded by the shared request-id counter (leaving the
+lightbox stale with no retry, i.e. #1419 again), navigating away and back
+rebuilds the record under it, and a NULL orientation — every video, and any row
+`MissingOrientationFinder` has not backfilled — read as "turned", so a background
+batch re-read the boxes and cleared the viewer's word selection for a change that
+turned nothing. Neither `fields` nor a client should have to guess this.
+
+Because the signal is now precise, it is **id-gated** like `ocr_text` and unlike
+the score and detection signals: those are ungated because two of their frames
+can coalesce into one watcher flush, which cannot happen to a socket-driven ref
+(one write per `ws.onmessage`, one macrotask each, Vue's pre-flush queue drained
+on the microtask between).
+
+**A TURN's applier runs under an open overlay**, unlike every other deferred op
+in §9.1 of the frontend document: `applyRotatedCards` is fields-only — it writes
+the shape and bitmap of cards already present and never inserts, removes or
+reorders, a turned photo having nowhere to move to — so there is no
+restructuring to keep off the frozen filmstrip, and deferring it only queued a
+whole-grid refetch for overlay close. The exception is a grid list already
+parked for close (`pendingGridImages`): that branch of `closeOverlay` assigns
+wholesale and clears the deferral flags with it, so an in-place write made then
+is discarded with nothing queued to repair it, and the turn defers after all.
+
+A **non-turn** byte rewrite keeps the ordinary deferral. Its card still needs the
+applier rather than a metadata refresh — the thumbnail URL is not on
+`/pictures/{id}/metadata` — but it is background work arriving in a steady stream
+for the length of an import, not a gesture waiting to land.
+
+**`MAX_TARGETED_UPDATE` does not apply to the applier.** That cap is written for
+the per-id `refreshGridImage` loop ("one /metadata + thumbnail fetch each"), and
+the applier is one batched `POST /pictures/thumbnails` for the whole set.
+Escalating it sent the tab that *issued* a 51–200 picture rotate
+(`ROTATE_MAX_IDS` is 200) into a whole-library reload of a change it had already
+applied optimistically.
+
+**The overlay must survive that write.** `applyRotatedCards` replaces the
+`allGridImages` array, and the lightbox re-seeds its open card from the sequence
+frozen at open whenever that prop moves - so without care an undo turns the
+picture and the grid's own repaint turns it straight back (#1419). Two things
+stop it, both on the frontend: `fetchOverlayMetadata` patches that snapshot's
+`orientation`, and the re-seed preserves `orientation` / `pixel_sha` for rows
+the patch cannot reach, exactly as the metadata merge excepts the same two
+fields from local-wins. See `frontend_architecture.md` §9.1.
 
 **The grid is not the only destination.** `useUpdatesSocket` routes each `pictures_changed` frame to every store that holds a snapshot of a server read, and each destination owns its own decision, the grid's table above is *not* shared. The other subscriber is the **Duplicates queue** (`useDedupStore.applyPictureEvent`), whose rows are groups rather than cards:
 
@@ -749,7 +1901,7 @@ The client used to paper over this with a per-request `?cb=<Date.now()>`, which 
 
 **Contract (both routes, via `pixlstash/utils/http_cache.py`):** the response carries `Cache-Control: private, no-cache` plus a weak `ETag`, and a matching `If-None-Match` is answered with a bodyless `304` that repeats the `ETag` and the policy. So the browser revalidates every time but transfers bytes only when they actually changed. **The frontend must therefore NOT cache-bust these URLs** — `SideBar.fetchCharacterThumbnail` calls `getCharacterThumbnail(id)` with no `cacheBuster`, and re-adding one would restore the download-per-refresh cost the header exists to remove.
 
-Note the contrast with `/pictures/thumbnails/{id}.webp`, which is *content-addressed* (`?v=WxH` changes when the bitmap is regenerated) and may therefore be cached for a while: `private, max-age=3600, must-revalidate`. Stable-URL generated images get `no-cache`; version-tokened ones get a max-age.
+Note the contrast with `/pictures/thumbnails/{id}.webp`, which is *content-addressed* (`?v=WxH-<file digest>` changes when the bitmap is regenerated, and differs for a new picture given a deleted one's id) and may therefore be cached for a while: `private, max-age=3600, must-revalidate`. Stable-URL generated images get `no-cache`; version-tokened ones get a max-age.
 
 ### Watermarking
 
@@ -841,45 +1993,63 @@ The **Segment** action runs Florence-2 object detection over the selected pictur
        "elements":[{"type":"obj","bbox":[y_min,x_min,y_max,x_max],"desc":"dog"}]}}
     ```
 
-### 11.2 Remix — "Generate variants" (v1.9)
+### 11.2 Replaying a picture's recipe
 
-Right-clicking a grid image offers **Generate variants…**, which runs one picture through the shipped ComfyUI engine. It follows the WebSocket branch of the rule above: the dialog submits, closes, and the app-wide `ComfyUiRunner` owns progress; the output arrives as a normal `picture_imported` event and is inserted in place (§8).
+A picture's own recipe can be run again through the shipped ComfyUI engine. It follows the WebSocket branch of the rule above: the dialog submits and closes, the backend follows the run and reports it in `GET /workers/progress` (`runs`), which is what the Tasks tab draws; the output arrives as a normal `picture_imported` event and is inserted in place (§8).
+
+**The dialog that owned this pair of round trips was `RemixDialog` ("Generate variants…"), deleted in v1.12 F5 (#1407).** The recipe read below is unchanged and is still what the lightbox's Recipe tab and the Run popup prefill from; what changed is the *submit*. The Run popup sends `POST /api/v1/workflows/run` (§ the one run route, B7) rather than `POST /comfyui/run_recipe`, so the reason codes it renders are that route's, not this one's `preflight`. `run_recipe` itself was then deleted by B9 (#1410), which leaves `POST /api/v1/workflows/run` the only way to replay a recipe.
 
 Two round trips, both scoped to the source picture (`PICTURE_SCOPED` in `ROUTE_POLICIES`):
 
 - **Ask** `GET /api/v1/comfyui/pictures/{id}/recipe`. Answers whether the file carries a *replayable* recipe — the embedded API-format `prompt` chunk, never the UI `workflow` chunk — and pre-flights it against the user's ComfyUI:
   ```json
-  {"available": true, "reason": null, "summary": "API Workflow · 12 nodes",
-   "positive_prompt": "…", "seed": 12345, "models": ["…"], "loras": [],
+  {"available": true, "reason": null, "source": "comfyui",
+   "summary": "API Workflow · 12 nodes",
+   "positive_prompt": "…", "negative_prompt": "…", "seed": 12345,
+   "settings": {"steps": 25, "cfg": 7.5, "sampler_name": "euler",
+                "scheduler": "normal", "denoise": 1.0},
+   "workflow_id": "…", "models": ["…"], "loras": [],
    "node_count": 12,
    "node_classes": ["CheckpointLoaderSimple","CLIPTextEncode","KSampler","SaveImage"],
+   "node_class_counts": {"CLIPTextEncode": 2, "CheckpointLoaderSimple": 1,
+                         "KSampler": 1, "SaveImage": 1},
+   "lora_chain": {"branches": false, "trunk": [{"node_id": "10", "name": "…"}],
+                  "passes": [], "note": null, "refusal": null},
    "source_is_imported": true, "source_label": "Watched folder",
    "seed_inputs": [{"node_id":"3","class_type":"KSampler","field":"seed","value":1}],
    "preflight": {"ok": true, "checked": true, "missing_node_classes": [],
                  "missing_models": [], "missing_input_images": [],
-                 "has_save_image": true, "unchecked_fields": 0}}
+                 "has_save_image": true, "unchecked_fields": 0,
+                 "unchecked_models": 0}}
   ```
   `node_classes` (distinct `class_type`, sorted) and `source_is_imported` / `source_label` exist for the owner's **consent** decision, not for display polish — see the untrusted-graph note below. `node_classes` is read from the file, so unlike everything under `preflight` it is populated even when ComfyUI was unreachable.
+  `node_class_counts` is the same list with how many nodes of each class, so a second sampler pass shows where the distinct list names its class once. `lora_chain` is the Edit LoRAs chain reader's view of the picture's own graph (#1579): `trunk` holds the LoRAs every pass reads, and `passes` holds one `{node_id, class_type, title, loras}` per sampler pass where the model forks, with `branches` true exactly then. It is typed from the same `/object_info` read the pre-flight makes, so with ComfyUI unreachable, or `preflight=false`, `branches` is `null` and `refusal` says why, as it also does for a chain the reader refuses. `null` is "not known", never "straight". `null` for an A1111 or unconvertible editor recipe.
   **Three distinct negative answers, and the SPA must not collapse them**, because they send the user to three different places:
   | Response | Meaning | UI |
   |---|---|---|
-  | `available:false`, `reason:"no_prompt_chunk"` | Ordinary photo, A1111 output, stripped metadata, or a UI-graph-only file | Recipe mode disabled: "No executable workflow embedded" |
+  | `available:false`, `reason:"no_prompt_chunk"` | Ordinary photo or stripped metadata: nothing was made in ComfyUI here. **The lightbox hides its Recipe tab entirely on this answer** | Recipe mode disabled: "No executable workflow embedded" |
+  | `available:false`, `reason:"editor_graph"` | The file carries ComfyUI's editor graph and PixlStash could not rebuild it exactly — a node class this ComfyUI does not have, a widget array it cannot account for, a subgraph whose definition is missing or whose values do not match its inputs. `conversion_problems` is one sentence per reason | Recipe mode disabled, the recipe still shown (prompt, models, seed read off the editor graph), with `conversion_problems` printed under the refusal |
+  | `available:false`, `reason:"a1111"`, `source:"a1111"` | A1111 output: its recipe is readable (prompts, settings, LoRAs, seed) but is not a graph ComfyUI can be handed | Recipe mode disabled, the recipe still shown. A client that does not know this value falls through to the row above, which stays true |
   | `available:false`, `reason:"no_seed_input"` | The graph has no seed to change, so a re-run would be byte-identical (and would be deduped on `pixel_sha`, emitting no event — the user would see nothing at all) | Recipe mode disabled, with that reason |
   | `preflight.ok:false` | Checked, and this ComfyUI cannot run it | Recipe mode disabled, naming the missing node types / models / input images |
   | `preflight.checked:false` | ComfyUI was unreachable — **the check did not run; this is NOT a pass** | Recipe mode stays *selectable* but is **refused by default**: the run needs an explicit acknowledgement (below) |
 
-  `unchecked_fields > 0` means the check was partial (a field ComfyUI does not enumerate, or a `remote` combo it fills lazily) and must not read as a clean bill of health. It is **not** the same state as `checked:false` and must not be gated the same way.
+  **`settings`, `negative_prompt` and each `lora_slots[].strengths` are read from the picture's own file**, like `positive_prompt` beside them. `settings` holds whichever of `steps` / `cfg` / `sampler_name` / `scheduler` / `denoise` the graph names — read from any node, since split-sampler graphs spread them over a scheduler, a `KSamplerSelect` and a `CFGGuider` — so **treat every key as optional** and do not read the block as "the settings of the pass that made this picture": a graph that samples twice can report one pass's steps beside another's CFG. `strengths` is always numbers (`{"model": 0.8, "clip": 0.6}`), on both branches, and a key is absent rather than of another type when the graph wires it or the value cannot be rendered. Each settings key is reported **at its own type** — `steps` an int, `cfg` and `denoise` numbers, `sampler_name` and `scheduler` strings — and a value of the wrong type is absent rather than passed through, so `steps` is a number on both branches and never a string to be parsed. `workflow_id` names the workflow the picture's variant is in (#1623 replaced the card's `workflow_key`): an automatic workflow's id is `auto:<64 hex>`, a digest of the stripped graph and its base-model families, which this token can already read from `/workflow`, and a manual one is a random uuid that says only that the owner grouped this topology by hand — see the backend note. What a `workflow_id` *groups* is an owner-only question, answered by the Workflows routes and never by this one.
 
-- **Run** `POST /api/v1/comfyui/run_recipe` with `{picture_id, seed_mode, seed?, client_id?, stack?, allow_unchecked?}`, or `POST /api/v1/comfyui/run_i2i` for template mode (which now takes the same `seed_mode`/`seed` pair as `run_t2i`). Both return `{status, prompts:[{picture_id, prompt_id}]}`; the SPA passes `prompts` to `ComfyUiRunner` so its ComfyUI-WebSocket progress tracking picks the run up.
+  On the `a1111` branch the values come from the infotext instead. a value that is wholly a number is reported as one (`steps`, `cfg_scale`), and anything else stays the text A1111 wrote (`size: "512x768"`, `sampler: "Euler a"`). `settings` then carries **A1111's own field names, as an open set** — `steps`, `sampler`, `cfg_scale`, `size` and whatever else that build wrote (`denoising_strength`, `clip_skip`, ADetailer and ControlNet fields) — so render it as a list of name/value pairs rather than reaching for named keys. **One key is PixlStash's own**: a ControlNet field names its model inside its own value, and that name is lifted out into `<field>_model` (`controlnet_0_model`, `…_model_2` for a second) so it can be forgotten like any other model (#1375), which also means the `controlnet_0` beside it no longer repeats the name. Both are still rendered as ordinary name/value pairs; the lifted name is not added to `models`, which stays the checkpoint. `lora_slots[].node_id` and `.class_type` are `null` there: the reduction's ids name no node in any graph, and there is no replay to send one back to.
 
-**The client never sends a graph.** `run_recipe` re-extracts the prompt chunk from the picture's file on every call. That keeps the picture-scoped authz declaration a complete access control for the endpoint, and it means a stale client cannot replay something the file no longer contains.
+  `unchecked_fields > 0` means the check was partial (a field ComfyUI does not enumerate, a `remote` combo it fills lazily, or a custom loader whose list came back empty). An empty list from one of ComfyUI's own loaders (`CORE_FOLDER_LOADERS`: checkpoint, UNET, LoRA, VAE, CLIP, ControlNet, upscaler…) is not a gap: they read their folder on every `object_info`, so it means that folder is empty and the file is reported in `missing_models` and must not read as a clean bill of health. It is **not** the same state as `checked:false` and must not be gated the same way. `unchecked_models` counts the other gap: a model-shaped value (a model file extension) on a loader PixlStash cannot read at all, so it was never compared; a "no missing models" answer is only as good as that count is small.
+
+- **Run** `POST /api/v1/workflows/run` (§11.1). The per-picture replay routes this step used to name — `POST /api/v1/comfyui/run_recipe` and `POST /api/v1/comfyui/run_i2i` — were retired in #1410; the consent and seed rules below are unchanged and are now that route's. It returns `{status, prompts:[{workflow_id, prompt_id}]}`; the backend follows each prompt and lists it in `GET /api/v1/workers/progress` under `runs` (`prompt_id`, `label`, `workflow_id`, `status` `queued` or `running`, `percent`) until it ends, which is what every tab's Tasks row is drawn from (#1862). The body's optional `label` is what that row is called; without one the server names the run (`Clone picture`, or its workflow).
+
+**The client never sends a graph.** The run route re-extracts the prompt chunk from the picture's file on every call. That keeps the picture-scoped authz declaration a complete access control for the endpoint, and it means a stale client cannot replay something the file no longer contains.
 
 **But the graph is still untrusted input, and the contract reflects that** (review finding R3, CWE-829). It is authored by whoever made the image file; replaying it executes it on the owner's ComfyUI, bounded only by their installed node packs. The owner is the trust anchor, so the two sides split the job:
 
-- **Server side.** `run_recipe` returns **400** when `preflight.checked` is false and the body carries no `allow_unchecked: true`. The refusal is enforced on the server, not only in the dialog — a UI-only gate is not a gate. `allow_unchecked` is accepted as `allow_unchecked` or `allowUnchecked`, matching the existing `client_id`/`clientId` pair, and an accepted override is logged with the node classes that ran.
-- **Client side.** The SPA must render `node_classes` before the run button is usable, must send `allow_unchecked` **only** for a run the user explicitly acknowledged (never as a constant, never when `preflight.checked` is true), and must surface `source_is_imported` as information rather than a gate (it is the Source row in the disclosure; it was a banner until 2026-08-06, which fired on the common watched-folder case). See the `RemixDialog.vue` consent section in `frontend_architecture.md` for why the gate is deliberately narrow: an acknowledgement in front of a common state becomes a reflex and stops protecting the rare one.
+- **Server side.** The run **refuses** when `preflight.checked` is false and the body carries no `allow_unchecked: true`: `200` with `{"status": "refused"}`, `runs: 0` and the reason on the group, not a `400` — the batch shape reports per card, so a client must read `status` rather than the HTTP code. The refusal is enforced on the server, not only in the dialog — a UI-only gate is not a gate. **Consent is the literal JSON `true`** (`StrictBool`): `"true"`, `"yes"`, `"on"` and `1` are each a `422`, because a lenient cast would read `"false"` as consent too. The retired `run_recipe` also took the camelCase `allowUnchecked`; `POST /workflows/run` does **not**, so that spelling is a field the model ignores. An accepted override is logged with the node classes that ran.
+- **Client side.** The SPA must render `node_classes` before the run button is usable, must send `allow_unchecked` **only** for a run the user explicitly acknowledged (never as a constant, never when `preflight.checked` is true), and must surface `source_is_imported` as information rather than a gate (it is the Source row in the disclosure; it was a banner until 2026-08-06, which fired on the common watched-folder case). The gate is deliberately narrow: an acknowledgement in front of a common state becomes a reflex and stops protecting the rare one. **The v1.12 Run popup goes one step further and never sends `allow_unchecked` at all** — an uninspectable ComfyUI blocks the run, and the backend refuses independently — so `allow_unchecked` now has no caller in this app and remains for programmatic ones.
 
-**Seed ranges differ between the routes** — 32-bit for the template paths, 64-bit for replay (the shipped Flux2 Klein template's own `noise_seed` exceeds 2³²). The dialog caps its input at `Number.MAX_SAFE_INTEGER` regardless, because above 2⁵³ a JavaScript number cannot carry the value the user typed.
+**A fixed seed takes the full 64-bit range** (the shipped Flux2 Klein template's own `noise_seed` exceeds 2³²; the retired template paths checked 32 bits). The dialog caps its input at `Number.MAX_SAFE_INTEGER` regardless, because above 2⁵³ a JavaScript number cannot carry the value the user typed.
 
 ---
 
@@ -980,6 +2150,9 @@ A focused list — read before changing anything that crosses the boundary.
 12. **WebSocket reconnect is silent.** If the backend changes the filter schema, old clients will keep sending stale filters until they reload — version the filter message if you change it incompatibly.
 13. **Delete-forever is a two-call flow and cannot be short-circuited.** `POST /pictures/scrapheap/delete-preview` returns a single-use `confirm_token` bound to that exact selection; `DELETE /pictures/scrapheap` refuses without it (400 missing, 409 spent/expired/wrong-selection) and destroys nothing on a refusal. A type-to-confirm dialog is a client control and proves nothing to the server — CORS admits any `localhost`/LAN-IP *port* with credentials (§6), so a page on another local port could otherwise drive the one irreversible endpoint. Clear the token after every attempt and re-run the preview to retry; never cache one.
 14. **`X-Client-Id` / `origin_client_id` is for echo-matching only — never authorization.** It is attacker-controllable; any access decision based on it is a vulnerability. Every mutating in-request emit must carry `source`/`origin_client_id` in the event `data` dict, or the originating tab will full-reload on its own change.
+15. **`PUT /picture_sets/{id}/members` replaces; `POST` on the same path appends.** Same path, same body, opposite effect. The PUT refuses (400) a replacement that would leave a non-empty set empty unless the body carries `allow_empty: true`, and reports `removed` beside `members`. Removing one picture is `DELETE /picture_sets/{id}/members/{picture_id}`; its `picture_id` is an integer, so a non-numeric segment is a 422, never a 500 (#1580).
+16. **`original_file_name` is not unique.** It is the basename the file arrived with, and generators reuse names (`image_00008.png`) freely; many pictures can share one. Never join on it; join on `id`.
+17. **`Picture.source_picture_id` is not provenance.** It is a work marker: set on a generated or plugin output so `SourceFaceLikenessTask` can copy character assignments from the source's faces, then cleared once that task has run. A NULL says nothing about whether the picture was derived from another.
 
 ---
 
@@ -1085,11 +2258,14 @@ flowchart TB
 
 ---
 
-## 19. Duplicates Queue API (v1.9)
+## 19. Duplicates Queue API
 
 The contract behind the sidebar **Duplicates** destination. Every route is
 `owner_only`; a share token gets 403 on all of them. Backend design is
-`docs/backend_architecture.md` §22.
+`docs/backend_architecture.md` §22. The full route table, and the rules the
+frontend leans on (including `GET /dedup/stacks/{stack_id}/members`, which this
+section only names), are in [§2.1](#21-the-dedup-contract); read both, and keep
+the two in step.
 
 **Two rules the client must hold to.** The queue is *paged*, never fetched whole
 (`GET /dedup/groups` returns `total` so a scrollbar can be sized without a second
@@ -1160,10 +2336,13 @@ with a 400 — never reuse a queue cursor on the decided page or across the flip
 **`decided_at` is display-ready.** It means "when this decision last became
 live" (a redo re-stamps it), even though a stacked row may sort by the newer
 stack activity described above. Format is
-**naive-UTC ISO 8601** with microseconds and **no offset suffix**
-(`"2026-07-30T12:28:53.123456"`, no trailing `Z`) — the same convention as
-every other timestamp on this API (`created_at`, the operation log's stamps) —
-so parse it as UTC. It is `null` on the open queue and `null` for the stale
+**UTC ISO 8601** with microseconds and an **explicit offset**
+(`"2026-07-30T12:28:53.123456Z"`; a route that returns a plain dict writes
+`+00:00` instead) — the same convention as every other database timestamp on
+this API (`created_at`, …), since every datetime column reads back aware UTC
+(#1503). Clients must still accept a string with no
+offset and read it as UTC: timestamps kept inside JSON payloads (the operation
+log's recorded state) are naive-UTC. It is `null` on the open queue and `null` for the stale
 edge of a resolved group whose verdict is missing or reopened (such rows sort
 into the list's tail); the server never invents a stamp for them.
 
@@ -1475,11 +2654,21 @@ There is **no deletion route** anywhere in v1.9. A stack is a grouping row plus 
 cover pointer; dropping it restores the flat grid exactly. Any UI copy implying
 files are removed would be wrong.
 
-## 20. Folder-Structure Read API (v1.11, Phase 2)
+---
+
+## 20. Folder-Structure API: read, commit, layout and moves
+
+The contract for mapping a folder tree onto the library and keeping the two
+in step: reading a tree (§20.1), committing the accepted mapping (§20.2), the
+layout and the moves that follow it (§20.3), and reconciling moves made
+outside PixlStash (§20.4). Backend design for all of it is
+`docs/backend_architecture.md` §24.
+
+### 20.1 Read
 
 The two-minute pass behind the mapping screen (`MapTree`). It reads a folder tree
 on disk and proposes **what each level is** — Project, Set, Person, Tag, or just a
-folder. Backend design is `docs/backend_architecture.md` §24; the release plan is
+folder. Backend design is `docs/backend_architecture.md` §24.1; the release plan is
 `docs/plans/v1.11.0-existing-library.md` §4 Phase 2.
 
 **Three rules the client must hold to.**
@@ -1499,7 +2688,7 @@ folder. Backend design is `docs/backend_architecture.md` §24; the release plan 
    to `candidates[0]` would invent a decision the backend deliberately refused to
    make.
 
-### The eight signals
+#### The eight signals
 
 All deterministic, all local, **no LLM** — a folder name is a string and `Mira`
 could be a person, a project or a client.
@@ -1534,7 +2723,7 @@ One more `signal` value, `level_vote`, can appear on a **level** proposal: it
 means the level took its rows' answer as its own, and its `text` says the count
 (`"31 of 149 folders read as Set"`).
 
-### `POST /api/v1/folder-structure/read`
+#### `POST /api/v1/folder-structure/read`
 
 Body `{"path": "/absolute/path/to/library"}`. Returns `{"task_id": "…"}` and
 starts the read in the background. An optional `"match_existing": false`
@@ -1569,7 +2758,7 @@ folder comes back as a Person. The result says which happened
 depending on whether models had loaded, and neither the client nor the owner
 could tell that from a library with nobody in it.
 
-### `GET /api/v1/folder-structure/read/status?task_id=…`
+#### `GET /api/v1/folder-structure/read/status?task_id=…`
 
 Polled per §11's task-id branch. `result` is `null` until the read has **settled**
 (`completed`, `cancelled` or `failed`); a `failed` read carries `error` and a
@@ -1595,7 +2784,7 @@ mean folders during `faces`; during `walking` `total` is `0` and `processed`
 counts folders found so far, which is why the client must render `walking` as an
 indeterminate bar rather than 0%.
 
-### The result
+#### The result
 
 ```jsonc
 {
@@ -1629,7 +2818,7 @@ files first. `kind` is the read's guess from a few sampled files (comma lists
 read as `tags`, prose as `description`); `sample` is an excerpt so the owner
 can check it without opening a file. Binary files, JSON and markup are never
 offered, and only text extensions (`.txt`, `.caption`) are considered. The
-owner confirms or corrects each row on the commit (§22, `captions`). Empty
+owner confirms or corrects each row on the commit (§20.2, `captions`). Empty
 when there are none.
 
 Two fields the screen must not ignore, because both mean *this map is not the
@@ -1735,7 +2924,7 @@ Two ways `name_match` declines to hand back a `match`, and both are deliberate:
   `Mira`). That is a narrowing, not a match: `kind: null`, `match: null`,
   `candidates: ["project", "person"]`, with the evidence saying so.
 
-### Evidence
+#### Evidence
 
 `evidence` is an ordered list, strongest signal first, and every entry carries a
 `signal` (the table above) and a display-ready `text`. Entries may carry extra
@@ -1765,7 +2954,7 @@ them again, so the two cannot drift. `folder` is the one addition and is
 deliberately not a facet: it is the *absence* of one. A client can treat a
 `kind` other than `folder` as a facet name the layout will accept.
 
-### `DELETE /api/v1/folder-structure/read?task_id=…`
+#### `DELETE /api/v1/folder-structure/read?task_id=…`
 
 Asks a running read to stop. Returns `{"status": "cancelled"}`, or **404** if the
 task-id is unknown (including an id evicted by a later read). A read that has
@@ -1778,16 +2967,481 @@ was found. It takes effect **at the next folder boundary**, so a cancel issued
 while a folder's face batch is in flight lands when that batch returns rather
 than instantly.
 
-### Not in this API
+#### Not in this API
 
-- **No commit.** Nothing here writes. The accept path is §22, Phase 3.
+- **No commit.** Nothing here writes. The accept path is §20.2.
 - **No per-row re-read.** A single read answers the whole tree; there is no
   "re-run faces on this one folder" route.
 - **No language reading of folder names.** Explicitly out (release plan §5): no
   LLM ships with PixlStash, and `name_match` is a string comparison against rows
   the vault already has, not a semantic one.
 
-## 21. About your library (v1.11)
+### 20.2 Commit
+
+The accept path behind the `Preview` screen: takes the mapping the owner
+confirmed over a §20.1 read and writes it. Backend design is
+`docs/backend_architecture.md` §24.2; the release plan is
+`docs/plans/v1.11.0-existing-library.md` §4 Phase 3.
+
+**One rule the client must hold to, same as §20.1's first: it moves, renames and
+copies zero files, in either commit mode.** `mode: "reference"` (the default)
+registers the scanned root as an ordinary reference folder — the same
+mechanism `POST /reference-folders` already ships, indexed in place. `mode:
+"local_import"` (v1.11.x, the "Add a library" fix) instead imports the pictures
+as ordinary MANAGED ones — no reference folder at all. Either way every
+picture found is linked to the accepted projects, people, sets and tags by
+writing database rows. Nothing on disk changes except the new thumbnail each
+newly-indexed picture gets, exactly as any other import produces.
+
+#### `POST /api/v1/folder-structure/commit`
+
+```jsonc
+{
+  // Exactly ONE of these two identifies the read being committed.
+  "task_id": "…",              // the settled read's task_id (§20.1)
+  "read_result": { /* … */ },  // or the read's own result, from §20.1's status
+  "label": "Generations",       // optional; defaults to the folder's own name
+  "mode": "reference",          // "reference" (default) | "local_import"
+  "captions": [                 // local_import only: one row per §20.1 caption pattern
+    {"suffix": ".txt", "kind": "tags"},
+    {"suffix": "_caption.txt", "kind": "description"},
+    {"suffix": "_notes.txt", "kind": "ignore"}
+  ],
+  "assignments": [
+    // One entry per folder the owner accepted as something. A folder left
+    // "just a folder" or undecided is simply absent — there is nothing here
+    // for it to do, and every picture under it is still indexed and
+    // searchable (§20.1's "arrives ungrouped" case).
+    {"relative_path": "2024 Shoots", "kind": "project"},
+    {"relative_path": "2024 Shoots/mira", "kind": "person", "match_id": 41},
+    {"relative_path": "Datasets/mira-lora-v3", "kind": "set"},
+    {"relative_path": "final", "kind": "tag"}
+  ]
+}
+```
+
+**`read_result` exists because a read lives in one server process's memory and
+processes end.** The desktop's first run reads the library folder while the GPU
+runtime downloads and then restarts the backend onto that runtime, so by the
+time the owner answers the mapping questions the task that produced the answer
+is gone and `task_id` can only be `404 Task not found` — with the answer sitting
+in the dialog. Sending the result back is the same information by another route.
+Two consequences worth knowing: a supplied result reserves nothing, so it
+carries none of the one-commit protection a task-identified read gets (the
+caller holding the result owns that), and a body that names both or neither is a
+`400`.
+
+`relative_path` is the same handle §20.1's folder rows carry — POSIX-separated,
+relative to the read's root, `""` for the root itself. `kind` is one of
+`project`, `person`, `set`, `tag` (never `folder`: a row with nothing to do is
+omitted, not sent as `folder`). `match_id` names an existing entity to attach
+to, exactly as `name_match`'s `match.id` proposed or as the owner picked from
+`candidates`; omitted, a new one is created named after the folder.
+
+**A folder's nearest accepted ancestor of each exclusive kind wins** — a
+picture is filed under the *closest* Project, Person or Set above it, not
+every one along the path, mirroring `library_layout`'s first-match-wins
+segments. Tags are the exception: every accepted Tag ancestor applies, because
+a picture can carry more than one label.
+
+Returns `{"task_id": "…"}` and starts the commit in the background.
+
+`local_owner_only` (§16.3): the read already validated the host path once, and
+this route is the write that follows from it.
+
+| Status | When |
+|---|---|
+| **400** | an `assignments` row is malformed or names an unknown `kind` |
+| **404** | `task_id` does not name a read this session holds |
+| **409** | the named read has not settled yet, a commit is already running (against any read), the named read has **already been committed**, or the read's root path is already a reference folder that has completed a scan (backend §24.2 — the reuse-vs-refuse rule) |
+
+#### `mode: "local_import"`
+
+For the read's root when it IS the active library's own `image_root`, or a
+folder inside it — the "Add a library" flow's "pictures" verdict, where the
+folder a fresh vault was just created in already held loose files before the
+owner ever pointed PixlStash at it. `label` is ignored in this mode: there is
+no reference folder to name.
+
+**Every picture the walk finds becomes an ordinary MANAGED picture** (relative
+`file_path`, exactly as anything else imported into this library), not a
+reference-folder one. Routing this case through `mode: "reference"` instead
+would collide with the rule `POST /reference-folders` already enforces the
+other direction — a reference folder may never equal or contain `image_root`
+(`409 "Path conflicts with the PixlStash data folder."`) — so the two stay two
+modes, never one. Import is **idempotent by `file_path`**: a file already
+indexed under this path (an overlapping earlier `local_import`, or an ordinary
+import that reached it independently) is reused by id, never re-imported as a
+second row — same spirit as `mode: "reference"`'s own "don't redo what already
+happened" rule for a resumed commit (backend §24.2).
+
+**`captions` says what each caption file beside the pictures is.** A picture
+built by the import reads the files at the confirmed suffixes: a `tags` file
+becomes its tags (and it is not queued for the tagger), a `description` file
+its description, and an `ignore` pattern is never opened however tag-like its
+content. **Absent and empty are different answers.** A request with no
+`captions` key is a client that never asked (an older one), and the import
+probes the known conventions as it always did (`_tags.txt`, `.caption`, a
+content-sniffed `.txt`). `[]` is the owner having been asked with nothing to
+confirm, and reads no caption file at all. The answer is recorded on the
+durable commit record, so a commit resumed after a crash honours it. A row's
+`suffix` must be a bare filename fragment and `kind` one of `tags`,
+`description`, `ignore`, else `400`. `mode: "reference"` refuses the field
+outright (`400`), `null` and `[]` included: a reference folder's sidecar
+suffixes are its own `PATCH /reference-folders/{folder_id}` fields.
+
+**The root must be inside `image_root` or the commit fails.** There is no
+separate error status for this — the check runs inside the background commit,
+same as every other commit-time refusal, and surfaces as `status: "failed"`
+with `error` set once the client polls `GET .../commit/status` (see below),
+not as a synchronous 4xx on the `POST`. A client offering `local_import` in its
+UI should therefore only ever construct the request against the active
+library's own folder — this is a server-side backstop, not something the
+mapping screen is expected to let the owner trigger by hand against an
+arbitrary path.
+
+#### `GET /api/v1/folder-structure/commit/status?task_id=…`
+
+Polled per §11's task-id branch, same shape as §20.1's read status:
+
+```jsonc
+{
+  "task_id": "…",
+  "status": "running",        // queued | running | completed | failed
+  "stage": "indexing",        // registering | indexing | assigning | done
+  "processed": 149,
+  "total": 352,
+  "progress": 42.3,
+  "error": null,
+  "result": null
+}
+```
+
+**A commit is never `cancelled`.** In `mode: "reference"`, once the reference
+folder is registered its scan runs to completion regardless of what the screen
+does next — the in-place indexing this route starts is not something a
+"Cancel and organise later" on a *later* screen can safely stop mid-write, and
+it is also the whole reason the mapping screen stays reachable from the
+sidebar afterwards: the scan and the mapping are two different steps, and
+abandoning the second does not undo the first. `mode: "local_import"` has no
+separate scan to keep running, but the same rule applies for the same
+underlying reason: there is no cancel route on this API in either mode, so a
+commit once started always runs to `completed` or `failed`.
+
+`stage` progresses `registering` (creating the reference folder row) →
+`indexing` → `assigning` (creating the accepted entities and linking pictures
+— no filesystem work happens here at all) → `done`. In `mode: "reference"`,
+`indexing` means waiting for the reference folder's first scan pass;
+`processed`/`total` are pictures indexed so far, out of the read's own
+`picture_count`. In `mode: "local_import"` there is no reference folder to
+register, so `stage` goes straight from `registering` (the commit's initial
+state, before its background thread has reported anything) to `indexing`,
+where `processed`/`total` instead count files as `local_import_pictures`
+resolves them — both the ones already indexed (an idempotent hit, counted
+immediately) and the newly-imported ones (counted as each batch commits).
+
+The result, once `status` is `completed`:
+
+```jsonc
+{
+  "reference_folder_id": 7,     // null for mode: "local_import" — no ref folder
+  "pictures_indexed": 28412,
+  "projects_created": 12, "projects_matched": 1,
+  "people_created": 114, "people_matched": 4,
+  "sets_created": 31, "sets_matched": 0,
+  "tags_created": 4
+}
+```
+
+#### Not in this API
+
+- **No re-mapping an already-committed folder.** Accepting a mapping is
+  one-shot and **enforced**, not merely a convention the client is trusted to
+  follow: the read is marked committed the instant a commit for it starts
+  (backend §24.2), and a second `POST` against the same `task_id` — whether the first
+  commit is still running or long since `completed` — is refused with a
+  **409**, never re-run. Changing what a folder means afterwards is ordinary
+  entity editing (rename a project, move a picture between sets), not a
+  second commit.
+- **No placement of *future* pictures.** This writes the accepted mapping onto
+  the pictures the read found; where a new picture goes on import is the
+  layout, v1.11 Phase 4.
+
+### 20.3 Layout & Move
+
+How a library's folders are laid out, the one action the client offers over it,
+and the one gesture that moves everything. Backend design is
+`docs/backend_architecture.md` §24.4; the release plan is
+`docs/plans/v1.11.0-existing-library.md` §4 Phase 4.
+
+**Three rules the client must hold to.**
+
+1. **A picture moves only when its folder stops being true.** Not whenever
+   something about it changes. Adding a second project or a second person moves
+   nothing, and the UI must not suggest otherwise — the copy that sits next to
+   the layout builder is a table of what does and does not move, not a warning.
+2. **Choosing a layout reorganises nothing.** Every path already in the library
+   is what its assignments were read from, so every path is already true. A
+   confirmation dialog saying "this will move your files" would be false, and
+   `PATCH /server-config/layout` will not have moved one when it returns.
+   *Offering* the Phase 4c migration afterwards is the correct shape, and it is
+   a separate, previewed, explicitly-consented action — never a side effect of
+   the PATCH.
+3. **Drift is offered, never taken.** A picture whose folder is still true but is
+   not what the layout would pick today is *not wrong*. `suggested_folder` is an
+   offer the owner accepts; nothing in the product acts on it by itself. The
+   Phase 4c migration is the one thing that does sweep a folder of the owner's
+   own into the layout, and only because it is the owner acting, on the whole
+   library at once, after a preview and with one undo: **the rule and the drift
+   offer treat a folder of the owner's own as a permanent override; "Move them
+   now" flattens it.**
+
+#### The layout string
+
+One field, `layout`, in the form `project/person,set`:
+
+- `/` separates **segments** — one folder level each, in order.
+- `,` separates a segment's **alternatives**; the first the picture has a value
+  for wins.
+- A segment nothing fills is **skipped**, not left as an empty folder, which is
+  what keeps the tree two deep instead of five.
+- Facets: `project`, `person`, `set`, `tag`. `person` is the user-facing word;
+  `character` is the database's.
+
+`null` or `""` means **no layout**, which is the default and the only state in
+which nothing is ever placed or moved. `layout_unfiled` is the folder a picture
+with nothing to file it by goes to — one safe path component, `Unassigned`
+when null. It is deliberately not the library root: the root is where an unmigrated
+flat library lives and those files must never move.
+
+**Both PATCHes are patches, not puts.** A field you do not send keeps its stored
+value, so sending `layout_unfiled` alone renames the unfiled folder and does not
+turn the layout off. Send `layout: null` explicitly to turn it off. An unfiled
+name that is not a single safe path component is `400`, and so is an
+unparseable layout — checked independently, so a bad unfiled name is refused
+even when there is no layout to parse beside it.
+
+#### Routes
+
+| Method | Path | Tier | Returns |
+|---|---|---|---|
+| `GET` | `/api/v1/server-config/layout` | `local_owner_only` | `{layout, layout_unfiled, default_layout}` for the library's own picture root |
+| `PATCH` | `/api/v1/server-config/layout` | `local_owner_only` | the same, after recording. `400` with the reason if the layout cannot be read |
+| `GET` | `/api/v1/server-config/captions` | `local_owner_only` | `{sync_tags, sync_descriptions, tags_suffix, description_suffix, default_tags_suffix, default_description_suffix}`: caption-file sync for the library's own picture root, the same four fields a reference folder carries |
+| `PATCH` | `/api/v1/server-config/captions` | `local_owner_only` | the same, after recording. A toggle sent as `null` is no change; an empty suffix clears it. `400` for a suffix that is not a bare filename fragment, or one suffix for both kinds. Turning a kind on asks for a root rescan, which reads existing caption files in and writes one beside every picture that has content but no file |
+| `PATCH` | `/api/v1/reference-folders/{folder_id}` | `local_owner_only` | the folder, now carrying `layout` / `layout_unfiled`. The same two fields on the folder the owner indexed in place, and they are read back by `GET /reference-folders` too |
+| `GET` | `/api/v1/pictures/{id}/layout` | `picture_scoped` | `{layout, current_folder, suggested_folder}` |
+| `POST` | `/api/v1/pictures/layout/move-to-match` | `picture_scoped` | `{moved_count, moved_picture_ids, skipped, operation_id}` |
+| `GET` | `/api/v1/server-config/layout/migration` | `local_owner_only` | what moving the whole library onto its layout would do. Moves nothing |
+| `POST` | `/api/v1/server-config/layout/migration` | `local_owner_only` | one pass of that move: `{batch_id, moved_count, moved_picture_ids, examined, next_after_id, done, skipped, operation_id}` |
+
+`GET /pictures/{id}/layout` answers `{"layout": null, "current_folder": null,
+"suggested_folder": null}` — **not** a 404 — for a picture in a root with no
+layout. A 404 there means the picture does not exist.
+
+`suggested_folder` is `null` whenever there is nothing to offer, and the client
+must treat all four cases the same way (no button): the root has no layout, the
+picture is not in a laid-out root, its folder is one of the owner's own, or it
+is already where the layout would put it.
+
+#### `move-to-match`
+
+Body `{"picture_ids": [int, ...]}`, at most 200 — the same cap as `POST /pictures/rotate`, because every id is a file operation on the owner's disk and the whole request is one transaction and one undo. A larger selection is `422`; send it in batches. Every picture that is already
+where the layout would put it, or is in a folder of the owner's own, comes back
+in `skipped` as `{"picture_id": int, "reason": str}` and is **left exactly where
+it is**. Reasons the client may see: `already_matches`, `no_layout`,
+`destination_taken`, `source_file_missing`, `source_is_symlink`,
+`path_outside_root`, `destination_outside_root`.
+
+The whole request is recorded as **one** `pictures.layout.move` operation, so
+one Ctrl+Z puts every file back — `operation_id` names it. A folder the move
+leaves empty is kept, never deleted.
+
+#### The migration (Phase 4c)
+
+The one operation in this release that deliberately moves everything, offered
+whenever a layout is **set or changed** and never automatic, never on import.
+
+> **It is not rule 1 and the UI must not describe it as one.** Under that rule a
+> flat path parses against nothing, can never be false, and never moves — which
+> is why an existing library needs no migration and why rule 2 is true. This is
+> the owner asking for something else: *make it all match, now.*
+
+`GET .../migration` **moves nothing** and is the consent screen:
+
+```
+{ "layout": "project/person,set",
+  "picture_count": 4109, "folder_count": 312,
+  "samples": [ {"picture_id": 12, "from": "0412.png", "to": "2024 Shoots/Mira/0412.png"} ],
+  "collision_count": 3, "collisions": [ ... ],
+  "cross_volume_count": 0,
+  "skipped_counts": {"source_is_symlink": 1} }
+```
+
+**`skipped_counts` is a different shape from the `POST`'s `skipped`, on
+purpose**, and the name says so: the preview answers `{reason: count}` because a
+per-picture list over a whole library would be a listing of it, and the `POST`
+answers `[{picture_id, reason}]` because a pass is 200 pictures and the client
+may want to name them.
+
+Every path is **relative to the library root**, never absolute. Three numbers
+carry the whole consent and the client must show all three:
+
+- `picture_count` / `folder_count` — *"4,109 pictures will move into 312
+  folders"*, with `samples` under it. A picture the layout cannot place is in
+  none of these and does not move: sweeping it into the unfiled folder would be
+  movement for no gain, since it already contradicts nothing.
+- `collision_count` — pictures rendering onto a path something already occupies.
+  They are suffixed `-2`, `-3`… **The file already sitting there is never
+  renamed and never overwritten**; what is suffixed is the file being moved,
+  and its sidecars with it (a sidecar pairs with its picture by stem).
+  Show the count and the `collisions` samples rather than hiding it, and never
+  present it as a failure.
+- `cross_volume_count` — pictures sitting across a mount point from where the
+  layout would put them. **Those cannot be moved at all**: the destination is
+  claimed with `os.link` and then `os.replace`, and both refuse to cross a
+  device, so they are refused in the plan rather than attempted. They are also
+  in `skipped_counts` as `destination_other_volume`, they are not in
+  `picture_count`, and they stay exactly where they are. Non-zero is worth
+  saying out loud before the run — it is the one case where "make it all match"
+  cannot, and the owner may want to move the mount rather than the pictures.
+
+`POST .../migration` runs **one pass**. Body `{"after_id": 0, "batch_id": null}`;
+call it again with the `next_after_id` and the `batch_id` it returned until
+`done` is `true`. That loop is the progress bar.
+
+- **Omit `batch_id` on the first pass and echo it on every one after.** Every
+  pass records its own `pictures.layout.move` operation, all under that one id,
+  and a batch is a single undo unit — so **one undo puts every file back at the
+  path it had**. A `batch_id` outside the `srv-layout-migration-` namespace is
+  `400`; the check is on the value's shape, so what it guarantees is that a
+  migration's passes cannot be grouped into some other gesture's undo unit, not
+  that the id came from this server.
+- **A pass that fails is finishable, not restartable.** The tree is left
+  half-moved and wholly consistent; call again with the same cursor and id. A
+  picture already where the layout wants it plans no move, so re-running is
+  safe and re-moves nothing.
+- **Every picture a pass planned is accounted for**, in `moved_picture_ids` or
+  in `skipped`. A file that could not be moved after all — a name that appeared
+  at the destination since the plan, a file locked on Windows — comes back as
+  `move_failed` rather than vanishing from both lists while the pass reports a
+  clean finish. Re-run to retry it.
+- `skipped` uses §20.3's own vocabulary plus `destination_other_volume` and
+  `move_failed`, both above.
+- Only the library's **own** picture root is migrated. A reference folder's
+  layout has no migration route; it would need its own consent naming that
+  folder.
+
+#### Events
+
+A move — whether the owner asked for it, the rule decided it, or the migration
+made it — broadcasts
+`CHANGED_PICTURES` with `change_kind: "updated"` and
+`fields: ["file_path", "pixels"]`. **`pixels` is not decoration.** The thumbnail
+URL is derived from the file path and does not come back from
+`GET /pictures/{id}/metadata`, so a client that re-reads metadata alone goes on
+painting a thumbnail that is no longer at that address — the same marker an
+in-place rotate raises, for the same reason.
+
+There is no event for "a picture became due a layout check", and there should
+not be: the check is debounced by design, almost always decides nothing, and a
+client that drew a spinner for it would be drawing one for every membership edit
+in the product.
+
+### 20.4 Move Reconciliation
+
+The mirror of §20.3: that surface moves a file when an assignment change makes
+its folder untrue; this one reads a file the owner already moved outside
+PixlStash and says whether an assignment should change to match. Backend
+design is `docs/backend_architecture.md` §24.5; the release plan is
+`docs/plans/v1.11.0-existing-library.md` §4 Phase 5.
+
+#### Routes
+
+All three `owner_only`, vault-wide like `/operations` — none of it is
+boundable to a single resource-scoped grant.
+
+| Method | Path | Body | Returns |
+|---|---|---|---|
+| `GET` | `/api/v1/moves/pending` | — | `{unambiguous, ambiguous, off_layout}` |
+| `POST` | `/api/v1/moves/apply` | `{"review_ids": [int, ...]}` | `{applied_picture_ids, skipped_review_ids}` |
+| `POST` | `/api/v1/moves/dismiss` | `{"review_ids": [int, ...]}` | `{dismissed_review_ids}` |
+
+Each item in a bucket:
+
+```jsonc
+{
+  "review_id": 42,
+  "picture_id": 1001,
+  "old_path": "/library/refs/2024 Shoots/mira.png",
+  "new_path": "/library/refs/Client · Nordvik/mira.png",
+  "removals": [{"facet": "project", "name": "2024 Shoots"}],
+  "additions": [{"facet": "project", "name": "Client · Nordvik"}],
+  // ambiguous bucket only — the picture's own current names for each facet a
+  // removal is ambiguous about, i.e. why leaving one folder does not say
+  // which the owner meant:
+  "current": {"project": ["2024 Shoots", "Client · Nordvik"]}
+}
+```
+
+`facet` is one of `"project"` \| `"set"` \| `"person"` — the same three
+`Facet` values §20.3's layout builder uses, minus `"tag"` (deliberately
+unreconciled; `docs/backend_architecture.md` §24.5).
+
+**Four contract points the client must hold to.**
+
+1. **There is no cache to invalidate, on either side.** Every `GET` is
+   reclassified live against current assignments and the current layout —
+   the same "Look again" shape as `GET /insights` (§21). A row that no longer
+   implies anything is quietly dropped rather than returned; the client
+   should not expect a `review_id` it saw once to still be there.
+2. **`apply` recomputes fresh too, never trusting an earlier `GET`.** Passing
+   every currently-unambiguous `review_id` is how the client requests "apply
+   the whole bucket" — it is not submitting a decision the server already
+   made, it is asking the server to decide again, right now, and act. A
+   picture whose memberships changed in the gap is applied against what is
+   true at that moment, which may differ from what the `GET` said.
+3. **A single `review_id` sent to `apply` is how an ambiguous row is
+   resolved** — the ambiguity gate only blocks the *bulk* "apply every
+   unambiguous row" action, never a caller naming one row explicitly.
+   `dismiss` on the same id ("Keep both") changes nothing and only clears the
+   queue. The resolve button's own label is derived client-side from `current`
+   and `removals`, not sent by the server — see
+   `docs/frontend_architecture.md` §13.5 for why it must name the destination
+   rather than a generic verb.
+4. **`applied_picture_ids` and `skipped_review_ids` are disjoint, and neither
+   implies the row is still in the queue.** Every `review_id` the caller sent
+   is cleared once acted on, whether or not anything changed. A `review_id`
+   lands in `skipped_review_ids` when it had a genuine removal or addition to
+   make but the entity name it needed could not be resolved uniquely (backend §24.5) —
+   the client must not read an empty `applied_picture_ids` as "nothing was
+   asked for" without also checking whether anything was skipped.
+
+**`off_layout` carries no decision.** Every item in it already has its path
+followed (the scan already updated `Picture.file_path`); the bucket exists so
+the client can say so, not so the client can act on it. Both endpoints accept
+any `review_id` and clear the row either way, so applying or dismissing an
+`off_layout` one is never an error — but it is not guaranteed to be a pure
+no-op, because `apply` reclassifies fresh (contract point 2, above): if a
+matching entity was created in the gap between the `GET` and the click, the
+row may no longer be `off_layout` by the time `apply` acts on it, and it is
+applied against what is true then. The client's own `off_layout` bucket
+carries no button for this reason — the row is not offered as something to
+apply, only as something to dismiss along with the rest of the queue, and it
+never persists past `RETENTION_S` regardless (backend §24.5).
+
+#### Events
+
+`external_moves_pending` (§8) is the only event on this surface, and it
+carries no picture ids or counts — see the table entry above. There is no
+"reconciled" event: applying and dismissing are both client-initiated `POST`s
+the caller already has the result of, and `CHANGED_PICTURES` (with
+`change_kind: "updated"`) is emitted separately for the pictures an `apply`
+actually changed, the same envelope every other membership write uses.
+
+---
+
+## 21. About your library
 
 ### `GET /insights`
 
@@ -1927,473 +3581,23 @@ touched. Any UI copy implying otherwise would be wrong.
 
 ---
 
-## 22. Folder-Structure Commit API (v1.11, Phase 3)
+## 22. Text in Pictures
 
-The accept path behind the `Preview` screen: takes the mapping the owner
-confirmed over a §20 read and writes it. Backend design is
-`docs/backend_architecture.md` §25; the release plan is
-`docs/plans/v1.11.0-existing-library.md` §4 Phase 3.
+Text read out of a picture is its own data: never `description`, never tags.
 
-**One rule the client must hold to, same as §20's first: it moves, renames and
-copies zero files, in either commit mode.** `mode: "reference"` (the default)
-registers the scanned root as an ordinary reference folder — the same
-mechanism `POST /reference-folders` already ships, indexed in place. `mode:
-"local_import"` (v1.11.x, the "Add a library" fix) instead imports the pictures
-as ordinary MANAGED ones — no reference folder at all. Either way every
-picture found is linked to the accepted projects, people, sets and tags by
-writing database rows. Nothing on disk changes except the new thumbnail each
-newly-indexed picture gets, exactly as any other import produces.
+| Route | Purpose | Response |
+|---|---|---|
+| `GET /pictures/search` | every search also matches the text | each row gains `text_match: bool`, true when every query word appears in the picture's text |
+| `GET /pictures/{id}/text?query=` | the Text tab and the word boxes | `{ state: "none" \| "pending" \| "read", lines: [[{ text, box: [x, y, w, h], matched }]] }` |
+| `POST /pictures/{id}/text/read` | *Read again*; the stored text is kept until the new read succeeds | `{ state: "pending", lines: [] }` |
 
-### `POST /api/v1/folder-structure/commit`
-
-```jsonc
-{
-  // Exactly ONE of these two identifies the read being committed.
-  "task_id": "…",              // the settled read's task_id (§20)
-  "read_result": { /* … */ },  // or the read's own result, from §20's status
-  "label": "Generations",       // optional; defaults to the folder's own name
-  "mode": "reference",          // "reference" (default) | "local_import"
-  "captions": [                 // local_import only: one row per §20 caption pattern
-    {"suffix": ".txt", "kind": "tags"},
-    {"suffix": "_caption.txt", "kind": "description"},
-    {"suffix": "_notes.txt", "kind": "ignore"}
-  ],
-  "assignments": [
-    // One entry per folder the owner accepted as something. A folder left
-    // "just a folder" or undecided is simply absent — there is nothing here
-    // for it to do, and every picture under it is still indexed and
-    // searchable (§20's "arrives ungrouped" case).
-    {"relative_path": "2024 Shoots", "kind": "project"},
-    {"relative_path": "2024 Shoots/mira", "kind": "person", "match_id": 41},
-    {"relative_path": "Datasets/mira-lora-v3", "kind": "set"},
-    {"relative_path": "final", "kind": "tag"}
-  ]
-}
-```
-
-**`read_result` exists because a read lives in one server process's memory and
-processes end.** The desktop's first run reads the library folder while the GPU
-runtime downloads and then restarts the backend onto that runtime, so by the
-time the owner answers the mapping questions the task that produced the answer
-is gone and `task_id` can only be `404 Task not found` — with the answer sitting
-in the dialog. Sending the result back is the same information by another route.
-Two consequences worth knowing: a supplied result reserves nothing, so it
-carries none of the one-commit protection a task-identified read gets (the
-caller holding the result owns that), and a body that names both or neither is a
-`400`.
-
-`relative_path` is the same handle §20's folder rows carry — POSIX-separated,
-relative to the read's root, `""` for the root itself. `kind` is one of
-`project`, `person`, `set`, `tag` (never `folder`: a row with nothing to do is
-omitted, not sent as `folder`). `match_id` names an existing entity to attach
-to, exactly as `name_match`'s `match.id` proposed or as the owner picked from
-`candidates`; omitted, a new one is created named after the folder.
-
-**A folder's nearest accepted ancestor of each exclusive kind wins** — a
-picture is filed under the *closest* Project, Person or Set above it, not
-every one along the path, mirroring `library_layout`'s first-match-wins
-segments. Tags are the exception: every accepted Tag ancestor applies, because
-a picture can carry more than one label.
-
-Returns `{"task_id": "…"}` and starts the commit in the background.
-
-`local_owner_only` (§16.3): the read already validated the host path once, and
-this route is the write that follows from it.
-
-| Status | When |
-|---|---|
-| **400** | an `assignments` row is malformed or names an unknown `kind` |
-| **404** | `task_id` does not name a read this session holds |
-| **409** | the named read has not settled yet, a commit is already running (against any read), the named read has **already been committed**, or the read's root path is already a reference folder that has completed a scan (§25 — the reuse-vs-refuse rule) |
-
-### `mode: "local_import"`
-
-For the read's root when it IS the active library's own `image_root`, or a
-folder inside it — the "Add a library" flow's "pictures" verdict, where the
-folder a fresh vault was just created in already held loose files before the
-owner ever pointed PixlStash at it. `label` is ignored in this mode: there is
-no reference folder to name.
-
-**Every picture the walk finds becomes an ordinary MANAGED picture** (relative
-`file_path`, exactly as anything else imported into this library), not a
-reference-folder one. Routing this case through `mode: "reference"` instead
-would collide with the rule `POST /reference-folders` already enforces the
-other direction — a reference folder may never equal or contain `image_root`
-(`409 "Path conflicts with the PixlStash data folder."`) — so the two stay two
-modes, never one. Import is **idempotent by `file_path`**: a file already
-indexed under this path (an overlapping earlier `local_import`, or an ordinary
-import that reached it independently) is reused by id, never re-imported as a
-second row — same spirit as `mode: "reference"`'s own "don't redo what already
-happened" rule for a resumed commit (§25).
-
-**`captions` says what each caption file beside the pictures is.** A picture
-built by the import reads the files at the confirmed suffixes: a `tags` file
-becomes its tags (and it is not queued for the tagger), a `description` file
-its description, and an `ignore` pattern is never opened however tag-like its
-content. **Absent and empty are different answers.** A request with no
-`captions` key is a client that never asked (an older one), and the import
-probes the known conventions as it always did (`_tags.txt`, `.caption`, a
-content-sniffed `.txt`). `[]` is the owner having been asked with nothing to
-confirm, and reads no caption file at all. The answer is recorded on the
-durable commit record, so a commit resumed after a crash honours it. A row's
-`suffix` must be a bare filename fragment and `kind` one of `tags`,
-`description`, `ignore`, else `400`. `mode: "reference"` refuses the field
-outright (`400`), `null` and `[]` included: a reference folder's sidecar
-suffixes are its own `PATCH /reference-folders/{folder_id}` fields.
-
-**The root must be inside `image_root` or the commit fails.** There is no
-separate error status for this — the check runs inside the background commit,
-same as every other commit-time refusal, and surfaces as `status: "failed"`
-with `error` set once the client polls `GET .../commit/status` (see below),
-not as a synchronous 4xx on the `POST`. A client offering `local_import` in its
-UI should therefore only ever construct the request against the active
-library's own folder — this is a server-side backstop, not something the
-mapping screen is expected to let the owner trigger by hand against an
-arbitrary path.
-
-### `GET /api/v1/folder-structure/commit/status?task_id=…`
-
-Polled per §11's task-id branch, same shape as §20's read status:
-
-```jsonc
-{
-  "task_id": "…",
-  "status": "running",        // queued | running | completed | failed
-  "stage": "indexing",        // registering | indexing | assigning | done
-  "processed": 149,
-  "total": 352,
-  "progress": 42.3,
-  "error": null,
-  "result": null
-}
-```
-
-**A commit is never `cancelled`.** In `mode: "reference"`, once the reference
-folder is registered its scan runs to completion regardless of what the screen
-does next — the in-place indexing this route starts is not something a
-"Cancel and organise later" on a *later* screen can safely stop mid-write, and
-it is also the whole reason the mapping screen stays reachable from the
-sidebar afterwards: the scan and the mapping are two different steps, and
-abandoning the second does not undo the first. `mode: "local_import"` has no
-separate scan to keep running, but the same rule applies for the same
-underlying reason: there is no cancel route on this API in either mode, so a
-commit once started always runs to `completed` or `failed`.
-
-`stage` progresses `registering` (creating the reference folder row) →
-`indexing` → `assigning` (creating the accepted entities and linking pictures
-— no filesystem work happens here at all) → `done`. In `mode: "reference"`,
-`indexing` means waiting for the reference folder's first scan pass;
-`processed`/`total` are pictures indexed so far, out of the read's own
-`picture_count`. In `mode: "local_import"` there is no reference folder to
-register, so `stage` goes straight from `registering` (the commit's initial
-state, before its background thread has reported anything) to `indexing`,
-where `processed`/`total` instead count files as `local_import_pictures`
-resolves them — both the ones already indexed (an idempotent hit, counted
-immediately) and the newly-imported ones (counted as each batch commits).
-
-The result, once `status` is `completed`:
-
-```jsonc
-{
-  "reference_folder_id": 7,     // null for mode: "local_import" — no ref folder
-  "pictures_indexed": 28412,
-  "projects_created": 12, "projects_matched": 1,
-  "people_created": 114, "people_matched": 4,
-  "sets_created": 31, "sets_matched": 0,
-  "tags_created": 4
-}
-```
-
-### Not in this API
-
-- **No re-mapping an already-committed folder.** Accepting a mapping is
-  one-shot and **enforced**, not merely a convention the client is trusted to
-  follow: the read is marked committed the instant a commit for it starts
-  (§25), and a second `POST` against the same `task_id` — whether the first
-  commit is still running or long since `completed` — is refused with a
-  **409**, never re-run. Changing what a folder means afterwards is ordinary
-  entity editing (rename a project, move a picture between sets), not a
-  second commit.
-- **No placement of *future* pictures.** This writes the accepted mapping onto
-  the pictures the read found; where a new picture goes on import is the
-  layout, v1.11 Phase 4.
+- `box` is in fractions of the picture **as displayed** (EXIF orientation applied), so the overlay draws it without knowing the pixel size.
+- `matched` is computed server-side with the rule search uses (`database.ocr_word_matches`: no edits under five letters, one under nine, two beyond, never on the first letter), so the Text tab and the result pill never disagree about "C0FFEE" matching "coffee". Words are marked only when the whole query matched the picture (every word), the same test that sets `text_match`. Omit `query` when no search is active.
+- `pending` means the picture is not in the scrapheap, its `text_score` qualifies and it has not been read yet; `none` covers both "not worth reading" and "read, nothing found".
+- A finished read emits `pictures_changed` with `fields: ["ocr_text"]`. The field affects no sort or filter, so the grid ignores it; the open overlay refetches.
+- Ranking: a text match adds `OCR_TEXT_MATCH_WEIGHT` (0.35) to the combined score and nothing otherwise, so a page of words gains nothing on a search its words do not answer. The SPA searches with `threshold=0.1`; at the route's own default of 0.5 a picture matched by its text alone (0.35) is filtered out, so an API caller wanting text-only matches must pass a lower threshold. `text_match` is computed only for the rows a search returns. `tests/test_ocr_text.py` holds the queries that must not match known text-heavy pictures.
+- The result pill's *All · In text* switch filters on `text_match` client-side; nothing is refetched and nothing is remembered.
 
 ---
 
----
-
-## 23. Layout & Move API (v1.11, Phases 4b and 4c)
-
-How a library's folders are laid out, the one action the client offers over it,
-and the one gesture that moves everything. Backend design is
-`docs/backend_architecture.md` §26; the release plan is
-`docs/plans/v1.11.0-existing-library.md` §4 Phase 4.
-
-**Three rules the client must hold to.**
-
-1. **A picture moves only when its folder stops being true.** Not whenever
-   something about it changes. Adding a second project or a second person moves
-   nothing, and the UI must not suggest otherwise — the copy that sits next to
-   the layout builder is a table of what does and does not move, not a warning.
-2. **Choosing a layout reorganises nothing.** Every path already in the library
-   is what its assignments were read from, so every path is already true. A
-   confirmation dialog saying "this will move your files" would be false, and
-   `PATCH /server-config/layout` will not have moved one when it returns.
-   *Offering* the Phase 4c migration afterwards is the correct shape, and it is
-   a separate, previewed, explicitly-consented action — never a side effect of
-   the PATCH.
-3. **Drift is offered, never taken.** A picture whose folder is still true but is
-   not what the layout would pick today is *not wrong*. `suggested_folder` is an
-   offer the owner accepts; nothing in the product acts on it by itself. The
-   Phase 4c migration is the one thing that does sweep a folder of the owner's
-   own into the layout, and only because it is the owner acting, on the whole
-   library at once, after a preview and with one undo: **the rule and the drift
-   offer treat a folder of the owner's own as a permanent override; "Move them
-   now" flattens it.**
-
-### The layout string
-
-One field, `layout`, in the form `project/person,set`:
-
-- `/` separates **segments** — one folder level each, in order.
-- `,` separates a segment's **alternatives**; the first the picture has a value
-  for wins.
-- A segment nothing fills is **skipped**, not left as an empty folder, which is
-  what keeps the tree two deep instead of five.
-- Facets: `project`, `person`, `set`, `tag`. `person` is the user-facing word;
-  `character` is the database's.
-
-`null` or `""` means **no layout**, which is the default and the only state in
-which nothing is ever placed or moved. `layout_unfiled` is the folder a picture
-with nothing to file it by goes to — one safe path component, `Unassigned`
-when null. It is deliberately not the library root: the root is where an unmigrated
-flat library lives and those files must never move.
-
-**Both PATCHes are patches, not puts.** A field you do not send keeps its stored
-value, so sending `layout_unfiled` alone renames the unfiled folder and does not
-turn the layout off. Send `layout: null` explicitly to turn it off. An unfiled
-name that is not a single safe path component is `400`, and so is an
-unparseable layout — checked independently, so a bad unfiled name is refused
-even when there is no layout to parse beside it.
-
-### Routes
-
-| Method | Path | Tier | Returns |
-|---|---|---|---|
-| `GET` | `/api/v1/server-config/layout` | `local_owner_only` | `{layout, layout_unfiled, default_layout}` for the library's own picture root |
-| `PATCH` | `/api/v1/server-config/layout` | `local_owner_only` | the same, after recording. `400` with the reason if the layout cannot be read |
-| `GET` | `/api/v1/server-config/captions` | `local_owner_only` | `{sync_tags, sync_descriptions, tags_suffix, description_suffix, default_tags_suffix, default_description_suffix}`: caption-file sync for the library's own picture root, the same four fields a reference folder carries |
-| `PATCH` | `/api/v1/server-config/captions` | `local_owner_only` | the same, after recording. A toggle sent as `null` is no change; an empty suffix clears it. `400` for a suffix that is not a bare filename fragment, or one suffix for both kinds. Turning a kind on asks for a root rescan, which reads existing caption files in and writes one beside every picture that has content but no file |
-| `PATCH` | `/api/v1/reference-folders/{folder_id}` | `local_owner_only` | the folder, now carrying `layout` / `layout_unfiled`. The same two fields on the folder the owner indexed in place, and they are read back by `GET /reference-folders` too |
-| `GET` | `/api/v1/pictures/{id}/layout` | `picture_scoped` | `{layout, current_folder, suggested_folder}` |
-| `POST` | `/api/v1/pictures/layout/move-to-match` | `picture_scoped` | `{moved_count, moved_picture_ids, skipped, operation_id}` |
-| `GET` | `/api/v1/server-config/layout/migration` | `local_owner_only` | what moving the whole library onto its layout would do. Moves nothing |
-| `POST` | `/api/v1/server-config/layout/migration` | `local_owner_only` | one pass of that move: `{batch_id, moved_count, moved_picture_ids, examined, next_after_id, done, skipped, operation_id}` |
-
-`GET /pictures/{id}/layout` answers `{"layout": null, "current_folder": null,
-"suggested_folder": null}` — **not** a 404 — for a picture in a root with no
-layout. A 404 there means the picture does not exist.
-
-`suggested_folder` is `null` whenever there is nothing to offer, and the client
-must treat all four cases the same way (no button): the root has no layout, the
-picture is not in a laid-out root, its folder is one of the owner's own, or it
-is already where the layout would put it.
-
-### `move-to-match`
-
-Body `{"picture_ids": [int, ...]}`, at most 200 — the same cap as `POST /pictures/rotate`, because every id is a file operation on the owner's disk and the whole request is one transaction and one undo. A larger selection is `422`; send it in batches. Every picture that is already
-where the layout would put it, or is in a folder of the owner's own, comes back
-in `skipped` as `{"picture_id": int, "reason": str}` and is **left exactly where
-it is**. Reasons the client may see: `already_matches`, `no_layout`,
-`destination_taken`, `source_file_missing`, `source_is_symlink`,
-`path_outside_root`, `destination_outside_root`.
-
-The whole request is recorded as **one** `pictures.layout.move` operation, so
-one Ctrl+Z puts every file back — `operation_id` names it. A folder the move
-leaves empty is kept, never deleted.
-
-### The migration (Phase 4c)
-
-The one operation in this release that deliberately moves everything, offered
-whenever a layout is **set or changed** and never automatic, never on import.
-
-> **It is not rule 1 and the UI must not describe it as one.** Under that rule a
-> flat path parses against nothing, can never be false, and never moves — which
-> is why an existing library needs no migration and why rule 2 is true. This is
-> the owner asking for something else: *make it all match, now.*
-
-`GET .../migration` **moves nothing** and is the consent screen:
-
-```
-{ "layout": "project/person,set",
-  "picture_count": 4109, "folder_count": 312,
-  "samples": [ {"picture_id": 12, "from": "0412.png", "to": "2024 Shoots/Mira/0412.png"} ],
-  "collision_count": 3, "collisions": [ ... ],
-  "cross_volume_count": 0,
-  "skipped_counts": {"source_is_symlink": 1} }
-```
-
-**`skipped_counts` is a different shape from the `POST`'s `skipped`, on
-purpose**, and the name says so: the preview answers `{reason: count}` because a
-per-picture list over a whole library would be a listing of it, and the `POST`
-answers `[{picture_id, reason}]` because a pass is 200 pictures and the client
-may want to name them.
-
-Every path is **relative to the library root**, never absolute. Three numbers
-carry the whole consent and the client must show all three:
-
-- `picture_count` / `folder_count` — *"4,109 pictures will move into 312
-  folders"*, with `samples` under it. A picture the layout cannot place is in
-  none of these and does not move: sweeping it into the unfiled folder would be
-  movement for no gain, since it already contradicts nothing.
-- `collision_count` — pictures rendering onto a path something already occupies.
-  They are suffixed `-2`, `-3`… **The file already sitting there is never
-  renamed and never overwritten**; what is suffixed is the file being moved,
-  and its sidecars with it (a sidecar pairs with its picture by stem).
-  Show the count and the `collisions` samples rather than hiding it, and never
-  present it as a failure.
-- `cross_volume_count` — pictures sitting across a mount point from where the
-  layout would put them. **Those cannot be moved at all**: the destination is
-  claimed with `os.link` and then `os.replace`, and both refuse to cross a
-  device, so they are refused in the plan rather than attempted. They are also
-  in `skipped_counts` as `destination_other_volume`, they are not in
-  `picture_count`, and they stay exactly where they are. Non-zero is worth
-  saying out loud before the run — it is the one case where "make it all match"
-  cannot, and the owner may want to move the mount rather than the pictures.
-
-`POST .../migration` runs **one pass**. Body `{"after_id": 0, "batch_id": null}`;
-call it again with the `next_after_id` and the `batch_id` it returned until
-`done` is `true`. That loop is the progress bar.
-
-- **Omit `batch_id` on the first pass and echo it on every one after.** Every
-  pass records its own `pictures.layout.move` operation, all under that one id,
-  and a batch is a single undo unit — so **one undo puts every file back at the
-  path it had**. A `batch_id` outside the `srv-layout-migration-` namespace is
-  `400`; the check is on the value's shape, so what it guarantees is that a
-  migration's passes cannot be grouped into some other gesture's undo unit, not
-  that the id came from this server.
-- **A pass that fails is finishable, not restartable.** The tree is left
-  half-moved and wholly consistent; call again with the same cursor and id. A
-  picture already where the layout wants it plans no move, so re-running is
-  safe and re-moves nothing.
-- **Every picture a pass planned is accounted for**, in `moved_picture_ids` or
-  in `skipped`. A file that could not be moved after all — a name that appeared
-  at the destination since the plan, a file locked on Windows — comes back as
-  `move_failed` rather than vanishing from both lists while the pass reports a
-  clean finish. Re-run to retry it.
-- `skipped` uses §23's own vocabulary plus `destination_other_volume` and
-  `move_failed`, both above.
-- Only the library's **own** picture root is migrated. A reference folder's
-  layout has no migration route; it would need its own consent naming that
-  folder.
-
-### Events
-
-A move — whether the owner asked for it, the rule decided it, or the migration
-made it — broadcasts
-`CHANGED_PICTURES` with `change_kind: "updated"` and
-`fields: ["file_path", "pixels"]`. **`pixels` is not decoration.** The thumbnail
-URL is derived from the file path and does not come back from
-`GET /pictures/{id}/metadata`, so a client that re-reads metadata alone goes on
-painting a thumbnail that is no longer at that address — the same marker an
-in-place rotate raises, for the same reason.
-
-There is no event for "a picture became due a layout check", and there should
-not be: the check is debounced by design, almost always decides nothing, and a
-client that drew a spinner for it would be drawing one for every membership edit
-in the product.
-
-## 24. Move Reconciliation API (v1.11, Phase 5)
-
-The mirror of §23: that surface moves a file when an assignment change makes
-its folder untrue; this one reads a file the owner already moved outside
-PixlStash and says whether an assignment should change to match. Backend
-design is `docs/backend_architecture.md` §27; the release plan is
-`docs/plans/v1.11.0-existing-library.md` §4 Phase 5.
-
-### Routes
-
-All three `owner_only`, vault-wide like `/operations` — none of it is
-boundable to a single resource-scoped grant.
-
-| Method | Path | Body | Returns |
-|---|---|---|---|
-| `GET` | `/api/v1/moves/pending` | — | `{unambiguous, ambiguous, off_layout}` |
-| `POST` | `/api/v1/moves/apply` | `{"review_ids": [int, ...]}` | `{applied_picture_ids, skipped_review_ids}` |
-| `POST` | `/api/v1/moves/dismiss` | `{"review_ids": [int, ...]}` | `{dismissed_review_ids}` |
-
-Each item in a bucket:
-
-```jsonc
-{
-  "review_id": 42,
-  "picture_id": 1001,
-  "old_path": "/library/refs/2024 Shoots/mira.png",
-  "new_path": "/library/refs/Client · Nordvik/mira.png",
-  "removals": [{"facet": "project", "name": "2024 Shoots"}],
-  "additions": [{"facet": "project", "name": "Client · Nordvik"}],
-  // ambiguous bucket only — the picture's own current names for each facet a
-  // removal is ambiguous about, i.e. why leaving one folder does not say
-  // which the owner meant:
-  "current": {"project": ["2024 Shoots", "Client · Nordvik"]}
-}
-```
-
-`facet` is one of `"project"` \| `"set"` \| `"person"` — the same three
-`Facet` values §23's layout builder uses, minus `"tag"` (deliberately
-unreconciled; `docs/backend_architecture.md` §27).
-
-**Four contract points the client must hold to.**
-
-1. **There is no cache to invalidate, on either side.** Every `GET` is
-   reclassified live against current assignments and the current layout —
-   the same "Look again" shape as `GET /insights` (§21). A row that no longer
-   implies anything is quietly dropped rather than returned; the client
-   should not expect a `review_id` it saw once to still be there.
-2. **`apply` recomputes fresh too, never trusting an earlier `GET`.** Passing
-   every currently-unambiguous `review_id` is how the client requests "apply
-   the whole bucket" — it is not submitting a decision the server already
-   made, it is asking the server to decide again, right now, and act. A
-   picture whose memberships changed in the gap is applied against what is
-   true at that moment, which may differ from what the `GET` said.
-3. **A single `review_id` sent to `apply` is how an ambiguous row is
-   resolved** — the ambiguity gate only blocks the *bulk* "apply every
-   unambiguous row" action, never a caller naming one row explicitly.
-   `dismiss` on the same id ("Keep both") changes nothing and only clears the
-   queue. The resolve button's own label is derived client-side from `current`
-   and `removals`, not sent by the server — see
-   `docs/frontend_architecture.md` §9.4 for why it must name the destination
-   rather than a generic verb.
-4. **`applied_picture_ids` and `skipped_review_ids` are disjoint, and neither
-   implies the row is still in the queue.** Every `review_id` the caller sent
-   is cleared once acted on, whether or not anything changed. A `review_id`
-   lands in `skipped_review_ids` when it had a genuine removal or addition to
-   make but the entity name it needed could not be resolved uniquely (§27) —
-   the client must not read an empty `applied_picture_ids` as "nothing was
-   asked for" without also checking whether anything was skipped.
-
-**`off_layout` carries no decision.** Every item in it already has its path
-followed (the scan already updated `Picture.file_path`); the bucket exists so
-the client can say so, not so the client can act on it. Both endpoints accept
-any `review_id` and clear the row either way, so applying or dismissing an
-`off_layout` one is never an error — but it is not guaranteed to be a pure
-no-op, because `apply` reclassifies fresh (contract point 2, above): if a
-matching entity was created in the gap between the `GET` and the click, the
-row may no longer be `off_layout` by the time `apply` acts on it, and it is
-applied against what is true then. The client's own `off_layout` bucket
-carries no button for this reason — the row is not offered as something to
-apply, only as something to dismiss along with the rest of the queue, and it
-never persists past `RETENTION_S` regardless (§27).
-
-### Events
-
-`external_moves_pending` (§8) is the only event on this surface, and it
-carries no picture ids or counts — see the table entry above. There is no
-"reconciled" event: applying and dismissing are both client-initiated `POST`s
-the caller already has the result of, and `CHANGED_PICTURES` (with
-`change_kind: "updated"`) is emitted separately for the pictures an `apply`
-actually changed, the same envelope every other membership write uses.
-
----
-
-*Last updated: 2026-08-24. Update this document whenever any integration contract (URL prefix, event names, auth mode, build output path, CORS policy, share-token mechanism, settings field names) changes.*
+*When a change needs documenting, edit the section that covers its subsystem, adding a numbered subsection there, and to the Table of Contents, if it needs one. Never add a new `##` section named for a feature, a release or a phase.*

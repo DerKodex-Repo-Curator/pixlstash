@@ -26,13 +26,21 @@ const sectionStub = vi.hoisted(() => ({
 vi.mock("./AccountSection.vue", () => ({ default: sectionStub }));
 vi.mock("./AppearanceSection.vue", () => ({ default: sectionStub }));
 vi.mock("./BehaviourSection.vue", () => ({ default: sectionStub }));
-vi.mock("./ComputeSection.vue", () => ({ default: sectionStub }));
+vi.mock("./ComputeSection.vue", () => ({
+  default: { template: '<div class="compute-stub" />' },
+}));
 vi.mock("./LibrariesSection.vue", () => ({ default: sectionStub }));
+vi.mock("./ModelFoldersSection.vue", () => ({ default: sectionStub }));
 vi.mock("./PrivacySection.vue", () => ({ default: sectionStub }));
 vi.mock("./ScrapheapSection.vue", () => ({ default: sectionStub }));
 vi.mock("./SnapshotsSection.vue", () => ({ default: sectionStub }));
 vi.mock("./SmartScoreSection.vue", () => ({ default: sectionStub }));
-vi.mock("./WorkflowsSection.vue", () => ({ default: sectionStub }));
+vi.mock("./ComfyuiHostSection.vue", () => ({
+  default: {
+    props: { first: Boolean },
+    template: '<div class="comfyui-host-stub" :data-first="String(first)" />',
+  },
+}));
 
 import UserSettingsDialog from "./UserSettingsDialog.vue";
 import { sessionContext } from "../../utils/apiClient";
@@ -75,14 +83,15 @@ describe("UserSettingsDialog library navigation", () => {
 
     // The whole order, not an adjacency: an index comparison between two
     // entries also holds when one of them is missing from the rail entirely.
-    // Compute and Backend are desktop-only and absent under jsdom.
+    // Compute and Backend are desktop-only and absent under jsdom; ComfyUI
+    // stays, because a browser connects ComfyUI too.
     expect(
       wrapper.findAll(".settings-nav-item").map((n) => n.attributes("id")),
     ).toEqual([
       "settings-nav-appearance",
+      "settings-nav-models",
       "settings-nav-behaviour",
       "settings-nav-smart-score",
-      "settings-nav-workflows",
       "settings-nav-libraries",
       // No Library layout rail item: the layout is a property of whichever
       // library is *open*, so it is a dialog off the active library's overflow
@@ -90,6 +99,7 @@ describe("UserSettingsDialog library navigation", () => {
       "settings-nav-scrapheap",
       "settings-nav-snapshots",
       "settings-nav-privacy",
+      "settings-nav-comfyui",
       "settings-nav-account",
     ]);
   });
@@ -104,6 +114,72 @@ describe("UserSettingsDialog library navigation", () => {
       expect(pane.exists()).toBe(true);
       expect(pane.attributes("role")).toBe("region");
       expect(pane.attributes("aria-labelledby")).toBe(item.attributes("id"));
+    }
+  });
+
+  it("gives the ComfyUI host its own pane in a browser", async () => {
+    sessionContext.value = { scope: "ALL" };
+    const wrapper = mount(UserSettingsDialog, {
+      props: { open: true, initialTab: "comfyui" },
+      global: { stubs: { VIcon: true } },
+    });
+    await nextTick();
+
+    expect(wrapper.find("#settings-nav-comfyui").attributes("aria-current")).toBe(
+      "page",
+    );
+    const pane = wrapper.find("#settings-pane-comfyui");
+    // Alone in the pane, so it carries no divider above nothing.
+    expect(pane.find(".comfyui-host-stub").attributes("data-first")).toBe(
+      "true",
+    );
+    expect(wrapper.find(".compute-stub").exists()).toBe(false);
+  });
+
+  it("splits ComfyUI and Compute into two desktop panes", async () => {
+    // `isDesktop` is read when the module is evaluated, so the bridge has to
+    // be in place before the import.
+    sessionContext.value = { scope: "ALL" };
+    window.pixlstashDesktop = {};
+    try {
+      vi.resetModules();
+      const { default: Desktop } = await import("./UserSettingsDialog.vue");
+      const wrapper = mount(Desktop, {
+        props: { open: true, initialTab: "compute" },
+        global: { stubs: { VIcon: true } },
+      });
+      await nextTick();
+
+      expect(
+        wrapper.findAll(".settings-nav-item").map((n) => n.attributes("id")),
+      ).toEqual([
+        "settings-nav-appearance",
+        "settings-nav-models",
+        "settings-nav-behaviour",
+        "settings-nav-smart-score",
+        "settings-nav-libraries",
+        "settings-nav-scrapheap",
+        "settings-nav-snapshots",
+        "settings-nav-privacy",
+        "settings-nav-comfyui",
+        "settings-nav-compute",
+        "settings-nav-backend",
+        "settings-nav-account",
+      ]);
+      expect(wrapper.find("#settings-nav-compute").attributes("aria-current")).toBe(
+        "page",
+      );
+      const compute = wrapper.find("#settings-pane-compute");
+      expect(compute.find(".compute-stub").exists()).toBe(true);
+      expect(compute.find(".comfyui-host-stub").exists()).toBe(false);
+      const comfyui = wrapper.find("#settings-pane-comfyui");
+      expect(comfyui.find(".comfyui-host-stub").attributes("data-first")).toBe(
+        "true",
+      );
+      expect(comfyui.find(".compute-stub").exists()).toBe(false);
+    } finally {
+      delete window.pixlstashDesktop;
+      vi.resetModules();
     }
   });
 

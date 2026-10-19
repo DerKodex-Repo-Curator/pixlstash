@@ -36,7 +36,10 @@ from pixlstash.utils.caption_file_utils import (
     writeback_path,
 )
 from pixlstash.utils.host_path_utils import is_absolute_host_path, normalize_host_path
-from pixlstash.utils.library_roots import refuse_path_inside_a_library
+from pixlstash.utils.library_roots import (
+    holding_folder_overlap_lock,
+    refuse_overlapping_folder,
+)
 from pixlstash.utils.library_layout import (
     DEFAULT_LAYOUT,
     folder_name,
@@ -656,6 +659,7 @@ def create_router(server) -> APIRouter:
         response_model=ReferenceFolderResponse,
         tags=["folders"],
     )
+    @holding_folder_overlap_lock
     def create_reference_folder(
         request: Request,
         payload: ReferenceFolderCreateRequest = Body(...),
@@ -673,16 +677,12 @@ def create_router(server) -> APIRouter:
         # does this and its comment says this route did too; it did not.
         folder = os.path.realpath(folder)
         # `_validate_reference_folder_conflicts` covers `image_root` and the
-        # other reference-folder rows; it does not know about this library's
-        # watch folders or about any other registered library. A reference
-        # folder overlapping a `delete_after_import` watch folder is scanned by
-        # one subsystem and emptied by the other. Same shared list the folder
-        # export and `POST /import-folders` refuse against (#1206 item 1).
+        # other reference-folder rows. Other registered libraries and the watch
+        # folders are refused here, in either direction (#1223).
         #
-        # Before the DB task, not inside it: this reads the folder tables
-        # itself, and a read nested in `run_task` would be a session inside a
-        # session.
-        refuse_path_inside_a_library(folder, server, server.vault)
+        # Before the DB task, not inside it: a read nested in `run_task` would
+        # be a session inside a session.
+        refuse_overlapping_folder(folder, server, server.vault)
 
         label = payload.label if payload.label is not None else os.path.basename(folder)
 
@@ -773,6 +773,7 @@ def create_router(server) -> APIRouter:
         response_model=ReferenceFolderResponse,
         tags=["folders"],
     )
+    @holding_folder_overlap_lock
     def update_reference_folder(
         folder_id: int,
         request: Request,
@@ -780,20 +781,19 @@ def create_router(server) -> APIRouter:
     ):
         # Repointing a row is a destination check like the create route's, and
         # for the same reason it runs before the DB task rather than inside it.
-        # The row's current folder is its own root, not a conflict with itself.
         if "folder" in payload.model_fields_set and payload.folder is not None:
             candidate = os.path.realpath(os.path.normpath(payload.folder))
+            # This row is not a conflict with itself: a PATCH may repoint it, or
+            # carry the folder unchanged beside another field, and `update`
+            # below treats an unchanged path as a no-op. Read here rather than
+            # in `update`, since the check cannot run inside that session; a
+            # missing row is left to `update` to 404.
             current = server.vault.db.run_immediate_read_task(
                 lambda session: getattr(
                     session.get(ReferenceFolder, folder_id), "folder", None
                 )
             )
-            refuse_path_inside_a_library(
-                candidate,
-                server,
-                server.vault,
-                ignore_roots=(current,) if current else (),
-            )
+            refuse_overlapping_folder(candidate, server, server.vault, exclude=current)
 
         def update(session: Session):
             rf = session.get(ReferenceFolder, folder_id)
@@ -1031,6 +1031,7 @@ def create_router(server) -> APIRouter:
         response_model=RelocateReferenceFolderResponse,
         tags=["folders"],
     )
+    @holding_folder_overlap_lock
     def relocate_reference_folder(
         folder_id: int,
         request: Request,
@@ -1065,16 +1066,13 @@ def create_router(server) -> APIRouter:
 
         # This route physically `shutil.move`s every file below `old_root`, so
         # a destination inside another registered library moves the pictures
-        # into a folder that library will index, and a destination inside a
-        # `delete_after_import` watch folder hands them to a watcher that
-        # imports and then unlinks them. `_validate_relocation_destination`
-        # above knows only `image_root` and the other reference-folder rows
-        # (#1206 item 1). Checked before the first move; the row being
-        # relocated is its own root, and the nesting check above has already
-        # refused a destination inside it.
-        refuse_path_inside_a_library(
-            new_root, server, server.vault, ignore_roots=(old_root,)
-        )
+        # into a folder that library will index, and one inside a watch folder
+        # feeds them to the importer. `_validate_relocation_destination` above
+        # knows only `image_root` and the other reference-folder rows (#1206
+        # item 1). Checked before the first move. No `exclude`: that validator
+        # has already refused a destination equal to, inside or around
+        # `old_root`, so this row cannot be the root that matches (#1223).
+        refuse_overlapping_folder(new_root, server, server.vault)
 
         if not os.path.isdir(old_root):
             raise HTTPException(
@@ -1573,6 +1571,7 @@ def create_router(server) -> APIRouter:
             tags_count = 0
             descriptions_count = 0
             skipped_count = 0
+            retagged: list[int] = []
             # A sidecar import deletes+rewrites confirmed Tag rows and overwrites
             # the description on EXISTING pictures - frozen for anything in a
             # locked set. Skip those (counted as skipped) instead of overwriting.
@@ -1615,6 +1614,7 @@ def create_router(server) -> APIRouter:
                         pic.tags_file = tags_path
                         pic.tags_file_mtime = get_sidecar_mtime(tags_path)
                         tags_count += 1
+                        retagged.append(pic.id)
                         dirty = True
                 if SIDECAR_TYPE_DESCRIPTION in requested_types:
                     description_path = resolve_typed_sidecar(
@@ -1643,6 +1643,7 @@ def create_router(server) -> APIRouter:
                     status_code=409,
                     detail=f"Could not import metadata: {exc}",
                 )
+            server.vault.db.tag_resets.mark_reset(retagged)
             return scope, tags_count, descriptions_count, skipped_count
 
         scope, tags_count, descriptions_count, skipped_count = server.vault.db.run_task(

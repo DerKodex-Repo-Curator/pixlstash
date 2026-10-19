@@ -19,6 +19,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The wheel carries the ComfyUI-PixlStash nodes (a public submodule).
+          submodules: true
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -30,32 +32,14 @@ jobs:
           RELEASE_REF: ${{ github.ref }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          python - <<'PY'
-          import os
-          import pathlib
-          import re
-          import sys
-          import tomllib
-
-          release_ref = os.environ["RELEASE_REF"]
-          tag = os.environ["RELEASE_TAG"]
-          tag_pattern = re.compile(
-              r"^v[0-9]+\.[0-9]+\.[0-9]+"
-              r"(?:(?:a|b|rc)[0-9]+|[.-]dev[.-]?[0-9]+)?$"
-          )
-          if release_ref != f"refs/tags/{tag}" or not tag_pattern.fullmatch(tag):
-              print(f"::error::Ref {release_ref!r} is not an allowed release tag")
-              sys.exit(1)
-
-          pyproject = pathlib.Path("pyproject.toml")
-          data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-          expected = f"v{data['project']['version']}"
-          if tag != expected:
-              print(f"::error::Tag {tag} does not match project version {expected}")
-              sys.exit(1)
-
-          print(f"Tag/version check passed: {tag}")
-          PY
+          python -m pip install --upgrade pip packaging
+          [ "$RELEASE_REF" = "refs/tags/$RELEASE_TAG" ] || {
+            echo "::error::Ref '$RELEASE_REF' is not an allowed release tag" >&2
+            exit 1
+          }
+          version=$(python -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])")
+          python scripts/check_release_tag.py "$RELEASE_TAG" "$version"
+          echo "Tag/version check passed: $RELEASE_TAG"
 
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -76,6 +60,9 @@ jobs:
           python -m pip install build twine
 
       - name: Build Python distributions
+        env:
+          # Fail rather than ship a wheel without the ComfyUI-PixlStash nodes.
+          PIXLSTASH_REQUIRE_COMFYUI_PACK: "1"
         run: python -m build
 
       - name: Verify wheel includes Alembic assets

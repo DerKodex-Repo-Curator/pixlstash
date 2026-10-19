@@ -167,17 +167,21 @@ export function keepCoverOnlyLockReason({
  * @param {number} options.selectedCount - pictures (tiles) selected.
  * @returns {string}
  */
-export function keepCoverOnlyMenuLabel({ stackCount, selectedCount } = {}) {
+export function keepCoverOnlyMenuLabel({
+  stackCount,
+  selectedCount,
+  label = KEEP_COVER_ONLY_LABEL,
+} = {}) {
   const stacks = Number(stackCount) || 0;
   const selected = Number(selectedCount) || 0;
-  if (stacks <= 0) return KEEP_COVER_ONLY_LABEL;
+  if (stacks <= 0) return label;
   // A selection whose every tile is a stack tile needs no "of": the two numbers
   // would be the same, and "3 of 3" reads as a warning about nothing.
   if (selected > stacks) {
-    return `${KEEP_COVER_ONLY_LABEL} (${stacks} of ${selected})`;
+    return `${label} (${stacks} of ${selected})`;
   }
   const noun = stacks === 1 ? "stack" : "stacks";
-  return `${KEEP_COVER_ONLY_LABEL} (${stacks} ${noun})`;
+  return `${label} (${stacks} ${noun})`;
 }
 
 /**
@@ -292,6 +296,13 @@ export function keepCoverOnlySkipReasons(preview) {
   const locked = Number(preview.stacks_skipped_locked) || 0;
   const character = Number(preview.stacks_skipped_character_on_copy) || 0;
   const single = Number(preview.stacks_skipped_single_member) || 0;
+  const nothing = Number(preview.stacks_skipped_nothing_reproducible) || 0;
+  if (nothing > 0) {
+    rows.push({
+      key: "nothing_reproducible",
+      text: `${nothing} ${nothing === 1 ? "stack has" : "stacks have"} no picture besides the cover that could be made again.`,
+    });
+  }
   if (locked > 0) {
     rows.push({
       key: "locked",
@@ -332,7 +343,8 @@ export function keepCoverOnlySkippedCount(preview) {
   return (
     (Number(preview.stacks_skipped_locked) || 0) +
     (Number(preview.stacks_skipped_character_on_copy) || 0) +
-    (Number(preview.stacks_skipped_single_member) || 0)
+    (Number(preview.stacks_skipped_single_member) || 0) +
+    (Number(preview.stacks_skipped_nothing_reproducible) || 0)
   );
 }
 
@@ -355,14 +367,28 @@ export function keepCoverOnlySkipNote(result) {
   const character = Array.isArray(result.stacks_skipped_character_on_copy)
     ? result.stacks_skipped_character_on_copy.length
     : 0;
+  const nothing = Array.isArray(result.stacks_skipped_nothing_reproducible)
+    ? result.stacks_skipped_nothing_reproducible.length
+    : 0;
   const total = locked + character;
-  if (total <= 0) return "";
+  const staying = Number(result.pictures_staying) || 0;
+  const stayingNote =
+    staying > 0
+      ? `${staying.toLocaleString()} ${staying === 1 ? "picture stays" : "pictures stay"}: ${staying === 1 ? "it" : "they"} could not be made again.`
+      : "";
+  const nothingNote =
+    nothing > 0
+      ? `${nothing} ${nothing === 1 ? "stack" : "stacks"} unchanged: nothing in ${nothing === 1 ? "it" : "them"} could be made again.`
+      : "";
+  if (total <= 0) return [nothingNote, stayingNote].filter(Boolean).join(" ");
   const noun = total === 1 ? "stack" : "stacks";
+  let note;
   if (locked && character) {
-    return `${total} ${noun} skipped: ${locked} locked, ${character} holding a person's only link.`;
+    note = `${total} ${noun} skipped: ${locked} locked, ${character} holding a person's only link.`;
+  } else if (locked) {
+    note = `${locked} ${noun} skipped: held by a locked picture set.`;
+  } else {
+    note = `${character} ${noun} skipped: a person's only link sits on a copy.`;
   }
-  if (locked) {
-    return `${locked} ${noun} skipped: held by a locked picture set.`;
-  }
-  return `${character} ${noun} skipped: a person's only link sits on a copy.`;
+  return [note, nothingNote, stayingNote].filter(Boolean).join(" ");
 }

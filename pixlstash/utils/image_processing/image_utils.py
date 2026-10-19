@@ -5,6 +5,7 @@ import functools
 import hashlib
 import os
 import piexif
+import piexif.helper
 import tempfile
 import uuid
 
@@ -93,13 +94,13 @@ class ImageUtils:
     def extract_embedded_metadata(file_path: str) -> dict:
         """Extract embedded EXIF and PNG metadata from an image file.
 
+        A video answers with the graphs its container's tags carry instead, as
+        ``{"comfyui": {"prompt": ..., "workflow": ...}}``.
+
         Results are cached in memory keyed by (file_path, mtime) so repeated
         calls for the same unchanged file (e.g. on every overlay open) are free.
         """
         if not file_path or not os.path.exists(file_path):
-            return {}
-        # Pillow cannot open video files - skip metadata extraction for them.
-        if VideoUtils.is_video_file(file_path):
             return {}
         try:
             mtime = os.stat(file_path).st_mtime
@@ -110,6 +111,14 @@ class ImageUtils:
     @staticmethod
     @functools.lru_cache(maxsize=512)
     def _extract_embedded_metadata_cached(file_path: str, mtime: float) -> dict:
+        # Pillow cannot open a video; its tags are read off the container. Only
+        # the two ComfyUI writes are kept, in a block of their own: a tag is
+        # named by whoever wrote the file, and one called `png` or `exif` would
+        # otherwise stand where this dict's own sections do.
+        if VideoUtils.is_video_file(file_path):
+            tags = VideoUtils.extract_embedded_metadata(file_path)
+            graphs = {key: tags[key] for key in ("prompt", "workflow") if key in tags}
+            return {"comfyui": graphs} if graphs else {}
         metadata = {}
         try:
             with Image.open(file_path) as img:
@@ -131,6 +140,9 @@ class ImageUtils:
                             exif_map[str(tag_name)] = ImageUtils._coerce_metadata_value(
                                 value
                             )
+                        comment = ImageUtils._user_comment(exif_data)
+                        if comment is not None:
+                            exif_map["UserComment"] = comment
                         if exif_map:
                             metadata["exif"] = exif_map
                 except Exception as exc:
@@ -138,6 +150,65 @@ class ImageUtils:
         except Exception as exc:
             logger.warning("Failed to extract embedded metadata: %s", exc)
         return metadata
+
+    @staticmethod
+    def _user_comment(exif_data) -> Optional[str]:
+        """The EXIF ``UserComment``, decoded, or ``None`` if there is none.
+
+        It lives in the Exif sub-IFD, which ``getexif()`` does not walk, and it
+        is where A1111 and its forks put a JPEG's or WebP's generation data
+        (``services/a1111_recipe.py``). The value carries its own 8-byte
+        encoding tag, so ``piexif`` decodes it rather than the bytes fallback in
+        :meth:`_coerce_metadata_value`, which would garble the UTF-16 one.
+        """
+        try:
+            raw = exif_data.get_ifd(ExifTags.IFD.Exif).get(ExifTags.Base.UserComment)
+        except Exception as exc:
+            logger.debug("Failed to read the EXIF sub-IFD: %s", exc)
+            return None
+        if isinstance(raw, str) or raw is None:
+            return raw
+        try:
+            return piexif.helper.UserComment.load(raw)
+        except Exception as exc:
+            # A comment with no encoding tag, or one piexif does not know.
+            logger.debug("Failed to decode the EXIF UserComment: %s", exc)
+            return None
+
+    @staticmethod
+    def frame_count(file_path: str) -> Optional[int]:
+        """Number of frames in a video or image file, or ``None`` if unreadable.
+
+        A still image is 1; an animated GIF, WebP or APNG is its frame count.
+        A video's is the container's own figure, which some codecs estimate.
+        Cached by (file_path, mtime) like :meth:`extract_embedded_metadata`.
+        """
+        if not file_path or not os.path.exists(file_path):
+            return None
+        try:
+            mtime = os.stat(file_path).st_mtime
+        except OSError as exc:
+            logger.warning("Failed to stat %s for its frame count: %s", file_path, exc)
+            return None
+        return ImageUtils._frame_count_cached(file_path, mtime)
+
+    @staticmethod
+    @functools.lru_cache(maxsize=512)
+    def _frame_count_cached(file_path: str, mtime: float) -> Optional[int]:
+        try:
+            if VideoUtils.is_video_file(file_path):
+                cap = cv2.VideoCapture(file_path)
+                try:
+                    count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                finally:
+                    cap.release()
+            else:
+                with Image.open(file_path) as img:
+                    count = int(getattr(img, "n_frames", 1))
+        except Exception as exc:
+            logger.warning("Failed to count frames in %s: %s", file_path, exc)
+            return None
+        return count if count > 0 else None
 
     @staticmethod
     def resolve_picture_path(
@@ -456,7 +527,8 @@ class ImageUtils:
 
                             dt = datetime.strptime(date_str, "%Y:%m:%d %H:%M:%S")
                             local_tz = (
-                                datetime.now().astimezone().tzinfo or timezone.utc
+                                datetime.now(timezone.utc).astimezone().tzinfo
+                                or timezone.utc
                             )
                             return dt.replace(tzinfo=local_tz).astimezone(timezone.utc)
                         except Exception as exc:
@@ -764,6 +836,8 @@ class ImageUtils:
         thumbnail_width: Optional[int],
         thumbnail_height: Optional[int],
         orientation: Optional[int] = None,
+        *,
+        file_path: Optional[str],
     ) -> str:
         """The ``?v=`` cache-buster for a picture's thumbnail URL.
 
@@ -778,6 +852,13 @@ class ImageUtils:
         On dimensions alone the URL would be identical and the browser would go
         on painting the pre-rotate bitmap for up to an hour.
 
+        **So is the file.** SQLite hands a deleted picture's id to the next
+        import, and a new picture the size of the one deleted gets exactly the
+        URL it had: the browser then paints the deleted picture's bitmap in its
+        place for up to an hour. Every picture has a file of its own, so a
+        digest of its path tells two holders of one id apart. Required, so no
+        caller can leave it out.
+
         Single source of truth on purpose: the batch-thumbnail endpoint and the
         duplicate queue both hand this version to the same frontend cache, and two
         independent copies of the formula would eventually disagree and
@@ -791,18 +872,24 @@ class ImageUtils:
                 same version: an unrotated picture keeps the URL it has always had,
                 so backfilling the mirror does not invalidate every thumbnail in
                 the library at once.
+            file_path: The picture's stored ``file_path``; ``None`` only for a
+                row with no file, which has no thumbnail to serve either.
 
         Returns:
             ``"<width>x<height>"`` for an unrotated picture,
             ``"<width>x<height>o<orientation>"`` for a rotated one, or ``"0"``
-            when either dimension is missing.
+            when either dimension is missing, then ``-<file digest>``.
         """
         if not (thumbnail_width and thumbnail_height):
-            return "0"
-        version = f"{thumbnail_width}x{thumbnail_height}"
-        if orientation and int(orientation) != 1:
-            version = f"{version}o{int(orientation)}"
-        return version
+            version = "0"
+        else:
+            version = f"{thumbnail_width}x{thumbnail_height}"
+            if orientation and int(orientation) != 1:
+                version = f"{version}o{int(orientation)}"
+        if not file_path:
+            return version
+        digest = hashlib.blake2s(file_path.encode("utf-8"), digest_size=4).hexdigest()
+        return f"{version}-{digest}"
 
     @staticmethod
     def calculate_hash_from_bytes(image_bytes: bytes) -> str:

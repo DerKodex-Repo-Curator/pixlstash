@@ -26,9 +26,12 @@ thing that differs.
 
 from __future__ import annotations
 
+import json
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+from sqlalchemy import func
 from sqlmodel import Session, delete, select
 
 from pixlstash.database import DBPriority
@@ -40,6 +43,7 @@ from pixlstash.db_models.adapter_attachment import (
 from pixlstash.db_models.character import Character
 from pixlstash.db_models.picture_set import PictureSet
 from pixlstash.pixl_logging import get_logger
+from pixlstash.services.builtin_models import HASH_PENDING_SQL
 from pixlstash.services.model_features import (
     FEATURE_CAPTIONER,
     FEATURE_DETECTOR,
@@ -49,14 +53,43 @@ from pixlstash.services.model_features import (
     FEATURE_TAGGER,
 )
 from pixlstash.services.stack_detector import repair_stacks
+from pixlstash.services.workflow_hash import (
+    SHA256_FIELD_RE,
+    SHELF_ID_FIELD,
+    WorkflowGraphError,
+    assets_from_reduction,
+    digests_with_prefix,
+    normalized_filename,
+    reduce_api_graph,
+)
+from pixlstash.services.workflow_identity import CHECKPOINT_WIDGETS, match_type
+from pixlstash.services.workflow_library_service import (
+    cover_order,
+    recipe_picture_counts,
+    variant_cover_candidates,
+)
 from pixlstash.utils.adapter_header import (
     FILE_ADAPTER,
     FILE_CHECKPOINT,
+    FILE_CONTROLNET,
     FILE_ENGINE,
     FILE_TEXT_ENCODER,
     FILE_UNKNOWN,
+    FILE_UPSCALER,
     FILE_VAE,
 )
+from pixlstash.utils.known_base_models import (
+    COMPANION_LAYOUTS,
+    SOURCE_DECLARED,
+    SOURCE_FILENAME,
+    SOURCE_USER,
+    family_of,
+    fold,
+    modality_of,
+    rank,
+)
+from pixlstash.utils.sql_chunking import chunked
+from pixlstash.utils.workflow_ids import MANUAL_PREFIX
 
 logger = get_logger(__name__)
 
@@ -121,6 +154,12 @@ MODEL_COLUMNS = (
     "run_key",
     "icon_sha256",
     "created_at",
+    "family",
+    "quant",
+    "weights_id",
+    "base_model_canonical",
+    "base_model_source",
+    "file_kind_decided",
 )
 
 # Computed per row by the two aggregate joins below, never by a second query.
@@ -160,10 +199,19 @@ LEFT JOIN (
 """
 
 _SELECT_LIST = ", ".join(
-    [*(f"m.{name}" for name in MODEL_COLUMNS), *(f"{c}" for c in AGGREGATE_COLUMNS)]
+    [
+        *(f"m.{name}" for name in MODEL_COLUMNS),
+        *(f"{c}" for c in AGGREGATE_COLUMNS),
+        f"({HASH_PENDING_SQL}) AS hash_pending",
+    ]
 )
 
 _FROM = f"FROM model m{_STACK_JOIN}{_LOCATION_JOIN}"
+
+# What a row is grouped, sorted and filtered under: the identified base model,
+# else the raw string for one nothing has identified (or a person typed
+# something the table does not know).
+_BASE_MODEL_KEY = "COALESCE(m.base_model_canonical, m.base_model)"
 
 # The five sort keys ruled 2026-08-08. ``COALESCE`` on the stack aggregate is the
 # "a row never sorts by a number it does not display" rule in SQL: a stacked row
@@ -176,7 +224,7 @@ SORT_KEYS = {
     "file_mtime": "loc.newest_file_mtime",
     "name": "m.display_name COLLATE NOCASE",
     "size": "COALESCE(st.total_size, m.file_size)",
-    "base_model": "m.base_model COLLATE NOCASE",
+    "base_model": f"{_BASE_MODEL_KEY} COLLATE NOCASE",
 }
 
 DEFAULT_SORT = "added_at"
@@ -232,8 +280,9 @@ def fetch_models(
         hub: The open :class:`~pixlstash.hub.db.HubDatabase`.
         file_kinds: Which ``model.file_kind`` values to serve. One query, not one
             per kind: there is one content table.
-        base_model: Exact match, or :data:`UNSET` to select the rows that record
-            none. ``None`` means no filter - a null base model is a bulk state
+        base_model: Exact match on the identified base model or on the raw
+            string (a caller holding the trainer's own spelling still gets its
+            rows), or :data:`UNSET` to select the rows that record none. ``None`` means no filter - a null base model is a bulk state
             (37 % of a measured 91-file folder), so it is never dropped by
             default.
         kind: Adapter algorithm (``lora``, ``lokr``, …).
@@ -257,10 +306,10 @@ def fetch_models(
 
     if base_model is not None:
         if base_model == UNSET:
-            where.append("m.base_model IS NULL")
+            where.append(f"{_BASE_MODEL_KEY} IS NULL")
         else:
-            where.append("m.base_model = ?")
-            params.append(base_model)
+            where.append(f"({_BASE_MODEL_KEY} = ? OR m.base_model = ?)")
+            params.extend([base_model, base_model])
     if kind:
         where.append("m.kind = ?")
         params.append(kind)
@@ -277,6 +326,24 @@ def fetch_models(
         f"WHERE {' AND '.join(where)} {_order_by(sort, direction)}"
     )
     return [dict(row) for row in hub.fetchall(sql, tuple(params))]
+
+
+def shelf_uuid(hub) -> str:
+    """This shelf's own id, made the first time it is asked for.
+
+    What a graph names beside a shelf row id (the checkpoint loader's
+    ``shelf``), so the id is known for this shelf's when the graph comes back.
+    """
+    row = hub.fetchone("SELECT uuid FROM shelf_identity WHERE id = 1")
+    if row is None:
+        with hub.transaction() as conn:
+            # Another process may have got there first: its id stands.
+            conn.execute(
+                "INSERT OR IGNORE INTO shelf_identity (id, uuid) VALUES (1, ?)",
+                (uuid.uuid4().hex,),
+            )
+        row = hub.fetchone("SELECT uuid FROM shelf_identity WHERE id = 1")
+    return row["uuid"]
 
 
 def fetch_distinct_base_models(hub) -> list[str]:
@@ -396,6 +463,1439 @@ def fetch_attachments(vault, *, sha256: Optional[str] = None) -> dict[str, list[
     return grouped
 
 
+def fetch_character_names(vault) -> dict[int, str]:
+    """Return ``character.id -> name`` for the active library, from the **vault**.
+
+    What a model with no trigger word of its own falls back to: the person it is
+    attached to is, on a real shelf, what the LoRA was trained to draw. One
+    whole-table read per page, hoisted like the attachments it is joined to.
+    """
+
+    def fetch(session: Session):
+        return list(session.exec(select(Character.id, Character.name)).all())
+
+    return {
+        int(character_id): name
+        for character_id, name in vault.db.run_task(
+            fetch, priority=DBPriority.IMMEDIATE
+        )
+        if name and name.strip()
+    }
+
+
+def decode_trigger_words(raw: Optional[str]) -> list[str]:
+    """Return the stored ``model.trigger_words`` column as a list.
+
+    Every writer stores a JSON list of strings. A value that is not JSON at
+    all is served as one word rather than dropped; inside JSON, anything that
+    is not a non-blank string is not a word and is left out.
+    """
+    if not raw:
+        return []
+    try:
+        decoded = json.loads(raw)
+    except ValueError:
+        logger.warning(
+            "model.trigger_words is not JSON (%r); serving it as one word.", raw
+        )
+        return [raw]
+    if not isinstance(decoded, list):
+        decoded = [decoded]
+    return [word.strip() for word in decoded if isinstance(word, str) and word.strip()]
+
+
+def encode_trigger_words(words: Optional[list[str]]) -> Optional[str]:
+    """Return the owner's trigger words as the column stores them.
+
+    Two different empties. A list with nothing in it is the owner saying this
+    model needs no trigger word, and is stored as ``[]``: an answer, which no
+    default and no later scan may overrule. ``None`` is "not set", stored as
+    NULL, which is what lets the person's name stand in and lets the scanner
+    fill the column from the file's header.
+    """
+    if words is None:
+        return None
+    cleaned = dict.fromkeys(word.strip() for word in words if word.strip())
+    # Not ASCII-escaped: the shelf's search is a LIKE over this column, and an
+    # escaped `café` is not a string anyone types.
+    return json.dumps(list(cleaned), ensure_ascii=False)
+
+
+TRIGGER_SOURCE_RECORDED = "recorded"
+TRIGGER_SOURCE_CHARACTER = "character"
+
+
+def effective_trigger_words(
+    raw: Optional[str], attachments: list[dict], character_names: dict[int, str]
+) -> tuple[list[str], Optional[str]]:
+    """Return ``(trigger words, source)`` for one model.
+
+    The words the file or the owner recorded win. A column that was never set
+    (NULL) on a model attached to a person takes that person's name; the lowest
+    character id when it is attached to several, so the answer does not move
+    between requests. A stored empty list is the owner's "none" and takes no
+    default: not every LoRA has a trigger word.
+
+    Args:
+        raw: The stored ``model.trigger_words`` column.
+        attachments: This model's rows from :func:`fetch_attachments`.
+        character_names: :func:`fetch_character_names` for the active library.
+
+    Returns:
+        The words and ``recorded`` / ``character``, or ``([], None)``.
+    """
+    recorded = decode_trigger_words(raw)
+    if recorded:
+        return recorded, TRIGGER_SOURCE_RECORDED
+    if raw is not None:
+        return [], None
+    named = sorted(
+        int(att["entity_id"])
+        for att in attachments
+        if att["entity_type"] == ENTITY_CHARACTER
+        and int(att["entity_id"]) in character_names
+    )
+    if named:
+        return [character_names[named[0]]], TRIGGER_SOURCE_CHARACTER
+    return [], None
+
+
+def fetch_picture_counts(hub, vault) -> dict[int, dict[str, int]]:
+    """How many kept pictures in the active library used each model, by tier.
+
+    ``verified`` counts pictures whose recipe names the model by its digest (a
+    PixlStash loader's ``*_sha256``, or an A1111 short hash only this model's
+    digest starts with): that exact file. ``by_filename`` counts
+    the rest whose recipe names a file called what one of the model's copies is
+    called: a file of that name, which is all the graph says. The two are never
+    summed here, because a count that mixes them claims a certainty the data
+    does not have, and a picture counted in the first is not counted again in
+    the second.
+
+    Read from the recipe keys every scanned picture carries and the hub's recipe
+    asset names, so it covers pictures imported before the recipe tables existed
+    and heals by itself when a model is added to the shelf later. A name that
+    was forgotten matches nothing.
+
+    Returns:
+        ``{model_id: {"verified": n, "by_filename": n}}``, models no kept
+        picture used absent.
+    """
+    pictures = vault.db.run_task(recipe_picture_counts, priority=DBPriority.IMMEDIATE)
+    if not pictures:
+        return {}
+    by_name, by_digest, _filenames, _names = recipe_asset_index(hub)
+    sorted_digests = sorted(by_digest)
+
+    verified: dict[int, set[str]] = {}
+    named: dict[int, set[str]] = {}
+    for row in hub.fetchall(
+        "SELECT structural_hash, widget_name, normalized_filename "
+        "FROM workflow_recipe_asset"
+    ):
+        recipe = row["structural_hash"]
+        if recipe not in pictures:
+            continue
+        if SHA256_FIELD_RE.search(row["widget_name"]):
+            # An A1111 short hash is verified only when it names one model;
+            # otherwise its picture is left to the filename tier.
+            matched = models_for_digest(
+                row["normalized_filename"], by_digest, sorted_digests
+            )
+            if len(matched) == 1:
+                verified.setdefault(matched.pop(), set()).add(recipe)
+        else:
+            for model_id in by_name.get(row["normalized_filename"], ()):
+                named.setdefault(model_id, set()).add(recipe)
+
+    return {
+        model_id: {
+            "verified": sum(pictures[r] for r in verified.get(model_id, ())),
+            "by_filename": sum(
+                pictures[r]
+                for r in named.get(model_id, set()) - verified.get(model_id, set())
+            ),
+        }
+        for model_id in verified.keys() | named.keys()
+    }
+
+
+def recipe_asset_index(
+    hub,
+) -> tuple[dict[str, set[int]], dict[str, int], dict[int, str], dict[int, str]]:
+    """How a recipe's asset names reach shelf models.
+
+    Returns ``(by_name, by_digest, filenames, names)``. ``by_name`` maps a normalized
+    basename to every model a file of that name could be - the row's
+    ``filename`` and each copy's basename - so a name two rows share maps to
+    both. ``by_digest`` maps a lowercase sha256 to its one model. ``filenames``
+    is the same ``model`` read the first map is built from, kept by id rather
+    than thrown away: a caller that has resolved a digest needs the name to
+    show for it, and re-issuing the identical SELECT to get it is a second scan
+    of this table for nothing. ``names`` is the name a person gave each model
+    that has one, off the same read, so a caller can show the shelf's name for
+    a model rather than the file's.
+    """
+    by_name: dict[str, set[int]] = {}
+    filenames: dict[int, str] = {}
+    names: dict[int, str] = {}
+    for row in hub.fetchall(
+        "SELECT id, filename, display_name FROM model WHERE filename IS NOT NULL"
+    ):
+        by_name.setdefault(normalized_filename(row["filename"]), set()).add(row["id"])
+        filenames[row["id"]] = row["filename"]
+        if row["display_name"] and row["display_name"].strip():
+            names[row["id"]] = row["display_name"].strip()
+    for row in hub.fetchall("SELECT model_id, relpath FROM model_file"):
+        by_name.setdefault(normalized_filename(row["relpath"]), set()).add(
+            row["model_id"]
+        )
+    by_digest = {
+        row["sha256"].lower(): row["id"]
+        for row in hub.fetchall("SELECT id, sha256 FROM model WHERE sha256 IS NOT NULL")
+    }
+    return by_name, by_digest, filenames, names
+
+
+def adapter_digest_index(hub) -> tuple[dict[str, set[str]], set[str]]:
+    """Which shelf LoRA a graph's ``lora_name`` names, by case-folded basename.
+
+    Returns ``(by_name, digests)``: ``by_name`` maps a
+    :func:`normalized_filename` (lowercase basename) to the SHA-256 of every
+    shelf model a file of that name could be - the row's ``filename`` and each
+    copy's ``relpath`` - and ``digests`` is every such model's SHA-256. Only
+    the kinds a LoRA loader can load count (an adapter, or a file the shelf has
+    not classified), because a checkpoint sharing a LoRA's name is not the
+    LoRA, and a digest nothing can load is no answer to "which LoRA is this".
+
+    A name two models share maps to both, and the caller treats that as no
+    match: it is the frontend's ``resolveRecipeLoras`` rule and
+    ``_resolve_against_shelf``'s, so the LoRA editor, the save dialog and the
+    run all agree on what the shelf can name (#1478).
+    """
+    kinds = (FILE_ADAPTER, FILE_UNKNOWN)
+    by_name: dict[str, set[str]] = {}
+    digests: set[str] = set()
+    sha_by_id: dict[int, str] = {}
+    for row in hub.fetchall(
+        "SELECT id, filename, sha256 FROM model "
+        "WHERE sha256 IS NOT NULL AND file_kind IN (?, ?)",
+        kinds,
+    ):
+        digest = str(row["sha256"]).lower()
+        sha_by_id[int(row["id"])] = digest
+        digests.add(digest)
+        if row["filename"]:
+            by_name.setdefault(normalized_filename(row["filename"]), set()).add(digest)
+    for row in hub.fetchall("SELECT model_id, relpath FROM model_file"):
+        digest = sha_by_id.get(int(row["model_id"]))
+        if digest is not None and row["relpath"]:
+            by_name.setdefault(normalized_filename(row["relpath"]), set()).add(digest)
+    return by_name, digests
+
+
+def model_name_aliases(hub) -> dict[str, list[str]]:
+    """The other names a recipe's model filename can be loaded under (#1439).
+
+    Keyed by a normalized basename (:func:`normalized_filename`, so **lowercase**
+    - the caller has to fold its lookup the same way), valued by the names of
+    that model's copies that are actually **present**: the full relpath as the
+    scanner recorded it and its basename, in the **scanner's own spelling** and
+    never folded. A ComfyUI combo entry is a path relative to one of ComfyUI's
+    own model folders and nothing here knows which prefix it puts in front, so
+    both forms are offered and the caller's ``object_info`` decides; generosity
+    here costs nothing because the verification is downstream. The *case* is not
+    generosity but correctness: ComfyUI compares exactly, so a lowercased
+    candidate is a filename it would refuse.
+
+    **Same model, therefore same bytes.** The hub is content-addressed - one
+    ``model`` row per SHA-256 - so every name under one key names one file's
+    contents, which is what makes this a substitution rather than the suggestion
+    a same-weights-different-precision match would have to stay.
+
+    The keys include names no copy of which is present, which is the whole point:
+    a copy removed to keep one of several (``POST /model-files/merge``) keeps its
+    row in ``state = 'removed'``, and the name a recipe recorded is the one a
+    graph still asks for.
+
+    A candidate equal to the key's own spelling is dropped, but one differing
+    only in case is not: a graph naming ``MyLora.safetensors`` on an install that
+    lists ``mylora.safetensors`` is a real miss (``_match_option`` reports it as
+    "present under a different case") and the correctly-spelled copy is the fix.
+
+    A name two models share is dropped rather than resolved, the same rule
+    ``picture_recipe_service._resolve_against_shelf`` applies to a name that
+    matches two rows: it names neither of them, and swapping to a coin-flip
+    would substitute a different model's weights into somebody's run.
+
+    Returns:
+        ``{lowercased basename: [name, ...]}``, each name as the scanner recorded
+        it, the key's own source spelling excluded, and no entry at all for a
+        model with nothing present to offer.
+    """
+    names_by_model: dict[int, set[str]] = {}
+    present_by_model: dict[int, list[str]] = {}
+    for row in hub.fetchall(
+        "SELECT id, filename FROM model WHERE filename IS NOT NULL"
+    ):
+        names_by_model.setdefault(int(row["id"]), set()).add(row["filename"])
+    for row in hub.fetchall("SELECT model_id, relpath, state FROM model_file"):
+        model_id = int(row["model_id"])
+        names_by_model.setdefault(model_id, set()).add(row["relpath"])
+        if row["state"] != "present":
+            continue
+        offered = present_by_model.setdefault(model_id, [])
+        # The relpath and its basename, both as the scanner spelled them. NOT
+        # `normalized_filename`, which lowercases: that is the right key for a
+        # lookup and the wrong thing to hand ComfyUI, which compares exactly.
+        basename = row["relpath"].replace("\\", "/").rsplit("/", 1)[-1]
+        for name in (row["relpath"], basename):
+            if name not in offered:
+                offered.append(name)
+
+    claimants: dict[str, set[int]] = {}
+    for model_id, names in names_by_model.items():
+        for name in names:
+            claimants.setdefault(normalized_filename(name), set()).add(model_id)
+
+    aliases: dict[str, list[str]] = {}
+    for model_id, names in names_by_model.items():
+        offered = present_by_model.get(model_id)
+        if not offered:
+            continue
+        for name in names:
+            key = normalized_filename(name)
+            if len(claimants[key]) != 1:
+                continue
+            for candidate in offered:
+                if candidate == name:
+                    continue
+                aliases.setdefault(key, [])
+                if candidate not in aliases[key]:
+                    aliases[key].append(candidate)
+    return aliases
+
+
+def models_for_digest(
+    value: str, by_digest: dict[str, int], sorted_digests: list[str]
+) -> set[int]:
+    """Every shelf model a ``*_sha256`` asset value could name.
+
+    One for a whole digest. An A1111 short hash (``services/a1111_recipe.py``)
+    names every model whose digest starts with it: one is that model, and
+    several is a name its recipe cannot pin down, which both callers treat the
+    way they treat an ambiguous filename. ``sorted_digests`` is sorted once per
+    call rather than per asset row, which is what keeps the prefix search a
+    bisect rather than a scan of the shelf.
+    """
+    return {by_digest[digest] for digest in digests_with_prefix(value, sorted_digests)}
+
+
+def served_family(row) -> Optional[str]:
+    """The architecture family to serve for a ``model`` row.
+
+    From the identified base model only when it was stated (by the file or a
+    person), never from a guess: the family is what the LoRA swap labels
+    compatibility with, and a guessed family there would be stated as fact.
+    *row* needs ``base_model``, ``base_model_canonical``, ``base_model_source``
+    and ``family``; the shelf rows and a workflow card's model marks both
+    read it here, so the two cannot disagree about one file.
+    """
+    stated = row["base_model_source"] in (SOURCE_USER, SOURCE_DECLARED)
+    return (
+        family_of(row["base_model"])
+        or (family_of(row["base_model_canonical"]) if stated else None)
+        or row["family"]
+    )
+
+
+def base_model_family(row) -> Optional[str]:
+    """The family of the base model a ``model`` row was identified as, guesses included.
+
+    Unlike :func:`served_family` this takes the identified label whatever its
+    source, a filename guess included, and never the tensors' own family of a
+    support file. It is for narrowing a list to what probably fits (a LoRA
+    against a workflow's checkpoint), where a guess the shelf already shows
+    beside the row is better than no answer; it is never stated as a fact.
+    *row* needs ``base_model`` and ``base_model_canonical``.
+    """
+    return family_of(row["base_model_canonical"]) or family_of(row["base_model"])
+
+
+def families_clash(base_model: Optional[str], other_base_model: Optional[str]) -> bool:
+    """Whether two models were made for different families or modalities.
+
+    Only where both fold to a known family (:func:`family_of`): an unknown
+    family is never a clash, because "we cannot tell" is not "they differ".
+    What the clone dialog flags a LoRA with against its new checkpoint, and
+    what a run flags a pinned model with (#1620 Q3). **A flag, never a block**:
+    a base model a family table does not know about is still the owner's call.
+    """
+    family, other = family_of(base_model), family_of(other_base_model)
+    if not family or not other:
+        return False
+    return family != other or modality_of(base_model) != modality_of(other_base_model)
+
+
+# What a generation graph loads BESIDE a model rather than as one: the files a
+# delete can leave with nothing to serve.
+SUPPORT_FILE_KINDS = (FILE_VAE, FILE_TEXT_ENCODER)
+
+# Kinds that never make a support file needed. An adapter runs on a base model
+# and needs whatever that base needs, so counting it would keep a VAE "in use"
+# by a LoRA whose checkpoint is the thing being deleted. A ControlNet is the
+# same: it conditions a base model and loads no VAE of its own, and so is an
+# upscaler, which works on pixels and loads nothing at all. `unknown` is NOT
+# here: it may be a base model we failed to recognise, and keeping a file is the
+# safe answer to not knowing.
+_NOT_CONSUMERS = (
+    *SUPPORT_FILE_KINDS,
+    FILE_ADAPTER,
+    FILE_CONTROLNET,
+    FILE_UPSCALER,
+    FILE_ENGINE,
+)
+
+
+def resolve_recipe_models(
+    hub, index: Optional[tuple] = None
+) -> tuple[dict[str, set[int]], dict[str, set[int]], set[str]]:
+    """Which shelf models each recipe on this hub is proven to have run with.
+
+    One ``workflow_recipe`` is one graph that ran with exactly the files its
+    ``workflow_recipe_asset`` rows name, so the models one recipe resolves to
+    are models a picture proves ran together. Every recipe the hub holds
+    counts, from every library and whether or not its pictures still exist.
+
+    Returns ``(recipe_models, ambiguous, unresolved, namesakes)``:
+
+    * ``recipe_models`` - ``{structural_hash: {model_id, ...}}``, recipes that
+      reached no shelf row absent;
+    * ``ambiguous`` - per recipe, the models it reached only through a name or
+      a digest prefix that several shelf rows answer to, so the membership is
+      a guess about which of them;
+    * ``namesakes`` - per recipe, each set of models ONE name or digest
+      prefix reached together: the recipe ran with one of them, so holding any
+      is holding the file it ran with. ``ambiguous`` is their union, which
+      loses that grouping; a name can reach a row through its stored filename
+      or through any copy's basename, so the grouping is the only safe record;
+    * ``unresolved`` - recipes naming a digest no shelf row matches while some
+      row is still waiting for its hash. The ghost reader's rule
+      (``hub/workflows._model_ghost_names``): that row may be the model the
+      digest names, so the recipe's membership is incomplete rather than wrong.
+
+    Shared by :func:`fetch_companions` and :func:`fetch_workflow_sets` because
+    both read co-occurrence off the same table and must agree about what a
+    recipe names - a second copy of this resolution is how the delete warning
+    and the grid would come to disagree about the same pair of files.
+
+    *index* is a :func:`recipe_asset_index` the caller already built in this
+    request, so a route that needs both does not scan the tables twice.
+    """
+    by_name, by_digest, _filenames, _names = index or recipe_asset_index(hub)
+    sorted_digests = sorted(by_digest)
+    digests_are_complete = not hub.fetchall(
+        f"SELECT 1 FROM model m WHERE {HASH_PENDING_SQL} LIMIT 1"
+    )
+
+    recipe_models: dict[str, set[int]] = {}
+    ambiguous: dict[str, set[int]] = {}
+    namesakes: dict[str, set[frozenset[int]]] = {}
+    unresolved: set[str] = set()
+    for row in hub.fetchall(
+        "SELECT structural_hash, widget_name, normalized_filename "
+        "FROM workflow_recipe_asset"
+    ):
+        recipe = row["structural_hash"]
+        if SHA256_FIELD_RE.search(row["widget_name"]):
+            matched = models_for_digest(
+                row["normalized_filename"], by_digest, sorted_digests
+            )
+            if not matched and not digests_are_complete:
+                unresolved.add(recipe)
+        else:
+            matched = by_name.get(row["normalized_filename"], set())
+        if len(matched) > 1:
+            ambiguous.setdefault(recipe, set()).update(matched)
+            namesakes.setdefault(recipe, set()).add(frozenset(matched))
+        if matched:
+            recipe_models.setdefault(recipe, set()).update(matched)
+    return recipe_models, ambiguous, unresolved, namesakes
+
+
+def model_workflow_types(
+    hub, model_ids, index: Optional[tuple] = None
+) -> dict[int, set[str]]:
+    """The kinds of workflow each of *model_ids* has run in, by its recipes.
+
+    ``{model_id: {match type, ...}}`` (:func:`match_type`), read off the type
+    of every recipe naming the model, in any library. A model no recipe names,
+    or only ones whose type is unknown, is absent: nothing is known about it,
+    which is not the same as it fitting nowhere.
+
+    *index* is :func:`resolve_recipe_models`'s.
+    """
+    wanted = set(model_ids)
+    recipes = {
+        recipe: models & wanted
+        for recipe, models in resolve_recipe_models(hub, index)[0].items()
+        if models & wanted
+    }
+    found: dict[int, set[str]] = {}
+    if not recipes:
+        return found
+    # Every recipe of a topology has its node classes, so one document read
+    # answers for all of them. One that could not be read answers for none.
+    video: dict[str, str] = {}
+    for row in hub.fetchall(
+        "SELECT r.structural_hash, r.topology_hash, c.workflow_type "
+        "FROM workflow_recipe r JOIN workflow_topology_core c "
+        "ON c.topology_hash = r.topology_hash WHERE c.workflow_type IS NOT NULL"
+    ):
+        members = recipes.get(row["structural_hash"])
+        if not members:
+            continue
+        kind = row["workflow_type"]
+        if kind == "video":
+            topology = row["topology_hash"]
+            kind = video.get(topology) or _video_match_type(hub, row["structural_hash"])
+            if kind is None:
+                continue
+            video[topology] = kind
+        for model_id in members:
+            found.setdefault(model_id, set()).add(kind)
+    return found
+
+
+def _video_match_type(hub, structural_hash: str) -> Optional[str]:
+    """A video recipe's :func:`match_type`, or None when its graph is unread."""
+    row = hub.fetchone(
+        "SELECT document FROM workflow_recipe_graph WHERE structural_hash = ?",
+        (structural_hash,),
+    )
+    try:
+        if row is None:
+            raise ValueError("no graph is stored for it")
+        nodes = json.loads(row["document"]).values()
+        return match_type("video", [node.get("class_type") or "" for node in nodes])
+    except (ValueError, AttributeError) as exc:
+        logger.warning(
+            "Could not read the graph of video recipe %s to tell what it "
+            "starts from, so it types no model: %s",
+            structural_hash,
+            exc,
+        )
+        return None
+
+
+def fetch_companions(hub, ids: list[int]) -> dict:
+    """What deleting *ids* would leave behind, from the recipes on this machine.
+
+    **The evidence is co-occurrence**: one ``workflow_recipe`` is one graph that
+    ran with exactly the files its ``workflow_recipe_asset`` rows name, so a VAE
+    and a checkpoint in one recipe are proven to work together. Every recipe the
+    hub holds counts, from every library and whether or not its pictures still
+    exist: evidence from more places can only keep more files, never offer one.
+
+    For each support file (``vae``, ``text_encoder``) that shares a recipe with
+    a model being deleted, its **consumers** are the base models across *all* of
+    its recipes (adapters and support files excluded, ``unknown`` included):
+
+    * **orphaned** - every consumer *a recipe records* is being deleted. That
+      is all it means: a kept base model no recipe names may need the file
+      too, which is why ``unrecorded`` counts those models beside it;
+    * **shared** - some consumer stays, and it is named;
+    * **unknown** - a recipe reached the file only by a basename another shelf
+      row also has, or named a model by a digest while some shelf row is still
+      waiting for its hash, so a consumer may be missing. Never reported as
+      orphaned.
+
+    **The absence of a recipe is not evidence.** A deleted model no recipe names
+    is listed under ``no_evidence``, so the caller can say it cannot tell, and
+    its support files are simply not examined.
+
+    ``in_use`` answers the other direction: a support file being deleted that a
+    model staying on the shelf has run with.
+
+    Args:
+        hub: The open hub database.
+        ids: ``model.id`` values about to be deleted.
+
+    Returns:
+        ``{"orphaned", "shared", "unknown", "in_use", "no_evidence",
+        "unrecorded"}``. The first four are lists of ``{"id", "name", ...}``,
+        ``shared`` and ``in_use`` entries also carrying ``used_with``;
+        ``no_evidence`` is a list of ids; ``unrecorded`` counts the base models
+        staying on the shelf that no recipe names.
+    """
+    deleting = set(ids)
+    models = {
+        int(row["id"]): row
+        for row in hub.fetchall(
+            "SELECT id, file_kind, display_name, filename, file_size FROM model"
+        )
+    }
+    recipe_models, ambiguous, unresolved, _namesakes = resolve_recipe_models(hub)
+
+    recipes_of: dict[int, set[str]] = {}
+    for recipe, members in recipe_models.items():
+        for model_id in members:
+            recipes_of.setdefault(model_id, set()).add(recipe)
+
+    def kind(model_id: int) -> str:
+        # `.get`, not an index: `models` was read before the recipe index, so a
+        # model registered by a scan between the two queries is in a recipe and
+        # not in this dict. `""` is in no kind list, so such a row is neither a
+        # consumer nor a support file - which is the safe answer, and the same
+        # guard `fetch_workflow_sets` makes with `if member in models`.
+        row = models.get(model_id)
+        return row["file_kind"] if row else ""
+
+    def entry(model_id: int) -> dict:
+        row = models[model_id]
+        return {
+            "id": model_id,
+            "name": row["display_name"] or row["filename"] or f"model {model_id}",
+            "file_size": row["file_size"],
+        }
+
+    def consumers(model_id: int) -> set[int]:
+        found: set[int] = set()
+        for recipe in recipes_of.get(model_id, ()):
+            found.update(
+                other
+                for other in recipe_models[recipe]
+                if other != model_id and kind(other) not in _NOT_CONSUMERS
+            )
+        return found
+
+    def used_with(members: set[int]) -> list[dict]:
+        return [
+            {"id": m, "name": entry(m)["name"]}
+            for m in sorted(members, key=lambda m: entry(m)["name"].lower())
+        ]
+
+    result: dict = {
+        "orphaned": [],
+        "shared": [],
+        "unknown": [],
+        "in_use": [],
+        "no_evidence": sorted(
+            model_id
+            for model_id in deleting
+            if model_id in models and model_id not in recipes_of
+        ),
+        "unrecorded": sum(
+            1
+            for model_id, row in models.items()
+            if model_id not in deleting
+            and model_id not in recipes_of
+            and row["file_kind"] not in _NOT_CONSUMERS
+        ),
+    }
+
+    candidates: set[int] = set()
+    for model_id in deleting & recipes_of.keys():
+        for recipe in recipes_of[model_id]:
+            candidates.update(
+                other
+                for other in recipe_models[recipe]
+                if other not in deleting and kind(other) in SUPPORT_FILE_KINDS
+            )
+        if kind(model_id) in SUPPORT_FILE_KINDS:
+            kept = consumers(model_id) - deleting
+            if kept:
+                result["in_use"].append(
+                    {**entry(model_id), "used_with": used_with(kept)}
+                )
+
+    for support_id in sorted(candidates, key=lambda m: entry(m)["name"].lower()):
+        users = consumers(support_id)
+        if not users & deleting:
+            # It shares a recipe with a deleted adapter or support file only;
+            # this delete does not change what it serves.
+            continue
+        if any(
+            support_id in ambiguous.get(r, ()) or r in unresolved
+            for r in recipes_of[support_id]
+        ):
+            result["unknown"].append(entry(support_id))
+        elif users - deleting:
+            result["shared"].append(
+                {**entry(support_id), "used_with": used_with(users - deleting)}
+            )
+        else:
+            result["orphaned"].append(entry(support_id))
+    return result
+
+
+def record_comfyui_history(hub, history: dict) -> int:
+    """File which shelf models ran together in each finished ComfyUI run.
+
+    *history* is ``GET /history`` as ComfyUI answers it. A run counts only when
+    its status says it finished: a run that errored proves nothing about its
+    files working together. Each asset name resolves the way a recipe's does
+    (:func:`resolve_recipe_models`), but **only an unambiguous match is kept**,
+    because what is stored is the model id and a guess stored as an id stops
+    reading as a guess. A name the shelf does not hold is not stored at all, so
+    nothing here keeps a model name the shelf has forgotten.
+
+    Idempotent: a run read twice writes nothing new, and one re-read after the
+    shelf gained a file gains that file.
+
+    **Nothing calls this now.** The history was read by the pull of ComfyUI's
+    saved workflows, which #1854 removed, so the rows are what was recorded
+    until then. Kept with its reader (:func:`_history_runs`) for whatever
+    hands the history over next.
+
+    Returns:
+        How many finished runs named at least one shelf model.
+    """
+    by_name, by_digest, _filenames, _names = recipe_asset_index(hub)
+    sorted_digests = sorted(by_digest)
+    rows: list[tuple[str, int]] = []
+    runs = 0
+    for prompt_id, entry in history.items():
+        try:
+            if entry["status"]["status_str"] != "success":
+                continue
+            nodes = reduce_api_graph(entry["prompt"][2])
+        except (KeyError, IndexError, TypeError, WorkflowGraphError) as exc:
+            logger.info(
+                "Skipped ComfyUI run %s from the history: no finished graph (%s: %s)",
+                prompt_id,
+                type(exc).__name__,
+                exc,
+            )
+            continue
+        found: set[int] = set()
+        for widget, value in assets_from_reduction(nodes):
+            if SHA256_FIELD_RE.search(widget):
+                matched = models_for_digest(value, by_digest, sorted_digests)
+            else:
+                matched = by_name.get(value, set())
+            if len(matched) == 1:
+                found |= matched
+        if found:
+            runs += 1
+            rows.extend((str(prompt_id), model_id) for model_id in found)
+    with hub.transaction() as conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO comfyui_history_model (prompt_id, model_id) "
+            "VALUES (?, ?)",
+            rows,
+        )
+    return runs
+
+
+def known_base_model(row) -> Optional[str]:
+    """The base model a clone may reason about for one ``model`` row, or ``None``.
+
+    The identified known label (``base_model_canonical``) when it came from the
+    owner, the file's declared metadata or its filename, and otherwise the
+    stored ``base_model`` folded where it folds. A **fuzzy** match is left out:
+    the shelf tags those as guesses, and a guess would widen the companion
+    ladder or flag a LoRA on a claim nobody made.
+    """
+    canonical = row["base_model_canonical"]
+    if canonical and rank(row["base_model_source"]) >= rank(SOURCE_FILENAME):
+        return canonical
+    return fold(row["base_model"]) or row["base_model"]
+
+
+# The widening ladder `propose_companions` climbs, narrowest first. Each answer
+# carries the step that produced it, so a weaker inference reads as weaker. The
+# last step is not evidence at all, and says so.
+VIA_CHECKPOINT = "checkpoint"
+VIA_BASE_MODEL = "base_model"
+VIA_FAMILY = "family"
+VIA_DECLARED = "declared"
+# Not a ladder step: a hand-made workflow set (#1520) that names this checkpoint.
+# The owner's own word, so it is listed ahead of every step of the ladder,
+# the declared-layout fallback included.
+VIA_GROUPED = "grouped"
+
+
+def propose_companions(
+    hub, checkpoint_id: int, index: Optional[tuple] = None
+) -> dict[str, list[dict]]:
+    """The VAEs and text encoders recipes have run beside *checkpoint_id*.
+
+    :func:`fetch_companions` read forwards: the same co-occurrence evidence, asked
+    "what goes with this" rather than "what would deleting this orphan". A VAE
+    carries no ``base_model`` to compare, so the first three steps propose a
+    support file only because a recipe on this hub named it beside a
+    checkpoint. The fourth is the cold case, and is not evidence.
+
+    Per support kind, the first step of the ladder with any answer wins:
+
+    1. ``checkpoint`` - recipes that name this checkpoint;
+    2. ``base_model`` - recipes naming any base model with the same base model
+       label (:func:`known_base_model`: the identified label unless it is a
+       fuzzy guess), when this checkpoint has one;
+    3. ``family`` - recipes naming any base model of the same architecture
+       family (:func:`family_of`), when the label folds to one, and never
+       across modalities (:func:`modality_of`): a video base does not answer
+       for an image checkpoint, nor the reverse;
+    4. ``declared`` - no recipe at all: the shelf's support files whose stored
+       tensor layout (``model.family``) the family declares in
+       :data:`~pixlstash.utils.known_base_models.COMPANION_LAYOUTS`. A layout
+       that fits says the file loads, not that it suits, so these carry
+       ``recipes`` 0 and the caller must present them as untested.
+
+    **ComfyUI's own runs count too** (#1518): the ``comfyui_history_model``
+    rows read off ``GET /history`` (:func:`record_comfyui_history`), so a
+    checkpoint used in
+    ComfyUI but in nothing PixlStash filed still has evidence. Nothing here asks
+    ComfyUI; the rows are whatever was last recorded. The two are counted
+    apart, ``recipes`` and ``history_runs``, and recipe evidence ranks first.
+    A run is evidence at every step, so ``declared`` answers only when neither
+    kind does.
+
+    A checkpoint nothing in its family has run with, whose family declares no
+    layout for a kind or whose shelf holds no file of that layout, proposes
+    nothing for that kind, and the caller is expected to say so. A support file a
+    recipe reached only through an ambiguous name is not proposed from that
+    recipe: it may be another row's file. Nor is one with no filename, which a
+    clone has nothing to write for.
+
+    Args:
+        hub: The open hub database.
+        checkpoint_id: The ``model.id`` the clone will load instead.
+        index: A :func:`recipe_asset_index` already built in this request.
+
+    **Grouped by the owner comes first.** Ahead of the ladder, every
+    hand-made workflow set with this checkpoint among its checkpoint members
+    (two for a two-model workflow) proposes its on-shelf VAE and text-encoder
+    members (``via: "grouped"``, ``recipes: 0``, ``set_name`` the newest such
+    set's name). ``prepick`` says whether the
+    dialog may select one for the owner: true when the matching sets between
+    them name exactly one on-shelf file of that kind, false when they name
+    several. A set with no checkpoint never matches, and a member off the shelf
+    is skipped. Ladder entries follow, minus any file already grouped, each
+    with ``prepick`` true and ``set_name`` null.
+
+    Returns:
+        ``{"vae": [...], "text_encoder": [...]}``, each entry ``{"id",
+        "filename", "display_name", "family", "via", "recipes",
+        "history_runs", "set_name", "prepick"}``: grouped entries first, then
+        most recipes first, then most runs. ``family`` is the file's own layout
+        (``clip_l``, ``t5_xxl``), which is how a caller tells two text encoders
+        apart. Both lists empty for an unknown id.
+    """
+    models = {
+        int(row["id"]): row
+        for row in hub.fetchall(
+            "SELECT id, file_kind, base_model, base_model_canonical, "
+            "base_model_source, filename, display_name, family FROM model"
+        )
+    }
+    proposals: dict[str, list[dict]] = {kind: [] for kind in SUPPORT_FILE_KINDS}
+    target = models.get(checkpoint_id)
+    if target is None:
+        return proposals
+    recipe_models, ambiguous, _unresolved, _namesakes = resolve_recipe_models(
+        hub, index
+    )
+
+    consumers = {
+        model_id: row
+        for model_id, row in models.items()
+        if row["file_kind"] not in _NOT_CONSUMERS
+    }
+    ladder: list[tuple[str, set[int]]] = [(VIA_CHECKPOINT, {checkpoint_id})]
+    label = known_base_model(target)
+    if label:
+        ladder.append(
+            (
+                VIA_BASE_MODEL,
+                {
+                    model_id
+                    for model_id, row in consumers.items()
+                    if known_base_model(row) == label
+                },
+            )
+        )
+    family = family_of(label)
+    if family:
+        modality = modality_of(label)
+        ladder.append(
+            (
+                VIA_FAMILY,
+                {
+                    model_id
+                    for model_id, row in consumers.items()
+                    if family_of(known_base_model(row)) == family
+                    and modality_of(known_base_model(row)) == modality
+                },
+            )
+        )
+
+    # ComfyUI's own runs (#1518), already resolved to unambiguous model ids by
+    # `record_comfyui_history`, so nothing is subtracted from them.
+    runs = _history_runs(hub)
+
+    def tally(witnesses, kind, anchors, skip) -> dict[int, int]:
+        counts: dict[int, int] = {}
+        for key, members in witnesses.items():
+            if not members & anchors:
+                continue
+            for member in members - skip.get(key, set()):
+                row = models.get(member)
+                if row is not None and row["file_kind"] == kind and row["filename"]:
+                    counts[member] = counts.get(member, 0) + 1
+        return counts
+
+    # Newest set first, so a file two sets group reads under the newest name.
+    grouped: dict[str, dict[int, Optional[str]]] = {
+        kind: {} for kind in SUPPORT_FILE_KINDS
+    }
+    for row in hub.fetchall(
+        "SELECT s.name, member_model.id AS model_id "
+        "FROM model_workflow_set AS s "
+        "JOIN model_workflow_set_member AS ckpt "
+        "  ON ckpt.set_id = s.id AND ckpt.slot = 'checkpoint' "
+        "JOIN model AS ckpt_model ON ckpt_model.sha256 = ckpt.sha256 "
+        "JOIN model_workflow_set_member AS member "
+        "  ON member.set_id = s.id AND member.slot IN ('vae', 'text_encoder') "
+        "JOIN model AS member_model ON member_model.sha256 = member.sha256 "
+        "WHERE ckpt_model.id = ? "
+        "ORDER BY s.created_at DESC, s.id DESC",
+        (checkpoint_id,),
+    ):
+        row_model = models.get(int(row["model_id"]))
+        # Filed by what the file IS, so a VAE never lands in the encoder list
+        # whichever slot it was put in; no filename means nothing to write.
+        if row_model is None or not row_model["filename"]:
+            continue
+        if row_model["file_kind"] in grouped:
+            grouped[row_model["file_kind"]].setdefault(
+                int(row["model_id"]), row["name"]
+            )
+
+    def layout_count(kind: str, model_id: int) -> int:
+        # Per LAYOUT, not per kind: a Flux set's clip_l and t5_xxl are one file
+        # each for two different rows, and counting them together would refuse
+        # to pre-pick either and hand both rows to weaker, ungrouped evidence.
+        family = models[model_id]["family"]
+        return sum(1 for other in grouped[kind] if models[other]["family"] == family)
+
+    for kind in SUPPORT_FILE_KINDS:
+        proposals[kind] = [
+            {
+                "id": model_id,
+                "filename": models[model_id]["filename"],
+                "display_name": models[model_id]["display_name"],
+                "family": models[model_id]["family"],
+                "via": VIA_GROUPED,
+                "recipes": 0,
+                "history_runs": 0,
+                "set_name": set_name,
+                "prepick": layout_count(kind, model_id) == 1,
+            }
+            for model_id, set_name in sorted(
+                grouped[kind].items(),
+                key=lambda item: (models[item[0]]["filename"] or "").lower(),
+            )
+        ]
+        # Whether an EVIDENCE step answered, on recipes or ComfyUI runs (#1518).
+        # Not `proposals[kind]`: the grouped
+        # entries are already in there, and reading them as evidence would
+        # skip the declared fallback for a row the owner's sets do not cover
+        # (a Flux set grouping a clip_l leaves its t5 row with nothing).
+        ladder_found = False
+        for via, anchors in ladder:
+            by_recipe = tally(recipe_models, kind, anchors, ambiguous)
+            by_run = tally(runs, kind, anchors, {})
+            if not by_recipe and not by_run:
+                continue
+            step = [
+                {
+                    "id": model_id,
+                    "filename": models[model_id]["filename"],
+                    "display_name": models[model_id]["display_name"],
+                    "family": models[model_id]["family"],
+                    "via": via,
+                    "recipes": by_recipe.get(model_id, 0),
+                    "history_runs": by_run.get(model_id, 0),
+                    "set_name": None,
+                    "prepick": True,
+                }
+                for model_id in sorted(
+                    by_recipe.keys() | by_run.keys(),
+                    key=lambda m: (
+                        -by_recipe.get(m, 0),
+                        -by_run.get(m, 0),
+                        (models[m]["filename"] or "").lower(),
+                    ),
+                )
+                # Already listed above as grouped. Dropped here rather than
+                # before the step is chosen, so grouping a file never widens
+                # the ladder past the step that found it.
+                if model_id not in grouped[kind]
+            ]
+            proposals[kind] += step
+            # Found only if the step added something. Evidence that merely
+            # repeats files the owner already grouped tells the other rows of
+            # this kind nothing new, so the declared fallback still answers
+            # for them.
+            ladder_found = bool(step)
+            break
+        layouts = COMPANION_LAYOUTS.get(family, {}).get(kind)
+        if ladder_found or not layouts:
+            continue
+        proposals[kind] += [
+            {
+                "id": model_id,
+                "filename": row["filename"],
+                "display_name": row["display_name"],
+                "family": row["family"],
+                "via": VIA_DECLARED,
+                "recipes": 0,
+                "history_runs": 0,
+            }
+            for model_id, row in sorted(
+                models.items(), key=lambda item: (item[1]["filename"] or "").lower()
+            )
+            if row["file_kind"] == kind
+            and row["filename"]
+            and row["family"] in layouts
+            # Listed above as grouped already, under the owner's own word.
+            and model_id not in grouped[kind]
+        ]
+    return proposals
+
+
+# How many of a combination's pictures the grid puts on a card's cover.
+#
+# Three, the shipped workflow card's cover depth (`workflow_card_service`'s
+# ``COVER_DEPTH``): the set grid reuses that card, so asking for more would
+# fetch bitmaps nothing draws.
+SET_COVER_DEPTH = 3
+
+
+def _history_runs(hub) -> dict[str, set[int]]:
+    """Return each stored ComfyUI run's model ids, keyed on its ``prompt_id``.
+
+    The one reader of ``comfyui_history_model`` (#1518). The rows were resolved
+    to unambiguous model ids when they were stored, so a caller
+    has no doubt to add; ComfyUI itself is never contacted.
+    """
+    runs: dict[str, set[int]] = {}
+    for row in hub.fetchall("SELECT prompt_id, model_id FROM comfyui_history_model"):
+        runs.setdefault(row["prompt_id"], set()).add(int(row["model_id"]))
+    return runs
+
+
+# The widgets a recipe names its base model by FILENAME. The shelf loader's
+# `checkpoint_id` is an id, not a name a reader could recognise or a fix could
+# match, so it is left out.
+_BASE_NAME_WIDGETS = tuple(sorted(CHECKPOINT_WIDGETS - {SHELF_ID_FIELD}))
+
+
+def _missing_bases(
+    hub, by_name: dict[str, set[int]], recipe_models, ambiguous, namesakes
+) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """The base models each recipe loads that no shelf row answers to.
+
+    A recipe whose checkpoint (or diffusion file) is off the shelf resolves to
+    its VAE and encoders alone, and a combination of those would be named after
+    the VAE. This is what lets the grid name it after the missing file instead.
+    A recipe that resolves to a base model anyway - by digest, as an A1111
+    recipe does, or through another loader - has nothing missing to report.
+
+    **A model fix answers first.** Where the owner replaced the missing name in
+    the recipe's workflow (``PUT /workflows/{id}/model-fix``, stored on that
+    workflow's base topology), the replacement is added to the recipe's models
+    in *recipe_models* (and to *ambiguous* and *namesakes* when its name is
+    shared), so the
+    recipe joins the replacement's combination. This is the owner's word that
+    the workflow now loads it, which is why the grid reads it and the delete
+    warning (:func:`fetch_companions`) does not.
+
+    Returns:
+        ``(missing, workflows)``: ``{structural_hash: {normalized name}}`` and
+        ``{normalized name: {workflow_id}}``, the workflows whose recipes load
+        that name, which is where its fix is made.
+    """
+    # Local: `hub.workflow_cards` imports this module.
+    from pixlstash.hub.workflow_card_reads import variant_workflows
+
+    workflow_of = variant_workflows(hub)
+    topology_of = {
+        row["structural_hash"]: row["topology_hash"]
+        for row in hub.fetchall(
+            "SELECT structural_hash, topology_hash FROM workflow_recipe"
+        )
+    }
+    workflows_on: dict[str, set[str]] = {}
+    for recipe, workflow_id in workflow_of.items():
+        workflows_on.setdefault(topology_of.get(recipe), set()).add(workflow_id)
+    # Per workflow, not per topology: the fix is written on the workflow's
+    # base topology and speaks for every recipe the workflow holds. Ordered so
+    # a name fixed differently in two slots resolves the same way every time.
+    fixes: dict[tuple[str, str], str] = {}
+    for row in hub.fetchall(
+        "SELECT topology_hash, was_norm, now_norm FROM workflow_model_fix "
+        "WHERE slot_kind = ? ORDER BY topology_hash, slot_label DESC",
+        (FILE_CHECKPOINT,),
+    ):
+        for workflow_id in workflows_on.get(row["topology_hash"], ()):
+            fixes[(workflow_id, row["was_norm"])] = row["now_norm"]
+    kinds = {
+        int(row["id"]): row["file_kind"]
+        for row in hub.fetchall("SELECT id, file_kind FROM model")
+    }
+    bases = {model_id for model_id, kind in kinds.items() if kind in _SET_BASE_KINDS}
+
+    unresolved: dict[str, set[str]] = {}
+    for row in hub.fetchall(
+        "SELECT structural_hash, normalized_filename FROM workflow_recipe_asset "
+        f"WHERE widget_name IN ({', '.join('?' for _ in _BASE_NAME_WIDGETS)})",
+        _BASE_NAME_WIDGETS,
+    ):
+        name = row["normalized_filename"]
+        # Kind-aware: a VAE or LoRA sharing the basename is not this base.
+        if by_name.get(name, set()) & bases:
+            continue
+        recipe = row["structural_hash"]
+        # The fix endpoint chose a checkpoint row, so only checkpoints answer.
+        fixed = {
+            model_id
+            for model_id in by_name.get(
+                fixes.get((workflow_of.get(recipe), name)), set()
+            )
+            if kinds.get(model_id) == FILE_CHECKPOINT
+        }
+        if fixed:
+            recipe_models.setdefault(recipe, set()).update(fixed)
+            if len(fixed) > 1:
+                ambiguous.setdefault(recipe, set()).update(fixed)
+                namesakes.setdefault(recipe, set()).add(frozenset(fixed))
+            continue
+        unresolved.setdefault(recipe, set()).add(name)
+
+    missing: dict[str, set[str]] = {}
+    workflows: dict[str, set[str]] = {}
+    for recipe, names in unresolved.items():
+        if recipe_models.get(recipe, set()) & bases:
+            continue
+        missing[recipe] = names
+        if recipe in workflow_of:
+            for name in names:
+                workflows.setdefault(name, set()).add(workflow_of[recipe])
+    return missing, workflows
+
+
+def _fixable_workflows(
+    hub, picture_counts: dict[str, int], workflows: dict[str, set[str]]
+) -> dict[str, set[str]]:
+    """Per missing name, the workflows where its fix can be made.
+
+    A workflow's recipes can load a name its own graph does not: a variant on
+    another of its topologies ran with it. Run uses the workflow's own graph,
+    so nothing there is missing, and ``PUT /workflows/{id}/model-fix`` refuses
+    it ("does not load that model"). Kept by the route's own test,
+    ``model_fix_labels`` on the base card's topology, chosen on the same
+    picture counts, so the note never names a workflow the fix then refuses.
+    A manual workflow is kept: it is fixed by cloning, and the note says so.
+    """
+    if not any(workflows.values()):
+        return workflows
+    # Local: `hub.workflow_cards` imports this module.
+    from pixlstash.hub.workflow_card_reads import (
+        card_index,
+        model_fix_labels,
+        workflow_index,
+    )
+
+    cards = card_index(hub)
+    topology_of = {card.workflow_key: card.topology_hash for card in cards}
+    base = {
+        workflow.workflow_id: topology_of.get(workflow.base_card)
+        for workflow in workflow_index(hub, picture_counts, cards)
+    }
+    return {
+        name: {
+            workflow_id
+            for workflow_id in ids
+            if workflow_id.startswith(MANUAL_PREFIX)
+            or (
+                base.get(workflow_id)
+                and model_fix_labels(hub, base[workflow_id], name, FILE_CHECKPOINT)
+            )
+        }
+        for name, ids in workflows.items()
+    }
+
+
+def fetch_workflow_sets(hub, vault) -> dict:
+    """Every set of shelf models a picture here or a ComfyUI run proves ran together.
+
+    One entry per distinct *combination* - the model ids one recipe resolves to.
+    Several recipes that name the same files are one combination, with their
+    recipe and picture counts summed, because the combination is the fact and
+    the recipe is one witness of it.
+
+    **Co-occurrence is evidence; its absence is not.** Two models in one recipe
+    proves they ran together; two models never seen together proves nothing at
+    all, so no combination is withheld and no pair is ruled out. One with no
+    base model, on the shelf or named by its recipes, is served but is no set:
+    a VAE, an encoder or a LoRA is not what a set is named after. The models
+    in no combination WITH a base model come back under ``no_set`` rather
+    than being dropped, so the caller can say it cannot tell rather than
+    implying nobody has tried them.
+
+    Pictures are scoped to the ACTIVE library, unlike
+    :func:`fetch_companions`, which counts every recipe the hub holds. The two
+    differ because they answer different questions: a delete warning must keep
+    a file some other library needs, and this grid is a picture of what the
+    library in front of the reader has actually made. A recipe the hub holds
+    with no kept picture here is therefore not a set, unless ComfyUI ran it.
+
+    **ComfyUI's own runs are witnesses too** (#1565): every finished run the
+    stored in ``comfyui_history_model`` counts one
+    ``history_runs`` against the combination its models resolve to exactly,
+    kept apart from ``recipes`` and ``picture_count``. A combination survives
+    the cut with a kept picture here OR a stored run, so one that has only ever
+    run in ComfyUI is a set with no cover. Runs are hub-wide, like
+    ``recipes``: ComfyUI's history is a fact about the machine, not about a
+    library. They were resolved unambiguously when stored, so they never mark
+    a member ``ambiguous``.
+
+    Returns:
+        ``{"combinations": [...], "no_set": [model_id, ...]}``. Each
+        combination carries ``key`` (its sorted member ids, joined, then
+        ``+`` and its missing names as a JSON list when it has any), ``models``
+        (``id``, ``name``, ``filename``, ``kind``, ``file_size``,
+        ``ambiguous``), ``missing`` (the base models its recipes load that
+        the shelf does not hold, each ``{"name", "workflow_ids"}``; see
+        :func:`_missing_bases`), ``recipes``, ``history_runs``,
+        ``picture_count`` and ``covers`` (up to :data:`SET_COVER_DEPTH` cover
+        candidates, best first). A combination with no base model, on the
+        shelf or missing, is served but counts for no model's set.
+        ``hub_combinations`` is every combination some recipe names,
+        before the "a picture here" cut, so it holds every library's recipes
+        and no run-only combination; only the merge offer reads it.
+        ``recipe_models`` is each recipe's resolved model ids, which only the
+        sets' check reads (:mod:`pixlstash.services.workflow_set_verdicts`).
+    """
+    index = recipe_asset_index(hub)
+    recipe_models, ambiguous, unresolved, namesakes = resolve_recipe_models(hub, index)
+    missing, missing_workflows = _missing_bases(
+        hub, index[0], recipe_models, ambiguous, namesakes
+    )
+    runs = _history_runs(hub)
+    pictures = vault.db.run_immediate_read_task(
+        lambda session: (
+            recipe_picture_counts(session),
+            variant_cover_candidates(session, SET_COVER_DEPTH),
+        )
+    )
+    missing_workflows = _fixable_workflows(hub, pictures[0], missing_workflows)
+    counts, candidates = pictures
+
+    covers_by_recipe: dict[str, list] = {}
+    for candidate in candidates:
+        covers_by_recipe.setdefault(candidate.structural_hash, []).append(candidate)
+
+    models = {
+        int(row["id"]): row
+        for row in hub.fetchall(
+            "SELECT id, file_kind, display_name, filename, file_size FROM model"
+        )
+    }
+
+    # Keyed on the frozen member set and the missing base names, so two
+    # recipes naming the same files are one card. `unsure` is OR-ed across the witnesses rather than AND-ed: one
+    # recipe that could only match a basename is enough to make the membership
+    # a guess, and a second, cleaner witness does not unmake the first.
+    grouped: dict[tuple[frozenset[int], frozenset[str]], dict] = {}
+
+    def empty() -> dict:
+        return {
+            "recipes": 0,
+            "history_runs": 0,
+            "picture_count": 0,
+            "covers": [],
+            "unsure": set(),
+            "namesakes": set(),
+        }
+
+    # A recipe whose only base is off the shelf (an all-in-one checkpoint with
+    # its VAE and encoder inside) resolves to no shelf row at all, and is
+    # still a set: the one named after its missing file, with no members.
+    for recipe in recipe_models.keys() | missing.keys():
+        members = recipe_models.get(recipe, set())
+        # Models the shelf no longer holds - a Forget between the recipe read
+        # and now - are dropped rather than drawn as an id with no name.
+        present = frozenset(member for member in members if member in models)
+        if not present and recipe not in missing:
+            continue
+        entry = grouped.setdefault(
+            (present, frozenset(missing.get(recipe, ()))), empty()
+        )
+        entry["recipes"] += 1
+        entry["picture_count"] += counts.get(recipe, 0)
+        entry["covers"].extend(covers_by_recipe.get(recipe, ()))
+        if recipe in unresolved:
+            entry["unsure"].update(present)
+        entry["unsure"].update(ambiguous.get(recipe, set()) & present)
+        entry["namesakes"].update(
+            group & present
+            for group in namesakes.get(recipe, ())
+            if len(group & present) > 1
+        )
+
+    # One witness per exact set, like a recipe: a run counts against the
+    # combination its STORED models are, never against every subset of it.
+    # Those are the names that could be pinned to one shelf row; a name that
+    # could
+    # not (#1518) is not stored, so a run proves at least this set ran. `unsure`
+    # is left alone - a run cannot add doubt, and cannot remove a recipe's.
+    for members in runs.values():
+        present = frozenset(member for member in members if member in models)
+        if not present:
+            continue
+        grouped.setdefault((present, frozenset()), empty())["history_runs"] += 1
+
+    def name(model_id: int) -> str:
+        row = models[model_id]
+        return row["display_name"] or row["filename"] or f"model {model_id}"
+
+    every = []
+    for (present, absent), entry in grouped.items():
+        ordered = sorted(
+            present, key=lambda m: (_set_kind_rank(models[m]), name(m).lower())
+        )
+        key = ",".join(str(m) for m in sorted(present))
+        every.append(
+            {
+                # JSON for the names: a filename may hold a comma.
+                "key": f"{key}+{json.dumps(sorted(absent), separators=(',', ':'))}"
+                if absent
+                else key,
+                "models": [
+                    {
+                        "id": model_id,
+                        "name": name(model_id),
+                        "filename": models[model_id]["filename"],
+                        "kind": models[model_id]["file_kind"],
+                        "file_size": models[model_id]["file_size"],
+                        "ambiguous": model_id in entry["unsure"],
+                    }
+                    for model_id in ordered
+                ],
+                # Internal, for the merge offer (`model_workflow_sets._lacks`):
+                # each set of members one name reached together. The route
+                # does not serve it.
+                "namesakes": sorted(sorted(group) for group in entry["namesakes"]),
+                "missing": [
+                    {
+                        "name": missing_name,
+                        "workflow_ids": sorted(missing_workflows.get(missing_name, ())),
+                    }
+                    for missing_name in sorted(absent)
+                ],
+                "recipes": entry["recipes"],
+                "history_runs": entry["history_runs"],
+                "picture_count": entry["picture_count"],
+                "covers": sorted(entry["covers"], key=cover_order, reverse=True)[
+                    :SET_COVER_DEPTH
+                ],
+            }
+        )
+    # Biggest evidence first, so the grid opens on the combinations the library
+    # actually leans on; the key breaks ties so a refetch draws the same order.
+    every.sort(
+        key=lambda c: (
+            -c["picture_count"],
+            -c["recipes"],
+            -c["history_runs"],
+            c["key"],
+        )
+    )
+    # A combination with no kept picture in this library and no stored
+    # ComfyUI run is not a set here: a recipe that made nothing in it has no
+    # cover, no count and nothing to show. A run is its own proof, cover or no.
+    combinations = [c for c in every if c["picture_count"] or c["history_runs"]]
+    # One with no base model at all, on the shelf or missing, is still served,
+    # because *Works with* reads every combination - but the grid draws no card
+    # for it: a VAE, an encoder or a LoRA is not something a set is named
+    # after. So its models count as in no set, below, unless a based one
+    # holds them.
+    based = [
+        c
+        for c in combinations
+        if c["missing"] or any(m["kind"] in _SET_BASE_KINDS for m in c["models"])
+    ]
+
+    # Read off the combinations that SURVIVED, not off `grouped`: a model whose
+    # only recipes made no kept picture here would otherwise be in no
+    # combination and in no `no_set` either, and so be missing from the screen
+    # altogether - the one outcome the honesty rule forbids.
+    in_a_set = {
+        member["id"] for combination in based for member in combination["models"]
+    }
+    return {
+        "combinations": combinations,
+        # Every library's recipes, pictures here or not: the hand-made sets'
+        # merge offer is a hub fact, like the sets (#1523). Not served.
+        # Recipe combinations only: the offer is worded in pictures and
+        # recipes, and a run-only one would read "0 recipes need N more".
+        "hub_combinations": [c for c in every if c["recipes"]],
+        # Each recipe's resolved models, model fixes applied, so the sets'
+        # check (`workflow_set_verdicts.fetch_set_checks`) reads the very
+        # co-occurrence the grid was drawn from. Not served.
+        "recipe_models": recipe_models,
+        # Engines are left out, and that is the honesty rule rather than an
+        # exception to it. `no_set` means "nothing here has been made with
+        # these", which is a statement a reader can act on for a checkpoint and
+        # is simply FALSE for a tagger: PixlStash downloaded it for itself, no
+        # generation graph can load it, and it will never appear in a recipe on
+        # any machine. Listing them would pad the card with files whose absence
+        # says nothing at all - and it is the same exclusion `_NOT_CONSUMERS`
+        # and the digest-completeness probe above already make.
+        "no_set": sorted(
+            model_id
+            for model_id in set(models) - in_a_set
+            if models[model_id]["file_kind"] != FILE_ENGINE
+        ),
+    }
+
+
+# Where each kind sits in a combination's member list: the base model it is
+# named after first, then whatever we could not classify, then the support files
+# a graph loads beside it, then the adapters, then the engines.
+#
+# The card's name is taken from the HEAD of this list, so the order is what
+# decides which file a set is called after. `unknown` sits second for that
+# reason and no other: a Flux or Wan graph loads a diffusion file rather than a
+# checkpoint, `classify_model_file` files most of those as `checkpoint` and the
+# rest as `unknown`, and there is no diffusion `file_kind` to key on - so the
+# rule is "an unclassified file names a set before a VAE does", which is a
+# ranking rather than a claim about what the file is.
+_SET_KIND_RANK = {
+    FILE_CHECKPOINT: 0,
+    FILE_UNKNOWN: 1,
+    FILE_VAE: 2,
+    FILE_TEXT_ENCODER: 3,
+    FILE_CONTROLNET: 4,
+    FILE_UPSCALER: 5,
+    FILE_ADAPTER: 6,
+    FILE_ENGINE: 7,
+}
+
+
+# The kinds a set is named after: a checkpoint, or an unclassified file that may
+# be a diffusion model (see `_SET_KIND_RANK`).
+_SET_BASE_KINDS = (FILE_CHECKPOINT, FILE_UNKNOWN)
+
+
+def _set_kind_rank(row) -> int:
+    return _SET_KIND_RANK.get(row["file_kind"], len(_SET_KIND_RANK))
+
+
 def attached_hashes(vault, entity_type: str, entity_id: int) -> set[str]:
     """Return the sha256 set one character or set uses, read from the vault."""
 
@@ -410,6 +1910,185 @@ def attached_hashes(vault, entity_type: str, entity_id: int) -> set[str]:
         )
 
     return set(vault.db.run_task(fetch, priority=DBPriority.IMMEDIATE))
+
+
+def character_lora_hashes(vault) -> set[str]:
+    """The sha256 of every model attached to a person in this library.
+
+    **The one answer to "is this a character LoRA"**: the attachment the Models
+    shelf writes, never a guess from a filename. A workflow run by itself goes
+    without these (``workflow_defaults``); a recipe keeps them.
+
+    Of a person the library still has: the table has no foreign key, a
+    character deleted before the delete route cleared its rows left them
+    behind, and a LoRA that was somebody's is nobody's once they are gone.
+    """
+
+    def fetch(session: Session):
+        return list(
+            session.exec(
+                select(AdapterAttachment.adapter_sha256).where(
+                    AdapterAttachment.entity_type == ENTITY_CHARACTER,
+                    AdapterAttachment.entity_id.in_(select(Character.id)),
+                )
+            ).all()
+        )
+
+    return {
+        str(sha256).lower()
+        for sha256 in vault.db.run_task(fetch, priority=DBPriority.IMMEDIATE)
+    }
+
+
+def lora_people(vault, digests) -> set[int]:
+    """The id of every person a LoRA in *digests* is attached to.
+
+    Of a person the library still has, as :func:`character_lora_hashes` reads
+    it. What a run asks of the LoRAs its graph loads: its pictures are of
+    whoever those belong to.
+    """
+    wanted = {str(digest).lower() for digest in digests if digest}
+    if not wanted:
+        return set()
+
+    def fetch(session: Session):
+        return list(
+            session.exec(
+                select(AdapterAttachment.entity_id).where(
+                    AdapterAttachment.entity_type == ENTITY_CHARACTER,
+                    AdapterAttachment.entity_id.in_(select(Character.id)),
+                    func.lower(AdapterAttachment.adapter_sha256).in_(wanted),
+                )
+            ).all()
+        )
+
+    return {
+        int(character_id)
+        for character_id in vault.db.run_task(fetch, priority=DBPriority.IMMEDIATE)
+    }
+
+
+def lora_owners(vault) -> dict[str, set[int]]:
+    """``{sha256: the ids of the people it is attached to}`` for this library.
+
+    :func:`character_lora_hashes` with whose each one is: what a write that
+    leaves a person's LoRA out of a workflow names in its answer.
+    """
+
+    def fetch(session: Session):
+        return list(
+            session.exec(
+                select(
+                    AdapterAttachment.adapter_sha256, AdapterAttachment.entity_id
+                ).where(
+                    AdapterAttachment.entity_type == ENTITY_CHARACTER,
+                    AdapterAttachment.entity_id.in_(select(Character.id)),
+                )
+            ).all()
+        )
+
+    owners: dict[str, set[int]] = {}
+    for sha256, character_id in vault.db.run_task(fetch, priority=DBPriority.IMMEDIATE):
+        owners.setdefault(str(sha256).lower(), set()).add(int(character_id))
+    return owners
+
+
+def people_who_fit(
+    hub, vault, family: Optional[str], base_model: Optional[str] = None
+) -> dict:
+    """The people a run of a workflow can be of, for a checkpoint of *family*.
+
+    **The one answer to "who fits this workflow"** (rule 4 of #1846), read by
+    the Run popup's *Person* field and by the people loader ComfyUI-PixlStash
+    puts on the canvas, so the two offer the same people. A person is offered
+    when a LoRA attached to them is for the base model of the workflow's
+    checkpoint: both sides read :func:`base_model_family`, the shelf's
+    identified base model with filename guesses included. Only a match is
+    offered. A person nothing vouches for (their LoRA's base model, or the
+    workflow's, was never identified) is counted in ``unknown``, and one whose
+    every LoRA is for another base model in ``clash``. A workflow that starts
+    from a picture still takes a person, so its type is not asked.
+    *base_model* is the checkpoint's base-model label, which only the note
+    reads: a label of no family the table knows is named rather than called
+    unknown.
+
+    Returns:
+        ``{"family", "people": [{"id", "name", "loras": [{"sha256",
+        "filename", "name", "trigger_words"}]}], "clash", "unknown", "note"}``:
+        people by name, each one's matching LoRAs in the shelf's order, and
+        ``note`` saying why there are none, when there are none.
+    """
+    owners = lora_owners(vault)
+    names = fetch_character_names(vault)
+    # A LoRA this library hides is not offered, so it vouches for nobody here.
+    hidden = set(hidden_model_ids(hub, getattr(vault, "library_uuid", None)))
+    rows = {}
+    for batch in chunked(sorted(owners)):
+        placeholders = ",".join("?" * len(batch))
+        for row in hub.fetchall(
+            "SELECT id, sha256, filename, display_name, base_model, "
+            "base_model_canonical, trigger_words FROM model "
+            f"WHERE lower(sha256) IN ({placeholders}) ORDER BY id",
+            tuple(batch),
+        ):
+            if int(row["id"]) not in hidden:
+                rows[str(row["sha256"]).lower()] = row
+    attached: dict[int, list] = {}
+    for sha256, row in sorted(rows.items(), key=lambda item: item[1]["id"]):
+        for character_id in owners[sha256]:
+            attached.setdefault(character_id, []).append(row)
+    people, clash, unknown = [], 0, 0
+    for character_id in sorted(attached, key=lambda cid: (names.get(cid, ""), cid)):
+        own = attached[character_id]
+        families = [base_model_family(row) for row in own]
+        matching = [
+            row
+            for row, lora_family in zip(own, families)
+            if family and lora_family == family
+        ]
+        if matching:
+            people.append(
+                {
+                    "id": character_id,
+                    "name": names.get(character_id),
+                    "loras": [
+                        {
+                            "sha256": str(row["sha256"]).lower(),
+                            "filename": row["filename"],
+                            "name": row["display_name"],
+                            "trigger_words": decode_trigger_words(row["trigger_words"]),
+                        }
+                        for row in matching
+                    ],
+                }
+            )
+        elif not family or any(lora_family is None for lora_family in families):
+            unknown += 1
+        else:
+            clash += 1
+    return {
+        "family": family,
+        "people": people,
+        "clash": clash,
+        "unknown": unknown,
+        "note": _nobody_fits_note(family, base_model) if not people else None,
+    }
+
+
+def _nobody_fits_note(family: Optional[str], base_model: Optional[str]) -> str:
+    """Why a workflow offers nobody, as the Run popup says it.
+
+    The words of ``personNote`` in ``frontend/src/components/io/RunDialog.vue``,
+    which the people loader in ComfyUI shows too: change both together.
+    """
+    if not family and base_model:
+        return f"PixlStash cannot match LoRAs to {base_model}."
+    if not family:
+        return (
+            "This workflow's base model is not known, so no person's LoRA can "
+            "be matched to it."
+        )
+    return "PixlStash has no LoRAs for this model."
 
 
 def replace_attachments(
@@ -474,7 +2153,13 @@ def replace_attachments(
 # The columns a person may edit, and the only ones the verb layer writes. Every
 # one of them is upserted with COALESCE by the scanner, so a correction made
 # here is never re-derived away on the next pass.
-CURATABLE_FIELDS = ("display_name", "base_model", "kind", "file_kind")
+CURATABLE_FIELDS = (
+    "display_name",
+    "base_model",
+    "kind",
+    "file_kind",
+    "trigger_words",
+)
 
 # What a file may be corrected to. Closed, and checked before the UPDATE rather
 # than left to the CHECK constraint: a violation would surface as a 500 naming
@@ -488,6 +2173,8 @@ FILE_KINDS = (
     FILE_CHECKPOINT,
     FILE_VAE,
     FILE_TEXT_ENCODER,
+    FILE_CONTROLNET,
+    FILE_UPSCALER,
     FILE_UNKNOWN,
 )
 
@@ -515,6 +2202,49 @@ CURATABLE_CAPABILITIES = (
     FEATURE_SCORER,
 )
 
+
+def hidden_model_ids(hub, library_uuid: Optional[str]) -> list[int]:
+    """The models hidden in ONE library, sorted. ``[]`` with no library."""
+    if not library_uuid:
+        return []
+    return [
+        int(row["model_id"])
+        for row in hub.fetchall(
+            "SELECT model_id FROM model_hidden WHERE library_uuid = ? "
+            "ORDER BY model_id",
+            (library_uuid,),
+        )
+    ]
+
+
+def set_models_hidden(
+    hub, library_uuid: Optional[str], ids: list[int], hidden: bool
+) -> list[int]:
+    """Hide or show models in one library; answer with that library's hidden ids.
+
+    A view choice and nothing else: no file, no ``model`` row and no set member
+    is touched, and every other library keeps showing the model. An id naming
+    no model is skipped rather than refused, so a hide sent over a selection
+    that a scan has since shortened still lands for the rest. A hub with no
+    active library hides nothing (there is no library to hide it in).
+    """
+    if not library_uuid or not ids:
+        return hidden_model_ids(hub, library_uuid)
+    with hub.transaction() as conn:
+        if hidden:
+            conn.executemany(
+                "INSERT OR IGNORE INTO model_hidden (library_uuid, model_id) "
+                "SELECT ?, id FROM model WHERE id = ?",
+                [(library_uuid, model_id) for model_id in ids],
+            )
+        else:
+            conn.executemany(
+                "DELETE FROM model_hidden WHERE library_uuid = ? AND model_id = ?",
+                [(library_uuid, model_id) for model_id in ids],
+            )
+    return hidden_model_ids(hub, library_uuid)
+
+
 # A location state that means the bytes are still out there somewhere, so the
 # row is NOT a candidate for Forget. `unreachable` is in here deliberately: it
 # is "we could not look", and forgetting on it would let one click wipe the
@@ -530,6 +2260,17 @@ def update_models(hub, ids: list[int], changes: dict) -> list[int]:
     IS written: clearing a wrong base model back to "not set" is a correction
     the owner is entitled to make, and it puts the row back in the `Needs a
     name` / unset queues where it belongs.
+
+    ``trigger_words`` arrives as a list and is stored as JSON
+    (:func:`encode_trigger_words`): an empty list is "needs none" and is not
+    the same write as ``None``.
+
+    Writing ``file_kind`` records that a person decided what the file is
+    (``file_kind_decided``), whatever kind they picked, so a workflow loading
+    it as another kind is no longer offered (#1962). ``suggest_kind`` writes
+    that mark alone: ``False`` is "don't suggest", ``True`` takes it back.
+    Sent beside ``file_kind`` it decides the mark, which is how an Undo puts
+    back a kind and the offer together.
 
     ``capabilities`` is the one entry that is not a column. It is the complete
     set for every id, written to ``model_capability``: replaced wholesale rather
@@ -548,7 +2289,9 @@ def update_models(hub, ids: list[int], changes: dict) -> list[int]:
     if not ids or not changes:
         return []
     capabilities = changes.get("capabilities")
-    columns_only = {k: v for k, v in changes.items() if k != "capabilities"}
+    columns_only = {
+        k: v for k, v in changes.items() if k not in ("capabilities", "suggest_kind")
+    }
     unknown = set(columns_only) - set(CURATABLE_FIELDS)
     if unknown:
         raise ValueError(f"not a curatable field: {sorted(unknown)}")
@@ -562,11 +2305,32 @@ def update_models(hub, ids: list[int], changes: dict) -> list[int]:
             ).fetchall()
         ]
         if existing:
+            if "suggest_kind" in changes or "file_kind" in changes:
+                conn.execute(
+                    "UPDATE model SET file_kind_decided = ? "
+                    f"WHERE id IN ({placeholders})",
+                    (int(not changes.get("suggest_kind", False)), *ids),
+                )
             if columns_only:
-                columns = ", ".join(f"{field} = ?" for field in columns_only)
+                assignments = dict(columns_only)
+                if "base_model" in assignments:
+                    # In the same UPDATE, or the shelf keeps grouping a corrected
+                    # row under the scanner's old guess. `user` outranks every
+                    # scan, so the answer sticks - including a cleared one,
+                    # which is the owner saying "none of these", not a blank
+                    # for the next scan to guess into.
+                    assignments["base_model_canonical"] = fold(
+                        assignments["base_model"]
+                    )
+                    assignments["base_model_source"] = SOURCE_USER
+                if "trigger_words" in assignments:
+                    assignments["trigger_words"] = encode_trigger_words(
+                        assignments["trigger_words"]
+                    )
+                columns = ", ".join(f"{field} = ?" for field in assignments)
                 conn.execute(
                     f"UPDATE model SET {columns} WHERE id IN ({placeholders})",
-                    tuple(columns_only.values()) + tuple(ids),
+                    tuple(assignments.values()) + tuple(ids),
                 )
             # Correcting what a file IS drops the capabilities we guessed it
             # served - unless the same call states them, which is the owner
@@ -667,10 +2431,19 @@ def forget_models(hub, ids: list[int]) -> tuple[list[int], list[dict]]:
         # route because the read belongs inside this transaction - the same
         # critical section the state gate runs in.
         #
-        # Only while something still declares it, which is what every non-
-        # `missing` state means here: a declared engine nothing has fetched is
-        # `not_downloaded`, and `declare_folder`'s sweep writes `missing` exactly
-        # when the declaration stopped naming the row. That is the DISCOVERED
+        # Only while something still declares it, which is what `present`,
+        # `unreachable` and `not_downloaded` mean here: a declared engine nothing
+        # has fetched is `not_downloaded`, and `declare_folder`'s sweep writes
+        # `missing` exactly when the declaration stopped naming the row.
+        #
+        # `removed` is excluded with it, and by construction rather than by
+        # argument (#1439). It satisfies "not missing" while meaning the
+        # opposite - the owner deleted that copy on purpose - so left in, an
+        # engine every copy of which had been merged away would stay refused
+        # forever as "something still declares it". It is unreachable today only
+        # because `POST /model-files/merge` refuses an engine outright, which is a
+        # gate in another file; this is the class closed here where the predicate
+        # is, the way the other five were. That is the DISCOVERED
         # roots - a repo dropped by `huggingface-cli delete-cache`, a deleted
         # InsightFace pack - and nothing fetches those back, so refusing them
         # left the owner a row drawn as a fault that no verb on the shelf could
@@ -686,7 +2459,7 @@ def forget_models(hub, ids: list[int]) -> tuple[list[int], list[dict]]:
             for row in conn.execute(
                 f"SELECT id FROM model WHERE id IN ({placeholders}) AND file_kind = ? "
                 "AND EXISTS (SELECT 1 FROM model_file WHERE model_id = model.id "
-                "AND state <> 'missing')",
+                "AND state NOT IN ('missing', 'removed'))",
                 (*ids, FILE_ENGINE),
             ).fetchall()
         }
@@ -741,6 +2514,9 @@ def _purge(conn, ids: list[int]) -> None:
         f"DELETE FROM model_capability WHERE model_id IN ({marks})", tuple(ids)
     )
     conn.execute(f"DELETE FROM model WHERE id IN ({marks})", tuple(ids))
+    # Every library's hide of them: an id is never reissued, so the rows would
+    # only ever name nothing.
+    conn.execute(f"DELETE FROM model_hidden WHERE model_id IN ({marks})", tuple(ids))
     repair_stacks(conn, stack_ids)
 
 

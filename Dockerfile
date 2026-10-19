@@ -52,6 +52,7 @@ RUN pip install --no-cache-dir \
     open_clip_torch \
     fastapi \
     "uvicorn[standard]" \
+    websockets \
     numpy \
     pillow \
     opencv-python-headless \
@@ -68,7 +69,7 @@ RUN pip install --no-cache-dir \
     tqdm \
     sentence_transformers \
     pillow-heif \
-    "sqlmodel<0.0.45" \
+    "sqlmodel>=0.0.45" \
     alembic \
     cryptography \
     passlib \

@@ -85,7 +85,7 @@ import json
 from binascii import Error as BinasciiError
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Iterable, Iterator, Optional
 
@@ -595,7 +595,10 @@ class CandidateMember:
         queue, because the queue's URL would never change.
         """
         return ImageUtils.thumbnail_cache_version(
-            self.thumbnail_width, self.thumbnail_height, self.orientation
+            self.thumbnail_width,
+            self.thumbnail_height,
+            self.orientation,
+            file_path=self.file_path,
         )
 
     @property
@@ -1234,7 +1237,9 @@ def load_stack_facts(
     if not ordered:
         return {}
     rows_by_stack: dict[int, list[tuple]] = defaultdict(list)
-    thumbnails: dict[int, tuple[Optional[int], Optional[int]]] = {}
+    thumbnails: dict[
+        int, tuple[Optional[int], Optional[int], Optional[int], Optional[str]]
+    ] = {}
     for start in range(0, len(ordered), ID_CHUNK):
         chunk = ordered[start : start + ID_CHUNK]
         rows = session.exec(
@@ -1247,6 +1252,7 @@ def load_stack_facts(
                 Picture.thumbnail_width,
                 Picture.thumbnail_height,
                 Picture.orientation,
+                Picture.file_path,
             ).where(Picture.stack_id.in_(chunk), Picture.deleted.is_(False))
         ).all()
         for (
@@ -1258,6 +1264,7 @@ def load_stack_facts(
             thumbnail_width,
             thumbnail_height,
             orientation,
+            file_path,
         ) in rows:
             rows_by_stack[int(stack_id)].append(
                 _stack_member_order_key(picture_id, stack_position, score, created_at)
@@ -1266,16 +1273,19 @@ def load_stack_facts(
                 thumbnail_width,
                 thumbnail_height,
                 orientation,
+                file_path,
             )
     facts: dict[int, StackFacts] = {}
     for stack_id, keys in rows_by_stack.items():
         member_ids = tuple(int(key[-1]) for key in sorted(keys))
-        width, height, orientation = thumbnails.get(member_ids[0], (None, None, None))
+        width, height, orientation, file_path = thumbnails.get(
+            member_ids[0], (None, None, None, None)
+        )
         facts[stack_id] = StackFacts(
             stack_id=stack_id,
             member_ids=member_ids,
             leader_thumbnail_version=ImageUtils.thumbnail_cache_version(
-                width, height, orientation
+                width, height, orientation, file_path=file_path
             ),
         )
     return facts
@@ -2125,6 +2135,9 @@ def decode_decided_cursor(cursor: str) -> tuple[Optional[datetime], int]:
         if kind != DECIDED_CURSOR_KIND:
             raise ValueError(f"not a decided-page cursor (kind {kind!r})")
         decided_at = datetime.fromisoformat(stamp) if stamp else None
+        if decided_at is not None and decided_at.tzinfo is None:
+            # A cursor minted before the columns became aware carries naive UTC.
+            decided_at = decided_at.replace(tzinfo=timezone.utc)
         return decided_at, int(group_id)
     except (ValueError, UnicodeDecodeError, BinasciiError) as exc:
         raise DedupCursorError(f"malformed decided cursor {cursor!r}: {exc}") from exc
@@ -2854,7 +2867,7 @@ def request_scan_in_session(
             policy.threshold,
         )
         raise DedupScanBusyError(active)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     if row is None:
         row = DedupScan(scope_key=scope.key)
     row.scope_type = scope.scope_type.value

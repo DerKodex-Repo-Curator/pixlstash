@@ -1,29 +1,40 @@
 import os
 import sys
 import subprocess
+import threading
 import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Annotated, Literal, Optional
 from fastapi import APIRouter, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response as FastAPIResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 from sqlmodel import Session
 
 from PIL import Image
 
+from pixlstash.auth import is_local_or_tailscale_ip
 from pixlstash.database import DBPriority
 from pixlstash.db_models import User
+from pixlstash.hub.workflows import (
+    forget_model_ghosts,
+    model_ghost_names,
+    picture_ghost_count,
+)
 from pixlstash.db_models.tag import (
     DEFAULT_SMART_SCORE_PENALIZED_TAGS,
     DEFAULT_SMART_SCORE_PENALIZED_TAG_WEIGHT,
 )
 from pixlstash.pixl_logging import get_logger
+from pixlstash.routes._helpers import require_hub
+from pixlstash.routes.model_folders import register_comfyui_model_folders
 from pixlstash.utils.path_utils import LibraryRootsUnavailable
 from pixlstash.services import (
     config_service,
     library_settings_service,
     scrapheap_service,
+    workflow_ghost_service,
 )
+from pixlstash.services.comfyui_service import live_runs
 from pixlstash.telemetry import mark_install_established
 from pixlstash.server_config_io import persist_server_config
 from pixlstash.utils.quality.smart_score_utils import smart_score_penalised_tags
@@ -269,6 +280,9 @@ def create_router(server) -> APIRouter:
         last_used_at: Optional[datetime] = None
         include_attachments: bool
         watermark: bool
+        all_libraries: bool = False
+        # Bound to one client address (the ComfyUI link key).
+        source_bound: bool = False
 
     class DeleteTokenResponse(BaseModel):
         model_config = ConfigDict(extra="allow")
@@ -320,6 +334,7 @@ def create_router(server) -> APIRouter:
 
         status: str
         workers: dict
+        runs: list[dict] = []
         process: dict
 
     class WatchFoldersResponse(BaseModel):
@@ -466,6 +481,33 @@ def create_router(server) -> APIRouter:
         user = server.auth.get_user_for_request(request)
         config = _config_payload(user)
         return {"smart_score_penalised_tags": config["smart_score_penalised_tags"]}
+
+    def _host_ops_allowed(request: Request) -> bool:
+        """Whether this request may register and scan model folders.
+
+        The same locality rule the model-folder routes get from the gate
+        (``LOCAL_OWNER_ONLY``, §16.3): saving a ComfyUI address must not be a
+        way round it. A refused request still saves the address; it is logged.
+        """
+        client_ip = server.auth.real_client_ip(request)
+        if is_local_or_tailscale_ip(client_ip) or server.auth.allow_remote_host_ops:
+            return True
+        logger.info(
+            "ComfyUI address saved from %s; its model folders are not registered "
+            "because host operations are local-only (allow_remote_host_ops is off).",
+            client_ip,
+        )
+        return False
+
+    def _register_comfyui_model_folders(base_url: str) -> None:
+        try:
+            register_comfyui_model_folders(server, base_url)
+        except Exception:
+            logger.exception(
+                "Adding ComfyUI's model folders at %s to the shelf failed; the "
+                "ComfyUI URL is saved and the folders can be added by hand.",
+                base_url,
+            )
 
     @router.patch(
         "/users/me/config",
@@ -637,6 +679,20 @@ def create_router(server) -> APIRouter:
             # so MissingSmartScoreFinder promptly re-scores the cleared rows. wake() is a
             # scheduler poke, not a DB write, so it need not be inside the transaction.
             server.vault.wake()
+        if (
+            updated
+            and "comfyui_url" in patch_data
+            and user.comfyui_url
+            and _host_ops_allowed(request)
+        ):
+            # Off the request: ComfyUI may be slow or down, and the URL is saved
+            # whether or not its model folders can be read.
+            threading.Thread(
+                target=_register_comfyui_model_folders,
+                args=(user.comfyui_url.rstrip("/"),),
+                name="comfyui-model-folders",
+                daemon=True,
+            ).start()
         if "keep_models_in_memory" in patch_data:
             server.vault.set_keep_models_in_memory(
                 getattr(user, "keep_models_in_memory", True)
@@ -751,6 +807,34 @@ def create_router(server) -> APIRouter:
     )
     def patch_me_token(token_id: int, payload: UpdateTokenRequest, request: Request):
         return server.auth.update_token(request, token_id, watermark=payload.watermark)
+
+    class TokenLibrariesRequest(BaseModel):
+        all_libraries: bool
+
+    class TokenLibrariesResponse(BaseModel):
+        status: str
+        id: int
+        all_libraries: bool
+
+    @router.put(
+        "/users/me/token/{token_id}/libraries",
+        summary="Set which libraries an API token covers",
+        response_model=TokenLibrariesResponse,
+        description=(
+            "A token works only in the library it was created in. "
+            "`all_libraries: true` lets it work in whichever library is open, "
+            "so an agent's token keeps working when the library is switched; "
+            "`false` pins it to the library that is open now. Share links "
+            "and the ComfyUI link key cannot be widened. Only the owner's own "
+            "session, on the local network, may call this; a token cannot."
+        ),
+    )
+    def put_me_token_libraries(
+        token_id: int, payload: TokenLibrariesRequest, request: Request
+    ):
+        return server.auth.set_token_libraries(
+            request, token_id, all_libraries=payload.all_libraries
+        )
 
     # ── Watermark image endpoints ─────────────────────────────────────────────
 
@@ -904,7 +988,13 @@ def create_router(server) -> APIRouter:
         "/workers/progress",
         summary="Get worker progress",
         response_model=WorkersProgressResponse,
-        description="Returns background worker progress plus process CPU, RAM, and VRAM usage metrics.",
+        description=(
+            "Returns background worker progress plus process CPU, RAM, and VRAM "
+            "usage metrics. runs lists the ComfyUI runs in flight in this "
+            "library, oldest first, each with its prompt_id, label, "
+            "workflow_id, status (queued or running) and percent (the running "
+            "node's own progress); empty for any token but the owner's."
+        ),
     )
     def get_workers_progress(request: Request):
         _ensure_secure_when_required(request)
@@ -912,6 +1002,13 @@ def create_router(server) -> APIRouter:
         return {
             "status": "success",
             "workers": server.vault.get_worker_progress(),
+            # A run is the owner's, and its label names one of their workflows
+            # or recipes: a narrower token is told of none.
+            "runs": (
+                live_runs(request.state.library_lease.library_uuid)
+                if server.auth.is_unscoped_owner_request(request)
+                else []
+            ),
             "process": hw_monitor.get_usage(),
         }
 
@@ -1106,6 +1203,169 @@ def create_router(server) -> APIRouter:
         if config_path:
             persist_server_config(config_path, server._server_config)
         return _scrapheap_retention_payload()
+
+    class GhostRetentionConfigResponse(BaseModel):
+        model_config = ConfigDict(extra="allow")
+
+        status: str
+        workflow_ghost_retention: str
+        workflow_ghost_retention_choices: list[str]
+        picture_ghosts: int | None = Field(
+            None,
+            description="Picture ghosts the active library holds. Null without a hub.",
+        )
+        model_ghosts: int | None = Field(
+            None,
+            description=(
+                "Model names and digests recipes keep for models not on the shelf, "
+                "hub-wide. "
+                "Null without a hub."
+            ),
+        )
+
+    def _ghost_retention_payload() -> dict:
+        """Build the picture-ghost retention response from server-config."""
+        hub = getattr(server, "hub", None)
+        library_uuid = getattr(server.vault, "library_uuid", None)
+        return {
+            "picture_ghosts": (
+                picture_ghost_count(hub, library_uuid) if hub and library_uuid else None
+            ),
+            "model_ghosts": len(model_ghost_names(hub)) if hub else None,
+            "status": "success",
+            "workflow_ghost_retention": workflow_ghost_service.read_ghost_retention(
+                server._server_config
+            ),
+            "workflow_ghost_retention_choices": list(
+                workflow_ghost_service.GHOST_RETENTION_CHOICES
+            ),
+        }
+
+    @router.get(
+        "/server-config/ghost-retention",
+        summary="Get picture-ghost retention configuration",
+        response_model=GhostRetentionConfigResponse,
+        description=(
+            "Returns which picture ghosts a purge is allowed to keep. A "
+            "**ghost** is the thumbnail AND the prompt of a picture that has "
+            "been permanently destroyed, held in the hub so a dehydrated stack "
+            "member can be made again.\n\n"
+            "`off` keeps none. `covered` (the default) keeps a ghost only where "
+            "a SURVIVING picture already carries the same workflow instance "
+            "hash, so the retained prompt is one the library already holds and "
+            "the only marginal exposure is a thumbnail of a near-duplicate. "
+            "`on` keeps every ghost."
+        ),
+    )
+    def get_ghost_retention_config(request: Request):
+        _ensure_secure_when_required(request)
+        return _ghost_retention_payload()
+
+    class GhostRetentionConfigPatch(BaseModel):
+        model_config = ConfigDict(
+            json_schema_extra={"example": {"workflow_ghost_retention": "covered"}}
+        )
+
+        workflow_ghost_retention: Annotated[
+            Literal[workflow_ghost_service.GHOST_RETENTION_CHOICES],
+            # Matched case- and space-blind, as the setting always has been.
+            BeforeValidator(lambda value: str(value).strip().lower()),
+        ] = Field(
+            description=("One of `off`, `covered` or `on`. Any other value is a 422."),
+            examples=["covered"],
+        )
+
+    @router.patch(
+        "/server-config/ghost-retention",
+        summary="Update picture-ghost retention configuration",
+        response_model=GhostRetentionConfigResponse,
+        description=(
+            "Sets which picture ghosts a purge may keep and persists it to "
+            "server-config.json.\n\n"
+            "**Saving destroys nothing.** Lowering the position is a statement "
+            "about what FUTURE purges may retain; clearing what is already held "
+            "is `DELETE /server-config/ghost-retention/ghosts`. Raising it to "
+            "`on` does not resurrect a ghost that was never written."
+        ),
+        responses={
+            422: {"description": "workflow_ghost_retention is not off/covered/on."}
+        },
+    )
+    def patch_ghost_retention_config(request: Request, body: GhostRetentionConfigPatch):
+        _ensure_secure_when_required(request)
+        workflow_ghost_service.apply_ghost_retention(
+            server, body.workflow_ghost_retention
+        )
+        return _ghost_retention_payload()
+
+    class GhostEraseResponse(BaseModel):
+        status: str
+        ghosts_erased: int
+
+    @router.delete(
+        "/server-config/ghost-retention/ghosts",
+        summary="Erase the active library's picture ghosts",
+        response_model=GhostEraseResponse,
+        description=(
+            "Permanently destroys every picture ghost the active library "
+            "holds. Nothing that was destroyed can be made again afterwards. "
+            "Other libraries' ghosts are untouched. The retention setting is "
+            "unchanged, so later purges keep ghosts again unless it is `off`."
+        ),
+    )
+    def erase_picture_ghosts(request: Request):
+        _ensure_secure_when_required(request)
+        hub = getattr(server, "hub", None)
+        library_uuid = getattr(server.vault, "library_uuid", None)
+        if hub is None or not library_uuid:
+            raise HTTPException(
+                status_code=503,
+                detail="No hub-registered library is open, so there are no ghosts.",
+            )
+        return {
+            "status": "success",
+            "ghosts_erased": workflow_ghost_service.erase_library_ghosts(
+                server.vault.db, hub, library_uuid
+            ),
+        }
+
+    class ModelGhostForgetResponse(BaseModel):
+        status: str
+        names_forgotten: int
+
+    @router.delete(
+        "/server-config/ghost-retention/model-ghosts",
+        summary="Forget the names of models no longer on the shelf",
+        response_model=ModelGhostForgetResponse,
+        description=(
+            "Permanently forgets every `.safetensors` filename, and every "
+            "loader `*_sha256` digest, a workflow recipe keeps for a model that "
+            "is not on the shelf. The workflows stay and still "
+            "group, because their hashes are computed from the names rather "
+            "than containing them; they read as models whose names are "
+            "forgotten. Hub-wide: a model name is not a fact about one library."
+        ),
+    )
+    def forget_model_ghost_names(
+        request: Request,
+        expected: Optional[int] = Query(
+            None,
+            ge=0,
+            description=(
+                "The count the person confirmed. When the set has changed size "
+                "since, nothing is forgotten and the answer is a 409."
+            ),
+        ),
+    ):
+        _ensure_secure_when_required(request)
+        hub = require_hub(server, "No hub is attached, so there are no model ghosts.")
+        forgotten = forget_model_ghosts(hub, expected)
+        if forgotten is None:
+            raise HTTPException(
+                status_code=409,
+                detail="The model ghosts changed since they were counted. Nothing was forgotten.",
+            )
+        return {"status": "success", "names_forgotten": forgotten}
 
     @router.get(
         "/server-config/scrapheap-retention/impact",

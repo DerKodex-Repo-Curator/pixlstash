@@ -51,7 +51,6 @@ export function useGridScoring({
   rebuildGridImagesFromLastFetch,
   triggerNewImageHighlight,
   updateVisibleThumbnails,
-  maybeRefreshOverlayForComfyui,
   removeImagesById,
 }) {
   const sortStore = useSortStore();
@@ -527,12 +526,6 @@ export function useGridScoring({
     lastFetchedGridImages.value = base;
     rebuildGridImagesFromLastFetch();
     if (highlight) triggerNewImageHighlight(inserted);
-
-    // An in-app ComfyUI result lands here (origin-aware WS picture_imported insert).
-    // If the overlay is open with a pending comfyui refresh, reconcile it now that
-    // the new stacked output is present in lastFetchedGridImages - this is the i2i/
-    // upscale lightbox case that previously relied on the full-grid refetch.
-    void maybeRefreshOverlayForComfyui();
   }
 
   async function refreshSmartScoreForImage(imageId) {
@@ -580,12 +573,23 @@ export function useGridScoring({
       entries.map(([id, score]) => [String(id), Number(score)]),
     );
 
-    let updatedImages = allGridImages.value.map((img) => {
-      if (!img || img.id == null) return img;
-      const key = String(img.id);
-      if (!scoreMap.has(key)) return img;
-      return { ...img, score: scoreMap.get(key) };
-    });
+    const withScores = (images) =>
+      images.map((img) => {
+        if (!img || img.id == null) return img;
+        const key = String(img.id);
+        if (!scoreMap.has(key)) return img;
+        return { ...img, score: scoreMap.get(key) };
+      });
+
+    // The fetched rows too, not only the cards: expanding or collapsing stacks
+    // and a stack-count refresh rebuild the cards from these, and the WS echo
+    // that would correct a stale value is skipped above. Without this a rating
+    // made while the grid was still settling came back as the old score.
+    if (Array.isArray(lastFetchedGridImages.value)) {
+      lastFetchedGridImages.value = withScores(lastFetchedGridImages.value);
+    }
+
+    let updatedImages = withScores(allGridImages.value);
 
     if (updateSort && isScoreSortActive()) {
       const descending = gridSortDescending.value;
@@ -622,10 +626,20 @@ export function useGridScoring({
     // Drop it here rather than refetching: scoring straight through a backlog
     // is the workflow this filter exists for, and a refetch per keystroke would
     // be both janky and needless. A score of 0 is still unscored (the filter is
-    // `score IS NULL OR score = 0`), so only 1-5 leaves.
+    // `score IS NULL OR score = 0`), so only 1-5 leaves. With a score range
+    // beside it the filter is "range or unscored", so a score inside the range
+    // stays.
     if (filterStore.unscoredOnlyFilter && removeImagesById) {
+      const min = filterStore.minScoreFilter;
+      const max = filterStore.maxScoreFilter;
+      const hasRange = min != null || max != null;
       const scoredIds = entries
-        .filter(([, score]) => Number(score) > 0)
+        .filter(([, score]) => {
+          const n = Number(score);
+          if (n <= 0) return false;
+          if (!hasRange) return true;
+          return (min != null && n < min) || (max != null && n > max);
+        })
         .map(([id]) => id);
       if (scoredIds.length) removeImagesById(scoredIds);
     }

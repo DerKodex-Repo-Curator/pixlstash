@@ -11,6 +11,8 @@ import {
   getStackBadgeCount,
   shouldShowStackBadge,
   stackBadgeTitle,
+  moveStackMemberInOrder,
+  stackOrdinal,
 } from './stack.js'
 
 describe('getPictureStackId', () => {
@@ -205,5 +207,39 @@ describe('stackBadgeTitle', () => {
   it('returns empty string when count is <= 1', () => {
     expect(stackBadgeTitle({ stackCount: 1 })).toBe('')
     expect(stackBadgeTitle({})).toBe('')
+  })
+})
+
+describe('moveStackMemberInOrder', () => {
+  const order = ['10', '11', '12', '13']
+
+  it('makes a picture the cover by moving it to the front', () => {
+    expect(moveStackMemberInOrder(order, 12, 'cover')).toEqual(['12', '10', '11', '13'])
+  })
+
+  it('moves one step earlier and one step later', () => {
+    expect(moveStackMemberInOrder(order, '12', 'earlier')).toEqual(['10', '12', '11', '13'])
+    expect(moveStackMemberInOrder(order, '11', 'later')).toEqual(['10', '12', '11', '13'])
+  })
+
+  it('answers null for a step that changes nothing', () => {
+    expect(moveStackMemberInOrder(order, '10', 'cover')).toBeNull()
+    expect(moveStackMemberInOrder(order, '10', 'earlier')).toBeNull()
+    expect(moveStackMemberInOrder(order, '13', 'later')).toBeNull()
+    expect(moveStackMemberInOrder(order, '99', 'cover')).toBeNull()
+  })
+
+  it('leaves the order it was given alone', () => {
+    const given = ['1', '2']
+    moveStackMemberInOrder(given, '2', 'cover')
+    expect(given).toEqual(['1', '2'])
+  })
+})
+
+describe('stackOrdinal', () => {
+  it('names a position the way the menu header reads it', () => {
+    expect([1, 2, 3, 4, 11, 12, 13, 21, 22, 23, 111].map(stackOrdinal)).toEqual([
+      '1st', '2nd', '3rd', '4th', '11th', '12th', '13th', '21st', '22nd', '23rd', '111th',
+    ])
   })
 })

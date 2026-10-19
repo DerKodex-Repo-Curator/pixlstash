@@ -143,6 +143,7 @@ ANOMALY_FAMILIES = (
             "malformed hand",
             "malformed foot",
             "malformed teeth",
+            "malformed eyes",
             "malformed nipples",
             "missing nipples",
             "incorrect reflection",

@@ -1,20 +1,18 @@
 <template>
   <div ref="wrapEl" class="tbo-wrap" @keydown.esc.stop.prevent="close()">
-    <button
+    <AppBarButton
       ref="triggerEl"
-      type="button"
-      class="bar-btn bar-btn--icon tbo-trigger"
-      :class="{ 'bar-btn--open': open }"
-      title="More actions"
+      class="tbo-trigger"
+      icon="dots-horizontal"
+      :open="open"
+      tooltip="More actions"
       aria-haspopup="true"
       :aria-expanded="open ? 'true' : 'false'"
       @click="toggle"
-    >
-      <v-icon size="20">mdi-dots-horizontal</v-icon>
-    </button>
+    />
     <div
       v-if="open"
-      class="tbm tbo-panel"
+      class="ctx-menu tbo-panel"
       :class="`tbo-panel--${align}`"
       role="menu"
       aria-label="More actions"
@@ -38,10 +36,11 @@
 //
 // The trigger itself stays hidden until the host's first fold step (the host
 // owns that rule; it knows its own ladder). Escape closes back to the
-// trigger, a pointer press outside dismisses, and the rows use the global
-// `.tbm-action` recipe.
+// trigger, a pointer press outside dismisses, and the rows are the one menu
+// row, `.ctx-item` (styles/context-menu.css).
 
 import { onBeforeUnmount, onMounted, ref } from "vue";
+import AppBarButton from "../widgets/AppBarButton.vue";
 
 defineProps({
   /**
@@ -103,7 +102,7 @@ onBeforeUnmount(() => {
  * @returns {HTMLElement|null}
  */
 function trigger() {
-  return triggerEl.value ?? null;
+  return triggerEl.value?.el ?? null;
 }
 
 /**
@@ -131,43 +130,12 @@ defineExpose({ close, isOpen, trigger });
    dqbar ≤1180): only the host knows when its first control folds. The rule
    lives there rather than here because the breakpoint differs per bar. */
 
-/* Mirrors `.bar-btn` from the hosts' bars (their scoped styles cannot cross
-   the component boundary - same note as UndoControl carries). */
-.tbo-trigger {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  flex-shrink: 0;
-  position: relative;
-  color: rgb(var(--v-theme-toolbar-text));
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  box-sizing: border-box;
-  font-family: inherit;
-}
-
-.tbo-trigger:hover {
-  background: rgba(var(--v-theme-toolbar-text), 0.1);
-}
-
-.bar-btn--open {
-  border-color: rgb(var(--v-theme-border));
-  background: rgb(var(--v-theme-panel));
-}
-
-/* The in-place panel: the dq-tier-wrap positioning, the shared .tbm chrome. */
+/* The in-place menu: the dq-tier-wrap positioning, the shared .ctx-menu surface. */
 .tbo-panel {
   position: absolute;
   top: calc(100% + var(--space-2));
   z-index: var(--z-dropdown);
   min-width: 220px;
-  padding: var(--space-3);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
 }
 
 /* Which edge the panel hangs from; see the `align` prop. */

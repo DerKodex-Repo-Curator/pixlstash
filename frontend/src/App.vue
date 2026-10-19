@@ -21,6 +21,7 @@ import { useFilterStore } from "./stores/useFilterStore";
 import { useGridStore } from "./stores/useGridStore";
 import { useSidebarStore } from "./stores/useSidebarStore";
 import { useUserPrefsStore } from "./stores/useUserPrefsStore";
+import { useRunDialogStore } from "./stores/useRunDialogStore";
 import { useFolderMappingStore } from "./stores/useFolderMappingStore";
 import { useProjectStore } from "./stores/useProjectStore";
 import { useWsStore } from "./stores/useWsStore";
@@ -28,7 +29,7 @@ import { useReviewSessionsStore } from "./stores/useReviewSessionsStore";
 import { useSnapshotsStore } from "./stores/useSnapshotsStore";
 import { useTasksStore } from "./stores/useTasksStore";
 import { useOperationStore } from "./stores/useOperationStore";
-import { useNoticeStore } from "./stores/useNoticeStore";
+import { DEFAULT_TIMEOUTS, useNoticeStore } from "./stores/useNoticeStore";
 import {
   useLibrariesStore,
   useLibrarySwitchStore,
@@ -59,11 +60,11 @@ import RestoreConfirmDialog from "./components/widgets/RestoreConfirmDialog.vue"
 import TelemetryConsentDialog from "./components/dialogs/TelemetryConsentDialog.vue";
 import ImageGrid from "./components/views/ImageGrid.vue";
 import StatsSidebar from "./components/panels/StatsSidebar.vue";
-import ThumbnailUpgradeBanner from "./components/panels/ThumbnailUpgradeBanner.vue";
 import NoticeHost from "./components/widgets/NoticeHost.vue";
 import ShortcutsDialog from "./components/widgets/ShortcutsDialog.vue";
 import ConfirmDialog from "./components/widgets/ConfirmDialog.vue";
 import LibrarySwitchOverlay from "./components/settings/LibrarySwitchOverlay.vue";
+import Tooltip from "./components/widgets/Tooltip.vue";
 import { useFloatingBottomInset } from "./composables/useBottomAnchor";
 import { toPx } from "./utils/floatingBottom.js";
 
@@ -84,6 +85,32 @@ const MovesReview = defineAsyncComponent(
 const ReviewSessionsOverlay = defineAsyncComponent(
   () => import("./components/views/ReviewSessionsOverlay.vue"),
 );
+// The Workflows grid, on `/workflows` since F1b. Async like every other
+// destination, and for the same reason — nothing that is not on screen
+// belongs in the first chunk.
+const WorkflowsView = defineAsyncComponent(
+  () => import("./components/views/WorkflowsView.vue"),
+);
+// Its right rail (v1.12 F3), a component of its own rather than a branch
+// inside StatsSidebar: that panel fetches on watchers, so a
+// hidden-but-mounted copy would keep asking for numbers nobody is looking at.
+const WorkflowTab = defineAsyncComponent(
+  () => import("./components/panels/WorkflowTab.vue"),
+);
+// The Models screen's rail (Models | Tasks), for the same reason: the stats it
+// replaces there describe the library, and a hidden copy would keep fetching.
+const ModelsRail = defineAsyncComponent(
+  () => import("./components/panels/ModelsRail.vue"),
+);
+// The two Run popups (v1.12 F5). Mounted here rather than in the grid: they
+// are opened from the grid's menus, from the lightbox and from the Workflows
+// view's Workflow tab, and this is the only parent all three share.
+const RunDialog = defineAsyncComponent(
+  () => import("./components/io/RunDialog.vue"),
+);
+const MakeMoreDialog = defineAsyncComponent(
+  () => import("./components/io/MakeMoreDialog.vue"),
+);
 
 // --- Stores ---
 const selectionStore = useSelectionStore();
@@ -91,6 +118,7 @@ const filterStore = useFilterStore();
 const gridStore = useGridStore();
 const sidebarStore = useSidebarStore();
 const userPrefsStore = useUserPrefsStore();
+const runDialogStore = useRunDialogStore();
 const projectStore = useProjectStore();
 const wsStore = useWsStore();
 const reviewSessionsStore = useReviewSessionsStore();
@@ -99,7 +127,7 @@ const tasksStore = useTasksStore();
 const operationStore = useOperationStore();
 const librariesStore = useLibrariesStore();
 const librarySwitchStore = useLibrarySwitchStore();
-const { activeLibrary } = storeToRefs(librariesStore);
+const { activeLibrary, importingName } = storeToRefs(librariesStore);
 const { overlayOpen: librarySwitchOverlayOpen } =
   storeToRefs(librarySwitchStore);
 const noticeStore = useNoticeStore();
@@ -132,7 +160,6 @@ const theme = useTheme();
 // --- Component & DOM refs ---
 const gridContainer = ref(null);
 const sidebarRef = ref(null);
-const statsSidebarRef = ref(null);
 const mainAreaRef = ref(null);
 const gridWrapperRef = ref(null);
 
@@ -183,9 +210,11 @@ const {
   isModelsView,
   isInsightsView,
   isMovesView,
+  isWorkflowsView,
   handleSelectModels,
   handleSelectInsights,
   handleSelectMoves,
+  handleSelectWorkflows,
   handleInsightAction,
   handleSelectCharacter,
   handleSelectSet,
@@ -249,10 +278,9 @@ const {
   handleUpdateCheckForUpdates,
   handleEmptyScrapheapFromSidebar,
   handleSuggestPicturesForCharacter,
-  focusTasksTabPanel,
+  handleSuggestPicturesForSet,
 } = useAppSettingsHandlers({
   gridContainer,
-  statsSidebarRef,
   pushAppRoute,
 });
 
@@ -290,6 +318,28 @@ let mainAreaResizeObserver = null;
 let columnsMenuCloseTimeout = null;
 // Unsubscribe handle for the desktop tray's "Settings" event (desktop only).
 let stopOpenSettings = null;
+
+// Observed when the element arrives, not in onMounted. `<v-app>` renders its
+// content inside a Suspense boundary, so on a route whose view is an async
+// component the main area's ref is assigned after this component's mounted hook
+// has run; an observer created there was never created at all on those routes,
+// and the column count then tracked the window instead of the main area for the
+// life of the page.
+watch(mainAreaRef, (mainArea) => {
+  if (mainAreaResizeObserver) {
+    mainAreaResizeObserver.disconnect();
+    mainAreaResizeObserver = null;
+  }
+  if (!mainArea || typeof ResizeObserver === "undefined") return;
+  mainAreaResizeObserver = new ResizeObserver(() => {
+    updateMaxColumns();
+    updateIsMobile();
+  });
+  mainAreaResizeObserver.observe(mainArea);
+  if (gridWrapperRef.value) {
+    mainAreaResizeObserver.observe(gridWrapperRef.value);
+  }
+});
 
 // --- Computed ---
 // Maps the current route to a sidebar folder key ('rf-{id}' or 'if-{id}') so
@@ -337,9 +387,16 @@ const activeCategoryLabel = computed(() => {
   return "All Pictures";
 });
 
-const activeLibraryName = computed(() =>
-  isReadOnly.value ? "" : (activeLibrary.value?.name ?? ""),
-);
+// A library being imported for the first time is not in the registry listing
+// and has no active row: it is not a library until the import finishes. Naming
+// it here is what stops the shell showing a blank where a name belongs on the
+// one occasion the machine has nothing else to show.
+const activeLibraryName = computed(() => {
+  if (isReadOnly.value) return "";
+  const active = activeLibrary.value?.name;
+  if (active) return active;
+  return importingName.value ? `Importing ${importingName.value}` : "";
+});
 
 watch(
   activeLibraryName,
@@ -354,6 +411,85 @@ function onRestoreConfirmed() {
   gridStore.refreshGridVersion();
   refreshSidebar();
 }
+
+/**
+ * A Run popup queued something. The backend follows the runs and the Tasks
+ * tab shows them from its next poll, which is asked for now; the toast says
+ * that is where they are followed.
+ */
+function onRunStarted({ prompts = [], pictureIds = [], error = "" } = {}) {
+  tasksStore.nudge();
+  // ComfyUI took some of the batch and refused the next: the ones it took are
+  // followed as usual, and the rest must not vanish without a word. Ahead of
+  // the Edit tab's return on purpose: that tab tells the runs that were
+  // queued, and nothing but this says some were not.
+  if (error) {
+    noticeStore.error(
+      `ComfyUI stopped taking runs after ${prompts.length}: ${error}`,
+      { key: `comfyui-run-partial-${error}` },
+    );
+  }
+  // From the lightbox's Edit tab: no picture ids, so the grid leaves the
+  // lightbox on the original, and no "started" toast, because the tab tells
+  // the run.
+  if (runDialogStore.source?.fromEditTab) {
+    runDialogStore.started(prompts, []);
+    return;
+  }
+  runDialogStore.started(prompts, pictureIds);
+  noticeStore.push({
+    level: "success",
+    text:
+      prompts.length === 1
+        ? "Started 1 run in ComfyUI."
+        : `Started ${prompts.length} runs in ComfyUI.`,
+    action: { label: "Show", handler: () => sidebarStore.showTasksTab() },
+    // A confirmation, not an Undo: it expires rather than piling up, and an
+    // identical repeat collapses into one card with a ×N count. "Show" is a
+    // shortcut; the Tasks tab is reachable without it.
+    timeout: DEFAULT_TIMEOUTS.success,
+    key: `comfyui-run-started-${prompts.length}`,
+  });
+}
+
+// How a run ended, heard on whatever view is up. A failure is raised here,
+// once, as a notice; no view draws a banner for it. (The lightbox's Edit tab
+// also keeps the line of its own last run.)
+watch(
+  () => wsStore.wsPluginProgress,
+  (wrapped) => {
+    if (String(wrapped?.payload?.plugin || "").toLowerCase() === "comfyui") {
+      // The run has left the runs in flight: its row goes now, not at the
+      // next poll.
+      tasksStore.nudge();
+    }
+    // On the workflow that ran, whatever view is up: its card and the
+    // Workflow tab keep saying so until it is dismissed or run again.
+    const failure = runDialogStore.runEvent(wrapped?.payload);
+    if (!failure) return;
+    // Keyed by the message, not the run: a batch whose every prompt failed
+    // the same way is one card with a count, not one card per prompt. A run
+    // somebody stopped is news, not an error, so it does not stay up.
+    noticeStore.push({
+      level: failure.stopped ? "info" : "error",
+      text: failure.message,
+      key: `comfyui-failed-${failure.message}`,
+    });
+  },
+);
+
+// A run that ended well and still owes a word: every picture it made was one
+// the library already has, so nothing arrived in the grid.
+watch(
+  () => wsStore.wsPluginProgress,
+  (wrapped) => {
+    const payload = wrapped?.payload;
+    const notice = String(payload?.notice || "").trim();
+    if (String(payload?.plugin || "").toLowerCase() !== "comfyui") return;
+    if (payload.status !== "completed" || !notice) return;
+    noticeStore.push({ level: "info", text: notice, key: `comfyui-notice-${notice}` });
+  },
+);
 
 /**
  * Open the settings dialog. `tab` deep-links to a nav entry (e.g. "scrapheap"
@@ -470,7 +606,16 @@ function resolveThemeName(mode) {
 watch(
   () => userPrefsStore.themeMode,
   (value) => {
-    theme.global.name.value = resolveThemeName(value);
+    const name = resolveThemeName(value);
+    theme.global.name.value = name;
+    // The state tokens (`--hover-wash`, `--active-*`, `--selected-ink`, ...) are
+    // declared per theme on the `.v-theme--*` class, which Vuetify only puts on
+    // `v-app` and its own overlays. A hand-rolled `<Teleport to="body">` popup
+    // sits outside both and would resolve every one of them to nothing, so the
+    // root carries the theme class as well.
+    const root = document.documentElement.classList;
+    root.remove("v-theme--pixlStashDark", "v-theme--pixlStashLight");
+    root.add(`v-theme--${name}`);
     // Remember it for the next launch's first paint, which happens long before
     // the config that decided this one can be asked for.
     rememberTheme(value === "dark" ? "dark" : "light");
@@ -550,16 +695,6 @@ onMounted(async () => {
   refreshSidebar();
   updateMaxColumns();
   connectUpdatesSocket();
-  if (typeof ResizeObserver !== "undefined" && mainAreaRef.value) {
-    mainAreaResizeObserver = new ResizeObserver(() => {
-      updateMaxColumns();
-      updateIsMobile();
-    });
-    mainAreaResizeObserver.observe(mainAreaRef.value);
-    if (gridWrapperRef.value) {
-      mainAreaResizeObserver.observe(gridWrapperRef.value);
-    }
-  }
   // Everything above that the app shell needs to be usable (sidebar refresh,
   // WebSocket connect, layout measurement) has now been kicked off; the
   // remaining config/library/undo-history fetches finish in the background
@@ -603,15 +738,6 @@ defineExpose({
         :active-library-name="activeLibraryName"
         @open-libraries="openSettingsDialog('libraries')"
       />
-      <!-- App-level status strip: spans the whole shell above BOTH rails and the
-           grid. Thumbnail regeneration repaints grid tiles, sidebar thumbnails
-           and the Tasks row alike, so it is not a property of the grid column;
-           mounting it inside `.main-area` used to push the stats rail down while
-           leaving the left rail alone. -->
-      <ThumbnailUpgradeBanner
-        :inert="librarySwitchOverlayOpen"
-        @view-progress="focusTasksTabPanel"
-      />
       <div
         class="file-manager"
         :inert="librarySwitchOverlayOpen"
@@ -626,14 +752,28 @@ defineExpose({
             !sidebarStore.sidebarForcedHidden
           "
           class="sidebar-hover-trigger"
-          title="Show sidebar"
           @mouseenter="sidebarStore.revealSidebar()"
           @click="sidebarStore.revealSidebar()"
         >
+          <Tooltip text="Show sidebar" activator="parent" location="end" />
           <span class="sidebar-hover-trigger-tab">
             <v-icon size="18">mdi-chevron-right</v-icon>
           </span>
         </div>
+        <!-- Click-outside scrim for the auto-hide sidebar. Purely a dimming
+             surface and a tap target, so it is hidden from assistive tech; the
+             keyboard/AT equivalent of clicking it is Escape (handleGlobalKeydown).
+             BEFORE the shell on purpose: both sit on --z-floating, and the
+             later sibling paints on top, so this order keeps the panel over
+             the scrim that dismisses it. -->
+        <Transition name="backdrop-fade">
+          <div
+            v-if="sidebarStore.sidebarVisible && sidebarStore.sidebarOverlay"
+            class="sidebar-backdrop"
+            aria-hidden="true"
+            @click="sidebarStore.hideAutoSidebar()"
+          ></div>
+        </Transition>
         <div
           class="sidebar-shell"
           :class="{
@@ -650,12 +790,14 @@ defineExpose({
             :dockerVariant="dockerVariant"
             @empty-scrapheap="handleEmptyScrapheapFromSidebar"
             @suggest-pictures-for-character="handleSuggestPicturesForCharacter"
+            @suggest-pictures-for-set="handleSuggestPicturesForSet"
             @view-project="handleViewProject"
             @select-character="handleSelectCharacter"
             @select-insights="handleSelectInsights"
             @select-moves="handleSelectMoves"
             @select-duplicates="handleSelectDuplicates"
             @select-models="handleSelectModels"
+            @select-workflows="handleSelectWorkflows"
             @select-set="handleSelectSet"
             @select-folder="handleSelectFolder"
             @images-assigned-to-character="handleImagesAssignedToCharacter"
@@ -666,17 +808,6 @@ defineExpose({
             @update:check-for-updates="handleUpdateCheckForUpdates"
           />
         </div>
-        <!-- Click-outside scrim for the auto-hide sidebar. Purely a dimming
-             surface and a tap target, so it is hidden from assistive tech; the
-             keyboard/AT equivalent of clicking it is Escape (handleGlobalKeydown). -->
-        <Transition name="backdrop-fade">
-          <div
-            v-if="sidebarStore.sidebarVisible && sidebarStore.sidebarOverlay"
-            class="sidebar-backdrop"
-            aria-hidden="true"
-            @click="sidebarStore.hideAutoSidebar()"
-          ></div>
-        </Transition>
 
         <TelemetryConsentDialog
           :open="telemetryConsentVisible"
@@ -749,7 +880,18 @@ defineExpose({
               <!-- Moves is a destination for the same reason Insights is: it
                    reports on the queue rather than showing the library, so it
                    replaces the grid instead of floating over it. -->
-              <MovesReview v-else-if="isMovesView" />
+              <MovesReview
+                v-else-if="isMovesView"
+                @open-settings="openSettingsDialog"
+              />
+              <!-- The Workflows grid lists graphs the hub knows about rather
+                   than pictures in this library, so like the shelf it replaces
+                   the grid instead of floating over it, and the grid stays
+                   unmounted while it is open. -->
+              <WorkflowsView
+                v-else-if="isWorkflowsView"
+                @open-settings="openSettingsDialog"
+              />
               <ImageGrid
                 v-else
                 ref="gridContainer"
@@ -794,8 +936,35 @@ defineExpose({
         <!-- Peer of the left sidebar, NOT nested in the grid column: both rails
              then span the full height of `.file-manager` and nothing stacked in
              the main area can push one rail down without the other. -->
-        <StatsSidebar ref="statsSidebarRef" />
+        <!-- One rail, four uses (implementation plan §F2). On the workflow
+             library it carries the selected workflow; everywhere else it is the
+             statistics panel it has always been. -->
+        <!-- Nothing contends for this rail any more. The shelf's own inspector
+             went with the shelf in F1b, and the run panel that used to outrank
+             both became a popup in F5, so `/workflows` is the one branch left
+             ahead of the stats panel. -->
+        <WorkflowTab v-if="isWorkflowsView" />
+        <ModelsRail v-else-if="isModelsView" />
+        <StatsSidebar v-else />
       </div>
+      <RunDialog
+        v-if="runDialogStore.source"
+        :key="runDialogStore.runOpened"
+        :source="runDialogStore.source"
+        :context="runDialogStore.context"
+        @close="runDialogStore.close()"
+        @run="onRunStarted"
+        @open-settings="openSettingsDialog"
+      />
+      <MakeMoreDialog
+        v-if="runDialogStore.makeMore"
+        open
+        :source="runDialogStore.makeMore"
+        :context="runDialogStore.context"
+        @close="runDialogStore.close()"
+        @run="onRunStarted"
+        @open-settings="openSettingsDialog"
+      />
       <ReviewSessionsOverlay
         v-if="reviewSessionsStore.overlayOpen"
         :inert="librarySwitchOverlayOpen"
@@ -815,14 +984,18 @@ defineExpose({
       class="shortcuts-fab"
       :class="{
         'shortcuts-fab--above-bar': multiSelectBarShown,
-        'shortcuts-fab--stats-open': sidebarStore.statsOpen,
+        'shortcuts-fab--stats-open': isWorkflowsView
+          ? sidebarStore.workflowInspectorOpen
+          : isModelsView
+            ? sidebarStore.modelsRailOpen
+            : sidebarStore.statsOpen,
       }"
       type="button"
-      title="Keyboard shortcuts (F1)"
       :disabled="librarySwitchOverlayOpen"
       @click="shortcutsDialogOpen = true"
     >
-      <v-icon size="20">mdi-keyboard</v-icon><span>F1</span>
+      <Tooltip text="Keyboard shortcuts (F1)" activator="parent" />
+      <v-icon size="18">mdi-keyboard</v-icon><span>F1</span>
     </button>
     <ShortcutsDialog v-model="shortcutsDialogOpen" />
     <ConfirmDialog />

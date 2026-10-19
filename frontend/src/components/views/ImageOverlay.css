@@ -2,7 +2,19 @@
   position: fixed;
   inset: 0;
   background: rgba(var(--v-theme-scrim), 0.92);
-  z-index: 1000;
+  z-index: var(--z-drawer);
+}
+
+/* The lightbox is dark in both themes, so the global focus outline takes the
+   dark-surface ink here: the per-theme stroke is near-black in light. The
+   ComfyUI panel is teleported out of `.image-overlay`, so it restates it (the
+   rating menu's rows take the on-dark ring from `.ctx-menu--on-dark`). */
+.image-overlay,
+.overlay-comfy-panel {
+  /* Amber on a dark panel keeps the bright amber in both themes (#1413). */
+  --v-theme-accent: var(--v-theme-dark-surface-accent);
+  --focus-stroke: rgb(var(--v-theme-on-dark-surface));
+  --focus-ring-inset: inset 0 0 0 var(--focus-width) var(--focus-stroke);
 }
 
 .overlay-shell {
@@ -18,7 +30,7 @@
 }
 
 .overlay-shell.sidebar-open {
-  --sidebar-width: 320px;
+  --sidebar-width: var(--stats-panel-w);
 }
 
 .overlay-topbar {
@@ -34,7 +46,7 @@
   background: rgba(var(--v-theme-dark-surface), 0.9);
   color: rgb(var(--v-theme-on-dark-surface));
   transition: opacity 0.2s ease;
-  z-index: 5;
+  z-index: var(--z-sticky);
 }
 
 .overlay-topbar.hidden {
@@ -45,7 +57,7 @@
 .overlay-progress {
   position: absolute;
   right: calc(16px + var(--sidebar-width));
-  z-index: 6;
+  z-index: var(--z-floating);
   background: rgba(var(--v-theme-dark-surface), 0.75);
   color: rgb(var(--v-theme-on-dark-surface));
   padding: var(--space-3) 10px;
@@ -96,7 +108,7 @@
 }
 
 .overlay-close {
-  background: rgba(var(--v-theme-primary), 0.7);
+  background: rgb(var(--v-theme-primary));
   color: rgb(var(--v-theme-on-primary));
   padding: 6px 14px;
   border-radius: var(--radius-sm);
@@ -108,7 +120,7 @@
   font-weight: var(--weight-semibold);
 }
 .overlay-close:hover {
-  background: rgba(var(--v-theme-accent), 0.85);
+  background-image: var(--hover-shade);
 }
 
 .overlay-title {
@@ -146,7 +158,7 @@
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
-  height: 32px;
+  height: var(--control-h-bar);
   padding: var(--space-1) var(--space-3);
   border-radius: var(--radius-pill);
   background: rgba(var(--v-theme-shadow), 0.4);
@@ -155,26 +167,60 @@
   line-height: var(--leading-snug);
 }
 
+/* "2 of 4 in this stack · Make cover": the lock chip's shape, with one
+   action riding inside it. */
+.overlay-stack-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--control-h-bar);
+  padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3);
+  border-radius: var(--radius-pill);
+  background: rgba(var(--v-theme-shadow), 0.4);
+  color: rgb(var(--v-theme-on-dark-surface));
+  font-size: var(--text-2xs);
+  line-height: var(--leading-snug);
+  white-space: nowrap;
+}
+
+.overlay-stack-chip-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--control-h-sm);
+  padding: 0 var(--space-3) 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: rgba(var(--v-theme-dark-surface-accent), 0.22);
+  color: rgb(var(--v-theme-on-dark-surface));
+  font: inherit;
+  cursor: pointer;
+}
+
+.overlay-stack-chip-btn:hover {
+  background: rgba(var(--v-theme-dark-surface-accent), 0.34);
+}
+
 .overlay-top-actions .star-overlay {
   position: static;
   top: auto;
   right: auto;
   z-index: auto;
   padding: 6px 14px;
-  height: 32px;
+  height: var(--control-h-bar);
   background: none;
   border-radius: var(--radius-sm);
 }
 
 .star-overlay:hover {
-  background: rgba(var(--v-theme-primary), 0.6);
+  background: rgba(var(--v-theme-on-dark-surface), 0.16);
 }
 
 .overlay-icon-btn {
   color: rgb(var(--v-theme-on-dark-surface));
-  height: 32px;
+  height: var(--control-h-bar);
   padding: 6px 14px;
-  min-width: 32px;
+  min-width: var(--control-h-bar);
   border-radius: var(--radius-sm);
   display: flex;
   align-items: center;
@@ -182,12 +228,13 @@
   font-size: var(--text-base);
 }
 .overlay-icon-btn:hover {
-  background: rgba(var(--v-theme-primary), 0.6);
+  background: rgba(var(--v-theme-on-dark-surface), 0.16);
 }
 
-.overlay-icon-btn--active {
-  background: rgba(var(--v-theme-primary), 0.25);
-  color: rgb(var(--v-theme-primary));
+/* Olive marks, words stay text: an active toggle or open menu colours its glyph
+   only, in the dark-surface olive. */
+.overlay-icon-btn--active .v-icon {
+  color: rgb(var(--v-theme-dark-surface-primary));
 }
 
 .overlay-star-mobile-btn {
@@ -203,43 +250,15 @@
   min-width: 10px;
 }
 
+/* Surface and rows are the shared `.ctx-menu--on-dark` / `.ctx-item`
+   (styles/context-menu.css); the current rating is its current value. */
 .overlay-star-menu {
-  background: rgba(var(--v-theme-dark-surface), 0.97);
-  border-radius: 10px;
-  padding: var(--space-2);
-  display: flex;
-  flex-direction: column;
   min-width: 160px;
-  box-shadow: var(--elevation-4);
-}
-
-.overlay-star-menu-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: var(--space-3) var(--space-4);
-  border-radius: 6px;
-  color: rgb(var(--v-theme-on-dark-surface));
-  width: 100%;
-  text-align: left;
-}
-
-.overlay-star-menu-item:hover {
-  background: rgba(var(--v-theme-on-dark-surface), 0.08);
-}
-
-.overlay-star-menu-item--active {
-  background: rgba(var(--v-theme-accent), 0.15);
 }
 
 .overlay-star-menu-stars {
   display: flex;
   gap: var(--space-1);
-}
-
-.overlay-star-menu-label {
-  font-size: var(--text-2xs);
-  color: rgba(var(--v-theme-on-dark-surface), 0.8);
 }
 
 .overlay-comfy-activator {
@@ -256,7 +275,7 @@
   min-width: 420px;
   background: rgba(var(--v-theme-dark-surface), 0.96);
   color: rgb(var(--v-theme-on-dark-surface));
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   box-shadow: var(--elevation-3);
   display: flex;
   flex-direction: column;
@@ -294,8 +313,7 @@
   cursor: pointer;
 }
 
-.overlay-comfy-select,
-.overlay-comfy-textarea {
+.overlay-comfy-select {
   width: 100%;
   background: rgba(var(--v-theme-shadow), 0.45);
   border: 1px solid rgba(var(--v-theme-on-dark-surface), 0.18);
@@ -305,24 +323,6 @@
   font-size: var(--text-2xs);
 }
 
-.overlay-comfy-textarea-wrap {
-  position: relative;
-}
-
-.overlay-comfy-help {
-  position: absolute;
-  left: 12px;
-  top: 10px;
-  font-size: var(--text-2xs);
-  color: rgba(var(--v-theme-on-dark-surface), 0.5);
-  pointer-events: none;
-}
-
-.overlay-comfy-textarea {
-  resize: vertical;
-  min-height: 220px;
-}
-
 .overlay-comfy-actions {
   display: flex;
   justify-content: flex-end;
@@ -330,7 +330,7 @@
 }
 
 .overlay-comfy-run {
-  background: rgba(var(--v-theme-primary), 0.8);
+  background: rgb(var(--v-theme-primary));
   color: rgb(var(--v-theme-on-primary));
   padding: 6px var(--space-4);
   border-radius: var(--radius-pill);
@@ -346,42 +346,18 @@
   cursor: default;
 }
 
-.overlay-comfy-warning,
-.overlay-comfy-error,
-.overlay-comfy-success {
+/* A 20% TINT on the dark lightbox, not a solid status fill, so `on-warning` is
+   the wrong token here - it is authored for a solid fill and resolves to a
+   near-black that vanishes into the tint (1.4:1). The right foreground is the
+   surface's own; the hue comes from the dark-surface status set because the
+   lightbox is dark in both themes. 9.18:1. The error, success, note and status
+   variants went with the I2I menu (#1406); the Filters menu, which shares this
+   box, only ever used the warning. */
+.overlay-comfy-warning {
   border-radius: var(--radius-md);
   padding: 6px var(--space-3);
   font-size: var(--text-2xs);
-}
-
-/* These chips are a 20% TINT on the dark lightbox, not a solid status fill, so
-   `on-warning` / `on-error` are the wrong tokens here - they are authored for a
-   solid fill and resolve to a near-black that vanishes into the tint (1.4:1).
-   The right foreground is the surface's own, matching `.overlay-comfy-note` and
-   `.overlay-comfy-status` directly above; the hue comes from the dark-surface
-   status set because the lightbox is dark in both themes. 9.18:1 – 11.24:1. */
-.overlay-comfy-warning {
   background: rgba(var(--v-theme-dark-surface-warning), 0.2);
-  color: rgb(var(--v-theme-on-dark-surface));
-}
-
-.overlay-comfy-note {
-  font-size: var(--text-2xs);
-  color: rgba(var(--v-theme-on-dark-surface), 0.65);
-}
-
-.overlay-comfy-status {
-  font-size: var(--text-2xs);
-  color: rgba(var(--v-theme-on-dark-surface), 0.75);
-}
-
-.overlay-comfy-error {
-  background: rgba(var(--v-theme-dark-surface-error), 0.2);
-  color: rgb(var(--v-theme-on-dark-surface));
-}
-
-.overlay-comfy-success {
-  background: rgba(var(--v-theme-primary), 0.18);
   color: rgb(var(--v-theme-on-dark-surface));
 }
 
@@ -451,7 +427,7 @@
   height: 100%;
   max-width: 100%;
   max-height: 100%;
-  z-index: 1;
+  z-index: var(--z-base);
 }
 
 .overlay-media.panning {
@@ -469,7 +445,7 @@
   background: rgb(var(--v-theme-dark-surface));
   box-shadow: 0 12px 30px rgba(var(--v-theme-shadow), 0.45);
   position: relative;
-  z-index: 1;
+  z-index: var(--z-base);
 }
 
 .overlay-img {
@@ -526,7 +502,7 @@
   align-items: center;
   gap: 6px;
   padding: var(--space-3) 20px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: rgb(var(--v-theme-primary));
   color: rgb(var(--v-theme-on-primary));
   text-decoration: none;
@@ -535,7 +511,7 @@
 }
 
 .overlay-video-download-btn:hover {
-  opacity: 0.85;
+  background-image: var(--hover-shade);
 }
 
 .overlay-nav {
@@ -552,7 +528,7 @@
   align-items: center;
   justify-content: center;
   transition: opacity 0.2s ease;
-  z-index: 4;
+  z-index: var(--z-raised);
 }
 
 .overlay-nav.hidden {
@@ -581,7 +557,7 @@
   color: rgb(var(--v-theme-on-dark-surface));
   border-radius: var(--radius-pill);
   font-size: var(--text-xs);
-  z-index: 4;
+  z-index: var(--z-raised);
 }
 .overlay-chrome-hint {
   position: absolute;
@@ -594,7 +570,7 @@
   border-radius: var(--radius-pill);
   font-size: var(--text-2xs);
   pointer-events: none;
-  z-index: 4;
+  z-index: var(--z-raised);
   white-space: nowrap;
 }
 .overlay-chrome-hint kbd {
@@ -605,27 +581,17 @@
   padding: 0 var(--space-2);
 }
 
-.overlay-sidebar {
+/* Width, collapse and surface come from AppInspector; this places it over the
+   canvas, under the top bar. Three selector parts once Vue stamps this file's
+   scope id on the last one, so it outranks AppInspector's own `.inspector`
+   rule (and its `height: 100%`) regardless of stylesheet order. */
+.overlay-main > .overlay-sidebar {
   position: absolute;
   top: var(--topbar-height);
   right: 0;
   bottom: 0;
-  width: var(--sidebar-width);
-  background: rgba(var(--v-theme-dark-surface), 0.6);
-  color: rgb(var(--v-theme-on-dark-surface));
-  transition: width 0.2s ease;
-  overflow: hidden;
-  padding: 0;
   height: calc(100% - var(--topbar-height));
-  z-index: 4;
-}
-
-.overlay-sidebar.open {
-  width: 320px;
-  padding: 10px var(--space-4) 44px;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
+  z-index: var(--z-raised);
 }
 
 .overlay-sidebar.hidden {
@@ -633,8 +599,16 @@
   pointer-events: none;
 }
 
-.sidebar-section {
-  margin-bottom: 6px;
+/* The Info tab's own column. The inspector's lightbox body is a fixed-height
+   flex column whose sections bound and scroll themselves, so the group has to
+   be that column rather than a plain wrapper, or Description loses the
+   `flex: 1 1 114px` that gives it its share of the height. */
+.overlay-sidebar-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  flex: 1;
+  min-height: 0;
 }
 
 .sidebar-section--description {
@@ -661,25 +635,21 @@
 }
 
 .section-header--collapsible:hover {
-  opacity: 0.85;
+  color: rgb(var(--v-theme-on-dark-surface));
 }
 
+/* Type and ink come from the shared `.section-label`; this is layout only. */
 .section-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: var(--text-2xs);
-  font-weight: var(--weight-semibold);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
   margin-bottom: var(--space-2);
   padding: var(--space-1) 0;
-  color: rgba(var(--v-theme-on-dark-surface), 0.6);
 }
 
 .rejected-threshold-label {
   margin-left: 6px;
-  font-size: 0.64rem;
+  font-size: var(--text-2xs);
   opacity: 0.5;
   font-weight: 400;
   letter-spacing: 0.01em;
@@ -708,7 +678,7 @@
 .face-assign-card {
   background: rgba(var(--v-theme-on-dark-surface), 0.06);
   border: 1px solid rgba(var(--v-theme-on-dark-surface), 0.12);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   padding: 3px;
 }
 
@@ -756,8 +726,7 @@
 
 /* The person menu's trigger keeps the exact look and metrics of the <select>
    it replaced. Only the trigger: the menu rows themselves stay at the shared
-   --text-xs of the .ate-item family rather than inheriting this row's
-   --text-2xs. */
+   menu row's --text-sm rather than inheriting this row's --text-2xs. */
 .face-assign-person {
   width: 100%;
 }
@@ -796,24 +765,13 @@
 }
 
 
-.metadata-tab-btn.active {
-  color: rgb(var(--v-theme-on-dark-surface));
-  background: rgba(var(--v-theme-on-dark-surface), 0.08);
-}
-
-.metadata-tab-btn:hover:not(.active) {
-  color: rgba(var(--v-theme-on-dark-surface), 0.8);
-  background: rgba(var(--v-theme-on-dark-surface), 0.04);
-}
-
-
 .face-bbox-empty {
   position: absolute;
   left: 8px;
   top: 8px;
   color: rgb(var(--v-theme-dark-surface-error));
   background: rgba(var(--v-theme-on-dark-surface), 0.12);
-  z-index: 1001;
+  z-index: var(--z-raised);
   font-size: var(--text-sm);
   padding: var(--space-1) var(--space-3);
   border-radius: var(--radius-sm);
@@ -834,14 +792,86 @@
   box-sizing: border-box;
   position: absolute;
   pointer-events: none;
-  z-index: 1000 !important;
+  z-index: var(--z-raised) !important;
+}
+
+/* ── Word boxes (Text tab, #1197) ──────────────────────────────────────────
+   A photo can be any colour, so every mark pairs a line with a contrasting
+   halo underneath: a dark halo under the olive selected ring, a light halo
+   under the dark dashed match outline and the hovered box, and a faint light
+   one under the faint resting line. The overlay is a dark surface in both
+   themes, so the ink comes from the `dark-surface` family, not the theme. The
+   alphas are the approved design's and live only here. */
+.picture-text-boxes {
+  position: absolute;
+  overflow: visible;
+  pointer-events: none;
+  z-index: var(--z-raised);
+}
+
+.picture-text-box {
+  cursor: pointer;
+  pointer-events: all;
+}
+
+.picture-text-box rect {
+  rx: var(--radius-sm);
+  fill: transparent;
+  stroke: transparent;
+  vector-effect: non-scaling-stroke;
+}
+
+.picture-text-box-halo {
+  stroke-width: 3px;
+}
+
+.picture-text-box-line {
+  stroke-width: 1px;
+}
+
+.picture-text-box .picture-text-box-line {
+  stroke: rgba(var(--v-theme-dark-surface), 0.13);
+}
+
+.picture-text-box .picture-text-box-halo {
+  stroke: rgba(var(--v-theme-on-dark-surface), 0.13);
+}
+
+.picture-text-box:hover .picture-text-box-line {
+  fill: rgba(var(--v-theme-dark-surface), 0.12);
+  stroke: rgba(var(--v-theme-dark-surface), 0.6);
+}
+
+.picture-text-box:hover .picture-text-box-halo,
+.picture-text-box--match .picture-text-box-halo {
+  stroke: rgba(var(--v-theme-on-dark-surface), 0.9);
+}
+
+.picture-text-box.picture-text-box--match .picture-text-box-line {
+  stroke: rgb(var(--v-theme-dark-surface));
+  stroke-dasharray: 3 2;
+  stroke-width: 1.25px;
+}
+
+.picture-text-box.picture-text-box--selected .picture-text-box-halo {
+  stroke: rgb(var(--v-theme-dark-surface));
+  stroke-width: 4px;
+}
+
+.picture-text-box.picture-text-box--selected .picture-text-box-line {
+  stroke: rgb(var(--v-theme-dark-surface-primary));
+  stroke-dasharray: none;
+  stroke-width: 2px;
+  fill: rgba(var(--v-theme-dark-surface-primary), 0.28);
 }
 
 .overlay-draw-layer {
   position: absolute;
   inset: 0;
   pointer-events: auto;
-  z-index: 5000;
+  /* Over all of the lightbox's chrome, the floating pills included: draw mode
+     takes every pointerdown until a box is drawn or cancelled. */
+  z-index: var(--z-dropdown);
   cursor: crosshair;
 }
 
@@ -850,7 +880,7 @@
   border: 2px dashed rgba(var(--v-theme-on-dark-surface), 0.8);
   background: rgba(var(--v-theme-on-dark-surface), 0.12);
   box-sizing: border-box;
-  z-index: 2001;
+  z-index: var(--z-raised);
 }
 
 .overlay-draw-hint {
@@ -866,7 +896,7 @@
   font-weight: var(--weight-semibold);
   box-shadow: var(--elevation-3);
   pointer-events: none;
-  z-index: 2002;
+  z-index: var(--z-raised);
   display: inline-flex;
   align-items: center;
   gap: 10px;
@@ -884,7 +914,7 @@
 }
 
 .overlay-draw-cancel:hover {
-  filter: brightness(0.95);
+  background-image: var(--hover-shade);
 }
 
 @media (max-width: 900px) {
@@ -917,8 +947,8 @@
   }
 
   .zoom-btn {
-    min-width: 32px;
-    width: 32px;
+    min-width: var(--control-h-bar);
+    width: var(--control-h-bar);
     padding: 6px;
   }
 
@@ -938,16 +968,12 @@
     grid-template-columns: 1fr;
   }
 
-  .overlay-sidebar {
-    position: absolute;
-    top: var(--topbar-height);
-    right: 0;
-    height: calc(100% - var(--topbar-height));
-    width: 0;
-  }
-
-  .overlay-sidebar.open {
-    width: 78%;
+  /* Reads `--sidebar-width` so the pane and the receipt that tracks its edge
+     cannot drift apart. */
+  .overlay-main > .overlay-sidebar:not(.inspector--collapsed) {
+    width: var(--sidebar-width);
+    min-width: var(--sidebar-width);
+    max-width: var(--sidebar-width);
   }
 
   .overlay-nav {

@@ -18,32 +18,69 @@ because a rule shipped without them was found broken by measurement:
 """
 
 import copy
+import hashlib
 import json
+import os
+import random
 import sqlite3
+import struct
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import piexif
+import piexif.helper
 import pytest
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
-from sqlmodel import delete as sqlmodel_delete
+from sqlalchemy import text as sa_text
+from sqlalchemy.exc import OperationalError
+from sqlmodel import delete as sqlmodel_delete, select
 
-from pixlstash.db_models import Picture
+from pixlstash.db_models import DeletedFileLog, Generation, Picture
+from pixlstash.event_types import EventType
 from pixlstash.hub.db import HubDatabase
+from pixlstash.hub import workflow_card_reads, workflow_cards, workflow_versions
+from pixlstash.hub import workflows as hub_workflows
+from pixlstash.services import workflow_hash, workflow_identity
+from pixlstash.hub.workflow_card_reads import (
+    find_workflow,
+    picture_keys,
+    run_filed_workflow_ids,
+    workflow_of_variant,
+)
+from pixlstash.hub.workflow_group_writes import (
+    create_manual_workflow,
+    delete_manual_workflow,
+)
 from pixlstash.hub.workflows import (
+    PictureGhost,
     assets_for_recipe,
     forget_asset_names,
     get_document,
+    model_ghost_names,
     record_api_graph,
+    record_picture_ghosts,
     recipes_for_topology,
+)
+from pixlstash.services.workflow_bindings import canonical
+from pixlstash.services.a1111_recipe import (
+    _parse_fields,
+    parse_infotext,
+    reduce_a1111,
 )
 from pixlstash.services.workflow_hash import (
     HASH_VERSION,
     MissingSubgraphDefinitionError,
     asset_reference,
     assets_from_reduction,
+    digests_with_prefix,
+    drop_widgets,
+    graph_key,
+    instance_document_from_reduction,
     instance_hash,
+    promote_instance_widgets,
     WorkflowGraphError,
     reduce_api_graph,
     reduce_ui_graph,
@@ -52,11 +89,52 @@ from pixlstash.services.workflow_hash import (
     topology_hash,
     ui_topology_hash,
 )
-from pixlstash.services.workflow_library_service import topology_picture_counts
+from pixlstash.routes.comfyui import _picture_workflow
+from pixlstash.routes.pictures._listing import _resolve_workflow_filter
+from pixlstash.services import model_shelf_service
+from pixlstash.services.workflow_card_service import read_grid
+from pixlstash.services.model_shelf_service import (
+    fetch_companions,
+    propose_companions,
+    fetch_picture_counts,
+    record_comfyui_history,
+    fetch_workflow_sets,
+)
+from pixlstash.services.model_workflow_sets import create_set, delete_set
+from pixlstash.services.workflow_library_service import (
+    read_card_picture_ids,
+    recipe_picture_counts,
+)
+from pixlstash.services.scrapheap_service import purge_scrapheap_pictures
+from pixlstash.services.workflow_ghost_service import (
+    DEFAULT_GHOST_RETENTION,
+    GHOST_RETENTION_COVERED,
+    GHOST_RETENTION_KEY,
+    GHOST_RETENTION_OFF,
+    GHOST_RETENTION_ON,
+    GhostPurgeContext,
+    apply_purge_to_hub,
+    collect_ghost_candidates_in_session,
+    drain_ghost_cascade,
+    enqueue_ghost_cascade_in_session,
+    erase_library_ghosts,
+    read_ghost_retention,
+    requeue_library_ghosts,
+    surviving_instance_hashes_in_session,
+)
 from pixlstash.tasks.comfyui_extraction_task import ComfyUIExtractionTask
+from pixlstash.tasks.missing_file_purge_task import MissingFilePurgeTask
 from pixlstash.tasks.missing_comfyui_extraction_finder import (
     MissingComfyUIExtractionFinder,
 )
+from pixlstash.utils.comfyui_utilities import find_comfy_workflow
+from pixlstash.utils.image_processing.image_utils import ImageUtils
+from pixlstash.utils.known_base_models import KNOWN_BASE_MODELS
+from pixlstash.utils.query.predicate_filter import workflow_keys_predicate
+from pixlstash.utils.workflow_ids import WORKFLOW_TAG_KEY
+
+LIBRARY = "11111111-2222-4333-8444-555555555555"
+OTHER_LIBRARY = "99999999-8888-4777-8666-555555555555"
 
 # One ordinary txt2img graph, held once in a format-neutral shape so the API
 # and UI builders below cannot drift apart. Nodes 2 and 3 are the twin
@@ -88,6 +166,16 @@ TXT2IMG = [
     ),
     (6, "VAEDecode", [("samples", 5, 0), ("vae", 1, 2)], {}),
     (7, "SaveImage", [("images", 6, 0)], {"filename_prefix": "ComfyUI"}),
+]
+
+# An upscale graph: a real workflow shape with no CLIPTextEncode anywhere, so it
+# hashes and has a recipe but genuinely carries no prompt. The fixture for §5's
+# "a ghost never keeps the prompt ALONE, but a prompt need not exist" rule.
+UPSCALE = [
+    (1, "LoadImage", [], {"image": "in.png"}),
+    (2, "UpscaleModelLoader", [], {"model_name": "x4-upscaler.pth"}),
+    (3, "ImageUpscaleWithModel", [("upscale_model", 2, 0), ("image", 1, 0)], {}),
+    (4, "SaveImage", [("images", 3, 0)], {"filename_prefix": "upscaled"}),
 ]
 
 SUBGRAPH_UUID = "7b34ab90-36f9-45ba-a665-71d418f0df18"
@@ -516,6 +604,127 @@ def test_ui_only_and_bypassed_nodes_do_not_reach_the_key():
     assert ui_topology_hash(workflow) == topology_hash(api_graph(TXT2IMG))
 
 
+def _typed_io(node, inputs, outputs):
+    node["inputs"] = [{"name": name, "type": kind} for name, kind in inputs]
+    node["outputs"] = [{"name": name, "type": kind} for name, kind in outputs]
+    return node
+
+
+def _latent_through(inputs, outputs, *, read_slot=0, feed_slot=None, mode=4):
+    """TXT2IMG with a node spliced into ``EmptyLatentImage -> KSampler.latent_image``.
+
+    The spliced node (93) gets *inputs* and *outputs* as ``(name, type)``;
+    EmptyLatentImage feeds its input *feed_slot* (the last one by default), a
+    LoadImage (94) feeds every other input, and the sampler reads output
+    *read_slot*.
+    """
+    workflow = ui_workflow(TXT2IMG)
+    sampler = next(node for node in workflow["nodes"] if node["id"] == 5)
+    for entry in sampler["inputs"]:
+        entry["type"] = "LATENT" if entry["name"] == "latent_image" else "*"
+    workflow["nodes"].append(
+        _typed_io(ui_node(93, "Spliced", [], mode=mode), inputs, outputs)
+    )
+    feed_slot = len(inputs) - 1 if feed_slot is None else feed_slot
+    if any(slot != feed_slot for slot in range(len(inputs))):
+        workflow["nodes"].append(
+            _typed_io(ui_node(94, "LoadImage", []), [], [("IMAGE", "IMAGE")])
+        )
+    links = workflow["links"]
+    latent = next(link for link in links if link[3] == 5 and link[4] == 3)
+    latent[1], latent[2] = 93, read_slot
+    for slot in range(len(inputs)):
+        source = (4, 0) if slot == feed_slot else (94, 0)
+        links.append([len(links) + 1, *source, 93, slot, "*"])
+    return workflow
+
+
+def _latent_source(workflow):
+    sampler = reduce_ui_graph(workflow)["5"]
+    return next(
+        ((key, slot) for name, key, slot in sampler.inputs if name == "latent_image"),
+        None,
+    )
+
+
+def test_a_bypassed_node_is_spliced_out_as_comfyui_does():
+    """ComfyUI hands the consumer what fed the bypassed node, so the key must too.
+
+    #1440: a bypassed ShowText between a captioner and a text encoder dropped
+    the edge on the editor side only, and one workflow keyed two ways.
+    """
+    workflow = _latent_through([("samples", "LATENT")], [("LATENT", "LATENT")])
+    assert _latent_source(workflow) == ("4", 0)
+    assert ui_topology_hash(workflow) == topology_hash(api_graph(TXT2IMG))
+
+
+def test_a_muted_node_still_cuts_the_edge():
+    """Muting is not bypassing: ComfyUI gives the consumer nothing."""
+    workflow = _latent_through([("samples", "LATENT")], [("LATENT", "LATENT")], mode=2)
+    assert _latent_source(workflow) is None
+    assert ui_topology_hash(workflow) != topology_hash(api_graph(TXT2IMG))
+
+
+def test_a_bypass_prefers_the_input_on_the_same_slot():
+    workflow = _latent_through(
+        [("a", "LATENT"), ("b", "LATENT")],
+        [("x", "LATENT"), ("y", "LATENT")],
+        read_slot=1,
+        feed_slot=1,
+    )
+    assert _latent_source(workflow) == ("4", 0)
+
+
+def test_a_bypass_passes_over_a_same_slot_input_of_the_wrong_type():
+    """Slot 0 is an IMAGE and the sampler wants a LATENT: the LATENT input wins."""
+    workflow = _latent_through(
+        [("image", "IMAGE"), ("samples", "LATENT")], [("LATENT", "LATENT")]
+    )
+    assert _latent_source(workflow) == ("4", 0)
+
+
+def test_a_bypass_matches_types_as_litegraph_does():
+    """Case-insensitive, and a comma list matches on any member."""
+    workflow = _latent_through(
+        [("image", "IMAGE"), ("samples", "image,latent")], [("LATENT", "LATENT")]
+    )
+    assert _latent_source(workflow) == ("4", 0)
+
+
+def test_a_bypass_with_no_input_of_the_type_drops_the_edge():
+    workflow = _latent_through(
+        [("image", "IMAGE")], [("LATENT", "LATENT")], feed_slot=1
+    )
+    assert _latent_source(workflow) is None
+
+
+def test_a_bypassed_subgraph_instance_is_spliced_not_entered():
+    """ComfyUI checks bypass before it looks inside a subgraph instance.
+
+    VAEDecode's ``samples`` is typed ``*`` here, and an any-type consumer takes
+    the input on the same slot number: the instance's ``model``.
+    """
+    workflow = subgraph_ui_workflow()
+    instance = next(node for node in workflow["nodes"] if node["id"] == 10)
+    instance["mode"] = 4
+    _typed_io(
+        instance,
+        [
+            ("model", "MODEL"),
+            ("positive", "CONDITIONING"),
+            ("negative", "CONDITIONING"),
+        ],
+        [("LATENT", "LATENT")],
+    )
+    decode = next(node for node in workflow["nodes"] if node["id"] == 6)
+    decode["inputs"][0]["type"] = "*"
+    nodes = reduce_ui_graph(workflow)
+    assert ("samples", "1", 0) in nodes["6"].inputs
+    assert not {"EmptyLatentImage", "KSampler"} & {
+        node.class_type for node in nodes.values()
+    }
+
+
 def test_a_reroute_is_stepped_through():
     """A Reroute exists only in the UI graph, so it must not key as a node."""
     workflow = ui_workflow(TXT2IMG)
@@ -526,6 +735,91 @@ def test_a_reroute_is_stepped_through():
             link[3], link[4] = 92, 0
     workflow["links"].append([len(workflow["links"]) + 1, 92, 0, 6, 0, "LATENT"])
     assert ui_topology_hash(workflow) == topology_hash(api_graph(TXT2IMG))
+
+
+# ---------------------------------------------------------------------------
+# Portability on real pairs (#1440 plan §2.2)
+#
+# The same workflow saved by ComfyUI in both formats. A pulled workflow is
+# always the editor half and the pictures it made carry the API half, so the
+# topology is the only thing that can join them.
+# ---------------------------------------------------------------------------
+
+PAIRED = Path(__file__).parent / "comfyui_workflows" / "paired" / "multigpu"
+PAIRED_NAMES = sorted(path.stem for path in (PAIRED / "ui").glob("*.json"))
+
+
+def _paired(name):
+    with open(PAIRED / "ui" / f"{name}.json", encoding="utf-8") as handle:
+        ui = json.load(handle)
+    with open(PAIRED / "api" / f"{name}.json", encoding="utf-8") as handle:
+        api = json.load(handle)
+    return ui, api
+
+
+def test_the_paired_corpus_is_all_there():
+    """An empty glob would parametrize nothing and pass."""
+    assert len(PAIRED_NAMES) == 15
+    assert sorted(path.stem for path in (PAIRED / "api").glob("*.json")) == (
+        PAIRED_NAMES
+    )
+
+
+@pytest.mark.parametrize("name", PAIRED_NAMES)
+def test_both_formats_of_a_real_workflow_key_to_one_topology(name):
+    ui, api = _paired(name)
+    assert ui_topology_hash(ui) == topology_hash(api)
+
+
+def _shuffled(workflow, rng):
+    rng.shuffle(workflow["nodes"])
+    rng.shuffle(workflow["links"])
+
+
+def _moved(workflow, rng):
+    for node in workflow["nodes"]:
+        node["pos"] = [rng.randint(-5000, 5000), rng.randint(-5000, 5000)]
+        node["size"] = [rng.randint(50, 900), rng.randint(50, 900)]
+
+
+def _reordered(workflow, rng):
+    for node in workflow["nodes"]:
+        node["order"] = rng.randint(0, 10_000)
+
+
+def _renumbered(workflow, rng):
+    """New node ids AND new link ids, everywhere either is written."""
+    node_ids = [node["id"] for node in workflow["nodes"]]
+    new_node = dict(zip(node_ids, rng.sample(range(1000, 100_000), len(node_ids))))
+    link_ids = [link[0] for link in workflow["links"]]
+    new_link = dict(zip(link_ids, rng.sample(range(1000, 100_000), len(link_ids))))
+    for node in workflow["nodes"]:
+        node["id"] = new_node[node["id"]]
+        for entry in node.get("inputs") or ():
+            if entry.get("link") is not None:
+                entry["link"] = new_link[entry["link"]]
+        for entry in node.get("outputs") or ():
+            if entry.get("links"):
+                entry["links"] = [new_link[link] for link in entry["links"]]
+    workflow["links"] = [
+        [new_link[link[0]], new_node[link[1]], link[2], new_node[link[3]], *link[4:]]
+        for link in workflow["links"]
+    ]
+
+
+@pytest.mark.parametrize(
+    "disturb", [_shuffled, _moved, _reordered, _renumbered], ids=lambda f: f.__name__
+)
+def test_editor_bookkeeping_does_not_reach_the_topology(disturb):
+    """Layout, evaluation order, array order and ids are the editor's, not the graph's."""
+    rng = random.Random(1440)
+    for name in PAIRED_NAMES:
+        ui, _api = _paired(name)
+        before = ui_topology_hash(ui)
+        disturbed = copy.deepcopy(ui)
+        disturb(disturbed, rng)
+        assert disturbed != ui, name
+        assert ui_topology_hash(disturbed) == before, name
 
 
 # ---------------------------------------------------------------------------
@@ -725,14 +1019,26 @@ def test_the_ui_topology_of_a_subgraph_workflow_matches_its_api_graph():
 
 WORKFLOW_TABLES = ("workflow_topology", "workflow_recipe", "workflow_recipe_graph")
 
-# Every workflow table including the asset child, deepest first. Separate from
-# WORKFLOW_TABLES above because that one is asserted on one-row-per-recipe
-# counts and a recipe names several assets.
+# Every workflow table including the asset child and the ghost store, deepest
+# first. Separate from WORKFLOW_TABLES above because that one is asserted on
+# one-row-per-recipe counts and a recipe names several assets, and because a
+# ghost is not a recipe row at all.
 WORKFLOW_WIPE_ORDER = (
+    # Children first: the hub enforces foreign keys, so a leftover row aborts
+    # the wipe rather than lingering. The card tables (v1.12 B2) are here for
+    # both reasons - `workflow_variant` references the recipe and
+    # `workflow_topology_core` the topology, and a slot mark left behind would
+    # be read as frozen by the next test in this module.
     "workflow_recipe_asset",
+    "workflow_recipe_instance",
     "workflow_recipe_graph",
+    "workflow_variant",
+    "workflow_slot_mark",
+    "workflow_file",
     "workflow_recipe",
+    "workflow_topology_core",
     "workflow_topology",
+    "workflow_picture_ghost",
 )
 
 
@@ -771,6 +1077,93 @@ def test_reopening_a_hub_is_a_no_op(tmp_path):
         assert get_document(second, keys.structural_hash) is not None
     finally:
         second.close()
+
+
+def test_the_stricter_picture_input_check_is_rebuilt_with_its_rows(tmp_path):
+    """An unreleased branch forbade a kept picture on a non-Fixed input; a hub
+    that created that shape must accept one after its next open, rows intact."""
+    path = str(tmp_path / "hub.db")
+    HubDatabase(path).close()
+    conn = sqlite3.connect(path)
+    conn.execute("DROP TABLE workflow_picture_input")
+    conn.execute(
+        "CREATE TABLE workflow_picture_input (library_uuid TEXT NOT NULL, "
+        "workflow_name TEXT NOT NULL, node_id TEXT NOT NULL, mode TEXT NOT NULL "
+        "CHECK (mode IN ('selection', 'picker', 'fixed')), pixel_sha TEXT, "
+        "CHECK ((mode = 'fixed') = (pixel_sha IS NOT NULL)), "
+        "PRIMARY KEY (library_uuid, workflow_name, node_id))"
+    )
+    conn.execute(
+        "INSERT INTO workflow_picture_input VALUES ('lib', 'edit.json', '2', "
+        "'fixed', 'sha')"
+    )
+    conn.commit()
+    conn.close()
+
+    reopened = HubDatabase(path)
+    try:
+        with reopened.transaction() as tx:
+            tx.execute(
+                "INSERT INTO workflow_picture_input VALUES ('lib', 'edit.json', "
+                "'1', 'picker', 'kept')"
+            )
+        rows = reopened.fetchall(
+            "SELECT node_id, mode, pixel_sha FROM workflow_picture_input "
+            "ORDER BY node_id"
+        )
+        assert [tuple(row) for row in rows] == [
+            ("1", "picker", "kept"),
+            ("2", "fixed", "sha"),
+        ]
+    finally:
+        reopened.close()
+
+
+def test_an_integer_ghost_seed_is_rebuilt_as_text_with_its_rows(tmp_path):
+    """Development builds created the ghost seed as INTEGER, which overflows on
+    a seed above 2**63 - 1; a hub with that shape is rebuilt on its next open."""
+    path = str(tmp_path / "hub.db")
+    HubDatabase(path).close()
+    conn = sqlite3.connect(path)
+    conn.execute("DROP TABLE workflow_picture_ghost")
+    conn.execute(
+        "CREATE TABLE workflow_picture_ghost (library_uuid TEXT NOT NULL, "
+        "pixel_sha TEXT NOT NULL, instance_hash TEXT NOT NULL, "
+        "structural_hash TEXT, positive_prompt TEXT, seed INTEGER, "
+        "thumbnail BLOB NOT NULL, created_at TEXT NOT NULL, "
+        "PRIMARY KEY (library_uuid, pixel_sha))"
+    )
+    conn.execute(
+        "INSERT INTO workflow_picture_ghost VALUES ('lib', 'old', 'inst', NULL, "
+        "'a prompt', 42, x'00', 'then')"
+    )
+    conn.commit()
+    conn.close()
+
+    reopened = HubDatabase(path)
+    try:
+        record_picture_ghosts(
+            reopened,
+            [
+                PictureGhost(
+                    library_uuid="lib",
+                    pixel_sha="new",
+                    instance_hash="inst",
+                    thumbnail=b"\x01",
+                    seed=str(2**64 - 1),
+                )
+            ],
+        )
+        rows = reopened.fetchall(
+            "SELECT pixel_sha, seed, typeof(seed) AS kind FROM "
+            "workflow_picture_ghost ORDER BY pixel_sha"
+        )
+        assert [tuple(row) for row in rows] == [
+            ("new", str(2**64 - 1), "text"),
+            ("old", "42", "text"),
+        ]
+    finally:
+        reopened.close()
 
 
 def test_recording_the_same_graph_twice_writes_one_row(hub):
@@ -812,7 +1205,7 @@ def test_the_stored_row_records_which_rule_keyed_it(hub):
     )
     # The literal the spec names, not the module's own constant: comparing a
     # written value against the thing that wrote it asserts nothing.
-    assert row["hash_version"] == "v1"
+    assert row["hash_version"] == "v2"
     assert row["node_count"] == len(TXT2IMG)
 
 
@@ -910,7 +1303,7 @@ def test_an_existing_v2_hub_gains_the_tables_on_its_next_open(tmp_path):
     # An older v2 hub: the shape as it was before this change, version intact.
     scratch = sqlite3.connect(path)
     try:
-        for table in reversed(WORKFLOW_TABLES):
+        for table in WORKFLOW_WIPE_ORDER:
             scratch.execute(f"DROP TABLE {table}")
         scratch.commit()
         assert scratch.execute("SELECT version FROM schema_version").fetchone()[0] == 2
@@ -925,8 +1318,9 @@ def test_an_existing_v2_hub_gains_the_tables_on_its_next_open(tmp_path):
                 "SELECT name FROM sqlite_master WHERE type IN ('table', 'index')"
             )
         }
-        assert set(WORKFLOW_TABLES) <= present
+        assert set(WORKFLOW_WIPE_ORDER) <= present
         assert "ix_workflow_recipe_topology" in present
+        assert "ix_workflow_picture_ghost_instance" in present
         # Re-running the shape reconciliation must not claim a new version.
         assert reopened.fetchone("SELECT version FROM schema_version")["version"] == 2
         # And the recreated tables are usable, not just present.
@@ -1018,19 +1412,95 @@ def test_a_credential_widget_reaches_no_tier_including_the_instance():
     assert instance_hash(dirty) == instance_hash(api_graph(TXT2IMG))
 
 
-def test_no_hub_table_stores_an_instance(hub):
-    """Phase 2 creep, guarded rather than remembered.
+def test_a_nested_credential_seed_or_output_path_is_never_stored(hub):
+    """The instance document is the first place a nested value is kept, so a
+    nested key gets the rules a node's own inputs already had."""
+    graph = api_graph(
+        TXT2IMG
+        + [
+            (
+                8,
+                "Power Lora Loader (rgthree)",
+                [("model", 1, 0)],
+                {
+                    "lora_1": {
+                        "lora": "example-subject.safetensors",
+                        "api_key": "test-nested-credential",
+                        "seed": 42,
+                        "output_path": "renders/example",
+                        "strength": 0.8,
+                    }
+                },
+            )
+        ]
+    )
+    keys = record_api_graph(hub, graph, LIBRARY)
 
-    "Add an instance hash" reads like an invitation to build `recipe_instance`,
-    and that table moved to v1.12 with the rest of the AI-toolkit work. The
-    hash is a value on a picture; v1.11 stores no instance ROW anywhere.
-    """
-    record_api_graph(hub, api_graph(TXT2IMG))
-    tables = {
-        row[0]
-        for row in hub.fetchall("SELECT name FROM sqlite_master WHERE type = 'table'")
+    row = instance_row(hub, LIBRARY, keys.instance_hash)
+    assert "test-nested-credential" not in row["document"]
+    lora = json.loads(row["document"])["8"]["inputs"]["lora_1"]
+    assert lora == {
+        "lora": asset_reference("example-subject.safetensors"),
+        "seed": None,
+        "output_path": None,
+        "strength": 0.8,
     }
-    assert not [name for name in tables if "instance" in name.lower()]
+
+
+def instance_row(hub, library_uuid, instance):
+    return hub.fetchone(
+        "SELECT * FROM workflow_recipe_instance "
+        "WHERE library_uuid = ? AND instance_hash = ?",
+        (library_uuid, instance),
+    )
+
+
+def test_an_instance_keeps_the_parameters_and_never_a_model_name(hub):
+    """The document forgetting a model's name has to reach, and the seed does not
+    belong to (a generation is an instance plus a seed)."""
+    keys = record_api_graph(hub, api_graph(TXT2IMG), LIBRARY)
+
+    document = json.loads(instance_row(hub, LIBRARY, keys.instance_hash)["document"])
+    assert document["2"]["inputs"]["text"] == "a lighthouse at dusk"
+    assert document["5"]["inputs"]["steps"] == 20
+    assert document["5"]["inputs"]["seed"] is None
+    assert document["1"]["inputs"]["ckpt_name"] == asset_reference(
+        "sd_xl_base_1.0.safetensors"
+    )
+    assert (
+        "sd_xl_base" not in instance_row(hub, LIBRARY, keys.instance_hash)["document"]
+    )
+
+
+def test_a_nested_model_name_is_a_reference_in_the_instance_too(hub):
+    """rgthree's Power Lora Loader keeps its LoRA inside a dict, which the
+    recipe tier nulls whole and so never names, and forgetting never reaches."""
+    graph = api_graph(
+        TXT2IMG
+        + [
+            (
+                8,
+                "Power Lora Loader (rgthree)",
+                [("model", 1, 0)],
+                {"lora_1": {"on": True, "lora": "example-subject.safetensors"}},
+            )
+        ]
+    )
+    keys = record_api_graph(hub, graph, LIBRARY)
+
+    row = instance_row(hub, LIBRARY, keys.instance_hash)
+    assert "example-subject" not in row["document"]
+    lora = json.loads(row["document"])["8"]["inputs"]["lora_1"]
+    assert lora == {
+        "on": True,
+        "lora": asset_reference("example-subject.safetensors"),
+    }
+
+
+def test_an_instance_row_needs_a_library_to_belong_to(hub):
+    """A row that names no library could never be cascaded when its pictures go."""
+    record_api_graph(hub, api_graph(TXT2IMG))
+    assert hub.fetchone("SELECT COUNT(*) AS n FROM workflow_recipe_instance")["n"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1075,15 +1545,29 @@ def reset(request):
 
 
 def _wipe_pictures(session):
+    # The purge tests below write permanent-deletion ledger rows, which are
+    # keyed by PATH rather than by picture: leaving them behind would let one
+    # test's destroyed path change what the next test's purge owns.
+    session.exec(sqlmodel_delete(DeletedFileLog))
     session.exec(sqlmodel_delete(Picture))
+    # After the pictures: deleting them is what fills it.
+    session.execute(sa_text("DELETE FROM pending_ghost_cascade"))
     session.commit()
 
 
-def write_png(directory, name, api=None):
-    """A real PNG, carrying an API graph in its ``prompt`` chunk when given one."""
+def write_png(directory, name, api=None, parameters=None, workflow=None):
+    """A real PNG, carrying an API graph in its ``prompt`` chunk when given one.
+
+    ``parameters`` is A1111 generation data, in the chunk A1111 writes it to;
+    ``workflow`` the editor graph, in the chunk ComfyUI's SaveImage writes.
+    """
     info = PngInfo()
     if api is not None:
         info.add_text("prompt", json.dumps(api))
+    if workflow is not None:
+        info.add_text("workflow", json.dumps(workflow))
+    if parameters is not None:
+        info.add_text("parameters", parameters)
     path = directory / name
     Image.new("RGB", (4, 4), "black").save(path, pnginfo=info)
     return name
@@ -1112,6 +1596,7 @@ def run_extraction(store, picture_ids, *, hub=True, on_hub_failure=None):
         pictures=[SimpleNamespace(id=pid) for pid in picture_ids],
         hub=store.hub if hub else None,
         on_hub_failure=on_hub_failure,
+        library_uuid=LIBRARY,
     )
     return task._run_task()
 
@@ -1140,6 +1625,388 @@ def test_ingest_files_the_workflow_and_stamps_the_picture(store):
     assert get_document(store.hub, picture.workflow_structural_hash) is not None
 
 
+def _box(kind, *payload):
+    """One ISO-BMFF box."""
+    body = b"".join(payload)
+    return struct.pack(">I4s", 8 + len(body), kind) + body
+
+
+def _element(ident, *payload):
+    """One EBML element, its size written short when it fits, as ffmpeg does."""
+    body = b"".join(payload)
+    size = (
+        bytes([0x80 | len(body)])
+        if len(body) < 0x7F
+        else ((1 << 56) | len(body)).to_bytes(8, "big")
+    )
+    return ident.to_bytes((ident.bit_length() + 7) // 8, "big") + size + body
+
+
+def mp4_bytes(tags=None, comment=None, faststart=False):
+    """An MP4, its ``moov`` after the media data unless ``faststart``.
+
+    ``tags`` are written the way ffmpeg's ``use_metadata_tags`` does (ComfyUI's
+    SaveVideo): a ``keys`` box naming them and an ``ilst`` numbering them.
+    ``comment`` is the iTunes comment atom instead, VideoHelperSuite's.
+    """
+
+    def text(value):
+        return _box(b"data", b"\x00\x00\x00\x01", bytes(4), value.encode())
+
+    if comment is not None:
+        items = [_box(b"ilst", _box(b"\xa9cmt", text(comment)))]
+    else:
+        names = [_box(b"mdta", name.encode()) for name in tags]
+        items = [
+            _box(b"keys", bytes(4), struct.pack(">I", len(names)), *names),
+            _box(
+                b"ilst",
+                *(
+                    _box(struct.pack(">I", index), text(value))
+                    for index, value in enumerate(tags.values(), start=1)
+                ),
+            ),
+        ]
+    handler = _box(b"hdlr", bytes(8), b"mdta", bytes(13))
+    media = _box(b"mdat", bytes(64))
+    moov = _box(b"moov", _box(b"udta", _box(b"meta", bytes(4), handler, *items)))
+    return _box(b"ftyp", b"isom", b"\x00\x00\x02\x00", b"isom") + (
+        moov + media if faststart else media + moov
+    )
+
+
+def mov_bytes(comment):
+    """A QuickTime file: the comment is an atom of ``udta`` itself.
+
+    Its 16-bit length wraps on a long text exactly as ffmpeg writes it, so
+    *comment* is padded past that: a workflow usually is.
+    """
+    text = (comment + " " * 0xFFF0).encode()
+    atom = _box(b"\xa9cmt", struct.pack(">HH", len(text) & 0xFFFF, 0x55C4), text)
+    return (
+        _box(b"ftyp", b"qt  ", b"\x00\x00\x02\x00", b"qt  ")
+        + _box(b"mdat", bytes(64))
+        + _box(b"moov", _box(b"udta", atom))
+    )
+
+
+def webm_bytes(tags):
+    """A WebM whose ``Tags`` follow a cluster, names upper-cased as ffmpeg does."""
+    simple_tags = [
+        _element(
+            0x67C8,
+            _element(0x45A3, name.upper().encode()),
+            _element(0x4487, value.encode()),
+        )
+        for name, value in tags.items()
+    ]
+    return _element(0x1A45DFA3, _element(0x4282, b"webm")) + _element(
+        0x18538067,
+        _element(0x1F43B675, bytes(64)),
+        _element(0x1254C367, _element(0x7373, *simple_tags)),
+    )
+
+
+def _video_tags(api, workflow):
+    return {"prompt": json.dumps(api), "workflow": json.dumps(workflow)}
+
+
+def _vhs_comment(api, workflow):
+    # VideoHelperSuite: one JSON comment, the prompt a string inside it.
+    return json.dumps({"prompt": json.dumps(api), "workflow": workflow})
+
+
+# Each ComfyUI video saver's container layout: (file name, bytes of a video
+# carrying that API graph and editor workflow).
+VIDEO_WRITERS = {
+    "SaveVideo": ("core.mp4", lambda a, w: mp4_bytes(_video_tags(a, w))),
+    "SaveVideo faststart": (
+        "faststart.mp4",
+        lambda a, w: mp4_bytes(_video_tags(a, w), faststart=True),
+    ),
+    "SaveWEBM": ("core.webm", lambda a, w: webm_bytes(_video_tags(a, w))),
+    "VideoHelperSuite mp4": (
+        "vhs.mp4",
+        lambda a, w: mp4_bytes(comment=_vhs_comment(a, w)),
+    ),
+    "VideoHelperSuite mov": (
+        "vhs.mov",
+        lambda a, w: mov_bytes(_vhs_comment(a, w)),
+    ),
+    "VideoHelperSuite webm": (
+        "vhs.webm",
+        lambda a, w: webm_bytes({"comment": _vhs_comment(a, w)}),
+    ),
+}
+
+
+@pytest.mark.parametrize("writer", sorted(VIDEO_WRITERS))
+def test_a_video_is_filed_exactly_as_a_picture_of_the_same_graph(store, writer):
+    """The graph in a video's container is read like the one in a PNG's chunks."""
+    api, workflow = api_graph(TXT2IMG), ui_workflow(TXT2IMG)
+    name, build = VIDEO_WRITERS[writer]
+    (Path(store.image_root) / name).write_bytes(build(api, workflow))
+    still = write_png(Path(store.image_root), "same-graph.png", api=api)
+    video_id, still_id = add_picture(store, name), add_picture(store, still)
+
+    result = run_extraction(store, [video_id, still_id])
+
+    assert result["found_workflow"] == 2
+    assert result["found_comfyui"] == 2
+
+    def filed(picture):
+        return (
+            picture.workflow_hash_version,
+            picture.workflow_topology_hash,
+            picture.workflow_structural_hash,
+            picture.workflow_instance_hash,
+            picture.comfyui_positive_prompt,
+            picture.comfyui_models,
+            picture.comfyui_loras,
+        )
+
+    video = read_picture(store, video_id)
+    assert video.workflow_instance_hash == instance_hash(api)
+    assert video.comfyui_positive_prompt == "a lighthouse at dusk"
+    assert filed(video) == filed(read_picture(store, still_id))
+    # The editor workflow is there too: it is what carries a manual
+    # workflow's tag back from a ComfyUI run.
+    embedded = ImageUtils.extract_embedded_metadata(
+        os.path.join(store.image_root, name)
+    )
+    assert find_comfy_workflow(embedded) == workflow
+
+
+@pytest.mark.parametrize(
+    "name, content",
+    [
+        ("phone.mp4", mp4_bytes({"encoder": "a camera"})),
+        # Tags named like the metadata dict's own sections, which the A1111
+        # reader indexes into: read as tags, they made it raise.
+        ("sections.mp4", mp4_bytes({"png": "x", "exif": "y", "comfyui": "z"})),
+        ("noise.mp4", b"\x00\x00\x00\x01moov" + bytes(3)),
+        ("cut-short.webm", webm_bytes({"prompt": "{}"})[:-9]),
+        ("malformed.webm", b"\x1a\x45\xdf\xa3\x80" + bytes(8)),
+        ("riff.avi", b"RIFF" + bytes(32)),
+    ],
+)
+def test_a_video_with_no_readable_graph_is_scanned_as_carrying_none(
+    store, name, content
+):
+    """No graph and a container that will not parse are facts about the file.
+
+    Either way the marker goes down, so the finder stops offering the video.
+    """
+    (Path(store.image_root) / name).write_bytes(content)
+    picture_id = add_picture(store, name)
+    # The reader's own answer rather than the task's catch-all: the lightbox
+    # and the recipe route call it bare.
+    embedded = ImageUtils.extract_embedded_metadata(
+        os.path.join(store.image_root, name)
+    )
+    assert embedded == {}
+
+    result = run_extraction(store, [picture_id])
+
+    assert result["found_workflow"] == 0
+    picture = read_picture(store, picture_id)
+    assert picture.workflow_hash_version == HASH_VERSION
+    assert picture.workflow_instance_hash is None
+    assert picture.comfyui_models == "[]"
+
+
+@pytest.fixture
+def manual_flow(store):
+    """A manual workflow of TXT2IMG's editor graph, as an import stores it."""
+    workflow_id = create_manual_workflow(
+        store.hub, "flow", ui_workflow(TXT2IMG), "import"
+    )
+    try:
+        yield workflow_id
+    finally:
+        delete_manual_workflow(store.hub, workflow_id)
+
+
+def stored_document(store, workflow_id):
+    row = store.hub.fetchone(
+        "SELECT document FROM workflow_document WHERE workflow_id = ?", (workflow_id,)
+    )
+    return json.loads(row["document"])
+
+
+def test_a_stored_manual_workflow_is_tagged_with_its_own_id(store, manual_flow):
+    """The tag a ComfyUI run carries back, replacing one it arrived with."""
+    assert stored_document(store, manual_flow)["extra"] == {
+        "pixlstash_workflow_id": manual_flow
+    }
+    foreign = "manual:" + "f" * 32
+    tagged = {**ui_workflow(TXT2IMG), "extra": {"ds": 1, WORKFLOW_TAG_KEY: foreign}}
+    copy = create_manual_workflow(store.hub, "copy", tagged, "import")
+    try:
+        assert stored_document(store, copy)["extra"] == {
+            "ds": 1,
+            WORKFLOW_TAG_KEY: copy,
+        }
+    finally:
+        delete_manual_workflow(store.hub, copy)
+    # An API document has nowhere to carry one: every top-level key is a node.
+    api_only = create_manual_workflow(store.hub, "api", api_graph(TXT2IMG), "import")
+    try:
+        assert stored_document(store, api_only) == api_graph(TXT2IMG)
+    finally:
+        delete_manual_workflow(store.hub, api_only)
+
+
+def test_the_tag_reaches_no_key(store, manual_flow):
+    """Two documents differing only in the tag are one workflow to every key."""
+    tagged = stored_document(store, manual_flow)
+    assert ui_topology_hash(tagged) == ui_topology_hash(ui_workflow(TXT2IMG))
+    assert canonical(tagged) == canonical(ui_workflow(TXT2IMG))
+
+
+def test_a_comfyui_run_of_a_manual_workflow_is_filed_on_it(store, manual_flow):
+    """The editor graph SaveImage embeds names the manual workflow that ran."""
+    name = write_png(
+        Path(store.image_root),
+        "tagged.png",
+        api=api_graph(TXT2IMG),
+        workflow=stored_document(store, manual_flow),
+    )
+    picture_id = add_picture(store, name)
+
+    run_extraction(store, [picture_id])
+
+    picture = read_picture(store, picture_id)
+    assert picture.run_workflow_id == manual_flow
+    # Filed on the workflow, keyed exactly as an untagged picture of the graph.
+    assert picture.workflow_structural_hash == structural_hash(api_graph(TXT2IMG))
+    assert picture.workflow_instance_hash == instance_hash(api_graph(TXT2IMG))
+
+
+def test_a_tagged_picture_with_no_graph_still_names_its_workflow(store, manual_flow):
+    """Only the editor chunk: filed on the manual workflow, so it is announced."""
+    name = write_png(
+        Path(store.image_root),
+        "tagged-only.png",
+        workflow=stored_document(store, manual_flow),
+    )
+    picture_id = add_picture(store, name)
+
+    result = run_extraction(store, [picture_id])
+
+    picture = read_picture(store, picture_id)
+    assert picture.run_workflow_id == manual_flow
+    assert picture.workflow_structural_hash is None
+    assert result["workflow_ids"] == [manual_flow]
+
+
+def test_a_tag_this_hub_does_not_hold_files_nothing(store):
+    """Another machine's workflow, or one deleted since, is not a filing."""
+    tagged = {**ui_workflow(TXT2IMG), "extra": {WORKFLOW_TAG_KEY: "manual:" + "e" * 32}}
+    name = write_png(
+        Path(store.image_root), "foreign.png", api=api_graph(TXT2IMG), workflow=tagged
+    )
+    picture_id = add_picture(store, name)
+
+    run_extraction(store, [picture_id])
+
+    picture = read_picture(store, picture_id)
+    assert picture.run_workflow_id is None
+    assert picture.workflow_structural_hash == structural_hash(api_graph(TXT2IMG))
+
+
+def test_the_tag_never_overwrites_the_workflow_pixlstash_ran(store, manual_flow):
+    """PixlStash's own run path knows which workflow ran; the tag defers to it."""
+    name = write_png(
+        Path(store.image_root),
+        "ran.png",
+        api=api_graph(TXT2IMG),
+        workflow=stored_document(store, manual_flow),
+    )
+    picture_id = add_picture(store, name)
+    ran = "manual:" + "d" * 32
+
+    def set_ran(session):
+        session.get(Picture, picture_id).run_workflow_id = ran
+        session.commit()
+
+    store.vault.run_task(set_ran)
+
+    run_extraction(store, [picture_id])
+
+    assert read_picture(store, picture_id).run_workflow_id == ran
+
+
+def _second_version(store, workflow_id):
+    """Make an edited copy of the workflow's document its version 2; return it."""
+    edited = copy.deepcopy(stored_document(store, workflow_id))
+    edited["nodes"][0]["pos"] = [321, 654]
+    with store.hub.transaction() as conn:
+        assert (
+            workflow_versions.append_version(conn, workflow_id, edited, source="chain")
+            == 2
+        )
+    return stored_document(store, workflow_id)
+
+
+def test_a_comfyui_run_records_the_version_its_graph_is(store, manual_flow):
+    """The editor graph a ComfyUI run embeds is compared with the workflow's
+    versions by content: equal to version 2 is 2, and the version 1 graph run
+    after version 2 landed is still 1."""
+    second = _second_version(store, manual_flow)
+    first = {
+        **copy.deepcopy(second),
+        "nodes": ui_workflow(TXT2IMG)["nodes"],
+    }
+    made = {}
+    for name, workflow in (("v2.png", second), ("v1.png", first)):
+        write_png(
+            Path(store.image_root), name, api=api_graph(TXT2IMG), workflow=workflow
+        )
+        made[name] = add_picture(store, name)
+
+    run_extraction(store, list(made.values()))
+
+    assert read_picture(store, made["v2.png"]).run_workflow_version == 2
+    assert read_picture(store, made["v1.png"]).run_workflow_version == 1
+
+
+def test_a_comfyui_graph_with_unsaved_edits_records_no_version(store, manual_flow):
+    """No version holds it: NULL, never the nearest one."""
+    edited = copy.deepcopy(_second_version(store, manual_flow))
+    edited["nodes"][0]["pos"] = [999, 999]
+    name = write_png(
+        Path(store.image_root), "edited.png", api=api_graph(TXT2IMG), workflow=edited
+    )
+    picture_id = add_picture(store, name)
+
+    run_extraction(store, [picture_id])
+
+    picture = read_picture(store, picture_id)
+    assert picture.run_workflow_id == manual_flow
+    assert picture.run_workflow_version is None
+
+
+def test_the_version_a_pixlstash_run_recorded_is_kept(store, manual_flow):
+    """A Run records what it submitted; the content comparison never replaces it."""
+    second = _second_version(store, manual_flow)
+    name = write_png(
+        Path(store.image_root), "ran-v.png", api=api_graph(TXT2IMG), workflow=second
+    )
+    picture_id = add_picture(store, name)
+
+    def ran(session):
+        picture = session.get(Picture, picture_id)
+        picture.run_workflow_id = manual_flow
+        picture.run_workflow_version = 7
+        session.commit()
+
+    store.vault.run_task(ran)
+    run_extraction(store, [picture_id])
+
+    assert read_picture(store, picture_id).run_workflow_version == 7
+
+
 def test_every_return_path_reports_the_same_keys(store):
     """A caller reading `found_workflow` must not depend on which path ran.
 
@@ -1154,8 +2021,281 @@ def test_every_return_path_reports_the_same_keys(store):
     empty = run_extraction(store, [])
 
     assert (
-        set(empty) == set(populated) == {"checked", "found_comfyui", "found_workflow"}
+        set(empty)
+        == set(populated)
+        == {"checked", "found_comfyui", "found_workflow", "workflow_ids"}
     )
+
+
+def test_the_result_names_the_workflow_each_picture_landed_on(store):
+    """The auto workflow by recipe, and a picture a manual run made by its run.
+
+    What an open Workflows view re-reads after a ComfyUI run: these cards and
+    no others.
+    """
+    name = write_png(Path(store.image_root), "auto.png", api=api_graph(TXT2IMG))
+    auto_id = add_picture(store, name)
+    name = write_png(Path(store.image_root), "manual.png", api=api_graph(UPSCALE))
+    manual_id = add_picture(store, name)
+    ran = "manual:" + "d" * 32
+
+    def set_ran(session):
+        session.get(Picture, manual_id).run_workflow_id = ran
+        session.commit()
+
+    store.vault.run_task(set_ran)
+
+    result = run_extraction(store, [auto_id, manual_id])
+
+    expected = workflow_of_variant(store.hub, structural_hash(api_graph(TXT2IMG)))
+    assert expected is not None
+    assert result["workflow_ids"] == sorted([expected, ran])
+
+    # A revisit (a migration's rescan) moves no covers and announces nothing.
+    def reset(session):
+        for pid in (auto_id, manual_id):
+            session.get(Picture, pid).workflow_hash_version = None
+        session.commit()
+
+    store.vault.run_task(reset)
+    assert run_extraction(store, [auto_id, manual_id])["workflow_ids"] == []
+
+
+def test_the_finder_announces_the_workflows_a_batch_filed_pictures_on(store):
+    """``workflows_changed`` with reason ``pictures``, and nothing for a failure."""
+    events = []
+    vault = SimpleNamespace(notify=lambda event, data: events.append((event, data)))
+    finder = MissingComfyUIExtractionFinder(
+        database=store.vault, image_root=store.image_root, hub=store.hub, vault=vault
+    )
+    task = SimpleNamespace(params={}, result={"workflow_ids": ["auto:a"]})
+
+    finder.on_task_complete(task, RuntimeError("example-failure"))
+    assert events == []
+    finder.on_task_complete(SimpleNamespace(params={}, result={}), None)
+    assert events == []
+
+    finder.on_task_complete(task, None)
+    assert [(event, data["keys"], data["reason"]) for event, data in events] == [
+        (EventType.CHANGED_WORKFLOWS, ["auto:a"], "pictures")
+    ]
+
+
+# ── #1849: an automatic workflow the owner saved over files its own runs ────
+
+
+@pytest.fixture
+def save_over(store):
+    """Save a graph over an automatic workflow, as its first overwrite does;
+    every version written this way is gone again afterwards."""
+    graph = {"1": {"class_type": "SaveImage", "inputs": {"filename_prefix": "x"}}}
+
+    def save(workflow_id):
+        with store.hub.transaction() as conn:
+            workflow_versions.append_version(
+                conn, workflow_id, graph, source="chain", first=graph
+            )
+
+    try:
+        yield save
+    finally:
+        with store.hub.transaction() as conn:
+            conn.execute("DELETE FROM workflow_version WHERE workflow_id LIKE 'auto:%'")
+
+
+def test_a_comfyui_run_tagged_with_a_saved_over_workflow_is_filed_on_it(
+    store, save_over
+):
+    """The tag files a picture on an automatic workflow only once the owner
+    has saved over it: before that the id is one the hub holds no run-filed
+    workflow for, and the picture is filed by its graph."""
+    keys = record_api_graph(store.hub, api_graph(TXT2IMG), LIBRARY)
+    automatic = workflow_of_variant(store.hub, keys.structural_hash)
+    assert automatic.startswith("auto:")
+    tagged = {**ui_workflow(UPSCALE), "extra": {WORKFLOW_TAG_KEY: automatic}}
+    before = add_picture(
+        store,
+        write_png(
+            Path(store.image_root),
+            "before.png",
+            api=api_graph(UPSCALE),
+            workflow=tagged,
+        ),
+    )
+    run_extraction(store, [before])
+    assert read_picture(store, before).run_workflow_id is None
+
+    save_over(automatic)
+    after = add_picture(
+        store,
+        write_png(
+            Path(store.image_root), "after.png", api=api_graph(UPSCALE), workflow=tagged
+        ),
+    )
+    result = run_extraction(store, [after])
+
+    picture = read_picture(store, after)
+    assert picture.run_workflow_id == automatic
+    # Keyed by its own graph all the same: the tag reaches no key.
+    assert picture.workflow_structural_hash == structural_hash(api_graph(UPSCALE))
+    assert result["workflow_ids"] == [automatic]
+
+
+def _filed_picture(store, name, structural, run=None, loras=()) -> int:
+    def insert(session):
+        picture = Picture(
+            file_path=name,
+            workflow_structural_hash=structural,
+            workflow_hash_version=HASH_VERSION,
+            run_workflow_id=run,
+            comfyui_loras=json.dumps(list(loras)),
+        )
+        session.add(picture)
+        session.commit()
+        return picture.id
+
+    return store.vault.run_task(insert)
+
+
+def _filing(store, workflow_id, lora=None) -> dict[str, set[int]]:
+    """The pictures each per-workflow read files on *workflow_id*.
+
+    ``filter`` is ``GET /pictures?workflow=`` (its resolver and predicate),
+    ``pictures`` what ``GET /workflows/{id}/pictures`` reads, ``covers`` the
+    grid's figures (its count checked against them), and ``own`` the pictures
+    whose own workflow it is. *lora* narrows the filter alone.
+    """
+    vault = SimpleNamespace(db=store.vault, library_uuid=LIBRARY)
+    server = SimpleNamespace(hub=store.hub, vault=vault)
+    params = {"workflow": workflow_id}
+    if lora is not None:
+        params["workflow_lora"] = lora
+    keys = _resolve_workflow_filter(server, params)
+
+    def read(session):
+        return (
+            set(session.exec(select(Picture.id).where(workflow_keys_predicate(keys)))),
+            list(session.exec(select(Picture.id))),
+        )
+
+    listed, everything = store.vault.run_immediate_read_task(read)
+    if lora is not None:
+        return {"filter": listed}
+    live = run_filed_workflow_ids(store.hub)
+    figure = read_grid(store.hub, vault, include_one_offs=True).figure(workflow_id)
+    covers = {cover.picture_id for cover in figure.covers}
+    assert figure.pictures == len(covers), "the fixture fits in one cover strip"
+    return {
+        "filter": listed,
+        "pictures": set(
+            read_card_picture_ids(
+                vault,
+                picture_keys(find_workflow(store.hub, workflow_id), live),
+                50,
+                live,
+            )
+        ),
+        "covers": covers,
+        "own": {
+            pid
+            for pid in everything
+            if _picture_workflow(server, pid)["workflow_id"] == workflow_id
+        },
+    }
+
+
+def test_a_saved_over_workflows_runs_are_its_pictures_whatever_their_variant(
+    store, save_over
+):
+    """Its run replaced the checkpoint with one of another family, so the
+    picture's variant computes another workflow's id: it is the saved-over
+    workflow's picture in every read, and not the other's. Before the save
+    its ``run_workflow_id`` names nothing the hub files runs on."""
+    own = record_api_graph(
+        store.hub,
+        generation_graph(
+            "sd_xl_base_1.0.safetensors", "v.safetensors", "c.safetensors"
+        ),
+        LIBRARY,
+    )
+    other = record_api_graph(
+        store.hub,
+        generation_graph(
+            "flux1-dev.safetensors",
+            "v.safetensors",
+            "c.safetensors",
+            lora="detail.safetensors",
+        ),
+        LIBRARY,
+    )
+    saved = workflow_of_variant(store.hub, own.structural_hash)
+    elsewhere = workflow_of_variant(store.hub, other.structural_hash)
+    assert saved != elsewhere, "the two graphs must be two base-model families"
+    manual = create_manual_workflow(store.hub, "Mine", api_graph(TXT2IMG), "import")
+    try:
+        mine = _filed_picture(store, "own.png", own.structural_hash)
+        ran = _filed_picture(
+            store,
+            "ran.png",
+            other.structural_hash,
+            run=saved,
+            loras=["detail.safetensors"],
+        )
+        theirs = _filed_picture(
+            store, "theirs.png", other.structural_hash, loras=["theirs.safetensors"]
+        )
+        # A run of it that kept its graph, so loads no LoRA.
+        ran_plain = _filed_picture(
+            store, "ran-plain.png", own.structural_hash, run=saved
+        )
+        by_hand = _filed_picture(store, "by-hand.png", own.structural_hash, run=manual)
+        detail = asset_reference("detail.safetensors")
+
+        # The control: not saved over, so its id on a picture files nothing.
+        for read, found in _filing(store, saved).items():
+            assert found == {mine, ran_plain}, read
+        for read, found in _filing(store, elsewhere).items():
+            assert found == {ran, theirs}, read
+
+        save_over(saved)
+
+        for read, found in _filing(store, saved).items():
+            assert found == {mine, ran, ran_plain}, read
+        for read, found in _filing(store, elsewhere).items():
+            assert found == {theirs}, read
+        # A manual workflow's run of the same variant is still the manual one's.
+        for read, found in _filing(store, manual).items():
+            assert found == {by_hand}, read
+        assert _picture_workflow(
+            SimpleNamespace(hub=store.hub, vault=SimpleNamespace(db=store.vault)),
+            ran,
+        ) == {"workflow_id": saved, "workflow_version": None}
+        # The LoRAs its pictures used are counted where the pictures are.
+        grid = read_grid(
+            store.hub,
+            SimpleNamespace(db=store.vault, library_uuid=LIBRARY),
+            include_one_offs=True,
+        )
+        assert grid.figure(saved).recipe_values["loras"] == [("detail.safetensors", 1)]
+        assert grid.figure(elsewhere).recipe_values["loras"] == [
+            ("theirs.safetensors", 1)
+        ]
+        # Narrowed by a LoRA: its own run that loaded it, and not the picture
+        # of the same variant somebody else made.
+        assert _filing(store, saved, detail) == {"filter": {ran}}
+        assert _filing(store, elsewhere, detail) == {"filter": {theirs}}
+        # Several at once are still each picture once, on the right side.
+        server = SimpleNamespace(hub=store.hub, vault=SimpleNamespace(db=store.vault))
+        both = _resolve_workflow_filter(server, {"workflow": [saved, elsewhere]})
+        assert set(
+            store.vault.run_immediate_read_task(
+                lambda session: session.exec(
+                    select(Picture.id).where(workflow_keys_predicate(both))
+                ).all()
+            )
+        ) == {mine, ran, ran_plain, theirs}
+    finally:
+        delete_manual_workflow(store.hub, manual)
 
 
 def test_a_picture_with_no_graph_is_marked_scanned_rather_than_re_read(store):
@@ -1341,7 +2481,7 @@ def test_hub_rows_outlive_the_pictures_they_came_from(store):
 
 
 def test_two_pictures_share_an_instance_exactly_when_they_share_the_value(store):
-    """What "Covered only" tests, asserted end to end through ingest.
+    """What "While matched" tests, asserted end to end through ingest.
 
     Same graph, different seed: one instance. Same graph, different prompt: two.
     """
@@ -1384,12 +2524,12 @@ def test_counts_exclude_soft_deleted_pictures(store):
 
     store.vault.run_task(soft_delete)
 
-    counts = store.vault.run_immediate_read_task(topology_picture_counts)
-    kept_topology = topology_hash(api_graph(TXT2IMG))
-    other_topology = topology_hash(trimmed)
-    assert kept_topology != other_topology
-    assert counts[kept_topology] == 1
-    assert counts[other_topology] == 1
+    counts = store.vault.run_immediate_read_task(recipe_picture_counts)
+    kept_recipe = read_picture(store, ids[0]).workflow_structural_hash
+    other_recipe = read_picture(store, ids[2]).workflow_structural_hash
+    assert kept_recipe != other_recipe
+    assert counts[kept_recipe] == 1
+    assert counts[other_recipe] == 1
 
     def soft_delete_the_rest(session):
         session.get(Picture, ids[0]).deleted = True
@@ -1398,6 +2538,3049 @@ def test_counts_exclude_soft_deleted_pictures(store):
     store.vault.run_task(soft_delete_the_rest)
 
     # Absent entirely, not present with a zero.
-    assert topology_hash(api_graph(TXT2IMG)) not in store.vault.run_immediate_read_task(
-        topology_picture_counts
+    assert kept_recipe not in store.vault.run_immediate_read_task(recipe_picture_counts)
+
+
+def generation(store, picture_id):
+    return store.vault.run_immediate_read_task(
+        lambda session: session.get(Generation, picture_id)
     )
+
+
+def mark_unscanned(store, picture_id):
+    """What migration 0118 does to every picture that carries a workflow."""
+
+    def clear(session):
+        session.get(Picture, picture_id).workflow_hash_version = None
+        session.commit()
+
+    store.vault.run_task(clear)
+
+
+def test_ingest_records_how_the_picture_was_made(store):
+    """The seed in the vault, the parameters in the hub, from the one file read.
+
+    The seed is ComfyUI's largest, which does not fit a SQLite INTEGER.
+    """
+    graph = api_graph(edited(TXT2IMG, 5, seed=2**64 - 1))
+    picture_id = add_picture(
+        store, write_png(Path(store.image_root), "made.png", graph)
+    )
+
+    run_extraction(store, [picture_id])
+
+    picture = read_picture(store, picture_id)
+    assert generation(store, picture_id).seed == str(2**64 - 1)
+    row = instance_row(store.hub, LIBRARY, picture.workflow_instance_hash)
+    assert row["structural_hash"] == picture.workflow_structural_hash
+    assert (
+        instance_row(store.hub, OTHER_LIBRARY, picture.workflow_instance_hash) is None
+    )
+
+
+def test_the_backfill_records_a_picture_filed_before_the_tables(store):
+    """A library upgraded from 1.11: keys on the picture, nothing recorded."""
+    name = write_png(Path(store.image_root), "filed.png", api=api_graph(TXT2IMG))
+    picture_id = add_picture(store, name)
+    run_extraction(store, [picture_id])
+    instance = read_picture(store, picture_id).workflow_instance_hash
+    store.vault.run_task(
+        lambda session: (
+            session.delete(session.get(Generation, picture_id)),
+            session.commit(),
+        )
+    )
+    with store.hub.transaction() as conn:
+        conn.execute("DELETE FROM workflow_recipe_instance")
+
+    mark_unscanned(store, picture_id)
+    assert new_finder(store).find_task() is not None
+    run_extraction(store, [picture_id])
+
+    assert generation(store, picture_id).seed == "42"
+    assert instance_row(store.hub, LIBRARY, instance) is not None
+    assert new_finder(store).find_task() is None
+
+
+def test_the_finder_hands_its_library_to_the_scan(store):
+    """The production path: without it the scan files no instance at all."""
+    name = write_png(Path(store.image_root), "via-finder.png", api=api_graph(TXT2IMG))
+    picture_id = add_picture(store, name)
+    finder = MissingComfyUIExtractionFinder(
+        database=store.vault,
+        image_root=store.image_root,
+        hub=store.hub,
+        library_uuid=LIBRARY,
+    )
+    finder.find_task()._run_task()
+
+    instance = read_picture(store, picture_id).workflow_instance_hash
+    assert instance_row(store.hub, LIBRARY, instance) is not None
+
+
+def test_a_scrapheaped_picture_keeps_its_instance_row(store):
+    """It can be restored, and it is never re-read, so its row must not go."""
+    names = [
+        write_png(
+            Path(store.image_root),
+            f"binned-{seed}.png",
+            api=api_graph(edited(TXT2IMG, 5, seed=seed)),
+        )
+        for seed in (1, 2)
+    ]
+    ids = [add_picture(store, name) for name in names]
+    run_extraction(store, ids)
+    instance = read_picture(store, ids[0]).workflow_instance_hash
+    store.vault.run_task(
+        lambda session: (
+            setattr(session.get(Picture, ids[0]), "deleted", True),
+            session.delete(session.get(Picture, ids[1])),
+            session.commit(),
+        )
+    )
+
+    cascade(store, GHOST_RETENTION_COVERED)
+
+    assert instance_row(store.hub, LIBRARY, instance) is not None
+
+
+def test_the_backfill_keeps_the_keys_of_a_file_it_cannot_read(store):
+    """An unplugged drive during the backfill must cost nothing it already had.
+
+    Nulling the keys would drop the picture out of its workflow and, through the
+    re-hash trigger's view of it, stop it covering its ghosts.
+    """
+    name = write_png(Path(store.image_root), "unplugged.png", api=api_graph(TXT2IMG))
+    picture_id = add_picture(store, name)
+    run_extraction(store, [picture_id])
+    before = read_picture(store, picture_id)
+    store.vault.run_task(
+        lambda session: (
+            session.delete(session.get(Generation, picture_id)),
+            session.commit(),
+        )
+    )
+    os.remove(Path(store.image_root) / name)
+
+    mark_unscanned(store, picture_id)
+    run_extraction(store, [picture_id])
+
+    after = read_picture(store, picture_id)
+    assert after.workflow_hash_version == HASH_VERSION
+    assert (
+        after.workflow_topology_hash,
+        after.workflow_structural_hash,
+        after.workflow_instance_hash,
+    ) == (
+        before.workflow_topology_hash,
+        before.workflow_structural_hash,
+        before.workflow_instance_hash,
+    )
+    # Recorded, with the seed honestly unknown, so it is not handed back again.
+    assert generation(store, picture_id).seed is None
+
+
+def test_the_backfill_never_brings_back_a_forgotten_model_name(store):
+    """Re-reading the library files every recipe again; a forget must survive it."""
+    name = write_png(Path(store.image_root), "forgot.png", api=api_graph(TXT2IMG))
+    picture_id = add_picture(store, name)
+    run_extraction(store, [picture_id])
+    structural = read_picture(store, picture_id).workflow_structural_hash
+    assert forget_asset_names(store.hub, "sd_xl_base_1.0.safetensors") == 1
+
+    mark_unscanned(store, picture_id)
+    run_extraction(store, [picture_id])
+
+    assert assets_for_recipe(store.hub, structural) == []
+
+
+def test_a_picture_destroyed_mid_read_queues_its_instance_again(store, monkeypatch):
+    """Its delete queued the cascade before the instance row existed, so a drain
+    in between found nothing to destroy and the row would be left behind."""
+    from pixlstash.tasks import comfyui_extraction_task
+
+    name = write_png(Path(store.image_root), "vanish.png", api=api_graph(TXT2IMG))
+    picture_id = add_picture(store, name)
+    real = comfyui_extraction_task.record_api_graph
+
+    def delete_drain_then_record(*args, **kwargs):
+        store.vault.run_task(
+            lambda session: (
+                session.delete(session.get(Picture, picture_id)),
+                session.commit(),
+            )
+        )
+        # The drain that runs in between, with no instance row to find yet.
+        cascade(store, GHOST_RETENTION_COVERED)
+        assert pending_hashes(store) == []
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(
+        comfyui_extraction_task, "record_api_graph", delete_drain_then_record
+    )
+    run_extraction(store, [picture_id])
+
+    instance = instance_hash(api_graph(TXT2IMG))
+    assert instance_row(store.hub, LIBRARY, instance) is not None
+    assert pending_hashes(store) == [instance]
+    cascade(store, GHOST_RETENTION_COVERED)
+    assert instance_row(store.hub, LIBRARY, instance) is None
+
+
+def shelf_model(store, filename, sha256):
+    with store.hub.transaction() as conn:
+        conn.execute(
+            "INSERT INTO model (file_kind, kind, sha256, filename, provenance) "
+            "VALUES ('adapter', 'lora', ?, ?, 'external')",
+            (sha256, filename),
+        )
+        return conn.execute(
+            "SELECT id FROM model WHERE sha256 = ?", (sha256,)
+        ).fetchone()[0]
+
+
+def test_the_shelf_counts_pictures_per_model_in_two_tiers(store):
+    """By digest is that file; by filename is a file called that. Never summed."""
+    digest = "ab" * 32
+    by_name = [
+        (1, "CheckpointLoaderSimple", [], {"ckpt_name": "sd_xl_base_1.0.safetensors"}),
+        (
+            2,
+            "LoraLoader",
+            [("model", 1, 0)],
+            {"lora_name": "example-subject.safetensors"},
+        ),
+    ]
+    by_digest = by_name + [
+        (3, "PixlStashAdapterLoader", [("model", 2, 0)], {"adapter_sha256": digest}),
+    ]
+    names = [
+        write_png(Path(store.image_root), "tier-name-a.png", api=api_graph(by_name)),
+        write_png(Path(store.image_root), "tier-name-b.png", api=api_graph(by_name)),
+        write_png(Path(store.image_root), "tier-digest.png", api=api_graph(by_digest)),
+        write_png(Path(store.image_root), "tier-binned.png", api=api_graph(by_digest)),
+    ]
+    ids = [add_picture(store, name) for name in names]
+    run_extraction(store, ids)
+    store.vault.run_task(
+        lambda session: (
+            setattr(session.get(Picture, ids[3]), "deleted", True),
+            session.commit(),
+        )
+    )
+    model_id = shelf_model(store, "Example-Subject.safetensors", digest)
+    other_id = shelf_model(store, "unused.safetensors", "cd" * 32)
+
+    counts = fetch_picture_counts(store.hub, SimpleNamespace(db=store.vault))
+
+    assert counts[model_id] == {"verified": 1, "by_filename": 2}
+    assert other_id not in counts
+
+
+A1111_PARAMETERS = (
+    "a castle on a hill <lora:example-style:0.8>\n"
+    "Negative prompt: blurry\n"
+    "Steps: 20, Sampler: Euler a, CFG scale: 7, Seed: 18446744073709551615, "
+    "Size: 512x768, Model hash: 0123456789, Model: example-checkpoint, "
+    "Version: v1.10.1"
+)
+
+
+def test_a1111_generation_data_is_filed_as_a_recipe(store):
+    """Keys, assets, the instance row and the seed, as a ComfyUI picture gets."""
+    name = write_png(Path(store.image_root), "a1111.png", parameters=A1111_PARAMETERS)
+    picture_id = add_picture(store, name)
+
+    assert run_extraction(store, [picture_id])["found_workflow"] == 1
+
+    picture = read_picture(store, picture_id)
+    assert picture.workflow_hash_version == HASH_VERSION
+    assert get_document(store.hub, picture.workflow_structural_hash) is not None
+    assert {
+        (row["widget_name"], row["normalized_filename"])
+        for row in assets_for_recipe(store.hub, picture.workflow_structural_hash)
+    } == {
+        ("ckpt_name", "example-checkpoint.safetensors"),
+        ("ckpt_sha256", "0123456789"),
+        ("lora_name", "example-style.safetensors"),
+    }
+    row = instance_row(store.hub, LIBRARY, picture.workflow_instance_hash)
+    assert "castle on a hill" in row["document"]
+    assert "example-style" not in row["document"]
+    # Above 2**63 - 1, which is why the seed is text.
+    assert generation(store, picture_id).seed == "18446744073709551615"
+
+
+def write_exif_picture(directory, name, parameters):
+    """A JPEG or WebP carrying A1111 data where A1111 puts it, in EXIF."""
+    exif = piexif.dump(
+        {
+            "Exif": {
+                piexif.ExifIFD.UserComment: piexif.helper.UserComment.dump(
+                    parameters, encoding="unicode"
+                )
+            }
+        }
+    )
+    Image.new("RGB", (4, 4), "black").save(directory / name, exif=exif)
+    return name
+
+
+@pytest.mark.parametrize("name", ["a1111.jpg", "a1111.webp"])
+def test_a1111_data_is_read_from_exif_too(store, name):
+    """A JPEG and a WebP carry the same text in the Exif sub-IFD."""
+    written = write_exif_picture(Path(store.image_root), name, A1111_PARAMETERS)
+    picture_id = add_picture(store, written)
+
+    assert run_extraction(store, [picture_id])["found_workflow"] == 1
+
+    picture = read_picture(store, picture_id)
+    png = write_png(Path(store.image_root), "same.png", parameters=A1111_PARAMETERS)
+    twin = add_picture(store, png)
+    run_extraction(store, [twin])
+    # The same generation data is the same recipe whatever carried it.
+    assert (
+        picture.workflow_instance_hash
+        == read_picture(store, twin).workflow_instance_hash
+    )
+    assert generation(store, picture_id).seed == "18446744073709551615"
+
+
+def test_an_a1111_short_hash_is_verified_only_when_unambiguous(store):
+    """One digest starting with it is that model; two leave it a filename match."""
+    name = write_png(Path(store.image_root), "short.png", parameters=A1111_PARAMETERS)
+    run_extraction(store, [add_picture(store, name)])
+
+    def counts():
+        return fetch_picture_counts(store.hub, SimpleNamespace(db=store.vault))
+
+    # The hub is shared by the module and `model` is not in the wipe.
+    models = []
+    try:
+        models.append(
+            shelf_model(
+                store, "example-checkpoint.safetensors", "0123456789" + "a" * 54
+            )
+        )
+        assert counts()[models[0]] == {"verified": 1, "by_filename": 0}
+        assert "0123456789" not in model_ghost_names(store.hub)
+
+        models.append(shelf_model(store, "twin.safetensors", "0123456789" + "b" * 54))
+        assert counts()[models[0]] == {"verified": 0, "by_filename": 1}
+        assert models[1] not in counts()
+    finally:
+        with store.hub.transaction() as conn:
+            conn.executemany("DELETE FROM model WHERE id = ?", [(m,) for m in models])
+    # No shelf digest starts with it: it names a model this shelf does not hold.
+    assert "0123456789" in model_ghost_names(store.hub)
+
+
+# ---------------------------------------------------------------------------
+# #1314 — what a delete leaves behind, from the recipes
+# ---------------------------------------------------------------------------
+
+
+def generation_graph(checkpoint, vae, clip, *, lora=None):
+    """A txt2img graph loading its VAE and text encoder from their own nodes."""
+    model_source = 1
+    spec = [
+        (1, "CheckpointLoaderSimple", [], {"ckpt_name": checkpoint}),
+        (8, "VAELoader", [], {"vae_name": vae}),
+        (9, "CLIPLoader", [], {"clip_name": clip, "type": "sdxl"}),
+    ]
+    if lora is not None:
+        spec.append((10, "LoraLoaderModelOnly", [("model", 1, 0)], {"lora_name": lora}))
+        model_source = 10
+    return api_graph(
+        spec
+        + [
+            (2, "CLIPTextEncode", [("clip", 9, 0)], {"text": "a lighthouse"}),
+            (3, "CLIPTextEncode", [("clip", 9, 0)], {"text": "blurry"}),
+            (4, "EmptyLatentImage", [], {"width": 64, "height": 64, "batch_size": 1}),
+            (
+                5,
+                "KSampler",
+                [
+                    ("model", model_source, 0),
+                    ("positive", 2, 0),
+                    ("negative", 3, 0),
+                    ("latent_image", 4, 0),
+                ],
+                {"seed": 1, "steps": 4, "cfg": 5.0},
+            ),
+            (6, "VAEDecode", [("samples", 5, 0), ("vae", 8, 0)], {}),
+            (7, "SaveImage", [("images", 6, 0)], {"filename_prefix": "c"}),
+        ]
+    )
+
+
+def shelf_file(hub, filename, file_kind):
+    with hub.transaction() as conn:
+        return conn.execute(
+            "INSERT INTO model (file_kind, kind, sha256, filename, provenance) "
+            "VALUES (?, ?, ?, ?, 'external')",
+            (
+                file_kind,
+                "lora" if file_kind == "adapter" else None,
+                hashlib.sha256(f"{file_kind}/{filename}".encode()).hexdigest()
+                if file_kind == "adapter"
+                else None,
+                filename,
+            ),
+        ).lastrowid
+
+
+@pytest.fixture
+def companions_shelf(hub):
+    """Two checkpoints sharing a text encoder, each with its own VAE.
+
+    A runs with a LoRA as well; B's VAE is named like a second file on the
+    shelf, so no recipe can say which of the two it loaded.
+    """
+    ids = {
+        name: shelf_file(hub, f"{name}.safetensors", kind)
+        for name, kind in (
+            ("ckpt_a", "checkpoint"),
+            ("ckpt_b", "checkpoint"),
+            ("vae_a", "vae"),
+            ("clip_shared", "text_encoder"),
+            ("lora_a", "adapter"),
+            ("lonely", "checkpoint"),
+        )
+    }
+    ids["twin_1"] = shelf_file(hub, "twin.safetensors", "vae")
+    ids["twin_2"] = shelf_file(hub, "twin.safetensors", "vae")
+    record_api_graph(
+        hub,
+        generation_graph(
+            "ckpt_a.safetensors",
+            "vae_a.safetensors",
+            "clip_shared.safetensors",
+            lora="lora_a.safetensors",
+        ),
+    )
+    record_api_graph(
+        hub,
+        generation_graph(
+            "ckpt_b.safetensors", "twin.safetensors", "clip_shared.safetensors"
+        ),
+    )
+    return SimpleNamespace(hub=hub, ids=ids)
+
+
+def companion_ids(result, bucket):
+    return [item["id"] for item in result[bucket]]
+
+
+def test_deleting_a_checkpoint_orphans_its_own_vae_and_names_who_shares_the_rest(
+    companions_shelf,
+):
+    """The LoRA that ran with A stays, and still does not keep A's VAE: an
+    adapter needs a base model, not the base model's support files."""
+    ids = companions_shelf.ids
+
+    result = fetch_companions(companions_shelf.hub, [ids["ckpt_a"]])
+
+    assert companion_ids(result, "orphaned") == [ids["vae_a"]]
+    assert companion_ids(result, "shared") == [ids["clip_shared"]]
+    assert result["shared"][0]["used_with"] == [
+        {"id": ids["ckpt_b"], "name": "ckpt_b.safetensors"}
+    ]
+    assert result["unknown"] == [] and result["in_use"] == []
+    assert result["no_evidence"] == []
+    # `lonely` stays and no recipe names it, so the orphan is not proof.
+    assert result["unrecorded"] == 1
+
+
+def test_a_support_file_a_basename_cannot_tell_apart_is_unknown_not_orphaned(
+    companions_shelf,
+):
+    ids = companions_shelf.ids
+
+    result = fetch_companions(companions_shelf.hub, [ids["ckpt_a"], ids["ckpt_b"]])
+
+    assert set(companion_ids(result, "orphaned")) == {ids["vae_a"], ids["clip_shared"]}
+    assert set(companion_ids(result, "unknown")) == {ids["twin_1"], ids["twin_2"]}
+    assert result["shared"] == []
+    assert result["unrecorded"] == 1  # `lonely`, the one kept base model
+
+
+def test_a_deleted_support_file_names_the_kept_models_that_use_it(companions_shelf):
+    """And a model no recipe names is reported as unknowable, not as unused."""
+    ids = companions_shelf.ids
+
+    result = fetch_companions(companions_shelf.hub, [ids["clip_shared"], ids["lonely"]])
+
+    assert companion_ids(result, "in_use") == [ids["clip_shared"]]
+    assert {m["id"] for m in result["in_use"][0]["used_with"]} == {
+        ids["ckpt_a"],
+        ids["ckpt_b"],
+    }
+    assert result["no_evidence"] == [ids["lonely"]]
+    assert result["orphaned"] == [] and result["unknown"] == []
+    assert result["shared"] == []
+
+
+def test_an_unknown_file_kind_still_keeps_a_support_file_in_use(hub):
+    """`unknown` may be a base model the classifier missed, so it counts."""
+    ckpt = shelf_file(hub, "base-x.safetensors", "checkpoint")
+    mystery = shelf_file(hub, "mystery-x.safetensors", "unknown")
+    vae = shelf_file(hub, "vae-x.safetensors", "vae")
+    for base in ("base-x.safetensors", "mystery-x.safetensors"):
+        record_api_graph(
+            hub, generation_graph(base, "vae-x.safetensors", "clip-x.safetensors")
+        )
+
+    result = fetch_companions(hub, [ckpt])
+
+    assert companion_ids(result, "shared") == [vae]
+    assert [m["id"] for m in result["shared"][0]["used_with"]] == [mystery]
+    assert result["orphaned"] == []
+
+
+def test_a_digest_the_shelf_cannot_match_yet_makes_its_companions_unknown(hub):
+    """While a checkpoint waits for its hash, a recipe naming a model by digest
+    may name that checkpoint, so nothing in that recipe is called orphaned."""
+    doomed = shelf_file(hub, "base-y.safetensors", "checkpoint")
+    vae = shelf_file(hub, "vae-y.safetensors", "vae")
+    graph = generation_graph(
+        "base-y.safetensors", "vae-y.safetensors", "clip-y.safetensors"
+    )
+    graph["11"] = {
+        "class_type": "PixlStashCheckpointLoader",
+        "inputs": {"ckpt_sha256": "ef" * 32},
+    }
+    record_api_graph(hub, graph)
+
+    assert companion_ids(fetch_companions(hub, [doomed]), "unknown") == [vae]
+
+    with hub.transaction() as conn:
+        # Every row hashed: an unmatched digest now names nothing on the shelf.
+        conn.execute(
+            "UPDATE model SET sha256 = printf('%064d', id) WHERE sha256 IS NULL"
+        )
+    assert companion_ids(fetch_companions(hub, [doomed]), "orphaned") == [vae]
+
+
+def set_base_model(hub, model_id, base_model):
+    with hub.transaction() as conn:
+        conn.execute(
+            "UPDATE model SET base_model = ? WHERE id = ?", (base_model, model_id)
+        )
+
+
+def proposed(result, kind):
+    return [(item["id"], item["via"]) for item in result[kind]]
+
+
+def test_a_checkpoint_proposes_what_its_own_recipes_ran_with(companions_shelf):
+    ids = companions_shelf.ids
+
+    result = propose_companions(companions_shelf.hub, ids["ckpt_a"])
+
+    assert proposed(result, "vae") == [(ids["vae_a"], "checkpoint")]
+    assert proposed(result, "text_encoder") == [(ids["clip_shared"], "checkpoint")]
+    assert result["vae"][0]["recipes"] == 1
+
+
+def test_a_support_file_only_an_ambiguous_name_reaches_is_not_proposed(
+    companions_shelf,
+):
+    """B's VAE is `twin.safetensors`, which two shelf rows are called."""
+    ids = companions_shelf.ids
+
+    result = propose_companions(companions_shelf.hub, ids["ckpt_b"])
+
+    assert result["vae"] == []
+    assert proposed(result, "text_encoder") == [(ids["clip_shared"], "checkpoint")]
+
+
+def test_a_checkpoint_no_recipe_names_widens_to_its_base_model(companions_shelf):
+    ids = companions_shelf.ids
+    set_base_model(companions_shelf.hub, ids["ckpt_a"], "FLUX.1 dev")
+    set_base_model(companions_shelf.hub, ids["lonely"], "flux1-dev")
+
+    result = propose_companions(companions_shelf.hub, ids["lonely"])
+
+    assert proposed(result, "vae") == [(ids["vae_a"], "base_model")]
+    assert proposed(result, "text_encoder") == [(ids["clip_shared"], "base_model")]
+
+
+def test_a_base_model_nothing_ran_with_widens_to_its_family(companions_shelf):
+    ids = companions_shelf.ids
+    set_base_model(companions_shelf.hub, ids["ckpt_a"], "FLUX.1 dev")
+    set_base_model(companions_shelf.hub, ids["lonely"], "FLUX.1 schnell")
+
+    result = propose_companions(companions_shelf.hub, ids["lonely"])
+
+    assert proposed(result, "vae") == [(ids["vae_a"], "family")]
+
+
+def test_the_family_step_never_crosses_from_image_to_video(
+    companions_shelf, monkeypatch
+):
+    """No family spans two modalities today, so one is made to for the test."""
+    ids = companions_shelf.ids
+    set_base_model(companions_shelf.hub, ids["ckpt_a"], "FLUX.1 dev")
+    set_base_model(companions_shelf.hub, ids["lonely"], "FLUX.1 schnell")
+    monkeypatch.setitem(KNOWN_BASE_MODELS["FLUX.1 dev"], "modality", "video")
+
+    result = propose_companions(companions_shelf.hub, ids["lonely"])
+
+    assert result == {"vae": [], "text_encoder": []}
+
+
+def test_a_cold_checkpoint_with_no_file_of_a_declared_layout_proposes_nothing(
+    companions_shelf,
+):
+    """SDXL declares layouts, but no support file here has one recorded."""
+    ids = companions_shelf.ids
+    set_base_model(companions_shelf.hub, ids["ckpt_a"], "FLUX.1 dev")
+    set_base_model(companions_shelf.hub, ids["lonely"], "SDXL 1.0")
+
+    result = propose_companions(companions_shelf.hub, ids["lonely"])
+
+    assert result == {"vae": [], "text_encoder": []}
+    assert propose_companions(companions_shelf.hub, 999_999) == result
+
+
+def set_layout(hub, model_id, layout):
+    with hub.transaction() as conn:
+        conn.execute("UPDATE model SET family = ? WHERE id = ?", (layout, model_id))
+
+
+def test_a_family_nothing_ran_with_proposes_the_layouts_it_declares(
+    companions_shelf,
+):
+    """The cold case: labelled `declared`, counted as no recipe, and only the
+    layouts SDXL takes, never the FLUX VAE or the T5 beside them."""
+    ids = companions_shelf.ids
+    hub = companions_shelf.hub
+    set_base_model(hub, ids["ckpt_a"], "FLUX.1 dev")
+    set_base_model(hub, ids["lonely"], "SDXL 1.0")
+    set_layout(hub, ids["vae_a"], "vae_16ch")
+    set_layout(hub, ids["clip_shared"], "clip_l")
+    sdxl_vae = shelf_file(hub, "sdxl_vae.safetensors", "vae")
+    set_layout(hub, sdxl_vae, "vae_4ch")
+    clip_g = shelf_file(hub, "Clip_G.safetensors", "text_encoder")
+    set_layout(hub, clip_g, "clip_g")
+    set_layout(hub, shelf_file(hub, "t5xxl.safetensors", "text_encoder"), "t5_xxl")
+
+    result = propose_companions(hub, ids["lonely"])
+
+    assert proposed(result, "vae") == [(sdxl_vae, "declared")]
+    assert proposed(result, "text_encoder") == [
+        (clip_g, "declared"),
+        (ids["clip_shared"], "declared"),
+    ]
+    assert {item["recipes"] for kind in result.values() for item in kind} == {0}
+    assert result["vae"][0]["family"] == "vae_4ch"
+
+
+def test_a_grouped_file_does_not_hide_the_declared_layouts_of_a_cold_checkpoint(
+    companions_shelf,
+):
+    """A set grouping only one encoder with a checkpoint nothing has run with:
+    the grouped file leads, once, and the declared fallback still answers for
+    the rest. Keying the fallback on "the list is empty" let the grouped entry
+    switch it off (#1520 rebased onto #1514)."""
+    ids = companions_shelf.ids
+    hub = companions_shelf.hub
+    set_base_model(hub, ids["lonely"], "SDXL 1.0")
+    set_layout(hub, ids["clip_shared"], "clip_l")
+    clip_g = shelf_file(hub, "Clip_G.safetensors", "text_encoder")
+    set_layout(hub, clip_g, "clip_g")
+    sdxl_vae = shelf_file(hub, "sdxl_vae.safetensors", "vae")
+    set_layout(hub, sdxl_vae, "vae_4ch")
+    hash_rows(hub, ids["lonely"], clip_g)
+    create_set(hub, "Cold", [{"model_id": ids["lonely"]}, {"model_id": clip_g}])
+
+    result = propose_companions(hub, ids["lonely"])
+
+    assert proposed(result, "text_encoder") == [
+        (clip_g, "grouped"),
+        (ids["clip_shared"], "declared"),
+    ]
+    assert proposed(result, "vae") == [(sdxl_vae, "declared")]
+
+
+def test_evidence_that_only_repeats_a_grouped_file_still_leaves_the_declared_fallback(
+    companions_shelf,
+):
+    """A ComfyUI run proves the checkpoint with the ONE encoder its set already
+    groups. That step tells the other encoder row nothing new, so the declared
+    layouts still answer for it rather than the row going empty (#1520 review)."""
+    ids = companions_shelf.ids
+    hub = companions_shelf.hub
+    set_base_model(hub, ids["lonely"], "SDXL 1.0")
+    set_layout(hub, ids["clip_shared"], "clip_l")
+    clip_g = shelf_file(hub, "Clip_G.safetensors", "text_encoder")
+    set_layout(hub, clip_g, "clip_g")
+    hash_rows(hub, ids["lonely"], clip_g)
+    create_set(hub, "Cold", [{"model_id": ids["lonely"]}, {"model_id": clip_g}])
+    record_comfyui_history(
+        hub,
+        {
+            "ran": history_entry(
+                generation_graph(
+                    "lonely.safetensors", "vae_a.safetensors", "Clip_G.safetensors"
+                )
+            )
+        },
+    )
+
+    result = propose_companions(hub, ids["lonely"])
+
+    assert proposed(result, "text_encoder") == [
+        (clip_g, "grouped"),
+        (ids["clip_shared"], "declared"),
+    ]
+
+
+def test_deleting_a_set_returns_exactly_what_it_deleted(companions_shelf):
+    """The snapshot is the undo, so it is read on the transaction that deletes:
+    every member row that went, by hash, slot and label, and nothing left
+    behind in the tables (#1520 review)."""
+    hub, ids = grouped_shelf(companions_shelf)
+    set_id = create_set(
+        hub,
+        "Night",
+        [
+            {"model_id": ids["ckpt_a"]},
+            {"model_id": ids["vae_grouped"]},
+            {"sha256": "ab" * 32, "slot": "lora", "label": "Gone_LoRA.safetensors"},
+        ],
+    )
+
+    snapshot = delete_set(hub, set_id)
+
+    assert snapshot["name"] == "Night"
+    assert {(m["sha256"], m["slot"]) for m in snapshot["members"]} == {
+        (
+            hub.fetchone("SELECT sha256 FROM model WHERE id = ?", (ids["ckpt_a"],))[0],
+            "checkpoint",
+        ),
+        (
+            hub.fetchone(
+                "SELECT sha256 FROM model WHERE id = ?", (ids["vae_grouped"],)
+            )[0],
+            "vae",
+        ),
+        ("ab" * 32, "lora"),
+    }
+    gone = next(m for m in snapshot["members"] if m["sha256"] == "ab" * 32)
+    assert (gone["on_shelf"], gone["label"]) == (False, "Gone_LoRA.safetensors")
+    assert not hub.fetchall(
+        "SELECT 1 FROM model_workflow_set_member WHERE set_id = ?", (set_id,)
+    )
+
+
+def test_evidence_in_the_family_outranks_the_declared_layouts(companions_shelf):
+    ids = companions_shelf.ids
+    hub = companions_shelf.hub
+    set_base_model(hub, ids["ckpt_a"], "FLUX.1 dev")
+    set_base_model(hub, ids["lonely"], "FLUX.1 schnell")
+    set_layout(hub, ids["vae_a"], "vae_16ch")
+    set_layout(hub, shelf_file(hub, "another_ae.safetensors", "vae"), "vae_16ch")
+
+    result = propose_companions(hub, ids["lonely"])
+
+    assert proposed(result, "vae") == [(ids["vae_a"], "family")]
+
+
+def test_a_kind_the_family_declares_no_layout_for_proposes_nothing(hub):
+    """Z-Image's encoder is a Qwen, which no stored layout names: its VAE is
+    declared, its text encoder is not, and a T5 is no stand-in."""
+    ckpt = shelf_file(hub, "zimage.safetensors", "checkpoint")
+    set_base_model(hub, ckpt, "Z-Image Turbo")
+    vae = shelf_file(hub, "ae.safetensors", "vae")
+    set_layout(hub, vae, "vae_16ch")
+    set_layout(hub, shelf_file(hub, "t5xxl.safetensors", "text_encoder"), "t5_xxl")
+
+    result = propose_companions(hub, ckpt)
+
+    assert proposed(result, "vae") == [(vae, "declared")]
+    assert result["text_encoder"] == []
+
+
+def identify_base_model(hub, model_id, canonical, source):
+    with hub.transaction() as conn:
+        conn.execute(
+            "UPDATE model SET base_model_canonical = ?, base_model_source = ? "
+            "WHERE id = ?",
+            (canonical, source, model_id),
+        )
+
+
+def test_an_identified_base_model_widens_like_a_recorded_one(companions_shelf):
+    """No `base_model` typed on either row: the shelf named both by filename."""
+    ids = companions_shelf.ids
+    identify_base_model(companions_shelf.hub, ids["ckpt_a"], "FLUX.1 dev", "filename")
+    identify_base_model(companions_shelf.hub, ids["lonely"], "FLUX.1 dev", "filename")
+
+    result = propose_companions(companions_shelf.hub, ids["lonely"])
+
+    assert proposed(result, "vae") == [(ids["vae_a"], "base_model")]
+
+
+def test_a_fuzzy_guess_at_a_base_model_never_widens(companions_shelf):
+    ids = companions_shelf.ids
+    identify_base_model(companions_shelf.hub, ids["ckpt_a"], "FLUX.1 dev", "filename")
+    identify_base_model(
+        companions_shelf.hub, ids["lonely"], "FLUX.1 dev", "filename_fuzzy"
+    )
+
+    result = propose_companions(companions_shelf.hub, ids["lonely"])
+
+    assert result == {"vae": [], "text_encoder": []}
+
+
+def test_a_support_file_with_no_filename_is_never_proposed(companions_shelf):
+    """A clone would have nothing to write for it."""
+    ids = companions_shelf.ids
+    hub = companions_shelf.hub
+    with hub.transaction() as conn:
+        folder = conn.execute(
+            "INSERT INTO model_folder (path, kind, movable) "
+            "VALUES ('/models/vae', 'user', 'per_item')"
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO model_file (model_id, model_folder_id, relpath, state) "
+            "VALUES (?, ?, 'vae_a.safetensors', 'present')",
+            (ids["vae_a"], folder),
+        )
+        conn.execute("UPDATE model SET filename = NULL WHERE id = ?", (ids["vae_a"],))
+
+    result = propose_companions(hub, ids["ckpt_a"])
+
+    assert result["vae"] == []
+    assert proposed(result, "text_encoder") == [(ids["clip_shared"], "checkpoint")]
+
+
+def history_entry(graph, status="success"):
+    """One ``GET /history`` entry as ComfyUI answers it."""
+    return {
+        "prompt": [0, "unused", graph, {}, ["7"]],
+        "outputs": {},
+        "status": {"status_str": status, "completed": status == "success"},
+    }
+
+
+def test_a_comfyui_run_proposes_for_a_checkpoint_no_recipe_names(companions_shelf):
+    """`lonely` ran in ComfyUI only; the run is evidence, counted apart."""
+    ids = companions_shelf.ids
+    hub = companions_shelf.hub
+    history = {
+        "ran": history_entry(
+            generation_graph(
+                "lonely.safetensors", "vae_a.safetensors", "twin.safetensors"
+            )
+        ),
+        "failed": history_entry(
+            generation_graph(
+                "lonely.safetensors", "vae_a.safetensors", "clip_shared.safetensors"
+            ),
+            status="error",
+        ),
+        "not a run": {"prompt": "junk"},
+    }
+
+    assert record_comfyui_history(hub, history) == 1
+    # Twice is the same evidence, not twice the evidence.
+    assert record_comfyui_history(hub, history) == 1
+
+    result = propose_companions(hub, ids["lonely"])
+    assert proposed(result, "vae") == [(ids["vae_a"], "checkpoint")]
+    assert result["vae"][0]["recipes"] == 0
+    assert result["vae"][0]["history_runs"] == 1
+    # `twin` is two shelf rows, and the errored run proves nothing.
+    assert result["text_encoder"] == []
+    # Only unambiguous shelf ids are kept: never a name, never a guess.
+    stored = {
+        int(row["model_id"])
+        for row in hub.fetchall("SELECT model_id FROM comfyui_history_model")
+    }
+    assert stored == {ids["lonely"], ids["vae_a"]}
+
+    recipe_side = propose_companions(hub, ids["ckpt_a"])["vae"][0]
+    assert (recipe_side["recipes"], recipe_side["history_runs"]) == (1, 0)
+
+
+def test_a_run_ranks_behind_a_recipe_and_a_forgotten_model_drops_out(
+    companions_shelf,
+):
+    ids = companions_shelf.ids
+    hub = companions_shelf.hub
+    vae_b = shelf_file(hub, "vae_b.safetensors", "vae")
+    record_comfyui_history(
+        hub,
+        {
+            str(n): history_entry(
+                generation_graph(
+                    "ckpt_a.safetensors",
+                    "vae_b.safetensors",
+                    "clip_shared.safetensors",
+                )
+            )
+            for n in range(3)
+        },
+    )
+
+    result = propose_companions(hub, ids["ckpt_a"])
+    assert [item["id"] for item in result["vae"]] == [ids["vae_a"], vae_b]
+    assert result["vae"][1]["history_runs"] == 3
+
+    with hub.transaction() as conn:
+        model_shelf_service._purge(conn, [vae_b])
+    assert [item["id"] for item in propose_companions(hub, ids["ckpt_a"])["vae"]] == [
+        ids["vae_a"]
+    ]
+
+
+def hash_rows(hub, *model_ids):
+    """Give rows a digest: a hand-made set holds files by sha256."""
+    with hub.transaction() as conn:
+        conn.executemany(
+            "UPDATE model SET sha256 = printf('%064d', id) WHERE id = ?",
+            [(model_id,) for model_id in model_ids],
+        )
+
+
+def grouped_shelf(companions_shelf):
+    """The companions shelf plus a VAE only a hand-made set pairs with A."""
+    hub = companions_shelf.hub
+    ids = dict(companions_shelf.ids)
+    ids["vae_grouped"] = shelf_file(hub, "vae_grouped.safetensors", "vae")
+    hash_rows(
+        hub,
+        *(
+            ids[name]
+            for name in ("ckpt_a", "ckpt_b", "vae_a", "clip_shared", "vae_grouped")
+        ),
+    )
+    return hub, ids
+
+
+def test_a_hand_made_set_proposes_its_members_ahead_of_the_evidence(
+    companions_shelf,
+):
+    hub, ids = grouped_shelf(companions_shelf)
+    create_set(
+        hub,
+        "Night",
+        [
+            {"model_id": ids["ckpt_a"]},
+            {"model_id": ids["vae_grouped"]},
+            {"model_id": ids["clip_shared"]},
+        ],
+    )
+
+    result = propose_companions(hub, ids["ckpt_a"])
+
+    assert proposed(result, "vae") == [
+        (ids["vae_grouped"], "grouped"),
+        (ids["vae_a"], "checkpoint"),
+    ]
+    grouped, recipe = result["vae"]
+    assert (grouped["set_name"], grouped["prepick"], grouped["recipes"]) == (
+        "Night",
+        True,
+        0,
+    )
+    assert (recipe["set_name"], recipe["prepick"]) == (None, True)
+    # The recipe also names the grouped encoder: listed once, as grouped.
+    assert proposed(result, "text_encoder") == [(ids["clip_shared"], "grouped")]
+
+
+def test_a_grouped_kind_is_prepicked_only_when_the_sets_agree_on_one_file(
+    companions_shelf,
+):
+    hub, ids = grouped_shelf(companions_shelf)
+    for name in ("One", "Two"):
+        create_set(
+            hub,
+            name,
+            [{"model_id": ids["ckpt_a"]}, {"model_id": ids["vae_grouped"]}],
+        )
+    agreed = propose_companions(hub, ids["ckpt_a"])
+    assert [(e["id"], e["prepick"]) for e in agreed["vae"][:1]] == [
+        (ids["vae_grouped"], True)
+    ]
+    # The newest matching set names it.
+    assert agreed["vae"][0]["set_name"] == "Two"
+
+    create_set(hub, None, [{"model_id": ids["ckpt_a"]}, {"model_id": ids["vae_a"]}])
+    split = propose_companions(hub, ids["ckpt_a"])
+    assert [(e["id"], e["via"], e["prepick"]) for e in split["vae"]] == [
+        (ids["vae_a"], "grouped", False),
+        (ids["vae_grouped"], "grouped", False),
+    ]
+    assert split["vae"][0]["set_name"] is None
+
+
+def test_a_grouped_encoder_pair_of_two_layouts_is_prepicked_each(
+    companions_shelf,
+):
+    """A Flux set holds one clip_l and one t5_xxl: one file per row, so both are
+    pre-picked. Counting per kind would refuse both and hand the rows to
+    weaker, ungrouped evidence (#1520 review)."""
+    hub, ids = grouped_shelf(companions_shelf)
+    clip = shelf_file(hub, "Clip_L.safetensors", "text_encoder")
+    t5 = shelf_file(hub, "T5_XXL.safetensors", "text_encoder")
+    hash_rows(hub, clip, t5)
+    with hub.transaction() as conn:
+        conn.execute("UPDATE model SET family = 'clip_l' WHERE id = ?", (clip,))
+        conn.execute("UPDATE model SET family = 't5_xxl' WHERE id = ?", (t5,))
+    create_set(
+        hub,
+        "Flux",
+        [{"model_id": ids["ckpt_a"]}, {"model_id": clip}, {"model_id": t5}],
+    )
+
+    result = propose_companions(hub, ids["ckpt_a"])
+
+    grouped = {
+        e["id"]: e["prepick"] for e in result["text_encoder"] if e["via"] == "grouped"
+    }
+    assert grouped == {clip: True, t5: True}
+
+
+def test_a_set_without_this_checkpoint_or_off_the_shelf_proposes_nothing(
+    companions_shelf,
+):
+    hub, ids = grouped_shelf(companions_shelf)
+    # No checkpoint - A itself is there, but filed as "other" - then another
+    # checkpoint's set.
+    create_set(
+        hub,
+        "Loose",
+        [
+            {"model_id": ids["ckpt_a"], "slot": "other"},
+            {"model_id": ids["vae_grouped"]},
+        ],
+    )
+    create_set(
+        hub, "B", [{"model_id": ids["ckpt_b"]}, {"model_id": ids["vae_grouped"]}]
+    )
+    # A's own set, holding a VAE whose file is no longer on the shelf.
+    create_set(
+        hub,
+        "Gone",
+        [
+            {"model_id": ids["ckpt_a"]},
+            {"sha256": "ab" * 32, "slot": "vae", "label": "vanished.safetensors"},
+        ],
+    )
+
+    result = propose_companions(hub, ids["ckpt_a"])
+
+    assert proposed(result, "vae") == [(ids["vae_a"], "checkpoint")]
+    assert proposed(result, "text_encoder") == [(ids["clip_shared"], "checkpoint")]
+
+
+# ---------------------------------------------------------------------------
+# B4 — purge reaches the hub, and the covered-ghost cascade
+# ---------------------------------------------------------------------------
+#
+# The same feature has to survive one deletion and not another, so both
+# directions are asserted here rather than assumed:
+#
+# * a recipe and its topology outlive EVERY picture deletion, purge included —
+#   that is B3's whole point and the thing dehydration's promise rests on;
+# * a ghost is thumbnail-and-prompt of a destroyed picture, and a purge must
+#   reach it, because leaving it behind is a privacy defect rather than a
+#   missing feature.
+
+
+def scrapheap(store, picture_id, *, pixel_sha, thumbnail=b"thumbnail-bytes"):
+    """Put a picture in the Scrapheap with the sha the ghost will be keyed on.
+
+    A thumbnail is written by default because a ghost is thumbnail-AND-prompt
+    and one without a thumbnail is refused: a helper that quietly omitted it
+    would make every retention assertion below pass for the wrong reason.
+    ``thumbnail=None`` is the case that exercises the refusal.
+    """
+    if thumbnail is not None:
+        write_thumbnail(store, read_picture(store, picture_id).file_path, thumbnail)
+
+    def mark(session):
+        picture = session.get(Picture, picture_id)
+        picture.deleted = True
+        picture.deleted_at = datetime(2026, 8, 23, tzinfo=timezone.utc)
+        picture.pixel_sha = pixel_sha
+        session.commit()
+
+    store.vault.run_task(mark)
+
+
+def cascade(store, retention, library_uuid=LIBRARY):
+    """Settle the vault's queued instance hashes, as ``GhostCascadeTask`` does."""
+    return drain_ghost_cascade(store.vault, store.hub, library_uuid, retention)[1]
+
+
+def pending_hashes(store):
+    """What ``pending_ghost_cascade`` holds, oldest first."""
+    return store.vault.run_immediate_read_task(
+        lambda session: (
+            session.execute(
+                sa_text("SELECT instance_hash FROM pending_ghost_cascade ORDER BY seq")
+            )
+            .scalars()
+            .all()
+        )
+    )
+
+
+def purge(store, picture_ids, *, retention, library_uuid=LIBRARY):
+    """Run THE destruction path against the shared store.
+
+    A ``SimpleNamespace`` rather than a real ``Vault`` for the same reason the
+    rest of this section uses a bare ``VaultDatabase``: standing a Vault up
+    loads an inference engine and a work planner, and the purge only ever
+    reaches these five members.
+    """
+    vault = SimpleNamespace(
+        db=store.vault,
+        image_root=store.image_root,
+        hub=store.hub,
+        library_uuid=library_uuid,
+        ghost_retention=retention,
+        reference_folder_roots=lambda: (),
+    )
+    return purge_scrapheap_pictures(vault, picture_ids, include_protected=False)
+
+
+def ghosts(store):
+    return {
+        row["pixel_sha"]: row
+        for row in store.hub.fetchall(
+            "SELECT * FROM workflow_picture_ghost ORDER BY pixel_sha"
+        )
+    }
+
+
+def write_thumbnail(store, file_name, payload):
+    thumb_path = ImageUtils.get_thumbnail_path(store.image_root, file_name)
+    os.makedirs(os.path.dirname(thumb_path), exist_ok=True)
+    with open(thumb_path, "wb") as handle:
+        handle.write(payload)
+    return thumb_path
+
+
+def test_the_default_position_is_covered_only():
+    """Settled with the owner 2026-08-23, and the whole cascade hangs off it."""
+    assert read_ghost_retention({}) == GHOST_RETENTION_COVERED
+    assert DEFAULT_GHOST_RETENTION == GHOST_RETENTION_COVERED
+
+
+def test_an_unreadable_position_keeps_no_ghosts():
+    """The fail-safe direction, which is the OPPOSITE of the retention window's.
+
+    There an unparseable config must not license a deletion. Here it must not
+    license keeping a thumbnail and a prompt for a picture the user destroyed.
+    Both fall to the position holding less of the user's data.
+    """
+    assert read_ghost_retention({GHOST_RETENTION_KEY: "sometimes"}) == (
+        GHOST_RETENTION_OFF
+    )
+    assert read_ghost_retention({GHOST_RETENTION_KEY: None}) == GHOST_RETENTION_OFF
+    # A valid position is honoured whatever case it was saved in.
+    assert read_ghost_retention({GHOST_RETENTION_KEY: " ON "}) == GHOST_RETENTION_ON
+
+
+def test_a_purge_destroys_the_picture_and_leaves_the_recipe_standing(store):
+    """Direction one: the rows that must SURVIVE a purge.
+
+    Ordinary deletion is already covered by
+    ``test_hub_rows_outlive_the_pictures_they_came_from``; this is the harder
+    case, because the purge is the one path that now reaches into the hub at
+    all. A step that destroyed the recipe would take dehydration's rehydrate
+    promise with it.
+    """
+    name = write_png(
+        Path(store.image_root), "purged-recipe.png", api=api_graph(TXT2IMG)
+    )
+    picture_id = add_picture(store, name)
+    run_extraction(store, [picture_id])
+    structural = read_picture(store, picture_id).workflow_structural_hash
+    scrapheap(store, picture_id, pixel_sha="sha-purged-recipe")
+
+    outcome = purge(store, [picture_id], retention=GHOST_RETENTION_ON)
+
+    assert outcome.deleted_count == 1
+    assert read_picture(store, picture_id) is None
+    assert not os.path.exists(os.path.join(store.image_root, name))
+    for table in WORKFLOW_TABLES:
+        assert store.hub.fetchone(f"SELECT COUNT(*) AS n FROM {table}")["n"] == 1
+    assert get_document(store.hub, structural) is not None
+    assert assets_for_recipe(store.hub, structural)
+
+
+def test_a_purge_with_ghosts_off_leaves_nothing_of_the_picture(store):
+    """Direction two, at the strictest position: no trace at all."""
+    name = write_png(Path(store.image_root), "no-ghost.png", api=api_graph(TXT2IMG))
+    picture_id = add_picture(store, name)
+    run_extraction(store, [picture_id])
+    write_thumbnail(store, name, b"thumbnail-bytes")
+    scrapheap(store, picture_id, pixel_sha="sha-no-ghost")
+
+    outcome = purge(store, [picture_id], retention=GHOST_RETENTION_OFF)
+
+    assert outcome.deleted_count == 1
+    assert outcome.ghosts_kept == 0
+    assert ghosts(store) == {}
+
+
+def test_a_covered_picture_leaves_a_ghost_and_an_uncovered_one_does_not(store):
+    """The default position, and both of its branches in one environment.
+
+    ``covered`` is not "keep a ghost when the workflow survives" — it is "keep
+    one when a SURVIVING PICTURE carries the same instance hash". The lone
+    picture below shares the recipe with the other two and still gets no ghost,
+    which is the distinction the structural hash cannot make.
+    """
+    covered = write_png(Path(store.image_root), "cov-a.png", api=api_graph(TXT2IMG))
+    cover = write_png(
+        Path(store.image_root), "cov-b.png", api=api_graph(edited(TXT2IMG, 5, seed=99))
+    )
+    lone = write_png(
+        Path(store.image_root),
+        "cov-c.png",
+        api=api_graph(edited(TXT2IMG, 2, text="a different prompt entirely")),
+    )
+    ids = [add_picture(store, name) for name in (covered, cover, lone)]
+    run_extraction(store, ids)
+    same_instance = read_picture(store, ids[0]).workflow_instance_hash
+    assert same_instance == read_picture(store, ids[1]).workflow_instance_hash
+    assert same_instance != read_picture(store, ids[2]).workflow_instance_hash
+
+    scrapheap(store, ids[0], pixel_sha="sha-covered")
+    scrapheap(store, ids[2], pixel_sha="sha-lone")
+    outcome = purge(store, [ids[0], ids[2]], retention=GHOST_RETENTION_COVERED)
+
+    assert outcome.deleted_count == 2
+    assert outcome.ghosts_kept == 1
+    assert set(ghosts(store)) == {"sha-covered"}
+
+
+def test_the_cascade_destroys_a_ghost_when_its_last_cover_is_purged(store):
+    """The hole the safe class would otherwise leave, closed on the DEFAULT path.
+
+    A covered ghost is safe *because* a covering picture survives. Destroy the
+    cover later and it stops being covered, retroactively, with nothing on
+    screen to say so. So the purge that destroys the last picture carrying an
+    instance hash must destroy the ghosts leaning on it, in the same pass.
+    """
+    member = write_png(Path(store.image_root), "casc-a.png", api=api_graph(TXT2IMG))
+    cover = write_png(
+        Path(store.image_root), "casc-b.png", api=api_graph(edited(TXT2IMG, 5, seed=11))
+    )
+    member_id, cover_id = (add_picture(store, name) for name in (member, cover))
+    run_extraction(store, [member_id, cover_id])
+
+    scrapheap(store, member_id, pixel_sha="sha-member")
+    assert purge(store, [member_id], retention=GHOST_RETENTION_COVERED).ghosts_kept == 1
+    assert set(ghosts(store)) == {"sha-member"}
+
+    scrapheap(store, cover_id, pixel_sha="sha-cover")
+    outcome = purge(store, [cover_id], retention=GHOST_RETENTION_COVERED)
+
+    # The cover was itself uncovered by then, so it leaves no ghost of its own
+    # AND takes its dependant with it.
+    assert outcome.ghosts_kept == 0
+    assert outcome.ghosts_cascaded == 1
+    assert ghosts(store) == {}
+
+
+def test_on_keeps_every_ghost_and_runs_no_cascade(store):
+    """The opposite setting, on the same shape, so the cascade is not universal.
+
+    Asserted because a cascade that ran regardless of the position would make
+    ``on`` mean ``covered`` and nobody would notice until a rehydrate failed.
+    """
+    member = write_png(Path(store.image_root), "keep-a.png", api=api_graph(TXT2IMG))
+    cover = write_png(
+        Path(store.image_root), "keep-b.png", api=api_graph(edited(TXT2IMG, 5, seed=13))
+    )
+    member_id, cover_id = (add_picture(store, name) for name in (member, cover))
+    run_extraction(store, [member_id, cover_id])
+
+    scrapheap(store, member_id, pixel_sha="sha-keep-member")
+    purge(store, [member_id], retention=GHOST_RETENTION_ON)
+    scrapheap(store, cover_id, pixel_sha="sha-keep-cover")
+    outcome = purge(store, [cover_id], retention=GHOST_RETENTION_ON)
+
+    assert outcome.ghosts_cascaded == 0
+    assert set(ghosts(store)) == {"sha-keep-member", "sha-keep-cover"}
+
+
+def test_a_soft_deleted_picture_is_not_cover(store):
+    """A sibling still in the Scrapheap must not keep a ghost alive.
+
+    It exists and can be restored, but it is sitting in the destruction queue,
+    so reading it as cover would retain a prompt on the strength of a picture
+    that is itself on its way out. Same rule as the workflow counts.
+    """
+    going = write_png(Path(store.image_root), "soft-a.png", api=api_graph(TXT2IMG))
+    also_binned = write_png(
+        Path(store.image_root), "soft-b.png", api=api_graph(edited(TXT2IMG, 5, seed=17))
+    )
+    going_id, binned_id = (add_picture(store, name) for name in (going, also_binned))
+    run_extraction(store, [going_id, binned_id])
+    assert (
+        read_picture(store, going_id).workflow_instance_hash
+        == read_picture(store, binned_id).workflow_instance_hash
+    )
+
+    # The sibling is soft-deleted but NOT purged: still a row, still restorable.
+    scrapheap(store, binned_id, pixel_sha="sha-soft-sibling")
+    scrapheap(store, going_id, pixel_sha="sha-soft-going")
+    outcome = purge(store, [going_id], retention=GHOST_RETENTION_COVERED)
+
+    assert read_picture(store, binned_id) is not None
+    assert outcome.ghosts_kept == 0
+    assert ghosts(store) == {}
+
+
+def test_a_ghost_carries_the_thumbnail_and_the_prompt_together(store):
+    """One word, two things, and it always means both (library plan §5).
+
+    Written down as an assertion because the optimisation this guards against
+    is a plausible one: keeping "just the prompt" because it is only text.
+    """
+    kept = write_png(Path(store.image_root), "both-a.png", api=api_graph(TXT2IMG))
+    cover = write_png(
+        Path(store.image_root), "both-b.png", api=api_graph(edited(TXT2IMG, 5, seed=23))
+    )
+    kept_id, cover_id = (add_picture(store, name) for name in (kept, cover))
+    run_extraction(store, [kept_id, cover_id])
+    scrapheap(store, kept_id, pixel_sha="sha-both", thumbnail=b"a real thumbnail")
+
+    purge(store, [kept_id], retention=GHOST_RETENTION_COVERED)
+
+    ghost = ghosts(store)["sha-both"]
+    assert ghost["thumbnail"] == b"a real thumbnail"
+    assert ghost["positive_prompt"] == "a lighthouse at dusk"
+    # The seed is the ONLY thing distinguishing this ghost from its cover, and
+    # it is not a picture column — it is re-read from the file the purge is
+    # about to delete.
+    assert ghost["seed"] == "42"
+    assert ghost["structural_hash"] == structural_hash(api_graph(TXT2IMG))
+    assert ghost["instance_hash"] == instance_hash(api_graph(TXT2IMG))
+
+
+def test_a_ghost_keeps_a_seed_beyond_sqlite_integer(store):
+    """ComfyUI draws seeds up to 2**64 - 1; SQLite's INTEGER stops at 2**63 - 1.
+
+    Written as an INTEGER, about half of all real seeds failed the ghost write
+    with an OverflowError, which turned emptying the Scrapheap into a 500.
+    """
+    big = 2**64 - 1
+    kept = write_png(
+        Path(store.image_root),
+        "bigseed-a.png",
+        api=api_graph(edited(TXT2IMG, 5, seed=big)),
+    )
+    cover = write_png(Path(store.image_root), "bigseed-b.png", api=api_graph(TXT2IMG))
+    kept_id, cover_id = (add_picture(store, name) for name in (kept, cover))
+    run_extraction(store, [kept_id, cover_id])
+    scrapheap(store, kept_id, pixel_sha="sha-bigseed")
+
+    outcome = purge(store, [kept_id], retention=GHOST_RETENTION_COVERED)
+
+    assert outcome.ghosts_kept == 1
+    assert ghosts(store)["sha-bigseed"]["seed"] == str(big)
+
+
+def test_a_picture_with_no_workflow_leaves_no_ghost(store):
+    """Nothing to key the cascade on and nothing that could be made again."""
+    plain = write_png(Path(store.image_root), "plain.png")
+    picture_id = add_picture(store, plain)
+    run_extraction(store, [picture_id])
+    assert read_picture(store, picture_id).workflow_instance_hash is None
+    scrapheap(store, picture_id, pixel_sha="sha-plain")
+
+    outcome = purge(store, [picture_id], retention=GHOST_RETENTION_ON)
+
+    assert outcome.deleted_count == 1
+    assert ghosts(store) == {}
+
+
+def test_the_purge_leaves_no_derived_copy_of_the_prompt(store):
+    """ "Forgetting reaches every derived copy" — an acceptance criterion.
+
+    A prompt lives in the column AND, in vector form, in ``text_embedding``.
+    Both are columns of the row the purge deletes, so this holds structurally;
+    it is asserted rather than argued because a future "keep the embedding, it
+    is only numbers" would pass every other test in this file.
+    """
+    name = write_png(Path(store.image_root), "derived.png", api=api_graph(TXT2IMG))
+    picture_id = add_picture(store, name)
+    run_extraction(store, [picture_id])
+
+    def give_it_an_embedding(session):
+        session.get(Picture, picture_id).text_embedding = b"pretend-vector"
+        session.commit()
+
+    store.vault.run_task(give_it_an_embedding)
+    scrapheap(store, picture_id, pixel_sha="sha-derived")
+    purge(store, [picture_id], retention=GHOST_RETENTION_OFF)
+
+    assert read_picture(store, picture_id) is None
+    remaining = store.vault.run_immediate_read_task(
+        lambda session: session.exec(
+            select(Picture).where(Picture.text_embedding.is_not(None))
+        ).all()
+    )
+    assert remaining == []
+
+
+def test_a_vault_with_no_hub_purges_without_reaching_for_one(store):
+    """The CLI tools and most tests open a vault with no hub attached."""
+    name = write_png(Path(store.image_root), "hubless.png", api=api_graph(TXT2IMG))
+    picture_id = add_picture(store, name)
+    run_extraction(store, [picture_id])
+    scrapheap(store, picture_id, pixel_sha="sha-hubless")
+
+    hubless = SimpleNamespace(
+        db=store.vault,
+        image_root=store.image_root,
+        hub=None,
+        library_uuid=None,
+        ghost_retention=GHOST_RETENTION_ON,
+        reference_folder_roots=lambda: (),
+    )
+    outcome = purge_scrapheap_pictures(hubless, [picture_id], include_protected=False)
+
+    assert outcome.deleted_count == 1
+    assert outcome.ghosts_kept == 0
+    assert read_picture(store, picture_id) is None
+
+
+def test_the_missing_file_purge_cascades_too(store):
+    """A path that removes a picture row for good without writing ghosts (§B4).
+
+    ``MissingFilePurgeTask`` never writes a ghost — the file it purges is
+    already gone from disk, so there is no thumbnail to keep — but it can
+    destroy the last picture covering an instance hash. It knows nothing about
+    ghosts: the vault's delete trigger queues the hash, and the drain settles it.
+    """
+    member = write_png(Path(store.image_root), "mfp-a.png", api=api_graph(TXT2IMG))
+    cover = write_png(
+        Path(store.image_root), "mfp-b.png", api=api_graph(edited(TXT2IMG, 5, seed=31))
+    )
+    member_id, cover_id = (add_picture(store, name) for name in (member, cover))
+    run_extraction(store, [member_id, cover_id])
+
+    scrapheap(store, member_id, pixel_sha="sha-mfp-member")
+    assert purge(store, [member_id], retention=GHOST_RETENTION_COVERED).ghosts_kept == 1
+
+    # The cover's file vanishes from under the library — a sync agent, a moved
+    # folder — which is what this task exists to reconcile.
+    os.remove(os.path.join(store.image_root, cover))
+    result = MissingFilePurgeTask(
+        database=store.vault, pictures=[read_picture(store, cover_id)]
+    )._run_task()
+    cascaded = cascade(store, GHOST_RETENTION_COVERED)
+
+    assert result["purged"] == 1
+    assert cascaded == 1
+    assert ghosts(store) == {}
+
+
+def test_the_missing_file_purge_leaves_a_still_covered_ghost_alone(store):
+    """The positive control: over-destroying is its own regression.
+
+    A cascade that fired on every purged picture rather than on the ones that
+    were actually covering something would pass the test above and silently
+    break the feature the setting exists to enable.
+    """
+    member = write_png(Path(store.image_root), "mfp-keep-a.png", api=api_graph(TXT2IMG))
+    cover = write_png(
+        Path(store.image_root),
+        "mfp-keep-b.png",
+        api=api_graph(edited(TXT2IMG, 5, seed=37)),
+    )
+    unrelated = write_png(
+        Path(store.image_root),
+        "mfp-keep-c.png",
+        api=api_graph(edited(TXT2IMG, 2, text="something else entirely")),
+    )
+    member_id, cover_id, other_id = (
+        add_picture(store, name) for name in (member, cover, unrelated)
+    )
+    run_extraction(store, [member_id, cover_id, other_id])
+
+    scrapheap(store, member_id, pixel_sha="sha-mfp-keep")
+    purge(store, [member_id], retention=GHOST_RETENTION_COVERED)
+    assert set(ghosts(store)) == {"sha-mfp-keep"}
+
+    # A DIFFERENT picture's file vanishes. The cover is untouched, so the ghost
+    # is still covered and must survive.
+    os.remove(os.path.join(store.image_root, unrelated))
+    result = MissingFilePurgeTask(
+        database=store.vault, pictures=[read_picture(store, other_id)]
+    )._run_task()
+    cascaded = cascade(store, GHOST_RETENTION_COVERED)
+
+    assert result["purged"] == 1
+    assert cascaded == 0
+    assert set(ghosts(store)) == {"sha-mfp-keep"}
+
+
+def test_a_picture_with_no_thumbnail_leaves_no_ghost_at_all(store):
+    """A ghost is thumbnail AND prompt, so half a ghost is no ghost.
+
+    Thumbnails are generated lazily by ``MissingThumbnailFinder``, so a picture
+    destroyed before its thumbnail existed genuinely reaches this branch. Keeping
+    the prompt alone would retain the more sensitive half on its own AND destroy
+    the argument that makes ``covered`` a safe default — that the only marginal
+    exposure is a thumbnail of a near-duplicate.
+    """
+    bare = write_png(Path(store.image_root), "nothumb-a.png", api=api_graph(TXT2IMG))
+    cover = write_png(
+        Path(store.image_root),
+        "nothumb-b.png",
+        api=api_graph(edited(TXT2IMG, 5, seed=41)),
+    )
+    bare_id, cover_id = (add_picture(store, name) for name in (bare, cover))
+    run_extraction(store, [bare_id, cover_id])
+    # Covered by its sibling, and would otherwise be retained.
+    assert (
+        read_picture(store, bare_id).workflow_instance_hash
+        == read_picture(store, cover_id).workflow_instance_hash
+    )
+    scrapheap(store, bare_id, pixel_sha="sha-nothumb", thumbnail=None)
+
+    outcome = purge(store, [bare_id], retention=GHOST_RETENTION_ON)
+
+    assert outcome.deleted_count == 1
+    assert outcome.ghosts_kept == 0
+    assert ghosts(store) == {}
+
+
+def test_a_picture_restored_mid_purge_leaves_no_ghost(store):
+    """The ``destroyed_ids`` guard, exercised where the purge cannot reach it.
+
+    ``purge_rows_in_session`` re-checks ``deleted`` at the point of deletion and
+    reports what it spared, and a spared picture still EXISTS — so writing its
+    thumbnail and prompt into the hub would retain a trace of a picture the user
+    just rescued. Driven through ``apply_purge_to_hub`` directly because the
+    interleaving it guards against cannot be produced from the endpoint.
+    """
+    kept = write_png(Path(store.image_root), "restored-a.png", api=api_graph(TXT2IMG))
+    cover = write_png(
+        Path(store.image_root),
+        "restored-b.png",
+        api=api_graph(edited(TXT2IMG, 5, seed=43)),
+    )
+    kept_id, cover_id = (add_picture(store, name) for name in (kept, cover))
+    run_extraction(store, [kept_id, cover_id])
+    scrapheap(store, kept_id, pixel_sha="sha-restored", thumbnail=b"still here")
+    instance = read_picture(store, kept_id).workflow_instance_hash
+
+    candidates = store.vault.run_immediate_read_task(
+        collect_ghost_candidates_in_session, [kept_id]
+    )
+    assert len(candidates) == 1 and candidates[0].pixel_sha == "sha-restored"
+
+    # The purge planned it, then the guarded DELETE spared it: destroyed_ids is
+    # empty even though the candidate was gathered.
+    written, cascaded = apply_purge_to_hub(
+        store.hub,
+        LIBRARY,
+        store.image_root,
+        GHOST_RETENTION_ON,
+        GhostPurgeContext(candidates=candidates, surviving_instance_hashes={instance}),
+        set(),
+    )
+
+    assert (written, cascaded) == (0, 0)
+    assert ghosts(store) == {}
+    # Positive control: the SAME call with the id actually destroyed does write
+    # one, so the negative above is the guard and not a broken fixture.
+    written, _ = apply_purge_to_hub(
+        store.hub,
+        LIBRARY,
+        store.image_root,
+        GHOST_RETENTION_ON,
+        GhostPurgeContext(candidates=candidates, surviving_instance_hashes={instance}),
+        {kept_id},
+    )
+    assert written == 1
+
+
+def test_the_missing_file_purge_never_cascades_at_on(store):
+    """``on`` keeps every ghost, on BOTH destruction paths.
+
+    Covered separately from the scrapheap purge because the cascade helper is a
+    different function with its own retention gate; a regression that dropped
+    that gate would make ``on`` mean ``covered`` and only show up as a failed
+    rehydrate months later.
+    """
+    member = write_png(Path(store.image_root), "on-mfp-a.png", api=api_graph(TXT2IMG))
+    cover = write_png(
+        Path(store.image_root),
+        "on-mfp-b.png",
+        api=api_graph(edited(TXT2IMG, 5, seed=47)),
+    )
+    member_id, cover_id = (add_picture(store, name) for name in (member, cover))
+    run_extraction(store, [member_id, cover_id])
+
+    scrapheap(store, member_id, pixel_sha="sha-on-mfp")
+    purge(store, [member_id], retention=GHOST_RETENTION_ON)
+    assert set(ghosts(store)) == {"sha-on-mfp"}
+
+    os.remove(os.path.join(store.image_root, cover))
+    result = MissingFilePurgeTask(
+        database=store.vault, pictures=[read_picture(store, cover_id)]
+    )._run_task()
+    cascaded = cascade(store, GHOST_RETENTION_ON)
+
+    assert result["purged"] == 1
+    assert cascaded == 0
+    assert set(ghosts(store)) == {"sha-on-mfp"}
+
+
+def test_the_missing_file_purge_clears_ghosts_at_off(store):
+    """``off`` means no ghosts, and it has to mean that on both paths.
+
+    Without this the two hard-delete paths disagree: a user who has said "keep
+    nothing" gets tidied up by one and not the other.
+    """
+    member = write_png(Path(store.image_root), "off-mfp-a.png", api=api_graph(TXT2IMG))
+    cover = write_png(
+        Path(store.image_root),
+        "off-mfp-b.png",
+        api=api_graph(edited(TXT2IMG, 5, seed=53)),
+    )
+    member_id, cover_id = (add_picture(store, name) for name in (member, cover))
+    run_extraction(store, [member_id, cover_id])
+
+    # Written while the setting was ON, then the user turns it off.
+    scrapheap(store, member_id, pixel_sha="sha-off-mfp")
+    purge(store, [member_id], retention=GHOST_RETENTION_ON)
+    assert set(ghosts(store)) == {"sha-off-mfp"}
+
+    os.remove(os.path.join(store.image_root, cover))
+    result = MissingFilePurgeTask(
+        database=store.vault, pictures=[read_picture(store, cover_id)]
+    )._run_task()
+    cascaded = cascade(store, GHOST_RETENTION_OFF)
+
+    assert result["purged"] == 1
+    assert cascaded == 1
+    assert ghosts(store) == {}
+
+
+def test_a_purge_never_cascades_a_ghost_belonging_to_another_library(store):
+    """The hub is shared; the cover that justifies a ghost is not.
+
+    Only one vault is live at a time, so a purge cannot see whether ANOTHER
+    library still holds a covering picture. A hub-global cascade would therefore
+    destroy a ghost that library still has cover for — silent loss, in the
+    opposite direction from the one this feature is careful about. Every hub
+    query is scoped to one library so that cannot happen.
+    """
+    mine = write_png(Path(store.image_root), "xlib-a.png", api=api_graph(TXT2IMG))
+    cover = write_png(
+        Path(store.image_root), "xlib-b.png", api=api_graph(edited(TXT2IMG, 5, seed=59))
+    )
+    mine_id, cover_id = (add_picture(store, name) for name in (mine, cover))
+    run_extraction(store, [mine_id, cover_id])
+    instance = read_picture(store, mine_id).workflow_instance_hash
+
+    # Another library holds a ghost on the same instance hash — the same
+    # workflow used in two of the owner's libraries, which the measurement says
+    # is the common case.
+    record_picture_ghosts(
+        store.hub,
+        [
+            PictureGhost(
+                library_uuid=OTHER_LIBRARY,
+                pixel_sha="sha-other-library",
+                instance_hash=instance,
+                thumbnail=b"other library thumbnail",
+                positive_prompt="a lighthouse at dusk",
+            )
+        ],
+    )
+
+    # This library destroys both pictures carrying the hash, so its own ghost is
+    # uncovered and cascades.
+    scrapheap(store, mine_id, pixel_sha="sha-mine")
+    purge(store, [mine_id], retention=GHOST_RETENTION_COVERED)
+    scrapheap(store, cover_id, pixel_sha="sha-mine-cover")
+    outcome = purge(store, [cover_id], retention=GHOST_RETENTION_COVERED)
+
+    assert outcome.ghosts_cascaded == 1
+    assert set(ghosts(store)) == {"sha-other-library"}
+
+
+def test_the_write_rechecks_cover_at_the_last_moment(store):
+    """The vault and the hub are separate databases, so coverage can go stale.
+
+    ``apply_purge_to_hub`` runs off the DB worker thread — it reads thumbnails
+    and re-parses embedded graphs — so an unknown amount of wall-clock separates
+    the coverage read inside the purge's submission from the hub write. If the
+    cover disappears in that window the ghost must not be written. Simulated by
+    a recheck that reports the hash uncovered.
+    """
+    member = write_png(Path(store.image_root), "stale-a.png", api=api_graph(TXT2IMG))
+    cover = write_png(
+        Path(store.image_root),
+        "stale-b.png",
+        api=api_graph(edited(TXT2IMG, 5, seed=61)),
+    )
+    member_id, cover_id = (add_picture(store, name) for name in (member, cover))
+    run_extraction(store, [member_id, cover_id])
+    scrapheap(store, member_id, pixel_sha="sha-stale", thumbnail=b"about to be stale")
+    instance = read_picture(store, member_id).workflow_instance_hash
+
+    # An earlier purge already left a ghost on this instance, so the cascade has
+    # something to destroy and its count means what it says.
+    record_picture_ghosts(
+        store.hub,
+        [
+            PictureGhost(
+                library_uuid=LIBRARY,
+                pixel_sha="sha-stale-earlier",
+                instance_hash=instance,
+                thumbnail=b"earlier ghost",
+            )
+        ],
+    )
+
+    candidates = store.vault.run_immediate_read_task(
+        collect_ghost_candidates_in_session, [member_id]
+    )
+    written, cascaded = apply_purge_to_hub(
+        store.hub,
+        LIBRARY,
+        store.image_root,
+        GHOST_RETENTION_COVERED,
+        # The early read said covered...
+        GhostPurgeContext(candidates=candidates, surviving_instance_hashes={instance}),
+        {member_id},
+        # ...and by write time the cover was gone.
+        recheck_surviving=lambda hashes: set(),
+    )
+
+    assert written == 0
+    assert cascaded == 1
+    assert ghosts(store) == {}
+
+
+def test_the_ghost_reads_survive_the_bound_parameter_ceiling(store):
+    """Emptying a whole scrapheap must not abort inside the purge (§B4).
+
+    Both new reads run INSIDE ``plan_and_purge_in_session`` — the candidate read
+    before the DELETE, the coverage read after it — so an ``OperationalError``
+    from either takes the whole purge down and destroys nothing. The list they
+    are handed is the entire purge plan, which for "delete forever, everything"
+    is the entire scrapheap.
+
+    Pinned to SQLite's historical 999-variable floor with ``setlimit``, the same
+    build-independent proof ``tests/test_scope_table.py`` uses, at a size well
+    under any modern default so the failure can only come from the ceiling.
+    """
+    size = 1500
+    ids = list(range(1, size + 1))
+    hashes = [f"instance-{n}" for n in range(size)]
+
+    def probe(session):
+        session.connection().connection.setlimit(
+            sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999
+        )
+        # A plain ``.in_()`` at this size is what the ceiling refuses, so the
+        # two calls below are not passing for want of a big enough list.
+        with pytest.raises(OperationalError, match="too many SQL variables"):
+            session.exec(select(Picture.id).where(Picture.id.in_(ids))).all()
+        return (
+            collect_ghost_candidates_in_session(session, ids),
+            surviving_instance_hashes_in_session(session, hashes),
+        )
+
+    candidates, surviving = store.vault.run_immediate_read_task(probe)
+
+    assert candidates == []
+    assert surviving == set()
+
+
+def test_a_workflow_with_no_prompt_still_leaves_a_ghost(store):
+    """The prompt half is optional; the thumbnail half is not (library plan §5).
+
+    §5's rule is that a ghost never keeps the prompt ALONE — the prompt is the
+    sensitive half and "it is only text" is the argument that would keep it once
+    the thumbnail had gone. It is NOT a rule that a prompt must exist. An upscale
+    graph has no ``CLIPTextEncode`` at all, and it still hashes, still has a
+    recipe and a seed, and is exactly as worth rehydrating as any other. Refusing
+    it would delete the feature for a whole class of real workflows.
+    """
+    ids = [
+        add_picture(
+            store,
+            write_png(Path(store.image_root), name, api=api_graph(UPSCALE)),
+        )
+        for name in ("noprompt-a.png", "noprompt-b.png")
+    ]
+    run_extraction(store, ids)
+    kept_id, cover_id = ids
+    kept = read_picture(store, kept_id)
+    # The premise: hashed and coverable, but genuinely promptless.
+    assert kept.workflow_instance_hash
+    assert (
+        kept.workflow_instance_hash
+        == read_picture(store, cover_id).workflow_instance_hash
+    )
+    assert kept.comfyui_positive_prompt is None
+
+    scrapheap(store, kept_id, pixel_sha="sha-noprompt", thumbnail=b"upscaled thumb")
+    outcome = purge(store, [kept_id], retention=GHOST_RETENTION_COVERED)
+
+    assert outcome.ghosts_kept == 1
+    ghost = ghosts(store)["sha-noprompt"]
+    assert ghost["thumbnail"] == b"upscaled thumb"
+    assert ghost["positive_prompt"] is None
+    assert ghost["structural_hash"] == structural_hash(api_graph(UPSCALE))
+
+
+def test_a_prompt_the_picture_had_is_never_dropped_on_the_way_in(store):
+    """NULL in the ghost means "no prompt", never "we lost it".
+
+    The pair with the test above: together they say the nullable column is a
+    faithful copy and not a place a half-ghost can appear. Without this one,
+    ``positive_prompt IS NULL`` would be indistinguishable from a write that
+    silently dropped the sensitive half.
+    """
+    kept = write_png(Path(store.image_root), "keptprompt-a.png", api=api_graph(TXT2IMG))
+    cover = write_png(
+        Path(store.image_root),
+        "keptprompt-b.png",
+        api=api_graph(edited(TXT2IMG, 5, seed=67)),
+    )
+    kept_id, cover_id = (add_picture(store, name) for name in (kept, cover))
+    run_extraction(store, [kept_id, cover_id])
+    stored = read_picture(store, kept_id).comfyui_positive_prompt
+    assert stored == "a lighthouse at dusk"
+
+    scrapheap(store, kept_id, pixel_sha="sha-keptprompt")
+    purge(store, [kept_id], retention=GHOST_RETENTION_COVERED)
+
+    assert ghosts(store)["sha-keptprompt"]["positive_prompt"] == stored
+
+
+def test_the_store_itself_refuses_a_ghost_with_no_thumbnail(store):
+    """The invariant at the storage layer, not only in the writer.
+
+    ``_prepare_ghosts`` already refuses to build one, so this asserts the second
+    line of defence: a FUTURE caller that bypassed the writer still cannot
+    create a retained prompt with no thumbnail beside it.
+    """
+    with pytest.raises(sqlite3.IntegrityError):
+        with store.hub.transaction() as conn:
+            conn.execute(
+                "INSERT INTO workflow_picture_ghost (library_uuid, pixel_sha, "
+                "instance_hash, positive_prompt, thumbnail, created_at) "
+                "VALUES (?, ?, ?, ?, NULL, 'now')",
+                (LIBRARY, "sha-half-ghost", "some-instance", "a secret prompt"),
+            )
+    assert ghosts(store) == {}
+
+
+def test_every_kind_of_hard_delete_queues_the_cascade(store):
+    """The trigger, not the caller, is what the cascade depends on (#1293).
+
+    Four paths forgot it when each had to remember. So both statement shapes the
+    code base deletes pictures with, an ORM ``session.delete`` and a core
+    ``DELETE``, are driven here with no ghost code anywhere near them.
+    """
+    names = [
+        write_png(Path(store.image_root), f"any-{n}.png", api=api_graph(TXT2IMG))
+        for n in ("a", "b")
+    ]
+    ids = [add_picture(store, name) for name in names]
+    run_extraction(store, ids)
+    instance = read_picture(store, ids[0]).workflow_instance_hash
+    record_picture_ghosts(
+        store.hub,
+        [
+            PictureGhost(
+                library_uuid=LIBRARY,
+                pixel_sha="sha-any",
+                instance_hash=instance,
+                thumbnail=b"thumbnail-bytes",
+            )
+        ],
+    )
+
+    def orm_delete(session):
+        session.delete(session.get(Picture, ids[0]))
+        session.commit()
+
+    store.vault.run_task(orm_delete)
+    assert pending_hashes(store) == [instance]
+    assert cascade(store, GHOST_RETENTION_COVERED) == 0, "one cover is left"
+    assert set(ghosts(store)) == {"sha-any"}
+
+    def core_delete(session):
+        session.exec(sqlmodel_delete(Picture).where(Picture.id == ids[1]))
+        session.commit()
+
+    store.vault.run_task(core_delete)
+    assert cascade(store, GHOST_RETENTION_COVERED) == 1
+    assert ghosts(store) == {}
+
+
+def test_a_rehash_queues_the_instance_hash_it_left(store):
+    """A hash-version bump re-extracts and moves every picture to a new hash.
+
+    A ghost keyed on the old one matches no picture any more, so it has lost
+    its cover exactly as if the picture had gone.
+    """
+    name = write_png(Path(store.image_root), "rehash.png", api=api_graph(TXT2IMG))
+    picture_id = add_picture(store, name)
+    run_extraction(store, [picture_id])
+    old = read_picture(store, picture_id).workflow_instance_hash
+    record_picture_ghosts(
+        store.hub,
+        [
+            PictureGhost(
+                library_uuid=LIBRARY,
+                pixel_sha="sha-rehash",
+                instance_hash=old,
+                thumbnail=b"thumbnail-bytes",
+            )
+        ],
+    )
+
+    def rehash(session, value):
+        # A core UPDATE, because the ORM skips a write that changes nothing and
+        # the same-value case below would then test the ORM, not the trigger.
+        session.execute(
+            sa_text("UPDATE picture SET workflow_instance_hash = :v WHERE id = :id"),
+            {"v": value, "id": picture_id},
+        )
+        session.commit()
+
+    # Writing the same value back is not a re-hash and must queue nothing.
+    store.vault.run_task(rehash, old)
+    assert pending_hashes(store) == []
+    # Nor is NULL: the extraction writes it for a file it could not read this
+    # time, and the picture is still in the library.
+    store.vault.run_task(rehash, None)
+    assert pending_hashes(store) == []
+    store.vault.run_task(rehash, old)
+    store.vault.run_task(rehash, "v2-" + old)
+    assert cascade(store, GHOST_RETENTION_COVERED) == 1
+    assert ghosts(store) == {}
+
+
+def test_the_migrated_vault_carries_both_cascade_triggers(store):
+    """The design rests on these. A later migration that rebuilds ``picture``
+    drops a table's triggers with it, and runs before this does."""
+    names = store.vault.run_immediate_read_task(
+        lambda session: (
+            session.execute(
+                sa_text("SELECT name FROM sqlite_master WHERE type = 'trigger'")
+            )
+            .scalars()
+            .all()
+        )
+    )
+    assert {
+        "trg_pending_ghost_cascade_picture_delete",
+        "trg_pending_ghost_cascade_picture_rehash",
+    } <= set(names)
+
+
+def test_a_hash_requeued_during_a_drain_is_not_swallowed(store, monkeypatch):
+    """The drain removes what it read by ``seq``, never by hash.
+
+    Otherwise a cover deleted between the drain's read and its dequeue would
+    queue a hash that is already queued, and the dequeue would take it with the
+    stale row. The requeue is injected at the one point in between.
+    """
+    from pixlstash.services import workflow_ghost_service
+
+    instance = "requeued-instance"
+    store.vault.run_task(enqueue_ghost_cascade_in_session, [instance])
+    real = workflow_ghost_service.cascade_uncovered_ghosts
+
+    def cascade_then_requeue(*args, **kwargs):
+        store.vault.run_task(enqueue_ghost_cascade_in_session, [instance])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(
+        workflow_ghost_service, "cascade_uncovered_ghosts", cascade_then_requeue
+    )
+    assert cascade(store, GHOST_RETENTION_COVERED) == 0
+    assert pending_hashes(store) == [instance]
+
+
+def test_a_restore_requeues_every_ghost_for_a_recheck(store):
+    """A full restore swaps the vault file, so no trigger sees what it dropped.
+
+    Here nothing was ever queued for the ghost's instance hash and no picture
+    carries it, which is what a swap leaves behind.
+    """
+    record_picture_ghosts(
+        store.hub,
+        [
+            PictureGhost(
+                library_uuid=LIBRARY,
+                pixel_sha="sha-swapped-away",
+                instance_hash="swapped-away-instance",
+                thumbnail=b"thumbnail-bytes",
+            ),
+            PictureGhost(
+                library_uuid=OTHER_LIBRARY,
+                pixel_sha="sha-other-library",
+                instance_hash="swapped-away-instance",
+                thumbnail=b"thumbnail-bytes",
+            ),
+        ],
+    )
+    assert cascade(store, GHOST_RETENTION_COVERED) == 0
+
+    assert requeue_library_ghosts(store.vault, store.hub, LIBRARY) == 1
+    assert cascade(store, GHOST_RETENTION_COVERED) == 1
+    assert set(ghosts(store)) == {"sha-other-library"}
+
+
+def test_a_purge_that_kept_ghosts_queues_their_hashes_again(store, monkeypatch):
+    """A drain that ran between the purge's DELETE and its ghost write settled
+    the hash with no ghost in place. The purge queues it again afterwards, so
+    the cascade looks once more with the ghost there to judge."""
+    from pixlstash.services import scrapheap_service
+
+    member = write_png(Path(store.image_root), "requeue-a.png", api=api_graph(TXT2IMG))
+    cover = write_png(
+        Path(store.image_root),
+        "requeue-b.png",
+        api=api_graph(edited(TXT2IMG, 5, seed=59)),
+    )
+    member_id, cover_id = (add_picture(store, name) for name in (member, cover))
+    run_extraction(store, [member_id, cover_id])
+    instance = read_picture(store, member_id).workflow_instance_hash
+    scrapheap(store, member_id, pixel_sha="sha-requeue")
+    real = scrapheap_service.apply_purge_to_hub
+
+    def drain_first(*args, **kwargs):
+        assert cascade(store, GHOST_RETENTION_COVERED) == 0
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(scrapheap_service, "apply_purge_to_hub", drain_first)
+    assert purge(store, [member_id], retention=GHOST_RETENTION_COVERED).ghosts_kept == 1
+
+    assert pending_hashes(store) == [instance]
+
+
+def test_an_instance_row_goes_with_the_last_picture_carrying_it(store):
+    """The prompt is kept while the library still holds a picture of it."""
+    names = [
+        write_png(
+            Path(store.image_root),
+            f"instance-{seed}.png",
+            api=api_graph(edited(TXT2IMG, 5, seed=seed)),
+        )
+        for seed in (1, 2)
+    ]
+    ids = [add_picture(store, name) for name in names]
+    run_extraction(store, ids)
+    instance = read_picture(store, ids[0]).workflow_instance_hash
+    with store.hub.transaction() as conn:
+        conn.execute(
+            "INSERT INTO workflow_recipe_instance (library_uuid, instance_hash, "
+            "structural_hash, hash_version, document, first_seen_at) "
+            "SELECT ?, instance_hash, structural_hash, hash_version, document, "
+            "first_seen_at FROM workflow_recipe_instance WHERE library_uuid = ?",
+            (OTHER_LIBRARY, LIBRARY),
+        )
+
+    def delete(picture_id):
+        store.vault.run_task(
+            lambda session: (
+                session.delete(session.get(Picture, picture_id)),
+                session.commit(),
+            )
+        )
+
+    delete(ids[0])
+    cascade(store, GHOST_RETENTION_ON)
+    assert instance_row(store.hub, LIBRARY, instance) is not None
+    assert generation(store, ids[0]) is None, "a generation dies with its picture"
+
+    delete(ids[1])
+    cascade(store, GHOST_RETENTION_ON)
+    assert instance_row(store.hub, LIBRARY, instance) is None
+    # Another library's pictures are in a vault this drain cannot see.
+    assert instance_row(store.hub, OTHER_LIBRARY, instance) is not None
+
+
+def test_a_ghost_keeps_its_instance_row_until_it_is_erased(store):
+    """At every position the ghost, not the setting, is what keeps the row."""
+    name = write_png(Path(store.image_root), "ghosted.png", api=api_graph(TXT2IMG))
+    picture_id = add_picture(store, name)
+    run_extraction(store, [picture_id])
+    instance = read_picture(store, picture_id).workflow_instance_hash
+    scrapheap(store, picture_id, pixel_sha="sha-ghosted")
+    assert purge(store, [picture_id], retention=GHOST_RETENTION_ON).ghosts_kept == 1
+
+    cascade(store, GHOST_RETENTION_ON)
+    assert instance_row(store.hub, LIBRARY, instance) is not None
+
+    # Another instance whose cover the erase does not touch.
+    other = write_png(
+        Path(store.image_root),
+        "unghosted.png",
+        api=api_graph(edited(TXT2IMG, 2, text="a harbour at noon")),
+    )
+    run_extraction(store, [add_picture(store, other)])
+
+    assert erase_library_ghosts(store.vault, store.hub, LIBRARY) == 1
+    assert pending_hashes(store) == [instance], "only the erased ghosts' hashes"
+    cascade(store, GHOST_RETENTION_ON)
+    assert instance_row(store.hub, LIBRARY, instance) is None
+
+
+# ---------------------------------------------------------------------------
+# A1111 generation data, keyed as a recipe (#1312)
+# ---------------------------------------------------------------------------
+
+
+A1111_PROMPT = "a castle on a hill <lora:Example-Style:0.8> <lora:example-light:1>"
+A1111_NEGATIVE = "blurry"
+A1111_FIELDS = (
+    "Steps: 20, Sampler: DPM++ 2M, Schedule type: Karras, CFG scale: 7, "
+    "Seed: 1234567890, Size: 512x768, Model hash: 0123456789, "
+    "Model: sd_xl_base_1.0, VAE: sdxl_vae.safetensors, "
+    'Lora hashes: "Example-Style: aaaaaaaaaaaa, example-light: bbbbbbbbbbbb", '
+    "Version: v1.10.1"
+)
+
+
+def infotext(prompt=A1111_PROMPT, negative=A1111_NEGATIVE, fields=A1111_FIELDS):
+    return f"{prompt}\nNegative prompt: {negative}\n{fields}"
+
+
+def a1111_keys(text):
+    recipe = reduce_a1111({"png": {"parameters": text}})
+    nodes = recipe.nodes
+    return (
+        graph_key(drop_widgets(nodes)),
+        graph_key(nodes),
+        graph_key(promote_instance_widgets(nodes)),
+    )
+
+
+def test_a1111_text_is_detected_and_split():
+    prompt, negative, fields = parse_infotext(infotext())
+    assert prompt == A1111_PROMPT
+    assert negative == A1111_NEGATIVE
+    assert fields["Lora hashes"] == (
+        "Example-Style: aaaaaaaaaaaa, example-light: bbbbbbbbbbbb"
+    )
+    assert fields["Size"] == "512x768"
+
+
+def test_other_text_is_not_a1111():
+    assert parse_infotext("just a caption") is None
+    # Fooocus writes JSON into the same chunk.
+    assert parse_infotext(json.dumps({"Prompt": "x", "Steps: 1, a: 2": 3})) is None
+    assert reduce_a1111({"png": {"prompt": "{}"}}) is None
+    assert reduce_a1111(None) is None
+
+
+def test_a_seed_or_version_change_keeps_every_key():
+    other = A1111_FIELDS.replace("Seed: 1234567890", "Seed: 42").replace(
+        "v1.10.1", "f2.0.1"
+    )
+    assert a1111_keys(infotext()) == a1111_keys(infotext(fields=other))
+
+
+def test_the_seed_is_the_generations():
+    recipe = reduce_a1111({"png": {"parameters": infotext()}})
+    assert recipe.seed == "1234567890"
+
+
+def test_a_seed_int_would_refuse_is_no_seed():
+    """`str.isdigit()` is not "an integer", and a consumer converts this.
+
+    Both of these are `isdigit()`-true and raise in `int()`: a superscript
+    two, and a digit run past CPython's 4,300-character integer-string limit.
+    The field is documented as text-or-None-if-not-an-integer, and
+    `GET /comfyui/pictures/{id}/recipe` converts it, so a crafted `parameters`
+    chunk was a 500 for anyone holding a share token for that picture.
+    """
+    for seed in ("\u00b2", "1" * 4301):
+        assert seed.isdigit(), "the fixture must clear the old guard"
+        recipe = reduce_a1111(
+            {"png": {"parameters": infotext(fields=f"Steps: 20, Seed: {seed}")}}
+        )
+        assert recipe is not None, "the rest of the recipe still reads"
+        assert recipe.seed is None, seed
+    # The control: an ordinary seed still arrives, so the guard is not blanket.
+    kept = reduce_a1111({"png": {"parameters": infotext(fields="Steps: 20, Seed: 7")}})
+    assert kept.seed == "7"
+
+
+def test_the_fields_regex_is_linear_in_the_line():
+    """An unbounded key run before the literal `:` is quadratic.
+
+    This parser gained a request-path caller in v1.12 B5, so the cost of a
+    crafted line stopped being a background pass's problem. `xSteps:` clears
+    the cheap substring guard while yielding no `Steps` field, so the whole
+    line is handed to the regex. Quadratic, 4x per doubling, this pair differs by ~16x;
+    linear, they differ by ~4x. Absolute times are host-specific, so the
+    assertion is on the RATIO, which the shape sets.
+    """
+    import time
+
+    def cost(width):
+        line = "xSteps: 20," + "a" * (width - 11)
+        start = time.perf_counter()
+        _parse_fields(line)
+        return time.perf_counter() - start
+
+    # Warm the regex cache so the first call does not carry compilation.
+    cost(100)
+    ratio = cost(8_000) / max(cost(2_000), 1e-9)
+    assert ratio < 8, f"doubling twice cost {ratio:.1f}x; that is not linear"
+
+
+def test_a_prompt_or_parameter_edit_forks_the_instance_only():
+    base = a1111_keys(infotext())
+    for edited in (
+        infotext(prompt=A1111_PROMPT.replace("castle", "harbour")),
+        infotext(fields=A1111_FIELDS.replace("Steps: 20", "Steps: 30")),
+        infotext(prompt=A1111_PROMPT.replace(":0.8>", ":0.5>")),
+        # A field nothing here knows is a parameter.
+        infotext(fields=A1111_FIELDS + ", Some extension: on"),
+    ):
+        other = a1111_keys(edited)
+        assert other[:2] == base[:2]
+        assert other[2] != base[2]
+
+
+def test_an_asset_swap_forks_the_recipe():
+    base = a1111_keys(infotext())
+    for edited in (
+        infotext(fields=A1111_FIELDS.replace("sd_xl_base_1.0", "other_model")),
+        infotext(fields=A1111_FIELDS.replace("0123456789", "9876543210")),
+        infotext(prompt=A1111_PROMPT.replace("example-light", "example-dark")),
+    ):
+        other = a1111_keys(edited)
+        assert other[0] == base[0]
+        assert other[1] != base[1]
+
+
+def test_lora_order_is_not_structure():
+    swapped = "a castle on a hill <lora:example-light:1> <lora:Example-Style:0.8>"
+    assert a1111_keys(infotext()) == a1111_keys(infotext(prompt=swapped))
+
+
+def test_structure_forks_the_topology():
+    base = a1111_keys(infotext())[0]
+    hires = A1111_FIELDS + ", Denoising strength: 0.4, Hires upscale: 2"
+    variants = [
+        infotext(prompt="a castle on a hill <lora:Example-Style:0.8>"),
+        infotext(fields=hires),
+        infotext(fields=A1111_FIELDS + ", Denoising strength: 0.4"),
+        infotext(fields=A1111_FIELDS + ", Refiner: sd_xl_refiner_1.0 [7440042bbd]"),
+    ]
+    topologies = [a1111_keys(edited)[0] for edited in variants]
+    assert len({base, *topologies}) == 5
+    # Hires fix as builds before 2023 wrote it is hires fix, not img2img.
+    old_hires = A1111_FIELDS + ", Denoising strength: 0.4, First pass size: 256x384"
+    assert a1111_keys(infotext(fields=old_hires))[0] == topologies[1]
+
+
+def test_assets_and_hashes_are_recorded_and_the_instance_names_neither():
+    fields = (
+        A1111_FIELDS + ", Denoising strength: 0.4, Hires upscale: 2, "
+        "Hires upscaler: 4x-Example, Hires checkpoint: example-hires [abcdef0123], "
+        'Hires prompt: "a castle, <lora:example-hires-lora:0.5>", '
+        'ADetailer model: face_yolov8n.pt, ADetailer prompt: "<lora:example-face:1>", '
+        "Example API key: test-not-a-real-key"
+    )
+    nodes = reduce_a1111({"png": {"parameters": infotext(fields=fields)}}).nodes
+    assert set(assets_from_reduction(nodes)) == {
+        ("ckpt_name", "sd_xl_base_1.0.safetensors"),
+        ("ckpt_sha256", "0123456789"),
+        ("vae_name", "sdxl_vae.safetensors"),
+        ("lora_name", "example-style.safetensors"),
+        ("lora_name", "example-light.safetensors"),
+        ("lora_name", "example-hires-lora.safetensors"),
+        ("lora_name", "example-face.safetensors"),
+        ("hires_upscaler", "4x-example"),
+        ("ckpt_name", "example-hires.safetensors"),
+        ("ckpt_sha256", "abcdef0123"),
+        ("adetailer_model", "face_yolov8n.pt"),
+    }
+
+    document = json.dumps(instance_document_from_reduction(nodes))
+    assert "castle on a hill" in document
+    assert asset_reference("example-style.safetensors") in document
+    for leaked in (
+        "example-",
+        "sd_xl_base",
+        "face_yolov8n",
+        "1234567890",
+        "test-not-a-real-key",
+        "aaaaaaaaaaaa",
+    ):
+        assert leaked not in document.lower()
+
+
+def test_a_shredded_compound_value_never_replaces_the_checkpoint():
+    """First occurrence wins: an unquoted ControlNet value holds a `Model:` too.
+
+    A1111 quotes a value holding a comma, so a repeat means another tool wrote
+    the text; taking the last would file a recipe naming one model's filename
+    with another model's digest.
+    """
+    fields = (
+        "Steps: 20, Sampler: Euler, CFG scale: 7, Seed: 1, Size: 512x512, "
+        "Model hash: aabbccddee, Model: my_real_checkpoint, ControlNet 0: "
+        "Module: canny, Model: control_v11p_sd15_canny.safetensors, Weight: 1, "
+        "Version: v1.10.1"
+    )
+    nodes = reduce_a1111({"png": {"parameters": infotext(fields=fields)}}).nodes
+    names = {
+        value for widget, value in assets_from_reduction(nodes) if widget == "ckpt_name"
+    }
+    assert names == {"my_real_checkpoint.safetensors"}
+
+
+def test_a_model_named_inside_a_compound_value_is_an_asset():
+    """A quoted ControlNet value hides a model name from both asset rules (#1375).
+
+    The field is not named for a model and the name inside carries no
+    extension, so the name used to be stored verbatim in the instance
+    document, where forgetting the model -- a row delete in
+    `workflow_recipe_asset`, with no stored graph rewritten -- never reached
+    it.
+    """
+    fields = (
+        A1111_FIELDS + ', ControlNet 0: "Module: canny, '
+        'Model: control_v11p_sd15_canny [d14c016b], Weight: 1", '
+        'ControlNet 1: "Module: none, Model: None, Weight: 1", '
+        "Hires upscale: 2"
+    )
+    nodes = reduce_a1111({"png": {"parameters": infotext(fields=fields)}}).nodes
+    assets = set(assets_from_reduction(nodes))
+    assert ("controlnet_0_model", "control_v11p_sd15_canny.safetensors") in assets
+    # "no model chosen" names no file.
+    assert "none.safetensors" not in {name for _, name in assets}
+
+    document = json.dumps(instance_document_from_reduction(nodes))
+    assert "control_v11p_sd15_canny" not in document
+    assert asset_reference("control_v11p_sd15_canny.safetensors") in document
+    # The rest of the compound survives, with no comma left where the model was.
+    assert '"controlnet_0": "Module: canny, Weight: 1"' in document
+
+
+def test_a_second_model_in_one_value_gets_its_own_row():
+    """Each name is forgotten on its own row, so one value can hold two.
+
+    Also the leading position: the model first in the value must not leave the
+    comma that separated it behind.
+    """
+    fields = (
+        A1111_FIELDS + ', ControlNet 0: "Model: control_a, '
+        'Module: canny, Model: control_b [d14c016b]"'
+    )
+    nodes = reduce_a1111({"png": {"parameters": infotext(fields=fields)}}).nodes
+    assets = set(assets_from_reduction(nodes))
+    assert ("controlnet_0_model", "control_a.safetensors") in assets
+    assert ("controlnet_0_model_2", "control_b.safetensors") in assets
+    document = json.dumps(instance_document_from_reduction(nodes))
+    assert '"controlnet_0": "Module: canny"' in document
+
+
+def test_a_field_that_is_not_a_known_compound_keeps_its_value_whole():
+    """Only ControlNet's fields are read this way, and for a reason (#1375).
+
+    A1111 writes prose into fields this module has no list of: the X/Y/Z plot
+    script puts prompt fragments in `X Values`, sd-dynamic-prompts puts the raw
+    template in `Template`. Reading `model: ...` in one of those as a filename
+    would file what a person wrote as a `workflow_recipe_asset` row -- hub-wide,
+    kept after the pictures are forgotten, and offered on the ghost screen as a
+    model. A long value is refused for the same reason.
+    """
+    long_name = "x" * 300
+    fields = (
+        A1111_FIELDS + ', X Values: "model: someone, model: someone else", '
+        'Template: "a castle, model: someone", '
+        f'ControlNet 0: "Module: canny, Model: {long_name}, Weight: 1"'
+    )
+    nodes = reduce_a1111({"png": {"parameters": infotext(fields=fields)}}).nodes
+    names = {name for _, name in assets_from_reduction(nodes)}
+    assert not {n for n in names if "someone" in n or n.startswith("x" * 10)}
+    document = json.dumps(instance_document_from_reduction(nodes))
+    # Untouched, both of them: not cut up, and nothing taken out.
+    assert "model: someone, model: someone else" in document
+    assert "a castle, model: someone" in document
+    assert long_name in document
+
+
+def test_two_units_each_name_their_own_model():
+    """A picture uses several ControlNets, and each names a file of its own."""
+    fields = (
+        A1111_FIELDS + ', ControlNet 0: "Module: canny, Model: control_a, Weight: 1", '
+        'ControlNet 1: "Module: depth, Model: control_b [d14c016b], Weight: 0.5"'
+    )
+    nodes = reduce_a1111({"png": {"parameters": infotext(fields=fields)}}).nodes
+    assets = set(assets_from_reduction(nodes))
+    assert ("controlnet_0_model", "control_a.safetensors") in assets
+    assert ("controlnet_1_model", "control_b.safetensors") in assets
+    document = json.dumps(instance_document_from_reduction(nodes))
+    for leaked in ("control_a", "control_b"):
+        assert leaked not in document
+
+
+def test_a_newline_inside_a_compound_is_not_a_model_name():
+    """A filename holds no newline, and A1111 can put one in a value.
+
+    A1111 escapes a real newline so its infotext stays one line, and
+    `_parse_fields` unescapes it through `json.loads`, so a compound can arrive
+    carrying one. Prose is what would then be filed as a hub-wide, permanent
+    model name -- the leak the allowlist above exists to prevent, arriving by
+    another door.
+    """
+    fields = (
+        A1111_FIELDS + ', ControlNet 0: "Module: canny, '
+        'Model: a line\\nand another, Weight: 1"'
+    )
+    nodes = reduce_a1111({"png": {"parameters": infotext(fields=fields)}}).nodes
+    assert "\n" in dict(nodes["sampler"].instance_widgets)["controlnet_0"], (
+        "the fixture must deliver a real newline, or this asserts nothing"
+    )
+    assert not [name for _, name in assets_from_reduction(nodes) if "line" in name]
+    # Left where it was, rather than cut out of the value.
+    assert "and another" in json.dumps(instance_document_from_reduction(nodes))
+
+
+def test_a_hash_with_no_name_inside_a_compound_files_nothing():
+    """`Model: [d14c016b]` names no file, and inventing `.safetensors` would."""
+    fields = A1111_FIELDS + ', ControlNet 0: "Module: canny, Model: [d14c016b]"'
+    nodes = reduce_a1111({"png": {"parameters": infotext(fields=fields)}}).nodes
+    widgets = dict(nodes["sampler"].instance_widgets)
+    assert "controlnet_0_model" not in widgets
+    assert ".safetensors" not in widgets["controlnet_0"]
+    assert widgets["controlnet_0"] == "Module: canny, Model: [d14c016b]"
+
+
+def test_one_model_is_one_asset_however_the_field_spelled_it():
+    """The flat spelling and the compound one must file the same row.
+
+    `ControlNet Model: x` and `ControlNet 0: "... Model: x ..."` name one file
+    on disk. Filing `x` for one and `x.safetensors` for the other is two rows
+    for one model, so forgetting either leaves the other, and only one matches
+    a shelf filename. `Module` and `upscaler` keep what A1111 wrote: those name
+    a method as often as a file.
+    """
+    flat = A1111_FIELDS + ", ControlNet Model: control_x [d14c016b]"
+    compound = A1111_FIELDS + ', ControlNet 0: "Model: control_x [d14c016b]"'
+
+    def model_names(fields):
+        nodes = reduce_a1111({"png": {"parameters": infotext(fields=fields)}}).nodes
+        return {name for _, name in assets_from_reduction(nodes)}
+
+    assert "control_x.safetensors" in model_names(flat)
+    assert "control_x.safetensors" in model_names(compound)
+    # A method is not a file, and `none` is not a model anybody can forget.
+    kept = A1111_FIELDS + ", ControlNet Module: canny, Hires upscaler: Latent"
+    assert {"canny", "latent"} <= model_names(kept)
+    assert not {
+        n for n in model_names(kept) if n in ("canny.safetensors", "latent.safetensors")
+    }
+    # Not under any spelling: without the guard `_asset_name` makes it
+    # `none.safetensors`, which is a ghost row offering to forget nothing.
+    assert not {
+        n
+        for n in model_names(A1111_FIELDS + ", ControlNet Model: None")
+        if n.startswith("none")
+    }
+
+
+def test_a_line_after_the_fields_line_does_not_lose_the_picture():
+    """The fields line is the last one that parses, not the last line."""
+    appended = infotext() + "\nTemplate: something else"
+    assert a1111_keys(appended) == a1111_keys(infotext())
+
+
+def test_a_hash_with_no_name_invents_no_asset():
+    """`Refiner: [abcdef0123]` must not file an asset called `.safetensors`."""
+    fields = A1111_FIELDS + ", Refiner: [abcdef0123]"
+    nodes = reduce_a1111({"png": {"parameters": infotext(fields=fields)}}).nodes
+    assets = assets_from_reduction(nodes)
+    assert ("ckpt_name", ".safetensors") not in assets
+    assert ("ckpt_sha256", "abcdef0123") in assets
+
+
+def test_a_legacy_8_digit_hash_is_not_kept():
+    old = A1111_FIELDS.replace("Model hash: 0123456789", "Model hash: 01234567")
+    nodes = reduce_a1111({"png": {"parameters": infotext(fields=old)}}).nodes
+    assert ("ckpt_sha256", "01234567") not in assets_from_reduction(nodes)
+
+
+def test_a_short_hash_names_a_digest_only_when_one_starts_with_it():
+    digests = sorted(["0123456789" + "a" * 54, "0123456789" + "b" * 54, "f" * 64])
+    assert digests_with_prefix("f" * 12, digests) == ["f" * 64]
+    # Only the lengths A1111 writes: a partial value elsewhere names nothing.
+    assert digests_with_prefix("f" * 11, digests) == []
+    assert len(digests_with_prefix("0123456789", digests)) == 2
+    assert digests_with_prefix("0123456789aa", digests) == [digests[0]]
+    assert digests_with_prefix("eeeeeeeeee", digests) == []
+    # Blank or too short names nothing, even on a one-model shelf.
+    assert digests_with_prefix("", ["f" * 64]) == []
+    assert digests_with_prefix("ffff", ["f" * 64]) == []
+
+
+# ---------------------------------------------------------------------------
+# #1438 - the workflow sets the shelf's card grid draws
+# ---------------------------------------------------------------------------
+
+
+def sets_of(store):
+    """``fetch_workflow_sets`` keyed by combination, so an assertion names files."""
+    found = fetch_workflow_sets(store.hub, SimpleNamespace(db=store.vault))
+    return {
+        frozenset(member["name"] for member in combination["models"]): combination
+        for combination in found["combinations"]
+    }, found["no_set"]
+
+
+def picture_from(store, name, graph):
+    """One kept picture made by *graph*, read for its recipe keys."""
+    written = write_png(Path(store.image_root), name, api=graph)
+    picture_id = add_picture(store, written)
+    run_extraction(store, [picture_id])
+    return picture_id
+
+
+@pytest.fixture
+def set_shelf(store):
+    """Two checkpoints, a shared text encoder, two VAEs and one LoRA.
+
+    The same shape ``companions_shelf`` uses, written against the module's
+    vault-bearing ``store`` because a set is counted in pictures and that
+    fixture has none. A fixture rather than a helper because ``model`` is NOT
+    in this section's wipe (``WORKFLOW_WIPE_ORDER``): a second call would trip
+    the adapter's UNIQUE sha256, and rows left standing would put a previous
+    test's files in the next test's ``no_set``.
+    """
+    ids = {
+        name: shelf_file(store.hub, f"{name}.safetensors", kind)
+        for name, kind in (
+            ("ckpt_a", "checkpoint"),
+            ("ckpt_b", "checkpoint"),
+            ("vae_a", "vae"),
+            ("vae_b", "vae"),
+            ("clip_shared", "text_encoder"),
+            ("lora_a", "adapter"),
+            ("never_run", "checkpoint"),
+        )
+    }
+    try:
+        yield ids
+    finally:
+        with store.hub.transaction() as conn:
+            conn.execute("DELETE FROM model")
+
+
+def test_a_set_is_the_files_one_recipe_bound_and_a_model_is_in_every_set_it_ran_in(
+    store, set_shelf
+):
+    """The grid's whole claim: a card is one combination, and membership overlaps.
+
+    `clip_shared` runs in both sets and `vae_a` in one, so the same text encoder
+    is a member of two cards while nothing about it is stored twice.
+    """
+    ids = set_shelf
+    picture_from(
+        store,
+        "set-a.png",
+        generation_graph(
+            "ckpt_a.safetensors", "vae_a.safetensors", "clip_shared.safetensors"
+        ),
+    )
+    picture_from(
+        store,
+        "set-b.png",
+        generation_graph(
+            "ckpt_b.safetensors", "vae_b.safetensors", "clip_shared.safetensors"
+        ),
+    )
+
+    combinations, no_set = sets_of(store)
+
+    a = frozenset(
+        {"ckpt_a.safetensors", "vae_a.safetensors", "clip_shared.safetensors"}
+    )
+    b = frozenset(
+        {"ckpt_b.safetensors", "vae_b.safetensors", "clip_shared.safetensors"}
+    )
+    assert set(combinations) == {a, b}
+    assert combinations[a]["picture_count"] == 1 and combinations[a]["recipes"] == 1
+    # The checkpoint is the file the set is named after, whatever it sorts as.
+    assert combinations[a]["models"][0]["name"] == "ckpt_a.safetensors"
+    assert combinations[a]["key"] == ",".join(
+        str(i) for i in sorted([ids["ckpt_a"], ids["vae_a"], ids["clip_shared"]])
+    )
+    # Membership is not exclusive: one file, two cards.
+    assert (
+        sum(
+            1
+            for combination in combinations.values()
+            if any(m["id"] == ids["clip_shared"] for m in combination["models"])
+        )
+        == 2
+    )
+    # And the absence of evidence is drawn rather than dropped.
+    assert ids["never_run"] in no_set
+    assert ids["ckpt_a"] not in no_set
+
+
+def test_two_recipes_naming_the_same_files_are_one_set_with_both_witnesses(
+    store, set_shelf
+):
+    """Two graphs, the same three files: one card carrying both witnesses.
+
+    The second graph drops the negative-prompt node and rewires the sampler,
+    which forks the recipe (``test_node_deleted_forks_the_recipe``) without
+    touching a single filename. The combination is the fact and the recipe is
+    one witness of it, so the counts add up rather than the card splitting.
+    """
+    graph = generation_graph(
+        "ckpt_a.safetensors", "vae_a.safetensors", "clip_shared.safetensors"
+    )
+    first = picture_from(store, "same-1.png", graph)
+    rewired = json.loads(json.dumps(graph))
+    del rewired["3"]
+    rewired["5"]["inputs"]["negative"] = ["2", 0]
+    second = picture_from(store, "same-2.png", rewired)
+    # The second picture scores higher, so the cover order below is a real
+    # ordering rather than the order the two witnesses happened to be read in.
+    store.vault.run_task(
+        lambda session: (
+            setattr(session.get(Picture, second), "score", 5),
+            session.commit(),
+        )
+    )
+
+    combinations, _ = sets_of(store)
+
+    key = frozenset(
+        {"ckpt_a.safetensors", "vae_a.safetensors", "clip_shared.safetensors"}
+    )
+    assert set(combinations) == {key}
+    assert combinations[key]["recipes"] == 2
+    assert combinations[key]["picture_count"] == 2
+    # Covers come back as `CoverCandidate` rows, best first, pooled across the
+    # combination's witnesses - the route turns them into URLs. Identity rather
+    # than truthiness: a list built from the wrong recipe, or sorted the wrong
+    # way, is also non-empty.
+    assert [cover.picture_id for cover in combinations[key]["covers"]] == [
+        second,
+        first,
+    ]
+
+
+def test_adding_a_lora_is_a_second_set_not_a_change_to_the_first(store, set_shelf):
+    """Two sets, because a card is the files a picture proves ran together - the
+    fold that puts them on one stack is the reader's, not the data's."""
+    picture_from(
+        store,
+        "plain.png",
+        generation_graph(
+            "ckpt_a.safetensors", "vae_a.safetensors", "clip_shared.safetensors"
+        ),
+    )
+    picture_from(
+        store,
+        "with-lora.png",
+        generation_graph(
+            "ckpt_a.safetensors",
+            "vae_a.safetensors",
+            "clip_shared.safetensors",
+            lora="lora_a.safetensors",
+        ),
+    )
+
+    combinations, _ = sets_of(store)
+
+    plain = frozenset(
+        {"ckpt_a.safetensors", "vae_a.safetensors", "clip_shared.safetensors"}
+    )
+    assert set(combinations) == {plain, plain | {"lora_a.safetensors"}}
+
+
+def test_a_workflow_whose_own_graph_lacks_the_missing_file_is_not_named(
+    store, set_shelf, monkeypatch
+):
+    """A workflow lists a missing file only where its fix can be made: its
+    base graph loads it. A recipe from another of its topologies does not make
+    the workflow a place to fix it, and the fix route would refuse it."""
+    picture_from(
+        store,
+        "gone.png",
+        generation_graph(
+            "Gone-Base.safetensors", "vae_a.safetensors", "clip_shared.safetensors"
+        ),
+    )
+    support = frozenset({"vae_a.safetensors", "clip_shared.safetensors"})
+    monkeypatch.setattr(
+        workflow_card_reads, "model_fix_labels", lambda hub, topology, was, kind: []
+    )
+
+    combinations, _ = sets_of(store)
+
+    assert combinations[support]["missing"] == [
+        {"name": "gone-base.safetensors", "workflow_ids": []}
+    ]
+
+
+def test_a_set_whose_checkpoint_is_off_the_shelf_is_named_after_the_missing_file(
+    store, set_shelf
+):
+    """A recipe loading a checkpoint the shelf lacks resolves to its VAE and
+    encoder alone. The set says which base it ran on rather than leading with
+    the VAE, and a model fix on that name folds it into the replacement's set.
+    """
+    ids = set_shelf
+    picture_from(
+        store,
+        "gone.png",
+        generation_graph(
+            "Gone-Base.safetensors", "vae_a.safetensors", "clip_shared.safetensors"
+        ),
+    )
+    support = frozenset({"vae_a.safetensors", "clip_shared.safetensors"})
+
+    combinations, _ = sets_of(store)
+
+    assert set(combinations) == {support}
+    found = combinations[support]
+    recipe = store.hub.fetchone(
+        "SELECT structural_hash, topology_hash FROM workflow_recipe"
+    )
+    topology = recipe["topology_hash"]
+    workflow = workflow_of_variant(store.hub, recipe["structural_hash"])
+    # The link the tray offers: a real workflow, or the note has no way to the fix.
+    assert workflow is not None
+    assert found["missing"] == [
+        {"name": "gone-base.safetensors", "workflow_ids": [workflow]}
+    ]
+    assert found["key"].endswith('+["gone-base.safetensors"]')
+
+    with store.hub.transaction() as conn:
+        conn.execute(
+            "INSERT INTO workflow_model_fix (topology_hash, slot_label, was_norm, "
+            "now_norm, was_name, now_name, slot_kind) "
+            "VALUES (?, 'any', 'gone-base.safetensors', 'ckpt_b.safetensors', "
+            "'Gone-Base.safetensors', 'ckpt_b.safetensors', 'checkpoint')",
+            (topology,),
+        )
+    try:
+        combinations, _ = sets_of(store)
+    finally:
+        with store.hub.transaction() as conn:
+            conn.execute("DELETE FROM workflow_model_fix")
+
+    fixed = support | {"ckpt_b.safetensors"}
+    assert set(combinations) == {fixed}
+    assert combinations[fixed]["missing"] == []
+    assert combinations[fixed]["models"][0]["id"] == ids["ckpt_b"]
+
+
+def test_a_recipe_naming_only_a_missing_checkpoint_is_still_a_set(store, set_shelf):
+    """An all-in-one checkpoint off the shelf: no shelf row resolves at all, and
+    the set is still drawn, named after the file, with no members."""
+    graph = generation_graph(
+        "all-in-one.safetensors", "vae_a.safetensors", "clip_shared.safetensors"
+    )
+    # Its VAE and encoder come from the checkpoint itself.
+    del graph["8"], graph["9"]
+    graph["2"]["inputs"]["clip"] = ["1", 1]
+    graph["3"]["inputs"]["clip"] = ["1", 1]
+    graph["6"]["inputs"]["vae"] = ["1", 2]
+    picture_from(store, "all-in-one.png", graph)
+
+    found = fetch_workflow_sets(store.hub, SimpleNamespace(db=store.vault))
+
+    (only,) = found["combinations"]
+    assert only["models"] == []
+    assert [m["name"] for m in only["missing"]] == ["all-in-one.safetensors"]
+    assert only["picture_count"] == 1
+
+
+def test_a_vae_sharing_the_missing_checkpoints_name_does_not_hide_it(store, set_shelf):
+    """The base-name lookup is kind-aware: a VAE whose file happens to share the
+    checkpoint's basename is not that checkpoint."""
+    shelf_file(store.hub, "twin.safetensors", "vae")
+    picture_from(
+        store,
+        "twin.png",
+        generation_graph(
+            "twin.safetensors", "vae_a.safetensors", "clip_shared.safetensors"
+        ),
+    )
+
+    combinations, _ = sets_of(store)
+
+    (only,) = combinations.values()
+    assert [m["name"] for m in only["missing"]] == ["twin.safetensors"]
+
+
+def test_a_combination_with_no_base_model_is_no_set(store, set_shelf):
+    """A recipe naming no base model at all is not drawn as a set led by its
+    VAE or LoRA: the combination is still served, for *Works with*, but its
+    files count as in no set rather than vanishing."""
+    ids = set_shelf
+    graph = generation_graph(
+        "ckpt_a.safetensors", "vae_b.safetensors", "clip_shared.safetensors"
+    )
+    # A custom loader whose field is no base-model widget PixlStash knows,
+    # loading a file the shelf does not hold: only the VAE and encoder resolve.
+    graph["1"]["class_type"] = "SomeCustomLoader"
+    graph["1"]["inputs"] = {"model_file": "elsewhere.safetensors"}
+    picture_from(store, "headless.png", graph)
+
+    combinations, no_set = sets_of(store)
+
+    loose = frozenset({"vae_b.safetensors", "clip_shared.safetensors"})
+    assert set(combinations) == {loose}
+    assert combinations[loose]["missing"] == []
+    assert ids["vae_b"] in no_set
+
+
+def test_a_recipe_with_a_base_on_the_shelf_reports_nothing_missing(store, set_shelf):
+    """A second base-model name the shelf lacks (a refiner, or an A1111 recipe's
+    guessed filename beside the digest that did resolve) does not make the
+    set's own checkpoint look missing, nor split its combination."""
+    graph = generation_graph(
+        "ckpt_a.safetensors", "vae_a.safetensors", "clip_shared.safetensors"
+    )
+    graph["11"] = {
+        "class_type": "UNETLoader",
+        "inputs": {"unet_name": "absent-refiner.safetensors"},
+    }
+    picture_from(store, "refined.png", graph)
+
+    combinations, _ = sets_of(store)
+
+    plain = frozenset(
+        {"ckpt_a.safetensors", "vae_a.safetensors", "clip_shared.safetensors"}
+    )
+    assert set(combinations) == {plain}
+    assert combinations[plain]["missing"] == []
+
+
+def test_a_recipe_whose_pictures_are_all_deleted_is_no_set_and_its_models_say_so(
+    store, set_shelf
+):
+    """The grid draws what the library HAS made. A recipe the hub still holds
+    with nothing kept behind it is not a set - and its models must then appear
+    under `no_set` rather than falling off the screen between the two."""
+    ids = set_shelf
+    picture_id = picture_from(
+        store,
+        "gone.png",
+        generation_graph(
+            "ckpt_a.safetensors", "vae_a.safetensors", "clip_shared.safetensors"
+        ),
+    )
+    store.vault.run_task(
+        lambda session: (
+            setattr(session.get(Picture, picture_id), "deleted", True),
+            session.commit(),
+        )
+    )
+
+    combinations, no_set = sets_of(store)
+
+    assert combinations == {}
+    assert {ids["ckpt_a"], ids["vae_a"], ids["clip_shared"]} <= set(no_set)
+
+
+def test_a_member_two_shelf_rows_could_be_is_flagged_rather_than_hidden(
+    store, set_shelf
+):
+    """`unknown` stays a first-class answer: the set is still drawn, and the
+    member that could be either file says so."""
+    twin_1 = shelf_file(store.hub, "twin.safetensors", "vae")
+    twin_2 = shelf_file(store.hub, "twin.safetensors", "vae")
+    picture_from(
+        store,
+        "ambiguous.png",
+        generation_graph(
+            "ckpt_a.safetensors", "twin.safetensors", "clip_shared.safetensors"
+        ),
+    )
+
+    combinations, _ = sets_of(store)
+
+    key = next(iter(combinations))
+    assert {twin_1, twin_2} <= {member["id"] for member in combinations[key]["models"]}
+    flagged = {
+        member["id"] for member in combinations[key]["models"] if member["ambiguous"]
+    }
+    assert flagged == {twin_1, twin_2}
+    # The checkpoint was named unambiguously and must not be tarred with it.
+    assert all(
+        not member["ambiguous"]
+        for member in combinations[key]["models"]
+        if member["kind"] == "checkpoint"
+    )
+
+
+def test_a_model_forgotten_between_the_two_reads_is_dropped_rather_than_raising(
+    store, set_shelf, monkeypatch
+):
+    """The race the `if member in models` guard is for, exercised rather than
+    assumed.
+
+    `fetch_workflow_sets` resolves the recipes and THEN reads the `model` table,
+    so a Forget or a folder-forget landing between the two leaves an id in a
+    recipe with no row behind it. A plain delete before the call cannot reach
+    this: the resolution reads `model` too, so the asset simply resolves to
+    nothing. The window has to be opened deliberately, and it is worth opening -
+    without the guard `name(model_id)` raises `KeyError` and the whole grid 500s
+    because one file was forgotten while somebody was looking at it.
+    """
+    ids = set_shelf
+    picture_from(
+        store,
+        "forgotten.png",
+        generation_graph(
+            "ckpt_a.safetensors", "vae_a.safetensors", "clip_shared.safetensors"
+        ),
+    )
+
+    real = model_shelf_service.resolve_recipe_models
+
+    def resolve_then_forget(hub, index=None):
+        resolved = real(hub, index)
+        with store.hub.transaction() as conn:
+            conn.execute("DELETE FROM model WHERE id = ?", (ids["vae_a"],))
+        return resolved
+
+    monkeypatch.setattr(
+        model_shelf_service, "resolve_recipe_models", resolve_then_forget
+    )
+
+    combinations, no_set = sets_of(store)
+
+    key = next(iter(combinations))
+    assert key == frozenset({"ckpt_a.safetensors", "clip_shared.safetensors"})
+    assert ids["vae_a"] not in no_set
+
+
+def test_a_digest_no_row_matches_yet_makes_the_whole_set_uncertain(store, set_shelf):
+    """The ghost reader's rule, reaching the grid: while any row waits for its
+    hash, a recipe naming a digest may name THAT row, so every member of the
+    combination is a guess about which files ran - including the ones matched by
+    an exact filename."""
+    set_shelf
+    graph = generation_graph(
+        "ckpt_a.safetensors", "vae_a.safetensors", "clip_shared.safetensors"
+    )
+    graph["11"] = {
+        "class_type": "PixlStashCheckpointLoader",
+        "inputs": {"ckpt_sha256": "ef" * 32},
+    }
+    picture_from(store, "pending-hash.png", graph)
+
+    combinations, _ = sets_of(store)
+    key = next(iter(combinations))
+    assert all(member["ambiguous"] for member in combinations[key]["models"])
+
+    # Every row hashed: the digest now matches nothing on the shelf and proves
+    # nothing is missing, so the same files are reported as certain.
+    with store.hub.transaction() as conn:
+        conn.execute(
+            "UPDATE model SET sha256 = printf('%064d', id) WHERE sha256 IS NULL"
+        )
+    combinations, _ = sets_of(store)
+    key = next(iter(combinations))
+    assert not any(member["ambiguous"] for member in combinations[key]["models"])
+
+
+def test_one_uncertain_witness_is_not_unmade_by_a_cleaner_one(store, set_shelf):
+    """`ambiguous` is OR-ed across the recipes behind a combination. Two graphs
+    reach the same two files, one of them through a basename two rows share; the
+    doubt has to survive the other, or a card's certainty depends on which
+    recipe the loop saw last."""
+    ids = set_shelf
+    twin = shelf_file(store.hub, "vae_a.safetensors", "vae")
+
+    # Witness one: unambiguous by construction - `twin` shares `vae_a`'s
+    # basename, so this needs a DIFFERENT pair to be the clean witness.
+    picture_from(
+        store,
+        "clean.png",
+        generation_graph(
+            "ckpt_a.safetensors", "vae_b.safetensors", "clip_shared.safetensors"
+        ),
+    )
+    # Witness two: the same THREE files by id is impossible here, so instead
+    # assert the property on the pair that IS shared - `vae_a` is now two rows.
+    picture_from(
+        store,
+        "murky.png",
+        generation_graph(
+            "ckpt_a.safetensors", "vae_a.safetensors", "clip_shared.safetensors"
+        ),
+    )
+
+    combinations, _ = sets_of(store)
+
+    murky = next(
+        card for key, card in combinations.items() if "vae_a.safetensors" in key
+    )
+    flagged = {m["id"] for m in murky["models"] if m["ambiguous"]}
+    assert flagged == {ids["vae_a"], twin}
+    clean = next(
+        card for key, card in combinations.items() if "vae_b.safetensors" in key
+    )
+    assert not any(m["ambiguous"] for m in clean["models"])
+
+
+def test_the_member_order_is_the_whole_ranking_not_only_its_head(store, set_shelf):
+    """The card's title is the first THREE members joined, so the order past the
+    head is on screen too: checkpoint, unclassified, VAE, text encoder, adapter."""
+    set_shelf
+    mystery = shelf_file(store.hub, "mystery_x.safetensors", "unknown")
+    assert mystery
+    graph = generation_graph(
+        "ckpt_a.safetensors",
+        "vae_a.safetensors",
+        "clip_shared.safetensors",
+        lora="lora_a.safetensors",
+    )
+    graph["12"] = {
+        "class_type": "LoraLoaderModelOnly",
+        "inputs": {"model": ["1", 0], "lora_name": "mystery_x.safetensors"},
+    }
+    picture_from(store, "ordered.png", graph)
+
+    combinations, _ = sets_of(store)
+
+    key = next(iter(combinations))
+    assert [m["kind"] for m in combinations[key]["models"]] == [
+        "checkpoint",
+        "unknown",
+        "vae",
+        "text_encoder",
+        "adapter",
+    ]
+
+
+def test_nothing_that_keys_a_workflow_reads_the_advisory_model_names():
+    """Recovered model names never enter a hash or a card key (#1440 plan §3.4)."""
+    for module in (workflow_hash, workflow_identity, hub_workflows, workflow_cards):
+        source = Path(module.__file__).read_text("utf-8")
+        assert "loaded_model_widgets" not in source, module.__name__

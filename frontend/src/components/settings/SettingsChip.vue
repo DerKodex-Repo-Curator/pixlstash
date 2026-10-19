@@ -12,9 +12,10 @@
     <button
       type="button"
       class="s-chip__remove"
-      title="Remove"
+      aria-label="Remove"
       @click="emit('remove')"
     >
+      <Tooltip text="Remove" activator="parent" :describe="false" />
       <v-icon size="15">mdi-close</v-icon>
     </button>
   </div>
@@ -22,6 +23,7 @@
 
 <script setup>
 import { VIcon } from "vuetify/components";
+import Tooltip from "../widgets/Tooltip.vue";
 
 defineProps({
   label: { type: String, default: "" },
@@ -70,7 +72,7 @@ const emit = defineEmits(["remove"]);
 }
 
 .s-chip__remove:hover {
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
   background: var(--hover-wash);
 }
 </style>

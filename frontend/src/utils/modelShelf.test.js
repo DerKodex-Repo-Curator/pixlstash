@@ -12,15 +12,22 @@ import {
   deletableModels,
   undeletableNotice,
   trashName,
+  companionsSentences,
   RING_STYLES,
   bandGroups,
   bandProjection,
   bandUsage,
+  baseModelCell,
   baseModelKey,
   capabilityLabel,
   collapseStacks,
   copyPathsTitle,
+  modelFileTitle,
   dateColumnKey,
+  quantBadge,
+  recordedTriggerWords,
+  triggerChip,
+  quantFromFilename,
   modelDate,
   withEmptyFolders,
   cleanAssetName,
@@ -99,6 +106,177 @@ describe("deriveModelName", () => {
   });
 });
 
+// (filename, the name a row shows, the canonical quant id or null).
+//
+// **Mirrors `QUANT_VOCABULARY` in `tests/test_model_file_classification.py`
+// case for case.** That is what the parity guarantee between the two halves
+// of the parser means: the shelf derives its names here and the workflow card
+// is served them from there, so a vocabulary the two disagree about is two
+// spellings of one model, a screen apart.
+const QUANT_VOCABULARY = [
+  ["model_fp32.safetensors", "model", "fp32"],
+  ["model_f32.safetensors", "model", "fp32"],
+  ["model_fp16.safetensors", "model", "fp16"],
+  ["z_image_turbo_bf16.safetensors", "z image turbo", "bf16"],
+  ["t5xxl_fp8_e4m3fn.safetensors", "t5xxl", "fp8_e4m3"],
+  ["clip_l_fp8_e5m2.safetensors", "clip l", "fp8_e5m2"],
+  ["model_fp8.safetensors", "model", "fp8"],
+  ["flux_nvfp4_awq.safetensors", "flux", "nvfp4"],
+  ["model_nf4.safetensors", "model", "nf4"],
+  ["model_int8.safetensors", "model", "int8"],
+  ["model_i4.safetensors", "model", "int4"],
+  ["flux1-dev-Q4_K_M.gguf", "flux1 dev", "q4_k_m"],
+  ["Qwen_Image-Q6_K.gguf", "Qwen Image", "q6_k"],
+  ["flux_q8_0.gguf", "flux", "q8_0"],
+  ["flux1-dev-IQ4_XS.gguf", "flux1 dev", "iq4_xs"],
+  ["flux1-dev-IQ3_M.gguf", "flux1 dev", "iq3_m"],
+  ["Qwen-Image-IQ2_XXS.gguf", "Qwen Image", "iq2_xxs"],
+  ["Qwen_Image-Q3_K_XL.gguf", "Qwen Image", "q3_k_xl"],
+  ["flux_iq4_nl.gguf", "flux", "iq4_nl"],
+  ["model-TQ1_0.gguf", "model", "tq1_0"],
+  ["model-TQ2_0.gguf", "model", "tq2_0"],
+  ["model-MXFP4.gguf", "model", "mxfp4"],
+  ["umt5_xxl_fp8_e4m3fn_scaled.safetensors", "umt5 xxl", "fp8_e4m3"],
+  ["model-step00004500-fp16.safetensors", "model", "fp16"],
+  // Mixed case, because every shelf fixture in this repo is lowercase and a
+  // case-folding bug in the lookup would otherwise pass the whole suite.
+  ["Flux1-Dev-FP8_E4M3FN.safetensors", "Flux1 Dev", "fp8_e4m3"],
+  ["Clementine_BF16.safetensors", "Clementine", "bf16"],
+];
+
+// Names that must come back untouched: `scaled`, `fast`, `m`, `l`, `1` and `0`
+// are ordinary tokens in real model names.
+const QUANT_NON_VOCABULARY = [
+  ["some_model_scaled.safetensors", "some model scaled"],
+  ["clementine_fast.safetensors", "clementine fast"],
+  ["clementine_m.safetensors", "clementine m"],
+  ["sdxl_1.safetensors", "sdxl 1"],
+  ["sd_xl_base_1.0.safetensors", "sd xl base 1.0"],
+  ["portrait_mix_v2.safetensors", "portrait mix v2"],
+  ["juggernaut_xl_v9.safetensors", "juggernaut xl v9"],
+  ["Anything-XL.safetensors", "Anything XL"],
+  // `constructor` is on every Object, so a bare `in` lookup ate it as a quant.
+  ["clementine_constructor.safetensors", "clementine constructor"],
+];
+
+describe("the quant postfix", () => {
+  it.each(QUANT_VOCABULARY)("%s reads as %s", (filename, name, quant) => {
+    expect(deriveModelName(filename)).toBe(name);
+    expect(quantFromFilename(filename)).toBe(quant);
+  });
+
+  it.each(QUANT_NON_VOCABULARY)("%s keeps its name", (filename, name) => {
+    // Without the "at least one real quant token" guard,
+    // `some_model_scaled` silently becomes `some model`.
+    expect(deriveModelName(filename)).toBe(name);
+    expect(quantFromFilename(filename)).toBe(null);
+  });
+
+  it("falls back to the filename when the name was only a quant", () => {
+    expect(deriveModelName("nvfp4_awq.safetensors")).toBe("");
+    expect(modelName({ filename: "nvfp4_awq.safetensors" })).toEqual({
+      text: "nvfp4_awq.safetensors",
+      state: "from-file",
+    });
+  });
+});
+
+describe("triggerChip", () => {
+  it("draws nothing for a model with no trigger word at all", () => {
+    expect(triggerChip({ trigger_words: [] })).toBeNull();
+    // A row from before the field was a list, or one that never carried it.
+    expect(triggerChip({})).toBeNull();
+    expect(triggerChip({ trigger_words: "ohwx" })).toBeNull();
+  });
+
+  it("shows the first recorded word and counts the rest", () => {
+    expect(
+      triggerChip({ trigger_words: ["ohwx"], trigger_words_source: "recorded" }),
+    ).toEqual({ label: "ohwx", title: "Trigger word: ohwx", isDefault: false });
+    expect(
+      triggerChip({
+        trigger_words: ["ohwx", "woman", "portrait"],
+        trigger_words_source: "recorded",
+      }),
+    ).toEqual({
+      label: "ohwx +2",
+      title: "Trigger words: ohwx, woman, portrait",
+      isDefault: false,
+    });
+  });
+
+  it("caps the hover list of a file that records its whole tag table", () => {
+    const words = Array.from({ length: 40 }, (_, i) => `tag${i}`);
+    const chip = triggerChip({
+      trigger_words: words,
+      trigger_words_source: "recorded",
+    });
+    expect(chip.label).toBe("tag0 +39");
+    expect(chip.title).toContain("tag11 and 28 more");
+    expect(chip.title).not.toContain("tag12");
+  });
+
+  it("marks a person's name as the default it is, and never as on record", () => {
+    const row = { trigger_words: ["Ada"], trigger_words_source: "character" };
+    const chip = triggerChip(row);
+    expect(chip.isDefault).toBe(true);
+    expect(chip.label).toBe("Ada");
+    expect(chip.title).toContain("the name of the person");
+    // What a bulk write counts as replaced: a default is not stored, so
+    // writing over it loses nothing.
+    expect(recordedTriggerWords(row)).toEqual([]);
+    expect(
+      recordedTriggerWords({
+        trigger_words: ["ohwx"],
+        trigger_words_source: "recorded",
+      }),
+    ).toEqual(["ohwx"]);
+  });
+});
+
+describe("quantBadge", () => {
+  it("turns the served id into words, not the raw dtype", () => {
+    // The API serves `fp8_e4m3`, folded from the header's own `f8_e4m3`. A
+    // chip reading the dtype is the drift this map exists to stop.
+    expect(quantBadge("fp8_e4m3")).toEqual({
+      label: "FP8",
+      title: "FP8 E4M3",
+    });
+    expect(quantBadge("bf16")).toEqual({ label: "BF16", title: "bfloat16" });
+  });
+
+  it("shows a GGUF level verbatim, because the level is the name", () => {
+    expect(quantBadge("q4_k_m")).toEqual({
+      label: "Q4_K_M",
+      title: "GGUF Q4_K_M quantisation",
+    });
+  });
+
+  it("keeps current TQ GGUF types distinguishable", () => {
+    expect(quantBadge("tq1_0")).toEqual({
+      label: "TQ1_0",
+      title: "GGUF TQ1_0 quantisation",
+    });
+    expect(quantBadge("mxfp4")).toEqual({
+      label: "MXFP4",
+      title: "mixed FP4",
+    });
+  });
+
+  it("shows an id it has never seen rather than swallowing it", () => {
+    expect(quantBadge("f64")).toEqual({ label: "F64", title: "Stored as F64" });
+  });
+
+  it("gives a model with no recorded precision NO badge", () => {
+    // Null and not an empty chip: a blank badge reads as a rendering gap and
+    // an `UNKNOWN` one reads like a fact nobody established.
+    expect(quantBadge(null)).toBe(null);
+    expect(quantBadge("")).toBe(null);
+    expect(quantBadge("   ")).toBe(null);
+    expect(quantBadge(undefined)).toBe(null);
+  });
+});
+
 describe("modelName", () => {
   it("prefers the name somebody gave it, and says nobody did", () => {
     expect(modelName({ display_name: "Clementine", filename: "x.st" })).toEqual(
@@ -115,6 +293,22 @@ describe("modelName", () => {
         filename: "Foxglove_Char_000000250.safetensors",
       }),
     ).toEqual({ text: "Foxglove Char", state: "derived" });
+  });
+
+  it("shows a checkpoint's matched base-model label, still as ours", () => {
+    // Drawn as `derived`: the label is our reading of the filename, not a
+    // name anybody chose, so the "needs a name" queue is untouched.
+    expect(
+      modelName({
+        display_name: null,
+        filename: "flux1-dev-fp8.safetensors",
+        matched_name: "FLUX.1 dev",
+      }),
+    ).toEqual({ text: "FLUX.1 dev", state: "derived" });
+    // A name somebody gave still wins over it.
+    expect(
+      modelName({ display_name: "My Flux", matched_name: "FLUX.1 dev" }).text,
+    ).toBe("My Flux");
   });
 
   it("separates the file's own string from one we made", () => {
@@ -199,6 +393,41 @@ describe("formatModelSize", () => {
   it("says nothing rather than zero when the size is unknown", () => {
     expect(formatModelSize(null)).toBe("");
     expect(formatModelSize(undefined)).toBe("");
+  });
+});
+
+describe("modelFileTitle", () => {
+  const SHA = "ab12".repeat(16);
+
+  it("puts the whole hash under the paths", () => {
+    expect(
+      modelFileTitle({
+        sha256: SHA,
+        locations: [{ folder_path: "/home/me/models", relpath: "a.st" }],
+      }),
+    ).toBe(`/home/me/models/a.st\nSHA-256: ${SHA}`);
+  });
+
+  it("is the hash alone for a set member, which has no locations", () => {
+    expect(modelFileTitle({ sha256: SHA })).toBe(`SHA-256: ${SHA}`);
+  });
+
+  it("says a checkpoint is still waiting for its hash", () => {
+    expect(modelFileTitle({ sha256: null, hash_pending: true })).toBe(
+      "SHA-256: not read yet",
+    );
+  });
+
+  it("does not say a row that never gets a hash is waiting for one", () => {
+    // An engine, or a cached Hugging Face repo: a directory nothing hashes.
+    expect(modelFileTitle({ sha256: null, hash_pending: false })).toBe("");
+  });
+
+  it("claims nothing about a set member whose shelf row is not loaded", () => {
+    // Such a member has no `sha256` field at all; "not read yet" would be a
+    // statement about the hasher that nothing here knows to be true.
+    expect(modelFileTitle({ id: 3, filename: "a.st" })).toBe("");
+    expect(modelFileTitle(undefined)).toBe("");
   });
 });
 
@@ -328,6 +557,24 @@ describe("locationState", () => {
     ).toBe("missing");
     // ...and so does a state this build has never heard of.
     expect(locationState([{ state: "banana" }])).toBe("missing");
+  });
+
+  it("does not call a copy the reader removed themselves a fault", () => {
+    // #1439: a copy removed to keep one of several has a row ON PURPOSE - it is
+    // what keeps a recipe naming that file resolving to the model - so drawing
+    // it as `missing` would report a fault about the tidy-up the reader just
+    // asked for. This is what the folder axis hands in: that draw stands for the
+    // removed copy alone.
+    expect(locationState([{ state: "removed" }])).toBe("removed");
+    // A model that still has a copy is simply fine...
+    expect(locationState([{ state: "removed" }, { state: "present" }])).toBe(
+      "present",
+    );
+    // ...and a genuinely missing copy beside a removed one is still a fault,
+    // because reporting the pair as a tidy-up would hide one.
+    expect(locationState([{ state: "removed" }, { state: "missing" }])).toBe(
+      "missing",
+    );
   });
 });
 
@@ -981,6 +1228,80 @@ describe("baseModelKey", () => {
     );
     expect(baseModelKey(undefined)).toBe("");
   });
+
+  it("prefers the identified label, which is what the server filters on", () => {
+    expect(
+      baseModelKey({
+        base_model: null,
+        base_model_folded: null,
+        base_model_canonical: "Illustrious XL",
+      }),
+    ).toBe("Illustrious XL");
+    // A typo the server read as Illustrious groups under Illustrious, not
+    // under its own misspelling.
+    expect(
+      baseModelKey({
+        base_model: "Ilustrius",
+        base_model_folded: null,
+        base_model_canonical: "Illustrious XL",
+      }),
+    ).toBe("Illustrious XL");
+  });
+});
+
+describe("baseModelCell", () => {
+  it("shows what the file or a person said, untagged", () => {
+    for (const source of ["declared", "user"]) {
+      expect(
+        baseModelCell({
+          base_model: "sdxl_base_v1-0",
+          base_model_canonical: "SDXL 1.0",
+          base_model_source: source,
+        }),
+      ).toEqual({ text: "sdxl_base_v1-0", guess: null });
+    }
+    // modelspec declared it, and there is no raw string to show.
+    expect(
+      baseModelCell({
+        base_model: null,
+        base_model_canonical: "SDXL 1.0",
+        base_model_source: "declared",
+      }),
+    ).toEqual({ text: "SDXL 1.0", guess: null });
+  });
+
+  it("tags every guess and shows the label, not the raw string", () => {
+    for (const source of ["filename", "filename_fuzzy"]) {
+      const cell = baseModelCell({
+        base_model: null,
+        base_model_canonical: "Sana",
+        base_model_source: source,
+      });
+      expect(cell.text).toBe("Sana");
+      expect(cell.guess).toMatch(/filename/);
+    }
+    const typo = baseModelCell({
+      base_model: "Ilustrius",
+      base_model_canonical: "Illustrious XL",
+      base_model_source: "declared_fuzzy",
+    });
+    expect(typo.text).toBe("Illustrious XL");
+    expect(typo.guess).toContain("Ilustrius");
+  });
+
+  it("is empty when nothing is recorded, including a cleared guess", () => {
+    expect(baseModelCell({ base_model: null })).toEqual({
+      text: "",
+      guess: null,
+    });
+    expect(
+      baseModelCell({
+        base_model: null,
+        base_model_canonical: null,
+        base_model_source: "user",
+      }),
+    ).toEqual({ text: "", guess: null });
+  });
 });
 
 describe("importReceipt", () => {
@@ -1216,6 +1537,88 @@ describe("the generated mark's contrast", () => {
     expect(
       contrastRatio(mark.ink, hslToHex(mark.color)),
     ).toBeGreaterThanOrEqual(4.5);
+  });
+});
+
+describe("the generated mark's initials", () => {
+  const initials = (display_name) => generatedMark({ display_name }).initials;
+
+  it("skips prepositions between words", () => {
+    expect(initials("World of Wordcraft")).toBe("WW");
+    expect(initials("Lord_Of_The_Rings")).toBe("LR");
+    expect(initials("image-to-video")).toBe("IV");
+  });
+
+  it("keeps a leading one, which is part of the name", () => {
+    expect(initials("In-Context LoRA")).toBe("IC");
+  });
+
+  it("never skips its way down to a single word", () => {
+    expect(initials("The Thing")).toBe("TT");
+    expect(initials("x-in")).toBe("XI");
+    expect(initials("of the")).toBe("OT");
+  });
+
+  it("matches whole words only", () => {
+    expect(initials("Forest Inpaint")).toBe("FI");
+  });
+
+  it("takes letters from words that start with one", () => {
+    // A number is the version, never an initial: the old rule drew the first
+    // of these as S5.
+    expect(initials("sd3.5 large controlnet canny")).toBe("SL");
+    expect(initials("Stable Diffusion 3.5-Large")).toBe("SD");
+    expect(initials("Wan 2.2 high noise")).toBe("WH");
+    // One lettered word gives its first two letters, never a digit.
+    expect(initials("SDXL 1.0")).toBe("SD");
+    expect(initials("flux1")).toBe("FL");
+    expect(initials("4x-UltraSharp")).toBe("UL");
+  });
+
+  it("takes a letter outside the BMP whole, never half of one", () => {
+    expect(initials("𝐀pple 𝐁anana")).toBe("𝐀𝐁");
+    expect(initials("𝐀𝐁𝐂")).toBe("𝐀𝐁");
+    expect(initials("1😀")).toBe("1😀");
+  });
+});
+
+describe("the generated mark's version tab", () => {
+  const version = (display_name) => generatedMark({ display_name }).version;
+
+  it("keeps the dot of an x.y version", () => {
+    expect(version("Stable Diffusion 3.5-Large")).toBe("3.5");
+    expect(version("sd3.5 large controlnet canny")).toBe("3.5");
+    expect(version("Wan 2.2 high noise")).toBe("2.2");
+    expect(version("SDXL 1.0")).toBe("1.0");
+    expect(version("v1.5.2 base")).toBe("1.5");
+    // The whole minor: one digit of it names a version the file is not.
+    expect(version("Model 1.10")).toBe("1.10");
+    expect(version("Model 0.05")).toBe("0.05");
+    // Past two digits it is a date or a counter, and only the major is true.
+    expect(version("Flux 2.2025-10-17")).toBe("2");
+    expect(version("lora_1.000002750")).toBe("1");
+  });
+
+  it("cuts any other first number to two digits", () => {
+    expect(version("flux1 dev")).toBe("1");
+    expect(version("Qwen Image Edit 2511")).toBe("25");
+    expect(version("Juggernaut XL v9 and 10")).toBe("9");
+    // A two-digit major already fills the tab, so its minor is dropped.
+    expect(version("Model 12.5")).toBe("12");
+  });
+
+  it("is empty when the name carries no number, so no tab is drawn", () => {
+    expect(version("World of Wordcraft")).toBe("");
+  });
+
+  it("skips a zero-padded counter, which is not a version", () => {
+    // A file whose whole name is a training index reads as its raw filename,
+    // which would otherwise put "00" on the tab.
+    expect(generatedMark({ filename: "000002750.safetensors" }).version).toBe(
+      "",
+    );
+    expect(version("lora 0042 v2")).toBe("2");
+    expect(version("SDXL 0.9")).toBe("0.9");
   });
 });
 
@@ -1752,6 +2155,69 @@ describe("trashName", () => {
     expect(trashName({ userAgent: "Mozilla/5.0 (Macintosh)" })).toBe("Trash");
     // No navigator at all (a worker, an old jsdom) still names something.
     expect(trashName(null)).toBe("Trash");
+  });
+});
+
+describe("companionsSentences", () => {
+  const none = {
+    orphaned: [],
+    shared: [],
+    unknown: [],
+    in_use: [],
+    no_evidence: [],
+  };
+  const named = (...names) => names.map((name, id) => ({ id, name }));
+
+  it("says nothing when the delete affects nothing it knows of", () => {
+    expect(companionsSentences(none, 2)).toBe("");
+  });
+
+  it("names every bucket, and never calls an orphan safe to delete", () => {
+    const said = companionsSentences(
+      {
+        ...none,
+        in_use: named("clip_g"),
+        orphaned: named("ae", "t5xxl"),
+        shared: named("clip_l"),
+        unknown: named("twin"),
+      },
+      1,
+    );
+    expect(said).toContain("clip_g is still used by models you are keeping.");
+    expect(said).toContain(
+      "In the workflows PixlStash has read, ae and t5xxl ran only with models you are deleting; they stay on disk.",
+    );
+    expect(said).not.toContain("no workflow on record");
+    expect(said).toContain("clip_l is still used by other models.");
+    expect(said).toContain("Whether twin is still needed is unknown");
+    expect(said).not.toMatch(/safe/i);
+  });
+
+  it("cuts a long list to three names and a count", () => {
+    expect(
+      companionsSentences(
+        { ...none, orphaned: named("a", "b", "c", "d", "e") },
+        1,
+      ),
+    ).toContain("read, a, b, c and 2 more ran only");
+  });
+
+  it("says kept models with no workflow on record may still need an orphan", () => {
+    expect(
+      companionsSentences({ ...none, orphaned: named("ae"), unrecorded: 3 }, 1),
+    ).toContain(
+      "3 other base models have no workflow on record and may still need it.",
+    );
+  });
+
+  it("says when it cannot tell, rather than saying nothing", () => {
+    expect(companionsSentences({ ...none, no_evidence: [3] }, 1)).toContain(
+      "No workflow PixlStash has read uses this model",
+    );
+    expect(companionsSentences({ ...none, no_evidence: [3] }, 4)).toContain(
+      "uses 1 of these models, so which support files it needs",
+    );
+    expect(companionsSentences(null, 2)).toContain("could not check");
   });
 });
 

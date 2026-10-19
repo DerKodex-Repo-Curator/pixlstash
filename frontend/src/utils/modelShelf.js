@@ -12,6 +12,111 @@
 
 import { ICON_CARDS, SET_COLORS } from "./setAppearance";
 
+// The precision a file was stored at, written into its name. Mirrors the
+// `_QUANT_*` vocabulary in `pixlstash/utils/model_utils.py` TOKEN FOR TOKEN:
+// `cleanAssetName` has already split on `_` and `-`, so `Q4_K_M` arrives as
+// three tokens, and the shelf row's name and the badge beside it come from one
+// parser on each side rather than two that can disagree.
+//
+// Two rules and not one list. A GGUF level (`k`, `s`, `m`, `l`, `0`, `1`) is an
+// ordinary token in a real name, so it is only ever eaten as the tail of an
+// explicit `q<n>`, `iq<n>`, or `tq<n>` head; the rest (`scaled`, `awq`, `gptq`, `fast`) are
+// distinctive enough to pop next to any real quant token, and never alone.
+const GGUF_HEAD_RE = /^(?:i?q|tq)\d+$/i;
+const GGUF_LEVELS = new Set([
+  "k",
+  "s",
+  "m",
+  "l",
+  "xs",
+  "xl",
+  "xxs",
+  "nl",
+  "0",
+  "1",
+]);
+
+/** Filename spelling -> canonical id. The refinement wins where both appear. */
+const QUANT_TOKENS = {
+  fp32: "fp32",
+  f32: "fp32",
+  fp16: "fp16",
+  f16: "fp16",
+  bf16: "bf16",
+  fp8: "fp8",
+  f8: "fp8",
+  e4m3: "fp8_e4m3",
+  e4m3fn: "fp8_e4m3",
+  e5m2: "fp8_e5m2",
+  nvfp4: "nvfp4",
+  mxfp4: "mxfp4",
+  fp4: "fp4",
+  nf4: "nf4",
+  int8: "int8",
+  i8: "int8",
+  int4: "int4",
+  i4: "int4",
+};
+
+/** Popped only alongside a real quant token; alone they are somebody's name. */
+const QUANT_MODIFIERS = new Set(["scaled", "awq", "gptq", "fast"]);
+
+/**
+ * Split a token list into its name and the quant postfix on the end.
+ *
+ * Mirrors `_split_quant`. The one parser both {@link deriveModelName} and
+ * {@link quantFromFilename} run.
+ *
+ * @param {string[]} tokens - `cleanAssetName(...)` split on whitespace.
+ * @returns {{tokens: string[], quant: string|null}}
+ */
+function splitQuant(tokens) {
+  // The GGUF tail first, longest match wins so `Q4 K M` beats the `Q4` in it.
+  for (const width of [3, 2, 1]) {
+    if (tokens.length < width) continue;
+    const tail = tokens.slice(tokens.length - width);
+    if (!GGUF_HEAD_RE.test(tail[0])) continue;
+    if (!tail.slice(1).every((t) => GGUF_LEVELS.has(t.toLowerCase()))) continue;
+    return {
+      tokens: tokens.slice(0, tokens.length - width),
+      quant: tail.map((t) => t.toLowerCase()).join("_"),
+    };
+  }
+  const kept = [...tokens];
+  const popped = [];
+  while (kept.length) {
+    const last = kept[kept.length - 1].toLowerCase();
+    if (!Object.hasOwn(QUANT_TOKENS, last) && !QUANT_MODIFIERS.has(last)) break;
+    popped.push(kept.pop());
+  }
+  // The guard the whole safety of this rests on: `scaled` and `fast` are
+  // ordinary tokens in real model names and may only be eaten when a genuine
+  // quant token was eaten with them, or `some_model_scaled` silently becomes
+  // `some model`.
+  const real = popped.find((t) =>
+    Object.hasOwn(QUANT_TOKENS, t.toLowerCase()),
+  );
+  if (!real) return { tokens: [...tokens], quant: null };
+  return { tokens: kept, quant: QUANT_TOKENS[real.toLowerCase()] };
+}
+
+/**
+ * The precision a model's filename says it was stored at.
+ *
+ * Mirrors `quant_from_filename`. The shelf and the workflow card are served
+ * the canonical id by the backend; this is here so the two halves of the
+ * parser stay provably identical (`modelShelf.test.js`) and so a client with
+ * only a filename in hand can still answer.
+ *
+ * @param {string} filename - file name or path.
+ * @returns {string|null} a canonical id, or null for the usual name that
+ *   carries no quant postfix.
+ */
+export function quantFromFilename(filename) {
+  return splitQuant(cleanAssetName(filename).split(/\s+/).filter(Boolean))
+    .quant;
+}
+
 /** Trailing tokens that record where in a training run a file was saved.
  *
  * Mirrors `_TRAINING_SUFFIX_RE` in `pixlstash/utils/model_utils.py`. The
@@ -41,19 +146,141 @@ export function cleanAssetName(filename) {
 /**
  * Derive a display name for a file that never said what it is called.
  *
- * Mirrors `derive_model_name`: drops trailing training bookkeeping, because
- * the step is parsed into its own field and repeating it turns six checkpoints
- * of one run into six unrelated-looking rows.
+ * Mirrors `derive_model_name`: drops the trailing quant postfix and then any
+ * training bookkeeping, because both are parsed into their own fields and
+ * repeating them turns six checkpoints of one run into six unrelated-looking
+ * rows, and puts the precision in the place a person reads the model's
+ * identity.
+ *
+ * **The precision is dropped from the name, never lost.** Two quant variants
+ * of one model collapse to one name here, and the badge the row draws from
+ * `quant` is what keeps them apart - a caller that strips without badging has
+ * made two rows read identically.
  *
  * @param {string} filename - file name or path.
  * @returns {string} a human-readable name, or `""` when nothing survives.
  */
 export function deriveModelName(filename) {
-  const tokens = cleanAssetName(filename).split(/\s+/).filter(Boolean);
+  const { tokens } = splitQuant(
+    cleanAssetName(filename).split(/\s+/).filter(Boolean),
+  );
   while (tokens.length && TRAINING_SUFFIX_RE.test(tokens[tokens.length - 1])) {
     tokens.pop();
   }
   return tokens.join(" ");
+}
+
+/**
+ * What each canonical quant id is called on a badge, and what the badge says
+ * on hover.
+ *
+ * **The display copy lives here and not in the API**, the way slot kinds
+ * already do: the backend serves the id, one map turns it into words, and the
+ * shelf row, the workflow card, its ⓘ list and the recipe overlay all read the
+ * same one rather than each inventing a spelling.
+ *
+ * `fp8_e4m3` and `fp8_e5m2` deliberately share the label `FP8`: the variant is
+ * a detail for the tooltip, and two chips reading `FP8_E4M3` and `FP8_E5M2` in
+ * a 240px column are two chips that clip to nothing.
+ */
+const QUANT_LABELS = {
+  fp32: ["FP32", "32-bit float"],
+  fp16: ["FP16", "16-bit float"],
+  bf16: ["BF16", "bfloat16"],
+  fp8_e4m3: ["FP8", "FP8 E4M3"],
+  fp8_e5m2: ["FP8", "FP8 E5M2"],
+  fp8: ["FP8", "8-bit float"],
+  nvfp4: ["NVFP4", "NVIDIA FP4"],
+  mxfp4: ["MXFP4", "mixed FP4"],
+  fp4: ["FP4", "4-bit float"],
+  nf4: ["NF4", "4-bit NormalFloat"],
+  int8: ["INT8", "8-bit integer"],
+  int4: ["INT4", "4-bit integer"],
+  int32: ["INT32", "32-bit integer"],
+  mixed: ["MIXED", "No single dtype holds most of the parameters"],
+};
+
+/** A GGUF id (`q4_k_m`): the level IS the name a person recognises. */
+const GGUF_ID_RE = /^(?:i?q|tq)\d+(?:_[a-z0-9]+)*$/i;
+
+/**
+ * The badge for one model's `quant`, or null when there is nothing to say.
+ *
+ * Null and not an empty badge: a model whose precision nothing recorded gets
+ * NO chip, rather than a blank one or an `UNKNOWN` that reads like a fact.
+ *
+ * An id this map has never seen is shown verbatim, uppercased, rather than
+ * swallowed - a safetensors dtype nobody anticipated is still true, and a
+ * reader can look it up.
+ *
+ * @param {string|null|undefined} quant - a canonical id from the API.
+ * @returns {{label: string, title: string}|null}
+ */
+export function quantBadge(quant) {
+  const id = String(quant ?? "").trim();
+  if (!id) return null;
+  const known = QUANT_LABELS[id.toLowerCase()];
+  if (known) return { label: known[0], title: known[1] };
+  const label = id.toUpperCase();
+  return {
+    label,
+    title: GGUF_ID_RE.test(id)
+      ? `GGUF ${label} quantisation`
+      : `Stored as ${label}`,
+  };
+}
+
+/** How many trigger words a tooltip spells out before it counts the rest. */
+const TRIGGER_TITLE_WORDS = 12;
+
+/**
+ * The trigger words a row has ON RECORD, as opposed to the person's name the
+ * server serves in their place while nothing has been set.
+ *
+ * What a bulk write would replace: a default is not stored, so writing over it
+ * loses nothing.
+ *
+ * @param {Object} row - a model row from the API.
+ * @returns {string[]}
+ */
+export function recordedTriggerWords(row) {
+  return row?.trigger_words_source === "recorded" &&
+    Array.isArray(row.trigger_words)
+    ? row.trigger_words
+    : [];
+}
+
+/**
+ * The chip for one model's trigger words, or null when it has none.
+ *
+ * `isDefault` is the person's name standing in for a word nobody recorded. It
+ * is drawn differently because it is a different claim: a recorded word is in
+ * the file or was typed here, and the default only says who the model is
+ * assigned to.
+ *
+ * A file trained on tagged captions records its whole tag table, most frequent
+ * first, so the label is the first word and a count rather than the list.
+ *
+ * @param {Object} row - a model row from the API.
+ * @returns {{label: string, title: string, isDefault: boolean}|null}
+ */
+export function triggerChip(row) {
+  const words = Array.isArray(row?.trigger_words) ? row.trigger_words : [];
+  if (!words.length) return null;
+  if (row.trigger_words_source === "character") {
+    return {
+      label: words[0],
+      title: `Trigger word: ${words[0]}, the name of the person this is assigned to. None has been set.`,
+      isDefault: true,
+    };
+  }
+  const rest = words.length - TRIGGER_TITLE_WORDS;
+  const listed = words.slice(0, TRIGGER_TITLE_WORDS).join(", ");
+  return {
+    label: words.length > 1 ? `${words[0]} +${words.length - 1}` : words[0],
+    title: `Trigger ${words.length > 1 ? "words" : "word"}: ${listed}${rest > 0 ? ` and ${rest} more` : ""}`,
+    isDefault: false,
+  };
 }
 
 /**
@@ -77,6 +304,12 @@ export function deriveModelName(filename) {
 export function modelName(model) {
   const given = String(model?.display_name || "").trim();
   if (given) return { text: given, state: "named" };
+  // A checkpoint whose filename simply IS a known base model
+  // (`flux1-dev.safetensors`) reads as that model's label. Still ours, so it
+  // draws as `derived`; the server sets it only for a checkpoint and never
+  // from a guessed base model, so a LoRA's name is never its base model.
+  const matched = String(model?.matched_name || "").trim();
+  if (matched) return { text: matched, state: "derived" };
   const filename = String(model?.filename || "").trim();
   const derived = deriveModelName(filename);
   // A real readable name, and OURS: `deriveModelName` rewrote the file's own
@@ -150,16 +383,31 @@ export function dateColumnKey(sortKey) {
  */
 export function modelDate(row, sortKey, own = false) {
   if (dateColumnKey(sortKey) === "file_mtime") {
-    const ns = Number(row?.newest_file_mtime);
-    // `!(ns > 0)` and not `ns <= 0`, so a null or a non-number is caught here
-    // rather than by the range check below.
-    if (!(ns > 0)) return "";
-    const at = new Date(ns / 1e6);
-    // `toISOString` THROWS on a date out of range, and this runs inside render:
-    // one corrupt mtime would take the whole shelf down rather than one cell.
-    return Number.isNaN(at.getTime()) ? "" : at.toISOString();
+    const ms = fileTime(row);
+    return ms === null ? "" : new Date(ms).toISOString();
   }
   return (!own && row?.newest_member_at) || row?.added_at || "";
+}
+
+/**
+ * A row's file date in milliseconds, or null when it has none to trust.
+ *
+ * The file's own date on disk, which for a download is when it was downloaded:
+ * the shelf's `added_at` is when a scan first saw it, and a first scan stamps a
+ * whole library with one moment.
+ *
+ * @param {Object} row - a shelf row.
+ * @returns {number|null}
+ */
+export function fileTime(row) {
+  const ns = Number(row?.newest_file_mtime);
+  // `!(ns > 0)` and not `ns <= 0`, so a null or a non-number is caught here
+  // rather than by the range check below.
+  if (!(ns > 0)) return null;
+  const ms = ns / 1e6;
+  // `toISOString` THROWS on a date out of range, and its callers run inside
+  // render: one corrupt mtime would take a whole list down rather than one row.
+  return Number.isNaN(new Date(ms).getTime()) ? null : ms;
 }
 
 /**
@@ -209,6 +457,9 @@ export function defaultSortDirection(key) {
 /** What each grouping axis is called, and the glyph that stands for it. */
 export const GROUP_BY_LABELS = {
   none: { label: "None", icon: "mdi-format-list-bulleted" },
+  // The one axis whose groups OVERLAP, and so the one that is a grid rather
+  // than a band: a VAE belongs to every set it has run in (#1438).
+  workflow_set: { label: "Workflow set", icon: "mdi-view-grid-outline" },
   base_model: { label: "Base model", icon: "mdi-cube-outline" },
   folder: { label: "Folder", icon: "mdi-folder-outline" },
   feature: { label: "Feature", icon: "mdi-star-four-points-outline" },
@@ -273,6 +524,8 @@ const FILE_KIND_LABELS = {
   checkpoint: "Checkpoint",
   vae: "VAE",
   text_encoder: "Text encoder",
+  controlnet: "ControlNet",
+  upscaler: "Upscaler",
   unknown: "Unclassified",
 };
 
@@ -513,8 +766,10 @@ export function withEmptyFolders(groups, folders) {
 /**
  * The base model a row should be GROUPED, FILTERED and FACETED by.
  *
- * `base_model_folded` when the server recognised the string, the raw one when
- * it did not. Folding is what makes `sdxl_base_v1-0`, `SDXL`, `sdxl base` and
+ * `base_model_canonical` when the server identified one - from what the file
+ * declares, from its filename, or from what a person typed - which is also
+ * what the server sorts and filters on. Else `base_model_folded` when the
+ * server recognised the string, the raw one when it did not. Folding is what makes `sdxl_base_v1-0`, `SDXL`, `sdxl base` and
  * `stable diffusion xl` one bucket instead of four; falling back to the raw
  * value is what keeps a base model nobody has heard of selectable rather than
  * swept into "not set".
@@ -527,7 +782,45 @@ export function withEmptyFolders(groups, folders) {
  * @returns {string} the grouping key, or `""` when the row records nothing.
  */
 export function baseModelKey(row) {
-  return row?.base_model_folded || row?.base_model || "";
+  return (
+    row?.base_model_canonical || row?.base_model_folded || row?.base_model || ""
+  );
+}
+
+/** The identification sources that are a guess, not something the file said. */
+const GUESSED_BASE_SOURCES = new Set([
+  "filename",
+  "declared_fuzzy",
+  "filename_fuzzy",
+]);
+
+/**
+ * What a row's Base model cell shows, and whether it is a guess.
+ *
+ * The raw `base_model` when the file (or a person) said it, because that
+ * spelling is what the file actually says. A GUESS shows the label it was
+ * read as instead - the raw string is not the guess - and says what it was
+ * read from, for the tag's tooltip.
+ *
+ * @param {Object} row - a row from `/adapters` or `/checkpoints`.
+ * @returns {{text: string, guess: string|null}} `text` is `""` when nothing
+ *   is recorded; `guess` is the tooltip copy for a guessed value, else null.
+ */
+export function baseModelCell(row) {
+  const canonical = row?.base_model_canonical || "";
+  const source = row?.base_model_source || "";
+  if (canonical && GUESSED_BASE_SOURCES.has(source)) {
+    const raw = String(row?.base_model || "").trim();
+    const how =
+      source === "declared_fuzzy" && raw
+        ? `The file says “${raw}”, read as ${canonical}.`
+        : "Guessed from the filename. Nothing in the file says this.";
+    return {
+      text: canonical,
+      guess: `${how} Double-click or press Shift+F2 to correct it.`,
+    };
+  }
+  return { text: row?.base_model || canonical, guess: null };
 }
 
 /** What each folder layout is called, and the glyph that stands for it. */
@@ -539,9 +832,9 @@ export const FOLDER_LAYOUT_LABELS = {
 /**
  * What each folder tier is marked with, in ONE icon family.
  *
- * Shared with `ModelFoldersDialog`, which is where these glyphs started: the
- * shelf header and the dialog row are two views of the same registry, and two
- * copies of the map would be two vocabularies for one fact. Nothing here is
+ * These glyphs started in the old model-folders dialog, which shared this map
+ * with the shelf header: two copies of the map would be two vocabularies for
+ * one fact. Settings › Models now draws no glyph, so the header is its reader. Nothing here is
  * hand-drawn - the header used to have no tier mark at all, and the mock that
  * proposed one built a folder out of a div and a `::before` tab, which is a
  * second icon family by construction.
@@ -568,6 +861,13 @@ export const FOLDER_TIERS = {
     icon: "mdi-folder-cog-outline",
     chip: "ai-toolkit",
     note: "Training output. Models are imported from here, not catalogued in place.",
+  },
+  // A tray, not a folder: nothing is listed from it. Models saved here are
+  // moved to the default folder, so it never heads a group of rows itself.
+  downloads: {
+    icon: "mdi-tray-arrow-down",
+    chip: "Downloads",
+    note: "New models saved here move to the default folder.",
   },
   user: { icon: "mdi-folder-outline", chip: "", note: "" },
 };
@@ -956,8 +1256,16 @@ export function presentCopies(locations) {
  * state this build does not know still falls through to `missing` rather than
  * being quietly reported as fine.
  *
+ * `removed` is the one absence that is not a fault at all: the reader deleted
+ * that copy themselves to keep another (#1439), and the row is here on purpose.
+ * It is reported only when every copy is one, which is the folder axis's case -
+ * that draw stands for the removed copy alone - because a model that still has a
+ * copy somewhere is `present` and a model with a genuinely missing one must
+ * still say so. Ranked after `unreachable` for that reason: a mix of removed and
+ * missing is a fault, and drawing it as a tidy-up would hide one.
+ *
  * @param {Array<Object>} locations - the row's `locations` array.
- * @returns {"present"|"missing"|"not_downloaded"|"unreachable"|"forgotten"}
+ * @returns {"present"|"missing"|"not_downloaded"|"unreachable"|"removed"|"forgotten"}
  */
 export function locationState(locations) {
   const list = Array.isArray(locations) ? locations : [];
@@ -966,6 +1274,7 @@ export function locationState(locations) {
   if (list.some((loc) => loc?.state === "unreachable")) return "unreachable";
   if (list.every((loc) => loc?.state === "not_downloaded"))
     return "not_downloaded";
+  if (list.every((loc) => loc?.state === "removed")) return "removed";
   return "missing";
 }
 
@@ -987,6 +1296,10 @@ const COPY_STATE_NOTE = {
   missing: "not where it was",
   unreachable: "out of reach",
   not_downloaded: "not downloaded yet",
+  // A copy removed to keep one of several (#1439). Its own word rather than
+  // `missing`, which is the scanner saying it looked and the file was gone: this
+  // one is gone because the reader said so, and the row is still here on purpose.
+  removed: "removed as a duplicate",
 };
 
 /**
@@ -1006,6 +1319,28 @@ function copyStateNote(state) {
 }
 
 /**
+ * One copy's full path: its registered folder and its relpath.
+ *
+ * The separator is taken from the registered folder rather than assumed, and a
+ * Windows folder takes the relpath's separators with it: the two halves come
+ * from different places (`model_folder.path` as registered, `relpath` as the
+ * scanner wrote it), so joining them without a rule is how a path comes back
+ * half-slashed. A POSIX folder leaves the relpath alone, where a backslash is a
+ * legal character in a filename rather than a separator.
+ *
+ * @param {{folder_path: string, relpath: string}} copy
+ * @returns {string}
+ */
+export function copyPath(copy) {
+  const folder = String(copy?.folder_path || "");
+  const relpath = String(copy?.relpath || "");
+  const windows = folder.includes("\\") && !folder.includes("/");
+  const sep = windows ? "\\" : "/";
+  const tail = windows ? relpath.replace(/\//g, "\\") : relpath;
+  return `${folder.replace(/[/\\]+$/, "")}${sep}${tail.replace(/^[/\\]+/, "")}`;
+}
+
+/**
  * Where a row's copies sit, one path per line, each saying what is there.
  *
  * The folder is only on screen under `groupBy: 'folder'`, where the header
@@ -1019,34 +1354,45 @@ function copyStateNote(state) {
  * naming one of its homes would read as naming its only one. Under `folder` the
  * store hands this ONE copy, because that draw stands for one copy.
  *
- * The separator is taken from the registered folder rather than assumed, and a
- * Windows folder takes the relpath's separators with it: the two halves come
- * from different places (`model_folder.path` as registered, `relpath` as the
- * scanner wrote it), so joining them without a rule is how a path comes back
- * half-slashed. A POSIX folder leaves the relpath alone, where a backslash is a
- * legal character in a filename rather than a separator.
- *
- * A copy missing either half is skipped rather than half-named: both are
+ * Each path is {@link copyPath}'s. A copy missing either half is skipped rather than half-named: both are
  * NOT NULL on the wire, so this is a broken row, and `a.st` on its own answers
  * "where is this file" with the one thing that is not a location.
  *
  * @param {Array<Object>} locations - the row's `locations` array.
- * @returns {string} the paths, newline-separated, or `""` when there are none -
- *   which the caller must bind as no tooltip at all rather than an empty one.
+ * @returns {string} the paths, newline-separated, or `""` when there are none.
  */
 export function copyPathsTitle(locations) {
   return (Array.isArray(locations) ? locations : [])
     .map((loc) => {
-      const folder = String(loc?.folder_path || "");
-      const relpath = String(loc?.relpath || "");
-      if (!folder || !relpath) return "";
-      const windows = folder.includes("\\") && !folder.includes("/");
-      const sep = windows ? "\\" : "/";
-      const tail = windows ? relpath.replace(/\//g, "\\") : relpath;
-      const path = `${folder.replace(/[/\\]+$/, "")}${sep}${tail.replace(/^[/\\]+/, "")}`;
+      if (!loc?.folder_path || !loc?.relpath) return "";
+      const path = copyPath(loc);
       const note = copyStateNote(loc?.state);
       return note ? `${path} · ${note}` : path;
     })
+    .filter(Boolean)
+    .join("\n");
+}
+
+/**
+ * A model's file tooltip: where its copies sit, then the SHA-256 it is matched by.
+ *
+ * The hash is whole, not shortened: it is what a set's membership and a
+ * recipe's digest are compared against, so it is here to be compared.
+ *
+ * "Not read yet" is said only of a row the hasher still owes a hash
+ * (`hash_pending`). A row that never gets one (an engine, a cached Hugging
+ * Face repo) and a set member whose row is not loaded get no line: neither is
+ * waiting for anything.
+ *
+ * @param {Object} row - a shelf row, or a set member (which has no `locations`).
+ * @returns {string} the lines, or `""` - which disables the Tooltip.
+ */
+export function modelFileTitle(row) {
+  const sha = row?.sha256;
+  return [
+    copyPathsTitle(row?.locations),
+    sha ? `SHA-256: ${sha}` : row?.hash_pending ? "SHA-256: not read yet" : "",
+  ]
     .filter(Boolean)
     .join("\n");
 }
@@ -1241,6 +1587,85 @@ export function trashName(
 ) {
   const platform = nav?.userAgentData?.platform || nav?.userAgent || "";
   return /win/i.test(platform) ? "Recycle Bin" : "Trash";
+}
+
+/** At most three names, then a count: a delete prompt is not a file listing. */
+function nameList(items) {
+  const names = items.map((item) => item.name);
+  if (names.length <= 3) {
+    return names.length === 1
+      ? names[0]
+      : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+  }
+  return `${names.slice(0, 3).join(", ")} and ${names.length - 3} more`;
+}
+
+/**
+ * What a delete leaves behind, as the sentences its confirmation adds (#1314).
+ *
+ * Built from `POST /models/companions`. Every clause names files, because
+ * "some support files may be unused" is a sentence nobody can act on. None of
+ * them says a file is safe to delete: `orphaned` means every model a recipe
+ * ran it with is going, which is what the sentence says - never "nothing uses
+ * it" - and `unrecorded` then says how many kept base models no workflow names,
+ * any of which could. `unknown` and `no_evidence` are said out loud rather than
+ * left out, because silence would read as "nothing is affected".
+ *
+ * @param {Object|null} companions - the route's answer, or null when it could
+ *   not be read.
+ * @param {number} count - how many models the delete names.
+ * @returns {string} Zero or more sentences, space-joined.
+ */
+export function companionsSentences(companions, count) {
+  if (!companions) {
+    return "PixlStash could not check which VAEs and text encoders these models use.";
+  }
+  const said = [];
+  const { in_use = [], orphaned = [], shared = [], unknown = [] } = companions;
+  const plural = (items, one, many) => (items.length === 1 ? one : many);
+  if (in_use.length) {
+    said.push(
+      `${nameList(in_use)} ${plural(in_use, "is", "are")} still used by models you are keeping.`,
+    );
+  }
+  if (orphaned.length) {
+    said.push(
+      `In the workflows PixlStash has read, ${nameList(orphaned)} ran only with ` +
+        `models you are deleting; ${plural(orphaned, "it stays", "they stay")} on disk.`,
+    );
+    const unrecorded = companions.unrecorded ?? 0;
+    if (unrecorded) {
+      said.push(
+        `${unrecorded === 1 ? "1 other base model has" : `${unrecorded} other base models have`} ` +
+          `no workflow on record and may still need ${plural(orphaned, "it", "them")}.`,
+      );
+    }
+  }
+  if (shared.length) {
+    said.push(
+      `${nameList(shared)} ${plural(shared, "is", "are")} still used by other models.`,
+    );
+  }
+  if (unknown.length) {
+    said.push(
+      `Whether ${nameList(unknown)} ${plural(unknown, "is", "are")} still needed ` +
+        "is unknown: another file on the shelf has the same name.",
+    );
+  }
+  const unseen = companions.no_evidence?.length ?? 0;
+  if (unseen) {
+    const subject =
+      count === 1
+        ? "this model"
+        : unseen === count
+          ? "these models"
+          : `${unseen} of these models`;
+    said.push(
+      `No workflow PixlStash has read uses ${subject}, so which support files ` +
+        `${unseen === 1 ? "it needs" : "they need"} is unknown.`,
+    );
+  }
+  return said.join(" ");
 }
 
 /**
@@ -1608,14 +2033,78 @@ function hash32(text) {
   return hash;
 }
 
-/** Up to two initials for a mark, from whatever the row is actually called. */
-function initialsOf(text) {
-  const words = String(text || "")
+// Words that carry no identity in a name, so "World of Wordcraft" marks as WW
+// rather than WO. Deliberately without "a": a lone letter in a model name is
+// more often a variant label than an article.
+const MARK_FILLER_WORDS = new Set([
+  "of",
+  "in",
+  "on",
+  "at",
+  "by",
+  "for",
+  "from",
+  "to",
+  "with",
+  "the",
+  "and",
+]);
+
+/**
+ * Up to two letters for a mark, from whatever the row is actually called: the
+ * first letters of the first two words that start with a letter, so the
+ * version number goes to {@link versionOf} instead of taking a letter's place
+ * (`Stable Diffusion 3.5` is SD, not S3). A `v1.0` is a version too, not a
+ * word that happens to start with one (`Lightning 4steps V1.0` is LI, not LV).
+ *
+ * Exported for the workflow card's two-line tiles (`markDetails`).
+ */
+export function initialsOf(text) {
+  const all = String(text || "")
     .split(/[\s_\-.]+/)
     .filter(Boolean);
-  if (!words.length) return "?";
-  if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
-  return (words[0][0] + words[1][0]).toUpperCase();
+  // The first word always counts: a leading "In" or "On" is usually part of
+  // the name ("In-Context LoRA" is IC), not a joiner between two others.
+  const significant = all.filter(
+    (word, index) => index === 0 || !MARK_FILLER_WORDS.has(word.toLowerCase()),
+  );
+  // Skipping must still leave two words to take a letter from each.
+  const words = significant.length > 1 ? significant : all;
+  const lettered = words.filter(
+    (word) => /^\p{L}/u.test(word) && !/^v\d/i.test(word),
+  );
+  // By code point, not UTF-16 unit, so a letter outside the BMP ("𝐀pple") is
+  // taken whole instead of as a lone surrogate.
+  if (lettered.length > 1) {
+    return ([...lettered[0]][0] + [...lettered[1]][0]).toUpperCase();
+  }
+  if (lettered.length === 1) {
+    return [...lettered[0].replace(/\P{L}/gu, "")]
+      .slice(0, 2)
+      .join("")
+      .toUpperCase();
+  }
+  return words.length ? [...words[0]].slice(0, 2).join("").toUpperCase() : "?";
+}
+
+/**
+ * What a mark's version tab shows: the first number in the name. An `x.y`
+ * version keeps its dot and its whole minor (`3.5`, `1.0`, `1.10`, `0.05`: one
+ * digit of `1.10` would name a version the file is not), and the tab widens to
+ * fit, up to two minor digits; anything else is cut to two digits (`2511` is 25, and so is `25.1`,
+ * whose major already fills the tab).
+ * A zero-padded number (`000002750`) is a counter, not a version, and is
+ * skipped; `0.9` is still one. Empty when the name carries no number, and then
+ * the mark has no tab.
+ */
+function versionOf(text) {
+  const match = /(?<!\d)(?!0\d)(\d+)(?:\.(\d+))?/.exec(String(text || ""));
+  if (!match) return "";
+  const [, major, minor] = match;
+  // A longer "minor" is a date or a counter, not a version: the major alone.
+  return major.length === 1 && minor?.length <= 2
+    ? `${major}.${minor}`
+    : major.slice(0, 2);
 }
 
 // The mark's tile keeps its palette entry's HUE and pins saturation and
@@ -1693,10 +2182,20 @@ export function markForeground() {
  * they genuinely are one group, and the shelf already treats "not set" as a
  * value rather than an absence.
  *
+ * **The ComfyUI pack ports this** (`web/js/model_mark.js`), so a loader node
+ * draws the same mark; `tests/test_comfyui_pack_model_mark.py` fails when the
+ * two disagree, so change them together.
+ *
+ * **Two letters and a version.** Two letters cannot tell `Stable Diffusion
+ * 3.5 Large` from `sd3.5 large controlnet`, and neither could the old rule's
+ * S5, so the letters say which model and a tab on the corner carries the
+ * version (the mark design round's option D2).
+ *
  * @param {Object} row - a shelf row.
- * @returns {{color: string, ink: string, initials: string}} `color` is an
- *   `hsl()` string, not a hex, because it is renormalised rather than taken
- *   from the palette. `ink` travels with it so the pair cannot be separated.
+ * @returns {{color: string, ink: string, initials: string, version: string}}
+ *   `color` is an `hsl()` string, not a hex, because it is renormalised rather
+ *   than taken from the palette. `ink` travels with it so the pair cannot be
+ *   separated. `version` is the tab's digits, `""` for no tab.
  */
 export function generatedMark(row) {
   const key = baseModelKey(row);
@@ -1706,6 +2205,7 @@ export function generatedMark(row) {
     color: markBackground(entry),
     ink: markForeground(),
     initials: initialsOf(name.text),
+    version: versionOf(name.text),
   };
 }
 
@@ -1868,4 +2368,39 @@ export function assignmentRing(
     label: named.map((one) => one.label).join(", "),
     count: named.length,
   };
+}
+
+/**
+ * The Hide row for a selection of models, or null when nothing is selected.
+ *
+ * One wording for every menu that offers it (the shelf's and the rail's), and
+ * the rule `toggleHiddenModels` runs: it hides the ones still shown, and turns
+ * into "show again" only when every one is already hidden. Worded *model* so
+ * it cannot be read as the workflow set's own Hide, which sits beside it on a
+ * set card's menu.
+ *
+ * @param {Array<number>} ids - the selected `model.id`s.
+ * @param {Set<number>} hiddenIds - the models this library hides.
+ * @returns {?{hide: boolean, icon: string, label: string, title: string}}
+ */
+export function hideModelsVerb(ids, hiddenIds) {
+  if (!ids?.length) return null;
+  const shown = ids.filter((id) => !hiddenIds.has(id)).length;
+  const n = shown || ids.length;
+  const models = n === 1 ? "model" : `${n} models`;
+  return shown
+    ? {
+        hide: true,
+        icon: "mdi-eye-off-outline",
+        label: `Hide ${models}`,
+        title:
+          "Leaves it off the shelf and out of every menu in this library. " +
+          "No file is touched. Show, Hidden models brings it back.",
+      }
+    : {
+        hide: false,
+        icon: "mdi-eye-outline",
+        label: `Show ${models} again`,
+        title: "",
+      };
 }

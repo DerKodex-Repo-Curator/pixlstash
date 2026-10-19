@@ -7,9 +7,26 @@ picture tagger when building text embeddings from ComfyUI generation data.
 """
 
 import json
+import math
+from functools import lru_cache
 from typing import Any
 
 from pixlstash.pixl_logging import get_logger
+from pixlstash.services.comfyui_recipe_service import (
+    CONTROLNET_LOADER_DIGEST,
+    PIXLSTASH_CONTROLNET_LOADER,
+    PIXLSTASH_UPSCALE_MODEL_LOADER,
+    UPSCALE_MODEL_LOADER_DIGEST,
+    model_filename_fields,
+)
+from pixlstash.services.comfyui_ui_graph import _WIDGET_OVERRIDES, inline_subgraphs
+from pixlstash.services.workflow_hash import (
+    DIGEST_PREFIX_RE,
+    IMAGE_EXTENSIONS,
+    MODEL_EXTENSIONS,
+    SHELF_ID_FIELD,
+    is_link,
+)
 
 logger = get_logger(__name__)
 
@@ -32,11 +49,6 @@ _LORA_CLASSES = {
     "LoRALoaderModelOnly",
     "LoraLoaderGGUF",
 }
-_CLIP_TEXT_ENCODE_CLASSES = {
-    "CLIPTextEncode",
-    "CLIPTextEncodeSDXL",
-    "CLIPTextEncodeFlux",
-}
 # Nodes that have a named "positive" conditioning input connected to a sampler
 _SAMPLER_CLASSES = {
     "KSampler",
@@ -44,6 +56,16 @@ _SAMPLER_CLASSES = {
     "CFGGuider",
     "SamplerCustom",
 }
+# The input a prompt node keeps its text in, first found: ``text`` on core's
+# encoders, ``prompt`` on the edit and video ones, ``value`` on a primitive
+# feeding one. One rule for the run, the bindings (#1832) and the recipe.
+# ponytail: one field per node. An encoder with a field per model (SDXL's
+# ``text_g``/``text_l``, Flux's ``clip_l``/``t5xxl``) has no place for a run's
+# prompt, and the Run popup says so; write every field when that is wanted.
+PROMPT_FIELDS = ("text", "prompt", "value")
+# Where an encoder that makes both sides (``TextEncodeBooguEdit``) keeps the
+# negative. Never ``PROMPT_FIELDS`` for it: that is its positive.
+NEGATIVE_FIELDS = ("negative_prompt", "negative")
 # Nodes that carry a seed value
 _SEED_CLASSES = {
     "KSampler",
@@ -52,8 +74,36 @@ _SEED_CLASSES = {
 }
 # Input field names that hold seed values
 _SEED_FIELDS = {"seed", "noise_seed"}
-# Nodes that carry a raw STRING value (positive-prompt primitive wired into subgraphs)
-_PRIMITIVE_STRING_CLASSES = {
+# The settings a recipe is read for. Named rather than "every scalar input",
+# because a node also carries its wiring and its pack's own extras, and a
+# settings block nobody can read is worse than a short one. Read from ANY node
+# that names one, not from the sampler: the split-sampler graphs (the shipped
+# Flux2-Klein templates among them) put the step count on a scheduler node, the
+# sampler name on a `KSamplerSelect` and the CFG on a `CFGGuider`, so reading
+# only the sampler reports one field out of five for PixlStash's own workflows.
+# Typed, because the value's *kind* is not the field's type: `steps: "twenty"`
+# and `sampler_name: 12345` are not settings, and reporting them puts a graph's
+# author in charge of what a client's formatter is handed.
+_SETTING_FIELDS = {
+    "steps": int,
+    "cfg": float,
+    # Flux and its kin have no CFG and carry a guidance scale instead, so a
+    # recipe block without it reports nothing for the setting that shaped the
+    # picture.
+    "guidance": float,
+    "sampler_name": str,
+    "scheduler": str,
+    "denoise": float,
+    # The design's Settings block draws a Size row ("832x1216"), which is two
+    # settings written as one value.
+    "width": int,
+    "height": int,
+}
+# Nodes that carry a raw STRING value (positive-prompt primitive wired into
+# subgraphs). Public because `services/workflow_export.py` needs the same list:
+# a prompt sitting in one of these is a prompt, and it is the population that
+# name-based prose detection cannot see.
+PRIMITIVE_STRING_CLASSES = {
     "PrimitiveStringMultiline",
     "TextBox",
     "Textbox",
@@ -109,7 +159,21 @@ def _iter_ui_graphs(workflow: dict):
     ComfyUI v0.4+ stores reusable subgraph definitions under
     ``workflow["definitions"]["subgraphs"]``, each of which has its own
     ``nodes`` and ``links`` arrays with the same schema as the top-level graph.
+
+    **Read with the instances expanded** (``inline_subgraphs``), so a widget
+    inside a subgraph reads the value its instance supplies rather than the
+    definition's own, which is only a default: a template's loader keeps the
+    file it shipped with there while the instance names the one that runs.
+    Where expanding refuses, the definitions are read as stored, and said.
     """
+    flat, problems = inline_subgraphs(workflow)
+    if flat is not None:
+        yield flat
+        return
+    logger.info(
+        "Subgraphs read as defined, not as their instances set them: %s",
+        "; ".join(problems),
+    )
     yield workflow
     for sg in (workflow.get("definitions") or {}).get("subgraphs") or []:
         if isinstance(sg, dict) and "nodes" in sg:
@@ -123,8 +187,12 @@ def _get_widget_value_ui(node: dict, input_name: str) -> Any:
     in the order they appear in ``node["inputs"]``, skipping non-widget inputs.
     Even when a widget input is overridden by an external link at runtime,
     the ``widgets_values`` slot still holds the last static/default value,
-    which is useful for embedding purposes.
+    which is useful for embedding purposes. A value an expanded subgraph's
+    instance supplies (``_iter_ui_graphs``) wins over that slot.
     """
+    overrides = node.get(_WIDGET_OVERRIDES) or {}
+    if input_name in overrides:
+        return overrides[input_name]
     widgets_values = node.get("widgets_values") or []
     widget_index = 0
     for inp in node.get("inputs") or []:
@@ -165,6 +233,34 @@ def _extract_text_from_node_ui(node: dict | None) -> str | None:
     return None
 
 
+def _is_conditioning_input(name: Any) -> bool:
+    return name in ("positive", "negative") or "conditioning" in str(name)
+
+
+def _guider_prompt_inputs(class_type: str) -> tuple[str, ...]:
+    """The inputs a sampler or guider takes its positive prompt on.
+
+    ``BasicGuider`` has one, unnamed; the same reading as
+    ``workflow_io._prompt_inputs``.
+    """
+    if class_type.endswith("Guider"):
+        return ("positive", "conditioning")
+    return ("positive",) if class_type in _SAMPLER_CLASSES else ()
+
+
+def _encodes_text_ui(node: dict) -> bool:
+    """Whether a UI-format node makes conditioning out of text.
+
+    The rule ``workflow_io`` detects a run's prompt nodes by: a ``TextEncode``
+    class, or a node that takes CLIP and no conditioning, so makes the
+    conditioning itself (``MiniMaxH3ImageToVideo``).
+    """
+    if "TextEncode" in str(node.get("type") or ""):
+        return True
+    kinds = {inp.get("type") for inp in node.get("inputs") or []}
+    return "CLIP" in kinds and "CONDITIONING" not in kinds
+
+
 def _follow_positive_ui(
     node_id: str,
     node_map: dict,
@@ -180,13 +276,14 @@ def _follow_positive_ui(
     node = node_map.get(str(node_id))
     if not isinstance(node, dict):
         return None
-    if node.get("type") in _CLIP_TEXT_ENCODE_CLASSES:
-        text = _get_widget_value_ui(node, "text")
-        if isinstance(text, str) and text.strip():
-            return text.strip()
+    if _encodes_text_ui(node):
+        for field in PROMPT_FIELDS:
+            text = _get_widget_value_ui(node, field)
+            if isinstance(text, str) and text.strip():
+                return text.strip()
         # text may be fed by an external STRING link - follow it
         for inp in node.get("inputs") or []:
-            if inp.get("name") == "text" and inp.get("link") is not None:
+            if inp.get("name") in PROMPT_FIELDS and inp.get("link") is not None:
                 src_id = link_map.get(str(inp["link"]))
                 if src_id:
                     return _extract_text_from_node_ui(node_map.get(src_id))
@@ -248,11 +345,11 @@ def _extract_generation_info_ui(workflow: dict) -> dict:
                 if isinstance(name, str) and name:
                     loras.append(name)
 
-            elif node_type in _SAMPLER_CLASSES:
+            elif _guider_prompt_inputs(node_type):
                 if positive_prompt is None:
                     for inp in node.get("inputs") or []:
                         if (
-                            inp.get("name") == "positive"
+                            inp.get("name") in _guider_prompt_inputs(node_type)
                             and inp.get("link") is not None
                         ):
                             upstream_id = link_map.get(str(inp["link"]))
@@ -294,7 +391,7 @@ def _extract_generation_info_ui(workflow: dict) -> dict:
     if positive_prompt is None:
         for graph in _iter_ui_graphs(workflow):
             for node in graph.get("nodes") or []:
-                if node.get("type") not in _PRIMITIVE_STRING_CLASSES:
+                if node.get("type") not in PRIMITIVE_STRING_CLASSES:
                     continue
                 # Only consider nodes that have at least one outgoing link (are wired up)
                 has_link = any(out.get("links") for out in (node.get("outputs") or []))
@@ -327,7 +424,11 @@ def _resolve_text_api(value: Any, workflow: dict, depth: int = 0) -> str | None:
     """Resolve a text input value in API format, following single-hop references.
 
     Handles both plain strings and references to primitive/text passthrough nodes
-    (e.g. ``PrimitiveStringMultiline``).
+    (e.g. ``PrimitiveStringMultiline``). A node that names its text otherwise
+    (``LoRACharacterPromptBuilder``) answers with its longest string, as
+    :func:`_extract_text_from_node_ui` reads the same node: what it builds from
+    that is not in the graph, and its own text is the prompt as far as the
+    file says.
     """
     if depth > _MAX_FOLLOW_DEPTH:
         return None
@@ -342,15 +443,40 @@ def _resolve_text_api(value: Any, workflow: dict, depth: int = 0) -> str | None:
             v = inputs.get(key)
             if v is not None:
                 return _resolve_text_api(v, workflow, depth + 1)
+        # Only a string with a space in it that does not end as a model or a
+        # picture file does: a file name, a path or a choice (``Random``) is
+        # one word or carries its extension, and this answer is stored as the
+        # picture's prompt.
+        # ponytail: a one-word prompt on such a node reads as no prompt, and a
+        # spaced path to any other kind of file as one; type the output from
+        # object_info if either turns up.
+        candidates = [
+            v.strip()
+            for v in inputs.values()
+            if isinstance(v, str)
+            and len(v.split()) > 1
+            and v.strip().lower() not in _TEXT_CONTROL_VALUES
+            and not v.strip().lower().endswith(MODEL_EXTENSIONS + IMAGE_EXTENSIONS)
+        ]
+        if candidates:
+            return max(candidates, key=len)
     return None
 
 
-def _follow_positive_api(
+def _follow_prompt_api(
     node_id: str,
     workflow: dict,
     depth: int = 0,
+    side: str = "positive",
 ) -> str | None:
-    """Walk upstream conditioning links in API format to find prompt text."""
+    """Walk upstream conditioning links in API format to find prompt text.
+
+    ``side`` names the conditioning input a passthrough node is followed
+    through, so the same walk reaches the negative encoder: a node that takes
+    both (a ControlNet applier, a conditioning combine) has to be followed on
+    the side the caller started on, or the negative chain arrives at the
+    positive prompt.
+    """
     if depth > _MAX_FOLLOW_DEPTH:
         return None
     node = workflow.get(str(node_id))
@@ -359,18 +485,70 @@ def _follow_positive_api(
     class_type = node.get("class_type", "")
     inputs = node.get("inputs") or {}
 
-    if class_type in _CLIP_TEXT_ENCODE_CLASSES:
-        text = inputs.get("text")
-        return _resolve_text_api(text, workflow, depth + 1)
+    # An encoder, by the rule `workflow_io` detects a run's prompt nodes by: a
+    # `TextEncode` class, or a node that takes `clip` and no conditioning, so
+    # makes the conditioning itself (`MiniMaxH3ImageToVideo`).
+    if "TextEncode" in class_type or (
+        "clip" in inputs and not any(map(_is_conditioning_input, inputs))
+    ):
+        # One that makes both sides keeps its negative in a field of its own.
+        fields = PROMPT_FIELDS
+        if side == "negative" and any(name in inputs for name in NEGATIVE_FIELDS):
+            fields = NEGATIVE_FIELDS
+        name = next((name for name in fields if name in inputs), None)
+        return _resolve_text_api(inputs.get(name), workflow, depth + 1)
 
-    # Follow conditioning passthrough nodes upstream
-    for key in ("conditioning", "positive"):
+    # Follow conditioning passthrough nodes upstream, **the caller's side
+    # first**: a node carrying both a generic `conditioning` and a named
+    # `positive`/`negative` is followed on the side this walk started on, or
+    # the negative chain arrives at the positive prompt - the exact failure
+    # `side` exists to prevent, which trying the generic key first reinstated.
+    for key in (side, "conditioning"):
         ref = inputs.get(key)
         if _is_api_ref(ref):
-            result = _follow_positive_api(str(ref[0]), workflow, depth + 1)
+            result = _follow_prompt_api(str(ref[0]), workflow, depth + 1, side)
             if result is not None:
                 return result
     return None
+
+
+def _dead_loader_ids(workflow: dict) -> set[str]:
+    """The model and LoRA loaders of an API graph that feed nothing.
+
+    A loader only other such loaders read, transitively: a left-over UNET and
+    the LoRA on it, wired into nothing. ComfyUI runs backwards from its outputs,
+    so those never ran, and crediting them shows a LoRA the picture never
+    loaded. Any other node nothing reads is taken for an output: plenty of
+    savers (a sampler that saves its own picture, a pack's previewer) carry no
+    name that says so, and dropping a LoRA that did run is the worse mistake.
+    A graph with no such node (loaders alone) says nothing about what ran, so
+    nothing in it is dead.
+    """
+    nodes = {
+        str(node_id): node
+        for node_id, node in workflow.items()
+        if isinstance(node, dict)
+    }
+    loaders = {
+        node_id
+        for node_id, node in nodes.items()
+        if node.get("class_type") in _CHECKPOINT_CLASSES | _UNET_CLASSES | _LORA_CLASSES
+    }
+    if not nodes.keys() - loaders:
+        return set()
+    dead: set[str] = set()
+    while True:
+        read = {
+            str(value[0])
+            for node_id, node in nodes.items()
+            if node_id not in dead
+            for value in (node.get("inputs") or {}).values()
+            if is_link(value)
+        }
+        newly_dead = loaders - dead - read
+        if not newly_dead:
+            return dead
+        dead |= newly_dead
 
 
 def _extract_generation_info_api(workflow: dict) -> dict:
@@ -383,12 +561,15 @@ def _extract_generation_info_api(workflow: dict) -> dict:
     loras: list[str] = []
     positive_prompt: str | None = None
     seed: int | None = None
+    dead = _dead_loader_ids(workflow)
 
-    for node in workflow.values():
+    for node_id, node in workflow.items():
         if not isinstance(node, dict):
             continue
         class_type = node.get("class_type", "")
         inputs = node.get("inputs") or {}
+        if str(node_id) in dead:
+            continue
 
         if class_type in _CHECKPOINT_CLASSES:
             name = inputs.get("ckpt_name")
@@ -405,11 +586,18 @@ def _extract_generation_info_api(workflow: dict) -> dict:
             if isinstance(name, str) and name:
                 loras.append(name)
 
-        elif class_type in _SAMPLER_CLASSES:
+        elif _guider_prompt_inputs(class_type):
             if positive_prompt is None:
-                ref = inputs.get("positive")
+                ref = next(
+                    (
+                        inputs[name]
+                        for name in _guider_prompt_inputs(class_type)
+                        if name in inputs
+                    ),
+                    None,
+                )
                 if _is_api_ref(ref):
-                    positive_prompt = _follow_positive_api(str(ref[0]), workflow)
+                    positive_prompt = _follow_prompt_api(str(ref[0]), workflow)
             if seed is None and class_type in _SEED_CLASSES:
                 for field in _SEED_FIELDS:
                     val = inputs.get(field)
@@ -438,8 +626,11 @@ def _extract_generation_info_api(workflow: dict) -> dict:
 def extract_generation_info(workflow: dict) -> dict:
     """Extract model names, LoRA names, and positive prompt from a workflow.
 
-    Works with both UI format (``nodes`` + ``links`` arrays) and API format
-    (flat dict of node dicts with ``class_type`` + ``inputs``).
+    Works with both serialisations, and which one this is is
+    :func:`is_api_format`'s answer rather than a second opinion taken here
+    (#1482): a document carrying the ``last_node_id`` / ``last_link_id`` hints
+    is the editor graph even where its body would read as a flat node map, and
+    is read as one rather than walked as both.
 
     Args:
         workflow: A parsed ComfyUI workflow dict as returned by
@@ -458,16 +649,344 @@ def extract_generation_info(workflow: dict) -> dict:
           the ``seed`` widget of ``KSampler``/``KSamplerAdvanced`` or the
           ``noise_seed`` input of ``RandomNoise``.
     """
-    is_ui_format = isinstance(workflow.get("nodes"), list) or isinstance(
-        workflow.get("links"), list
-    )
+    # The format check used to sit outside this `try`, so a non-dict raised
+    # `AttributeError` at the caller. `is_api_format` answers for one instead
+    # ("not the API format"), the UI reader then raises inside the `try`, and
+    # such a caller now gets the empty result and a logged traceback. No
+    # caller passes one; the widened `except` is the cost of the single sniff.
     try:
-        if is_ui_format:
+        if not is_api_format(workflow):
             return _extract_generation_info_ui(workflow)
         return _extract_generation_info_api(workflow)
     except Exception:
         logger.warning("Failed to extract generation info from workflow", exc_info=True)
         return {"models": [], "loras": [], "positive_prompt": None, "seed": None}
+
+
+# The loaders whose model name is the FIRST widget value, for the UI-format
+# node that declares no inputs at all and is therefore a bare positional array.
+# The three families, and the loaders whose model name is their ONLY widget
+# (ComfyUI's `/object_info`; DiffControlNetLoader's other input is a MODEL
+# link). Every other loader in the map below either interleaves its widgets or
+# carries several, and a positional guess there would name the wrong file
+# rather than none.
+_ONE_WIDGET_LOADERS = frozenset(
+    {
+        "ControlNetLoader",
+        "DiffControlNetLoader",
+        "UpscaleModelLoader",
+        "StyleModelLoader",
+    }
+)
+_NAME_FIRST_CLASSES = (
+    _CHECKPOINT_CLASSES | _UNET_CLASSES | _LORA_CLASSES | _ONE_WIDGET_LOADERS
+)
+
+# `config_name` is a YAML beside the checkpoint, not a model: it reaches no
+# shelf row and would draw a mark for a file nobody loads.
+_NOT_A_MODEL_WIDGET = frozenset({"config_name"})
+
+# The ComfyUI-PixlStash loaders that name a ControlNet or an upscale model by
+# digest. Read for a card only, never through `MODEL_FILENAME_FIELDS`: the
+# pre-flight would then check a digest against ComfyUI's filename combo. The
+# card's shelf lookup resolves a digest as it resolves a filename (#1939).
+_PACK_DIGEST_WIDGETS = {
+    PIXLSTASH_CONTROLNET_LOADER: CONTROLNET_LOADER_DIGEST,
+    PIXLSTASH_UPSCALE_MODEL_LOADER: UPSCALE_MODEL_LOADER_DIGEST,
+}
+
+
+@lru_cache(maxsize=1)
+def _base_model_widgets() -> tuple[str, ...]:
+    """Every widget that names a BASE MODEL, in a fixed order.
+
+    Read in addition to the loader's own widgets because
+    ``CHECKPOINT_WIDGETS`` - not a list of loader classes - is where "what
+    counts as a base model" is decided. A class list cannot answer for a node
+    it has never heard of, and two of these widgets reach a card through
+    PixlStash's own ComfyUI node (``checkpoint_id``) and through Diffusers,
+    neither of which the pre-flight map names.
+
+    **Derived, never copied**, for the reason ``BASE_MODEL_KINDS`` is derived:
+    a sixth widget added to that set has to reach this the same day. The
+    import is local only because ``workflow_identity`` reaches back into this
+    module through ``workflow_io`` -> ``comfyui_service``, so a top-level one
+    is a cycle - the single case CLAUDE.md sanctions a local import for.
+    """
+    from pixlstash.services.workflow_identity import CHECKPOINT_WIDGETS
+
+    return tuple(sorted(CHECKPOINT_WIDGETS))
+
+
+def _model_widgets_of(class_type: str) -> tuple[str, ...]:
+    """Every widget of this loader that holds a model file name."""
+    return tuple(
+        field
+        for field in model_filename_fields(class_type)
+        if field not in _NOT_A_MODEL_WIDGET
+    )
+
+
+def loaded_model_widgets(workflow: dict) -> list[tuple[str, str]]:
+    """``[(widget name, filename)]`` for every model loader in *workflow*.
+
+    Both serialisations, like :func:`extract_generation_info`, and the same
+    best effort: a **UI-format** file names its widget values by position, so a
+    name is read off ``widgets_values`` through the node's declared inputs, and
+    falls back to slot 0 only for the loaders whose model name is the first
+    widget (:data:`_NAME_FIRST_CLASSES`).
+
+    **Which widget each loader reads is ``MODEL_FILENAME_FIELDS``'** (through
+    ``model_filename_fields``, so a ComfyUI-MultiGPU wrapper reads as the
+    loader it wraps), the map
+    the pre-flight check already uses, rather than a list of its own: a card
+    built from these is read beside one built from a stored slot list, and two
+    answers to "which widget names a model" is how the two drift. That map
+    carries the VAE, CLIP, ControlNet, upscale and Diffusers loaders as well as
+    the three that name a base model, so each recovered slot arrives under the
+    widget ``workflow_card_service.slot_kind`` turns into its real kind.
+
+    It is still a list of classes, and no list of classes is every loader there
+    is: a graph loading through a custom node recovers nothing for it. That is
+    why an empty answer means "this document did not say" and never "this
+    workflow loads no models" -- and why a card drawn from this must not turn
+    a missing slot into a claim (``utils/workflowCard.checkpointUnread``).
+
+    The pack's ControlNet and upscale loaders name their file by digest and
+    are read as well (:data:`_PACK_DIGEST_WIDGETS`), under their digest widget.
+
+    Muted and bypassed nodes are skipped, because they do not load anything
+    when the workflow runs.
+
+    Order is document order, which is the order a reader sees the loaders in.
+    Duplicates are kept: two LoRA loaders holding one file is two slots.
+    """
+    if not isinstance(workflow, dict):
+        return []
+    if is_api_format(workflow):
+        found = []
+        for node_id, node in workflow.items():
+            if not isinstance(node, dict):
+                continue
+            found.extend(
+                (widget, value)
+                for _id, _cls, widget, value in iter_model_fields_api(
+                    {node_id: node}, shelf_ids_as_text=True
+                )
+            )
+            digest = _PACK_DIGEST_WIDGETS.get(node.get("class_type"))
+            inputs = node.get("inputs")
+            value = inputs.get(digest) if digest and isinstance(inputs, dict) else None
+            value = _pack_digest(value)
+            if value:
+                found.append((digest, value))
+        return found
+    return _loaded_model_widgets_ui(workflow)
+
+
+def _loaded_model_widgets_ui(workflow: dict) -> list[tuple[str, str]]:
+    found = []
+    for graph in _iter_ui_graphs(workflow):
+        for node in graph.get("nodes") or []:
+            if not isinstance(node, dict):
+                continue
+            # mode 2 = muted/never, mode 4 = bypassed - skip both.
+            if node.get("mode", 0) not in (0, None):
+                continue
+            class_type = node.get("type", "")
+            widgets = _model_widgets_of(class_type)
+            named = [(widget, _get_widget_value_ui(node, widget)) for widget in widgets]
+            if (
+                widgets
+                and all(value is None for _, value in named)
+                and class_type in _NAME_FIRST_CLASSES
+            ):
+                # No input declared the widget, so the array is bare and the
+                # model name is slot 0 - true of these loaders only.
+                values = node.get("widgets_values") or []
+                named = [(widgets[0], values[0] if values else None)]
+            named.extend(
+                (widget, _get_widget_value_ui(node, widget))
+                for widget in _base_model_widgets()
+                if widget not in widgets
+            )
+            digest = _PACK_DIGEST_WIDGETS.get(class_type)
+            if digest:
+                # The digest is the pack loader's only widget, so a bare
+                # array holds it at slot 0.
+                value = _get_widget_value_ui(node, digest)
+                if value is None:
+                    value = (node.get("widgets_values") or [None])[0]
+                named.append((digest, _pack_digest(value)))
+            for widget, value in named:
+                value = _shelf_id_text(widget, value)
+                if isinstance(value, str) and value:
+                    found.append((widget, value))
+    return found
+
+
+def _pack_digest(value):
+    """*value* lowercased when it is a digest, else ``None``.
+
+    The structural hash's rule for a digest widget
+    (``workflow_hash.structural_widget_value``): anything else in one names
+    nothing, so prose typed there never becomes a ControlNet on a card.
+    """
+    if not isinstance(value, str):
+        return None
+    lowered = value.lower()
+    # `fullmatch`: the pattern's `$` also matches before a trailing newline.
+    return lowered if DIGEST_PREFIX_RE.fullmatch(lowered) else None
+
+
+def _shelf_id_text(widget: str, value):
+    """A shelf loader's id as text: a JSON number is an id the node runs.
+
+    The node does ``str(checkpoint_id)``, so ``77`` and ``"77"`` load the same
+    row (``workflow_hash.structural_widget_value`` reads it the same way).
+    """
+    if (
+        widget == SHELF_ID_FIELD
+        and isinstance(value, int)
+        and not isinstance(value, bool)
+    ):
+        return str(value)
+    return value
+
+
+def iter_model_fields_api(workflow: dict, *, shelf_ids_as_text: bool = False):
+    """Yield ``(node_id, class_type, widget, filename)`` for an API graph.
+
+    The one walk over "which widget of which loader names a model file" in an
+    API-format graph: :func:`loaded_model_widgets` reads through it, and so do
+    the clone dialog's slot list and ``apply_filename_swap``'s rewrite, which
+    must agree with it about which fields a swap reaches.
+
+    *shelf_ids_as_text* also yields a numeric ``checkpoint_id`` as text, for a
+    reader that names models; a rewrite keeps seeing only what it can rewrite.
+    """
+    for node_id, node in (workflow or {}).items():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        class_type = node.get("class_type", "")
+        widgets = _model_widgets_of(class_type)
+        for widget in (
+            *widgets,
+            *(w for w in _base_model_widgets() if w not in widgets),
+        ):
+            value = inputs.get(widget)
+            if shelf_ids_as_text:
+                value = _shelf_id_text(widget, value)
+            if isinstance(value, str) and value:
+                yield node_id, class_type, widget, value
+
+
+def extract_recipe_extras(workflow: dict) -> dict:
+    """The negative prompt and the sampler settings of an **API-format** graph.
+
+    Split from :func:`extract_generation_info` rather than folded into it
+    because only the API format is read here: the recipe endpoint works on the
+    embedded ``prompt`` chunk, and a UI graph reaching this would quietly
+    report no settings at all. A caller holding a UI graph gets the same empty
+    answer as one holding a graph with no sampler, which is honest for both.
+
+    Args:
+        workflow: The API-format graph.
+
+    Returns:
+        ``{"negative_prompt": str | None, "settings": {field: value}}``. The
+        first node that names a field wins, and that is **iteration order, not
+        execution order**: a graph that samples twice (a hires-fix pass) can
+        report the second pass's step count beside the first's CFG. Reading it
+        as "the settings of the pass that made the picture" is therefore wrong;
+        it is "what this graph says", which is what a recipe read can honestly
+        offer without walking the execution graph. The size is the exception:
+        an empty latent's, worked out from a Resolution Selector when wired,
+        wins over another node's ``width`` (an SDXL text encoder's 4096),
+        because a run writes it back onto that latent. A graph with no empty
+        latent (image-to-video) reads it off the node that hands out the
+        latent, and failing that off the first node naming a ``width``
+        (``workflow_parameters.size_inputs``).
+    """
+    # Local: workflow_parameters -> workflow_io -> this module is a cycle.
+    from pixlstash.services.workflow_parameters import linked_size, size_inputs
+
+    negative_prompt: str | None = None
+    settings: dict[str, Any] = {}
+    latent_size: dict[str, int] = {}
+    try:
+        sized = size_inputs(workflow)
+        for node_id, node in workflow.items():
+            if not isinstance(node, dict):
+                continue
+            inputs = node.get("inputs") or {}
+            if not isinstance(inputs, dict):
+                continue
+            if (
+                negative_prompt is None
+                and node.get("class_type", "") in _SAMPLER_CLASSES
+            ):
+                ref = inputs.get("negative")
+                if _is_api_ref(ref):
+                    negative_prompt = _follow_prompt_api(
+                        str(ref[0]), workflow, side="negative"
+                    )
+            for field, kind in _SETTING_FIELDS.items():
+                value = inputs.get(field)
+                if (str(node_id), field) in sized:
+                    linked = linked_size(workflow, value)
+                    size = _typed_setting(value if linked is None else linked, kind)
+                    if size is not None:
+                        latent_size.setdefault(field, size)
+                if field in settings:
+                    continue
+                value = _typed_setting(value, kind)
+                if value is not None:
+                    settings[field] = value
+    except Exception:
+        logger.warning("Failed to extract recipe extras from workflow", exc_info=True)
+        return {"negative_prompt": None, "settings": {}}
+    settings.update(latent_size)
+    return {"negative_prompt": negative_prompt, "settings": settings}
+
+
+def _typed_setting(value: Any, kind: type) -> Any:
+    """*value* as *kind* if it is a reportable setting of that field, else ``None``.
+
+    The field's type, not the value's kind. A graph is attacker-authorable file
+    metadata, so `steps: "twenty"` and `sampler_name: 12345` both arrive as
+    plausible-looking JSON and neither is a setting; a number field written as
+    text is refused rather than passed on for a client to parse.
+
+    **A non-finite float is refused, and that is not tidiness.** ``json.loads``
+    accepts the ``Infinity`` and ``NaN`` literals while the response renders
+    with ``allow_nan=False``, so a crafted ``prompt`` chunk would turn this
+    read into a 500 for anyone holding a share token for the picture. An
+    integer past the range of a float is refused on the same ground: it
+    overflows the conversion rather than the renderer.
+
+    A wired input (``[node_id, slot]``) has no value until the graph runs, and
+    a bool is not a setting any of these fields declares.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    if kind is str:
+        return value if isinstance(value, str) else None
+    if isinstance(value, str):
+        return None
+    try:
+        typed = kind(value)
+    except (OverflowError, ValueError):
+        return None
+    # Only a float can be non-finite, and `math.isfinite` itself OVERFLOWS on
+    # an integer too large for a float - which would have been raised out of
+    # here and cost the whole settings block, not just the one field.
+    if isinstance(typed, float) and not math.isfinite(typed):
+        return None
+    return typed
 
 
 def _parse_metadata_value(value: Any) -> Any:
@@ -525,12 +1044,10 @@ def is_comfy_workflow(value: Any) -> bool:
     """
     if not isinstance(value, dict):
         return False
-    # UI format
-    if isinstance(value.get("nodes"), list) or isinstance(value.get("links"), list):
-        return True
-    if isinstance(value.get("last_node_id"), int) or isinstance(
-        value.get("last_link_id"), int
-    ):
+    # UI format: the same four hints, and `is_api_format` is their one reader.
+    # Sound as an inversion only because a non-dict was refused two lines up -
+    # `is_api_format` answers "not the API format" for one of those as well.
+    if not is_api_format(value):
         return True
     # API format: most top-level entries must be node dicts
     vals = list(value.values())
@@ -542,6 +1059,88 @@ def is_comfy_workflow(value: Any) -> bool:
         and "inputs" in v
     )
     return api_node_count > 0 and api_node_count >= min(len(vals), 2)
+
+
+class NotAWorkflowError(ValueError):
+    """A document offered for import is not a ComfyUI workflow."""
+
+
+def check_comfy_workflow(value: Any) -> None:
+    """Refuse *value* unless it is shaped like a ComfyUI workflow file.
+
+    Stricter than :func:`is_comfy_workflow`, which only sniffs metadata: this
+    guards what gets stored, so any JSON object must not pass.
+
+    - UI format: a non-empty ``nodes`` list whose every node has an ``id`` and
+      a non-empty string ``type``, beside a ``links`` list or, where the
+      schema-version-1 serialiser drops an empty ``links``, its ``state`` or
+      ``last_node_id``. Those tell it from other node-graph exports (React
+      Flow, n8n).
+    - API format (bare, or wrapped as ``{"prompt": graph}``): at least one
+      entry, and every entry other than PixlStash's own ``pixlstash_*`` keys a
+      node with a non-empty string ``class_type`` and an ``inputs`` object.
+
+    Raises:
+        NotAWorkflowError: *value* is not a workflow; the message says why.
+    """
+    if not isinstance(value, dict):
+        raise NotAWorkflowError("not a ComfyUI workflow: not a JSON object")
+    if "nodes" in value:
+        nodes = value["nodes"]
+        if not isinstance(nodes, list) or not nodes:
+            raise NotAWorkflowError("not a ComfyUI workflow: it has no nodes")
+        if not (
+            isinstance(value.get("links"), list)
+            or (
+                "links" not in value
+                and (
+                    isinstance(value.get("state"), dict)
+                    or isinstance(value.get("last_node_id"), int)
+                )
+            )
+        ):
+            raise NotAWorkflowError("not a ComfyUI workflow: it has no links list")
+        for index, node in enumerate(nodes, start=1):
+            if not isinstance(node, dict) or node.get("id") is None:
+                raise NotAWorkflowError(
+                    f"not a ComfyUI workflow: entry {index} of its nodes has no id"
+                )
+            if not _is_name(node.get("type")):
+                raise NotAWorkflowError(
+                    f"not a ComfyUI workflow: node {_shown(node['id'])} has no type"
+                )
+        return
+    graph = value["prompt"] if isinstance(value.get("prompt"), dict) else value
+    entries = {
+        key: node
+        for key, node in graph.items()
+        if not str(key).startswith("pixlstash_")
+    }
+    strays = [
+        key
+        for key, node in entries.items()
+        if not (
+            isinstance(node, dict)
+            and _is_name(node.get("class_type"))
+            and isinstance(node.get("inputs"), dict)
+        )
+    ]
+    if not entries or len(strays) == len(entries):
+        raise NotAWorkflowError("not a ComfyUI workflow")
+    if strays:
+        raise NotAWorkflowError(
+            f"not a ComfyUI workflow: {_shown(strays[0])} is not a node with a "
+            "class_type and inputs"
+        )
+
+
+def _is_name(value: Any) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _shown(value: Any) -> str:
+    """*value* quoted for a message, cut short so a huge key cannot flood it."""
+    return repr(str(value)[:60])
 
 
 def find_comfy_workflow(metadata: dict) -> dict | None:
@@ -629,12 +1228,14 @@ def find_comfy_api_prompt(metadata: dict) -> dict | None:
       executed*. This is the only executable one.
 
     Only the ``prompt`` chunk is considered here, and it must additionally pass
-    :func:`is_api_format`. There is deliberately **no fallback to the UI graph
-    and no UI→API conversion**: converting requires re-resolving widget values,
-    links, muted/bypassed nodes and subgraphs exactly as the ComfyUI frontend
-    does, and a near-miss produces a graph that runs and silently generates
-    something else. Absent an executable ``prompt`` chunk the honest answer is
-    "no executable workflow embedded".
+    :func:`is_api_format`. **This function never falls back to the UI graph**,
+    and that is not the same thing as PixlStash refusing to read one: a caller
+    that wants the editor chunk rebuilt into a runnable graph asks
+    :func:`pixlstash.services.comfyui_ui_graph.convert_ui_graph_to_api`, which
+    needs ComfyUI's ``/object_info`` to do it and refuses rather than
+    approximates. Keeping the two apart is what lets a caller say which it got:
+    the answer here is the graph ComfyUI actually executed, and the answer there
+    is PixlStash's reading of the editor's view of it.
 
     Args:
         metadata: Raw embedded metadata as returned by
@@ -793,7 +1394,21 @@ def extract_comfy_workflow_info(metadata: dict) -> dict | None:
         summary_parts.append(f"{stats['link_count']} links")
     summary = " · ".join(summary_parts) or "Detected ComfyUI metadata"
 
-    gen_info = extract_generation_info(workflow)
+    # **The graph shown and the graph read are two different questions.**
+    # `find_comfy_workflow` prefers the UI `workflow` chunk, which is right for
+    # what is displayed, copied and pasted back into ComfyUI. It is the wrong
+    # source for what the picture was MADE with: the UI chunk is the editor's
+    # view, read here by mapping named inputs onto positional `widgets_values`
+    # and, failing that, taking the longest string in a node - so a graph whose
+    # encoder is fed by a custom prompt-builder reports that node's template
+    # instead of the prompt, and can miss the models and the seed entirely.
+    #
+    # The `prompt` chunk is the resolved graph the ComfyUI server actually
+    # executed, which is why `GET /comfyui/pictures/{id}/recipe` reads only that
+    # one. Facts come from it whenever the file has one; a UI-only file falls
+    # back to the editor's view, which is then genuinely all there is.
+    executed = find_comfy_api_prompt(metadata)
+    gen_info = extract_generation_info(executed if executed is not None else workflow)
 
     return {
         "workflow": workflow,
@@ -802,5 +1417,13 @@ def extract_comfy_workflow_info(metadata: dict) -> dict | None:
         "models": gen_info["models"],
         "loras": gen_info["loras"],
         "positive_prompt": gen_info["positive_prompt"],
+        "negative_prompt": extract_recipe_extras(executed)["negative_prompt"]
+        if executed is not None
+        else None,
         "seed": gen_info["seed"],
+        # The seed as text as well as a number. ComfyUI draws seeds up to
+        # 2**64-1 and JavaScript's Number loses precision above 2**53, so a
+        # panel rendering `seed` would print the wrong digits for about half of
+        # real seeds. `generation.seed` is TEXT in the vault for this reason.
+        "seed_text": None if gen_info["seed"] is None else str(gen_info["seed"]),
     }

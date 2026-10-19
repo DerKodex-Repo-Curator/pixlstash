@@ -12,11 +12,10 @@ import { mount } from "@vue/test-utils";
 import { nextTick } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 
-// The CLI commands live in a dialog, so the real VDialog would need Vuetify's
+// The CLI commands live in an AppDialog, so the real VDialog would need Vuetify's
 // defaults instance. Render the slot inline instead, matching
 // LibrarySwitchOverlay.test.js.
 vi.mock("vuetify/components", () => ({
-  VCard: { name: "v-card", template: "<div><slot /></div>" },
   VDialog: { name: "v-dialog", template: "<div><slot /></div>" },
   VIcon: { name: "v-icon", template: "<i><slot /></i>" },
   VProgressCircular: { name: "v-progress-circular", template: "<i />" },
@@ -26,6 +25,11 @@ vi.mock("vuetify/components", () => ({
   VMenu: {
     name: "v-menu",
     template: "<div><slot name=\"activator\" :props=\"{}\" /><slot /></div>",
+  },
+  // Tooltip.vue wraps VTooltip: render the activator only, as a closed tip does.
+  VTooltip: {
+    name: "VTooltip",
+    setup: (_p, { slots }) => () => slots.activator?.({ props: {} }),
   },
 }));
 
@@ -155,7 +159,7 @@ function rowFor(wrapper, name) {
 /** A menu item inside a row, by its label. */
 function menuItem(wrapper, name, label) {
   return rowFor(wrapper, name)
-    .findAll(".library-menu__item")
+    .findAll(".ctx-item")
     .find((item) => item.text().includes(label));
 }
 
@@ -509,7 +513,7 @@ describe("the row menu", () => {
     const wrapper = await settle(mountPane());
 
     const labels = rowFor(wrapper, "Client work")
-      .findAll(".library-menu__item")
+      .findAll(".ctx-item")
       .map((item) => item.text());
     expect(labels).toEqual([
       "Open this library",
@@ -888,9 +892,7 @@ describe("teaching the CLI", () => {
 
     await wrapper.findAll(".libraries-cli")[0].find("button").trigger("click");
     await nextTick();
-    await wrapper.findAll(".libraries-cli-dialog__actions button")[0].trigger(
-      "click",
-    );
+    await wrapper.find(".libraries-cli-dialog__close").trigger("click");
     await nextTick();
 
     expect(wrapper.find('[role="status"]').text()).toBe("");

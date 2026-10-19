@@ -4,7 +4,7 @@ The shelf catalogues model files by **reading** them: the scanner walks a
 registered folder, reads each ``.safetensors`` header and decides what the file
 is. That is the right approach for a folder of LoRAs the owner assembled, and
 the wrong one for our own engines - half of them are ONNX or ``.pt``, which the
-scanner does not even yield (``MODEL_SUFFIX`` is ``.safetensors``), and all of
+scanner does not even yield (it walks ``SHELF_MODEL_SUFFIXES``), and all of
 them are files *we* chose to download. We do not have to guess what they are.
 We know.
 
@@ -47,7 +47,11 @@ from typing import Optional
 from platformdirs import user_data_dir
 
 from pixlstash.pixl_logging import get_logger
-from pixlstash.services.model_folder_scanner import STATE_PRESENT, STATE_UNREACHABLE
+from pixlstash.services.model_folder_scanner import (
+    STATE_PRESENT,
+    STATE_REMOVED,
+    STATE_UNREACHABLE,
+)
 from pixlstash.utils.adapter_header import FILE_ENGINE, FILE_UNKNOWN
 
 logger = get_logger(__name__)
@@ -57,6 +61,33 @@ logger = get_logger(__name__)
 # relocate as their own, and there is exactly one of those. This is ours.
 BUILTIN_KIND = "foreign"
 BUILTIN_OWNER = "pixlstash"
+
+# The rows the hash worker still owes a digest, as a predicate over `model m`.
+# A NULL `sha256` alone does not say that: an engine carries none by design,
+# and neither does anything in a folder declared here, which
+# `MissingCheckpointHashFinder` leaves out because a declared entry may be a
+# directory. Those rows never get one, so reading them as "still hashing" has
+# the shelf waiting on work nobody is going to do.
+#
+# "Never" is said only of a row whose EVERY copy is in a declared folder (the
+# MIN is 1). One copy anywhere else, in any state, and it is still owed: a
+# drive that is unplugged comes back. A row with no copy at all (NULL) stays
+# owed too, because the readers of this forget recipe digests once nothing is
+# pending, and wrongly waiting costs less than wrongly forgetting.
+# A folder (`f`) whose files nothing hashes: one PixlStash declared, which an
+# index describes rather than a walk, so a "file" may be a directory. The
+# managed store (`managed_model_store.MANAGED_KIND`) has the same owner but
+# holds plain files, the Downloads intake's among them, and is hashed like any
+# folder: a text encoder there with no digest is one no PixlStash loader can
+# load.
+UNHASHED_FOLDER_SQL = f"(f.owner IS '{BUILTIN_OWNER}' AND f.kind IS NOT 'managed')"
+
+HASH_PENDING_SQL = (
+    f"m.sha256 IS NULL AND m.file_kind <> '{FILE_ENGINE}' AND COALESCE(("
+    f"SELECT MIN{UNHASHED_FOLDER_SQL} FROM model_file mf "
+    "JOIN model_folder f ON f.id = mf.model_folder_id "
+    "WHERE mf.model_id = m.id), 0) = 0"
+)
 
 # How a declared folder moves, which is a statement about the folder rather than
 # a permission. `root_only` means "if it relocates, it relocates whole" - true of
@@ -96,8 +127,10 @@ STATE_NOT_DOWNLOADED = "not_downloaded"
 # reported as unclaimed - it is simply not a model file.
 TOOLING_DIRS = (".cache",)
 
-# What counts as weights, for the unclaimed readout. Wider than the scanner's
-# `MODEL_SUFFIX` (`.safetensors` alone), because this folder is precisely where
+# What counts as weights, for the unclaimed readout. **Not the scanner's
+# `SHELF_MODEL_SUFFIXES`, and not named after it**: that tuple answers "what
+# does the shelf catalogue by reading it", and this one answers "what in OUR
+# folder is a model file at all". Wider, because this folder is precisely where
 # the other formats land - our own tagger is ONNX and both scorers are `.pth` -
 # and the leftover that prompted #927 is a `.pt`.
 #
@@ -892,10 +925,19 @@ def declare_folder(
         # `seen_at <` the run's own stamp rather than `!=`, the same predicate
         # the scanner uses, so a concurrent declaration that stamped a later
         # time cannot have its rows swept by this one.
+        #
+        # `removed` is skipped for the reason the scanner's three sweeps skip it
+        # (#1439): a copy the owner deleted to keep one of several has a row on
+        # purpose, and this sweep runs on every start - so without the predicate
+        # the distinction would survive the delete and not the next boot. It
+        # matters here and not only in theory, because `deletes_unclaimed_files`
+        # lets the merge act on the unclaimed files in PixlStash's own download
+        # folder, which is one of the roots this function declares.
         conn.execute(
             "UPDATE model_file SET state = 'missing' "
-            "WHERE model_folder_id = ? AND seen_at < ? AND state <> 'missing'",
-            (folder_id, now),
+            "WHERE model_folder_id = ? AND seen_at < ? "
+            "AND state NOT IN ('missing', ?)",
+            (folder_id, now, STATE_REMOVED),
         )
         conn.execute(
             "UPDATE model_folder SET last_checked = ? WHERE id = ?", (now, folder_id)

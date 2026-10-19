@@ -229,3 +229,64 @@ export function isAllowedNavigation(
   // Fallback before the backend URL is known: only the loopback host over http.
   return url.protocol === 'http:' && (url.hostname === '127.0.0.1' || url.hostname === 'localhost');
 }
+
+/**
+ * A workflow id, as `?pixlstash_workflow=` carries it: `auto:` and the core
+ * hash for an automatic group, or `manual:` and the uuid hex of a manual
+ * workflow. The backend's `WORKFLOW_ID_PATTERN`
+ * (`pixlstash/utils/workflow_ids.py`) is the same rule.
+ */
+const WORKFLOW_ID_RE = /^(?:auto:[0-9a-f]{64}|manual:[0-9a-f]{32})$/;
+
+/**
+ * What the backend holds a run as for ComfyUI to open, as `?pixlstash_run=`
+ * carries it: 32 hex characters (`POST /workflows/run/opening`).
+ */
+const RUN_OPENING_RE = /^[0-9a-f]{32}$/;
+
+/**
+ * The URL `desktop:openComfyui` may hand to the OS browser, or `null`.
+ *
+ * `openExternalSafely` refuses plain `http:` because nothing in the app links
+ * out over it, and a ComfyUI almost always IS plain `http:`. So the Workflow
+ * tab's *Open in ComfyUI* gets its own channel, and this is the whole of what
+ * it will open: an `http(s)` address with no credentials in it, no fragment,
+ * and one query parameter, `pixlstash_workflow`, holding a workflow id. The
+ * one thing allowed beside it is `pixlstash_original=1`, which *Open original
+ * in ComfyUI* adds: a flag the ComfyUI-PixlStash node reads, and nothing else.
+ * The Run popup's *Open in ComfyUI* is the one other shape: `pixlstash_run`,
+ * the run the backend holds, then `pixlstash_of`, the workflow it is of, and
+ * nothing beside the two.
+ * The host is not checked: ComfyUI is wherever the owner configured it, and
+ * main cannot read that setting without the renderer's session. What this
+ * stops is the channel being a general "open any link" door.
+ */
+export function comfyuiOpenTarget(raw: unknown): string | null {
+  if (typeof raw !== 'string' || raw.length > 2048) return null;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+  if (url.username || url.password || url.hash) return null;
+  const keys = [...url.searchParams.keys()];
+  if (keys[0] === 'pixlstash_run') {
+    if (keys.length !== 2 || keys[1] !== 'pixlstash_of') return null;
+    if (!RUN_OPENING_RE.test(url.searchParams.get('pixlstash_run') ?? '')) return null;
+    if (!WORKFLOW_ID_RE.test(url.searchParams.get('pixlstash_of') ?? '')) return null;
+    return url.toString();
+  }
+  if (keys[0] !== 'pixlstash_workflow' || keys.length > 2) return null;
+  if (
+    keys.length === 2 &&
+    (keys[1] !== 'pixlstash_original' || url.searchParams.get('pixlstash_original') !== '1')
+  ) {
+    return null;
+  }
+  if (!WORKFLOW_ID_RE.test(url.searchParams.get('pixlstash_workflow') ?? '')) {
+    return null;
+  }
+  return url.toString();
+}

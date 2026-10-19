@@ -13,34 +13,635 @@ scrapheap in would make it read as live.
 
 from __future__ import annotations
 
-from sqlalchemy import func
+from collections import Counter
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from math import inf
+from typing import Optional, Sequence
+
+import json
+
+from sqlalchemy import and_, case, func, nullslast, text
 from sqlmodel import Session, select
 
-from pixlstash.db_models import Picture
+from pixlstash.db_models import Character, Picture, PictureSet, Project
+from pixlstash.services.saved_recipe_service import counts_by_workflow_id
+from pixlstash.stacking import get_or_create_stack_for_picture
+from pixlstash.utils.query.predicate_filter import filed_as as _filed_as
 
 
-def topology_picture_counts(session: Session) -> dict[str, int]:
-    """How many kept pictures each topology accounts for, **vault-wide**.
+@dataclass(frozen=True)
+class WorkflowActivity:
+    """What a vault knows about one workflow key: how much, and how recently."""
 
-    Served by ``ix_picture_workflow_topology_hash``.
+    pictures: int
+    last_used: Optional[datetime]
 
-    **This count is unscoped and must not be returned to a scoped token as it
-    stands.** It reads every non-deleted picture in the vault, so a route
-    exposing it to a picture-, set- or project-scoped token would disclose the
-    size of the whole library - the deny-by-default rule in
-    ``docs/backend_architecture.md`` §16 exists because that class of omission
-    has recurred here. A caller that needs a scoped answer adds the narrowing
-    parameter then, against a real policy; inventing one now with no route to
-    check it against would only look like the question had been settled.
+
+# When a workflow was last used. ``created_at`` is the picture's own date and is
+# nullable -- a PNG that carried no date has none -- so a bare ``max`` over it
+# reads as "never" for a workflow whose every picture came in undated, which is
+# a real state in the owner's libraries and not the one the column means. Falling
+# back to ``imported_at`` answers with the best date the vault actually has.
+_USED_AT = func.coalesce(Picture.created_at, Picture.imported_at)
+
+
+def _activity(session: Session, column) -> dict[str, WorkflowActivity]:
+    """Group kept pictures by one workflow hash column.
 
     Returns:
-        ``{topology_hash: count}``, with topologies whose pictures are all
+        ``{hash: WorkflowActivity}``, with keys whose pictures are all
         soft-deleted absent entirely rather than present with a zero.
     """
     rows = session.exec(
-        select(Picture.workflow_topology_hash, func.count(Picture.id))
-        .where(Picture.workflow_topology_hash.is_not(None))
+        select(column, func.count(Picture.id), func.max(_USED_AT))
+        .where(column.is_not(None))
         .where(Picture.deleted.is_(False))
-        .group_by(Picture.workflow_topology_hash)
+        .group_by(column)
     ).all()
-    return {topology: count for topology, count in rows}
+    return {
+        key: WorkflowActivity(pictures=count, last_used=last_used)
+        for key, count, last_used in rows
+    }
+
+
+def recipe_activity(
+    session: Session, structural_hashes: list[str]
+) -> dict[str, WorkflowActivity]:
+    """The same figures per recipe, for the variants under one topology.
+
+    Narrowed by hash rather than grouped vault-wide: the caller already knows
+    which recipes it is expanding, and a topology holding 159 of them is still
+    one ``IN`` over an indexed column.
+    """
+    if not structural_hashes:
+        return {}
+    column = Picture.workflow_structural_hash
+    rows = session.exec(
+        select(column, func.count(Picture.id), func.max(_USED_AT))
+        .where(column.in_(structural_hashes))
+        .where(Picture.deleted.is_(False))
+        .group_by(column)
+    ).all()
+    return {
+        key: WorkflowActivity(pictures=count, last_used=last_used)
+        for key, count, last_used in rows
+    }
+
+
+def recipe_picture_counts(session: Session) -> dict[str, int]:
+    """How many kept pictures each recipe made, **vault-wide**.
+
+    **Unscoped, and must not be returned to a scoped token as it stands.** It
+    reads every non-deleted picture in the vault, so a picture-, set- or
+    project-scoped token holding it would learn the size of the whole library;
+    the deny-by-default rule in ``docs/backend_architecture.md`` §16 exists
+    because that class of omission has recurred here. Served only to owner
+    routes.
+    """
+    return {
+        key: activity.pictures
+        for key, activity in _activity(
+            session, Picture.workflow_structural_hash
+        ).items()
+    }
+
+
+# ---------------------------------------------------------------------------
+# The vault-level entry points the routes call.
+#
+# The session-level functions above stay public because they are the ones whose
+# contract is worth reading (and testing) on its own; these are the thin layer
+# that owns the ``vault.db`` call, so no route file has to. That split is what
+# ``tests/test_architecture_guardrails.py::test_no_new_direct_db_calls_from_routes``
+# asks for, and it is why the list's two reads share one session rather than
+# taking two.
+# ---------------------------------------------------------------------------
+
+
+def read_recipe_activity(
+    vault, structural_hashes: list[str]
+) -> dict[str, WorkflowActivity]:
+    """The expansion's vault side: figures for one topology's recipes."""
+    return vault.db.run_immediate_read_task(recipe_activity, structural_hashes)
+
+
+def read_variant_picture_counts(vault) -> dict[str, int]:
+    """``{structural_hash: kept pictures}``, vault-wide.
+
+    What a model fix's card re-key decides its merge winner on (v1.12 B4), and
+    what picks a workflow's base topology: the re-key is a hub write, the counts belong to whichever vault is attached, and the two
+    are joined by the hub on the variants it is re-keying.
+    """
+    return vault.db.run_immediate_read_task(recipe_picture_counts)
+
+
+# ---------------------------------------------------------------------------
+# The card grid's vault side (v1.12 B3).
+#
+# Everything below is grouped by ``workflow_structural_hash`` - the VARIANT -
+# and never by card, because the vault does not know what a card is: the
+# variant-to-card map lives in the hub and the two are joined in memory
+# (``services/workflow_card_service``). That is what keeps this at two queries
+# for the whole grid, and what lets a card gain a variant without the vault
+# learning anything new.
+# ---------------------------------------------------------------------------
+
+# Rated means a star the owner actually put there. ``score`` is NULL for a
+# picture nobody has rated and 0 for one explicitly cleared, and neither is a
+# rating: counting either would drag every card's Bayesian mean towards zero in
+# proportion to how much of the library is simply unrated.
+_IS_RATED = and_(Picture.score.is_not(None), Picture.score > 0)
+_STARS = range(1, 6)
+
+
+# ---------------------------------------------------------------------------
+# Workflows whose runs file on them: every manual workflow, and every
+# automatic one the owner saved over (#1849). A picture such a workflow's run
+# made carries its id (`Picture.run_workflow_id`) and counts on THAT workflow,
+# not on the automatic one its variant is in - while it lives: the hub hands
+# every read here its list of live ids (`live`,
+# `workflow_card_reads.run_filed_workflow_ids`), so deleting a manual one
+# needs no vault write and its pictures fall back to their variant. The grid
+# reads group by `_filed_as`, which is that id for such a picture and the
+# variant otherwise, so such a workflow is one more key beside the variants.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class VariantActivity:
+    """What a vault knows about one variant, as the card rank is made of it.
+
+    ``score_total`` is Σ of the ratings that exist, over ``rated`` pictures, so
+    the two divide into a mean the prior can be mixed into. ``pictures`` counts
+    every kept picture whether rated or not, because that is the card's size
+    and the rank's tie-break.
+    """
+
+    pictures: int
+    rated: int
+    score_total: int
+    last_used: Optional[datetime]
+    # How many pictures carry each star, 1★ first: the inspector's histogram.
+    stars: tuple[int, ...] = (0, 0, 0, 0, 0)
+
+
+@dataclass(frozen=True)
+class CoverCandidate:
+    """One picture in the running to be a card's cover, with its sort keys.
+
+    The keys travel with the row because the top three of a CARD are picked in
+    memory out of the top three of each of its variants, and that second pick
+    has to order by exactly what the window ordered by -- including how each
+    key treats NULL, which is the part that is easy to get subtly wrong.
+
+    The three bitmap fields are here for the cache-buster in the thumbnail URL
+    (``ImageUtils.thumbnail_cache_version``), so the covers can be served as
+    URLs without a second read per card.
+
+    The three ``square_crop_*`` fields are the stored face-weighted rectangle
+    within that bitmap (``FaceUtils.square_crop_rect``), so a client can crop a
+    cover around the face rather than to a blind top anchor (#1465). They are
+    NULL while a picture is still being processed, which is the client's cue to
+    fall back to the shipped ``object-fit: cover`` framing.
+    """
+
+    structural_hash: str
+    picture_id: int
+    score: Optional[int]
+    smart_score: Optional[float]
+    used_at: Optional[datetime]
+    thumbnail_width: Optional[int] = None
+    thumbnail_height: Optional[int] = None
+    orientation: Optional[int] = None
+    square_crop_x: Optional[int] = None
+    square_crop_y: Optional[int] = None
+    square_crop_side: Optional[int] = None
+    # The picture's own file, which keys its thumbnail URL as well
+    # (``thumbnail_cache_version``): picture ids are reused after a delete.
+    file_path: Optional[str] = None
+    # Made with a model the owner has since replaced in this workflow
+    # (``workflow_model_fix``). Set by the workflows grid, never by the query.
+    superseded: bool = False
+
+
+# What a NULL date sorts as when the ranking above is re-expressed in Python.
+_EPOCH = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def cover_order(candidate: CoverCandidate) -> tuple:
+    """The window's ORDER BY, re-expressed so a per-card pick matches it.
+
+    Sorted **descending**, like the window is. Used wherever a cover strip is
+    picked in memory out of the top rows of several variants -- the workflows
+    grid and the model shelf's workflow sets -- which is why it lives beside
+    the row it orders rather than in either caller.
+
+    **NULL sorts below every value, including a negative one**, because that is
+    what ``nullslast`` on a descending column does and the two passes have to
+    agree. ``smart_score or 0.0`` would not: this repo writes ``-1.0`` into a
+    metric whose calculation failed (CLAUDE.md's own convention), so a picture
+    whose quality score failed would outrank an unscored one in SQL and lose to
+    it here, and a card's cover would depend on which pass last touched it.
+    """
+    return (
+        -inf if candidate.score is None else candidate.score,
+        -inf if candidate.smart_score is None else candidate.smart_score,
+        candidate.used_at or _EPOCH,
+        candidate.picture_id,
+    )
+
+
+def variant_activity(
+    session: Session, live: Sequence[str] = ()
+) -> dict[str, VariantActivity]:
+    """One ``GROUP BY`` variant (or live manual workflow) over every kept picture.
+
+    Served by ``ix_picture_workflow_structural_hash``. **Unscoped, like
+    :func:`recipe_picture_counts`**, and served only to owner routes for the
+    same reason: it reads every non-deleted picture in the vault, so a scoped token
+    holding the result would learn the size of the whole library one workflow
+    at a time. *live* is the hub's run-filed workflow ids (:func:`_filed_as`).
+    """
+    column = _filed_as(list(live))
+    rows = session.exec(
+        select(
+            column,
+            func.count(Picture.id),
+            func.sum(case((_IS_RATED, 1), else_=0)),
+            func.sum(case((_IS_RATED, Picture.score), else_=0)),
+            func.max(_USED_AT),
+            *(func.sum(case((Picture.score == star, 1), else_=0)) for star in _STARS),
+        )
+        .where(column.is_not(None))
+        .where(Picture.deleted.is_(False))
+        .group_by(column)
+    ).all()
+    return {
+        key: VariantActivity(
+            pictures=pictures,
+            rated=int(rated or 0),
+            score_total=int(score_total or 0),
+            last_used=last_used,
+            stars=tuple(int(count or 0) for count in stars),
+        )
+        for key, pictures, rated, score_total, last_used, *stars in rows
+    }
+
+
+def variant_cover_candidates(
+    session: Session, per_variant: int, live: Sequence[str] = ()
+) -> list[CoverCandidate]:
+    """The best few kept pictures of every variant, from one window pass.
+
+    ``ROW_NUMBER() OVER (PARTITION BY workflow_structural_hash ...)`` rather
+    than a query per card: the top *n* of a card is always a subset of the
+    union of the top *n* of its variants, so one pass over the picture table
+    answers the whole grid and the per-card pick is a sort of a handful of rows.
+    """
+    ordering = (
+        nullslast(Picture.score.desc()),
+        nullslast(Picture.smart_score.desc()),
+        nullslast(_USED_AT.desc()),
+        Picture.id.desc(),
+    )
+    filed = _filed_as(list(live))
+    ranked = (
+        select(
+            filed.label("structural_hash"),
+            Picture.id.label("picture_id"),
+            Picture.score.label("score"),
+            Picture.smart_score.label("smart_score"),
+            _USED_AT.label("used_at"),
+            Picture.thumbnail_width.label("thumbnail_width"),
+            Picture.thumbnail_height.label("thumbnail_height"),
+            Picture.orientation.label("orientation"),
+            Picture.square_crop_x.label("square_crop_x"),
+            Picture.square_crop_y.label("square_crop_y"),
+            Picture.square_crop_side.label("square_crop_side"),
+            Picture.file_path.label("file_path"),
+            func.row_number().over(partition_by=filed, order_by=ordering).label("rank"),
+        )
+        .where(filed.is_not(None))
+        .where(Picture.deleted.is_(False))
+        .subquery()
+    )
+    rows = session.exec(
+        select(
+            ranked.c.structural_hash,
+            ranked.c.picture_id,
+            ranked.c.score,
+            ranked.c.smart_score,
+            ranked.c.used_at,
+            ranked.c.thumbnail_width,
+            ranked.c.thumbnail_height,
+            ranked.c.orientation,
+            ranked.c.square_crop_x,
+            ranked.c.square_crop_y,
+            ranked.c.square_crop_side,
+            ranked.c.file_path,
+        ).where(ranked.c.rank <= per_variant)
+    ).all()
+    return [CoverCandidate(*row) for row in rows]
+
+
+def variant_picture_ids(
+    session: Session,
+    structural_hashes: list[str],
+    limit: int,
+    live: Sequence[str] = (),
+) -> list[int]:
+    """The newest kept pictures filed under these keys, newest first.
+
+    A key is a variant or a live run-filed workflow's id (:func:`_filed_as`),
+    so a manual workflow's pictures are its runs', an automatic one's leave
+    those out, and a saved-over automatic one's are both its variants' and
+    its own runs' (``workflow_card_reads.picture_keys`` names a workflow's
+    keys). Narrowed rather than grouped vault-wide, for the reason
+    :func:`recipe_activity` is: the caller already knows what it is opening.
+    """
+    if not structural_hashes:
+        return []
+    return list(
+        session.exec(
+            select(Picture.id)
+            .where(_filed_as(list(live)).in_(structural_hashes))
+            .where(Picture.deleted.is_(False))
+            .order_by(nullslast(_USED_AT.desc()), Picture.id.desc())
+            .limit(limit)
+        ).all()
+    )
+
+
+def instance_hashes_for_variants(
+    session: Session,
+    structural_hashes: list[str],
+    minimum_score: Optional[int],
+    limit: int,
+) -> list[str]:
+    """The most recent distinct instance hashes of a card's kept pictures.
+
+    **Capped, and the cap is the point of the argument existing.** An instance
+    keys on every parameter value, the seed included, so a card the owner has
+    run forty thousand times has forty thousand of these -- and the caller
+    reads and parses one stored graph per hash. The mode of a parameter over
+    the newest few hundred runs is the same answer as the mode over all of
+    them, for a bounded read.
+
+    Args:
+        structural_hashes: The card's variants.
+        minimum_score: Keep only pictures rated at least this, or ``None`` for
+            every kept picture. The defaults read is "the best pictures, and
+            failing that all of them", which is this function twice.
+        limit: How many distinct hashes to take, newest first.
+    """
+    if not structural_hashes:
+        return []
+    query = (
+        select(Picture.workflow_instance_hash, func.max(_USED_AT).label("used_at"))
+        .where(Picture.workflow_structural_hash.in_(structural_hashes))
+        .where(Picture.workflow_instance_hash.is_not(None))
+        .where(Picture.deleted.is_(False))
+        .group_by(Picture.workflow_instance_hash)
+        .order_by(nullslast(func.max(_USED_AT).desc()))
+        .limit(limit)
+    )
+    if minimum_score is not None:
+        query = query.where(Picture.score.is_not(None)).where(
+            Picture.score >= minimum_score
+        )
+    return [instance_hash for instance_hash, _ in session.exec(query).all()]
+
+
+def variant_model_values(
+    session: Session, live: Sequence[str] = ()
+) -> dict[str, dict[str, Counter]]:
+    """``{structural_hash: {"checkpoints"|"loras": Counter(value -> pictures)}}``.
+
+    The checkpoint and LoRA values every kept picture used, as the picture
+    grid's ``comfyui_model`` / ``comfyui_lora`` filters match them
+    (``picture.comfyui_models`` / ``comfyui_loras``, the raw widget values),
+    so a value served from here filters to the pictures it counted. One
+    grouped read per column over the whole vault; unscoped, and served only to
+    owner routes, like :func:`variant_activity`.
+    """
+    found: dict[str, dict[str, Counter]] = {}
+    # The key `_filed_as` spells, in SQL: a live run-filed workflow's id,
+    # else the variant.
+    filed = (
+        "CASE WHEN p.run_workflow_id IN (SELECT value FROM json_each(:live)) "
+        "THEN p.run_workflow_id ELSE p.workflow_structural_hash END"
+    )
+    for kind, column in (
+        ("checkpoints", "comfyui_models"),
+        ("loras", "comfyui_loras"),
+    ):
+        rows = session.execute(
+            text(
+                f"SELECT {filed} AS filed, j.value, COUNT(*) "
+                # json_each reads its argument before any WHERE can guard it,
+                # so a malformed value is swapped for an empty array in place:
+                # one bad row must not fail the whole grid.
+                f"FROM picture p, json_each(CASE WHEN json_valid(p.{column}) "
+                f"THEN p.{column} ELSE '[]' END) j "
+                f"WHERE p.deleted = 0 AND {filed} IS NOT NULL "
+                "GROUP BY filed, j.value"
+            ),
+            {"live": json.dumps(sorted(live))},
+        ).all()
+        for structural_hash, value, pictures in rows:
+            if isinstance(value, str) and value:
+                found.setdefault(structural_hash, {}).setdefault(kind, Counter())[
+                    value
+                ] += int(pictures)
+    return found
+
+
+def read_card_grid(
+    vault, cover_depth: int, live: Sequence[str] = ()
+) -> tuple[
+    dict[str, VariantActivity],
+    list[CoverCandidate],
+    dict[str, int],
+    dict[str, dict[str, Counter]],
+]:
+    """The grid's whole vault side in one session.
+
+    Four statements, one task: the per-variant counts, the cover candidates,
+    how many saved recipes each workflow holds (by ``workflow_id``) and the
+    checkpoint and LoRA values each variant's pictures used. They share a
+    session because the round trip is the expensive part.
+    """
+
+    def _read(session: Session):
+        return (
+            variant_activity(session, live),
+            variant_cover_candidates(session, cover_depth, live),
+            counts_by_workflow_id(session),
+            variant_model_values(session, live),
+        )
+
+    return vault.db.run_immediate_read_task(_read)
+
+
+def read_card_picture_ids(
+    vault, structural_hashes: list[str], limit: int, live: Sequence[str] = ()
+) -> list[int]:
+    """A workflow's newest kept pictures (:func:`variant_picture_ids`)."""
+    return vault.db.run_immediate_read_task(
+        variant_picture_ids, structural_hashes, limit, list(live)
+    )
+
+
+def read_instance_hashes(
+    vault, structural_hashes: list[str], minimum_score: Optional[int], limit: int
+) -> list[str]:
+    """The instances a card's pictures ran, optionally only its best."""
+    return vault.db.run_immediate_read_task(
+        instance_hashes_for_variants, structural_hashes, minimum_score, limit
+    )
+
+
+def best_picture_ids(
+    session: Session, structural_hashes: list[str], limit: int
+) -> list[int]:
+    """The card's best kept pictures, best first.
+
+    The same order :func:`variant_cover_candidates` ranks by - rating, then the
+    smart score, then how recently it was used - narrowed to one card's
+    variants rather than run as a window pass over the whole table. "Best" is
+    what the run route wants: the picture whose embedded graph is most worth
+    re-running is the one the owner liked, not the one that happens to be
+    newest.
+    """
+    if not structural_hashes:
+        return []
+    return list(
+        session.exec(
+            select(Picture.id)
+            .where(Picture.workflow_structural_hash.in_(structural_hashes))
+            .where(Picture.deleted.is_(False))
+            .order_by(
+                nullslast(Picture.score.desc()),
+                nullslast(Picture.smart_score.desc()),
+                nullslast(_USED_AT.desc()),
+                Picture.id.desc(),
+            )
+            .limit(limit)
+        ).all()
+    )
+
+
+def read_best_picture_ids(vault, structural_hashes: list[str], limit: int) -> list[int]:
+    """The card's best kept pictures, in its own read task."""
+    return vault.db.run_immediate_read_task(best_picture_ids, structural_hashes, limit)
+
+
+def picture_variant(session: Session, picture_id: int) -> Optional[str]:
+    """The variant a kept picture was made by, or ``None``.
+
+    ``None`` for a binned or unknown picture and for one no workflow was read
+    off, so a caller asking about a cover it was handed cannot be told about a
+    picture the owner threw away.
+    """
+    return session.exec(
+        select(Picture.workflow_structural_hash)
+        .where(Picture.id == picture_id)
+        .where(Picture.deleted.is_(False))
+    ).first()
+
+
+def read_picture_variant(vault, picture_id: int) -> Optional[str]:
+    """:func:`picture_variant` in its own read task."""
+    return vault.db.run_immediate_read_task(picture_variant, picture_id)
+
+
+def oldest_kept_by_pixel_sha(session: Session, pixel_shas: list[str]) -> dict[str, int]:
+    """``{pixel_sha: picture_id}``: the picture a pinned input resolves to (#1457).
+
+    **The OLDEST kept copy, deliberately**: a pin must feed a run the same
+    picture every time, and the oldest id is the one importing a duplicate of
+    the same bytes does not move. A content with no kept copy is
+    absent, which is the pin's picture having gone.
+    """
+    if not pixel_shas:
+        return {}
+    return {
+        pixel_sha: picture_id
+        for pixel_sha, picture_id in session.exec(
+            select(Picture.pixel_sha, func.min(Picture.id))
+            .where(Picture.pixel_sha.in_(pixel_shas))
+            .where(Picture.deleted.is_(False))
+            .group_by(Picture.pixel_sha)
+        ).all()
+    }
+
+
+def read_oldest_kept_by_pixel_sha(vault, pixel_shas: list[str]) -> dict[str, int]:
+    """The picture each pinned content resolves to, in its own read task."""
+    return vault.db.run_immediate_read_task(oldest_kept_by_pixel_sha, pixel_shas)
+
+
+def kept_picture_files(
+    session: Session, picture_ids: list[int]
+) -> dict[int, tuple[str, Optional[str]]]:
+    """``{picture_id: (file_path, pixel_sha)}`` for the ones that are kept.
+
+    What a run needs to hand a picture to ComfyUI, and what a pin is written
+    from. A binned or unknown id is absent, so the caller can refuse it by
+    name rather than upload a picture the owner threw away.
+    """
+    if not picture_ids:
+        return {}
+    return {
+        picture_id: (file_path, pixel_sha)
+        for picture_id, file_path, pixel_sha in session.exec(
+            select(Picture.id, Picture.file_path, Picture.pixel_sha)
+            .where(Picture.id.in_(picture_ids))
+            .where(Picture.deleted.is_(False))
+        ).all()
+    }
+
+
+def read_kept_picture_files(
+    vault, picture_ids: list[int]
+) -> dict[int, tuple[str, Optional[str]]]:
+    """Each kept picture's file and content, in its own read task."""
+    return vault.db.run_immediate_read_task(kept_picture_files, picture_ids)
+
+
+_LIBRARY_TABLES = {"project": Project, "set": PictureSet, "character": Character}
+
+
+def library_ids_present(
+    session: Session, named: dict[str, set[int]]
+) -> dict[str, dict[int, str]]:
+    """``{kind: {id: name}}`` for the ids in *named* this library has (kinds
+    ``project``, ``set``, ``character``): what a ComfyUI-PixlStash loader's
+    frozen ``"<name> #<id>"`` is checked against before a run (#1521)."""
+    present: dict[str, dict[int, str]] = {}
+    for kind, ids in named.items():
+        table = _LIBRARY_TABLES[kind]
+        present[kind] = dict(
+            session.exec(
+                select(table.id, table.name).where(table.id.in_(sorted(ids)))
+            ).all()
+        )
+    return present
+
+
+def read_library_ids(vault, named: dict[str, set[int]]) -> dict[str, dict[int, str]]:
+    """:func:`library_ids_present` in its own read task; no read when empty."""
+    if not named:
+        return {}
+    return vault.db.run_immediate_read_task(library_ids_present, named)
+
+
+def stack_for_picture(vault, picture_id: int) -> Optional[int]:
+    """The stack this picture is in, created if it has none.
+
+    A write, and here rather than in ``pixlstash/stacking.py`` so a route never
+    reaches for ``vault.db`` itself (the guardrail in
+    ``tests/test_architecture_guardrails.py``).
+    """
+    return vault.db.run_task(get_or_create_stack_for_picture, picture_id)

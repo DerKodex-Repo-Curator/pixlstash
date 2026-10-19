@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { join, resolve, sep } from 'node:path';
 import {
+  comfyuiOpenTarget,
   isAllowedNavigation,
   isBackendOrigin,
   isBundledRendererPage,
@@ -624,5 +625,108 @@ describe('main.ts window-open wiring', () => {
   it('never classifies a target by the loopback string prefix (#1020)', () => {
     const loopbackPrefix = /startsWith\(\s*['"`]https?:\/\/(127\.0\.0\.1|localhost|\[::1\])/;
     assert.equal(loopbackPrefix.test(source), false);
+  });
+});
+
+describe('comfyuiOpenTarget — the Open in ComfyUI channel opens only a workflow or run link', () => {
+  const HASH = 'a'.repeat(64);
+  // The two shapes a workflow id takes, as the Workflow tab's URLSearchParams
+  // writes them: `auto:` + core hash or `manual:` + uuid hex (the colon
+  // percent-encoded).
+  const KEY = `auto%3A${HASH}`;
+  const MINTED = 'b'.repeat(32);
+  const MANUAL = `manual%3A${MINTED}`;
+
+  it('accepts plain http and https ComfyUI addresses carrying a workflow id', () => {
+    for (const good of [
+      `http://127.0.0.1:8188/?pixlstash_workflow=${KEY}`,
+      `https://comfy.example.com/?pixlstash_workflow=${KEY}`,
+      `http://192.0.2.10:8188/comfy/?pixlstash_workflow=${KEY}`,
+      `http://127.0.0.1:8188/?pixlstash_workflow=${MANUAL}`,
+    ]) {
+      assert.equal(comfyuiOpenTarget(good), good, good);
+    }
+  });
+
+  it('accepts the link exactly as the Workflow tab builds it', () => {
+    const url = new URL('http://127.0.0.1:8188/');
+    for (const id of [`auto:${HASH}`, `manual:${MINTED}`]) {
+      url.searchParams.set('pixlstash_workflow', id);
+      assert.equal(comfyuiOpenTarget(url.toString()), url.toString(), id);
+    }
+  });
+
+  it('accepts the flag Open original in ComfyUI adds, and only as the tab writes it', () => {
+    const url = new URL('http://127.0.0.1:8188/');
+    url.searchParams.set('pixlstash_workflow', `auto:${HASH}`);
+    url.searchParams.set('pixlstash_original', '1');
+    assert.equal(comfyuiOpenTarget(url.toString()), url.toString());
+    for (const bad of [
+      `http://127.0.0.1:8188/?pixlstash_original=1`,
+      `http://127.0.0.1:8188/?pixlstash_original=1&pixlstash_workflow=${KEY}`,
+      `http://127.0.0.1:8188/?pixlstash_workflow=${KEY}&pixlstash_original=http://example.com`,
+      `http://127.0.0.1:8188/?pixlstash_workflow=${KEY}&pixlstash_original=1&pixlstash_original=1`,
+      `http://127.0.0.1:8188/?pixlstash_workflow=${KEY}&pixlstash_original=1&next=1`,
+    ]) {
+      assert.equal(comfyuiOpenTarget(bad), null, bad);
+    }
+  });
+
+  it('accepts the link the Run popup builds for a run the backend holds, and only that', () => {
+    const RUN = 'c'.repeat(32);
+    const url = new URL('http://127.0.0.1:8188/');
+    url.searchParams.set('pixlstash_run', RUN);
+    for (const id of [`auto:${HASH}`, `manual:${MINTED}`]) {
+      url.searchParams.set('pixlstash_of', id);
+      assert.equal(comfyuiOpenTarget(url.toString()), url.toString(), id);
+    }
+    for (const bad of [
+      `http://127.0.0.1:8188/?pixlstash_run=${RUN}`,
+      `http://127.0.0.1:8188/?pixlstash_of=${KEY}`,
+      `http://127.0.0.1:8188/?pixlstash_of=${KEY}&pixlstash_run=${RUN}`,
+      `http://127.0.0.1:8188/?pixlstash_run=${RUN}&pixlstash_of=abc`,
+      `http://127.0.0.1:8188/?pixlstash_run=${RUN}&pixlstash_workflow=${KEY}`,
+      `http://127.0.0.1:8188/?pixlstash_run=${RUN.slice(1)}&pixlstash_of=${KEY}`,
+      `http://127.0.0.1:8188/?pixlstash_run=${RUN.toUpperCase()}&pixlstash_of=${KEY}`,
+      `http://127.0.0.1:8188/?pixlstash_run=http://example.com&pixlstash_of=${KEY}`,
+      `http://127.0.0.1:8188/?pixlstash_run=${RUN}&pixlstash_of=${KEY}&next=1`,
+      `http://127.0.0.1:8188/?pixlstash_run=${RUN}&pixlstash_of=${KEY}&pixlstash_of=${KEY}`,
+      `http://127.0.0.1:8188/?pixlstash_run=${RUN}&pixlstash_run=${RUN}`,
+      `http://127.0.0.1:8188/?pixlstash_workflow=${KEY}&pixlstash_run=${RUN}`,
+      `http://example-user:example-password@127.0.0.1:8188/?pixlstash_run=${RUN}&pixlstash_of=${KEY}`,
+      `http://127.0.0.1:8188/?pixlstash_run=${RUN}&pixlstash_of=${KEY}#frag`,
+      `file:///etc/passwd?pixlstash_run=${RUN}&pixlstash_of=${KEY}`,
+    ]) {
+      assert.equal(comfyuiOpenTarget(bad), null, bad);
+    }
+  });
+
+  it('refuses anything that would make it a general open-any-link door', () => {
+    for (const bad of [
+      undefined,
+      42,
+      '',
+      'not a url',
+      `file:///etc/passwd?pixlstash_workflow=${KEY}`,
+      `javascript:alert(1)//?pixlstash_workflow=${KEY}`,
+      `smb://host/share?pixlstash_workflow=${KEY}`,
+      'http://127.0.0.1:8188/',
+      `http://127.0.0.1:8188/?pixlstash_workflow=${KEY}&next=http://example.com`,
+      `http://127.0.0.1:8188/?other=${KEY}`,
+      'http://127.0.0.1:8188/?pixlstash_workflow=abc',
+      `http://127.0.0.1:8188/?pixlstash_workflow=${KEY.toUpperCase()}`,
+      // The bare keys the ids replaced, and near misses of both shapes.
+      `http://127.0.0.1:8188/?pixlstash_workflow=${HASH}`,
+      `http://127.0.0.1:8188/?pixlstash_workflow=${MINTED}`,
+      `http://127.0.0.1:8188/?pixlstash_workflow=auto%3A${MINTED}`,
+      `http://127.0.0.1:8188/?pixlstash_workflow=${'b'.repeat(33)}`,
+      `http://127.0.0.1:8188/?pixlstash_workflow=manual%3A${HASH}`,
+      `http://user:pw@127.0.0.1:8188/?pixlstash_workflow=${KEY}`,
+      `http://127.0.0.1:8188/?pixlstash_workflow=${KEY}#frag`,
+      `http://127.0.0.1:8188/?pixlstash_workflow=${KEY}&pixlstash_workflow=${KEY}`,
+      `http://127.0.0.1:8188/${'a'.repeat(2100)}?pixlstash_workflow=${KEY}`,
+    ]) {
+      assert.equal(comfyuiOpenTarget(bad), null, String(bad));
+    }
   });
 });

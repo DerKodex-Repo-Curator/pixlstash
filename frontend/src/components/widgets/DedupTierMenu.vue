@@ -2,7 +2,7 @@
   <div class="tiermenu" role="group" aria-label="Which duplicates to include">
     <div class="tm-head">
       <v-icon size="16">mdi-filter-outline</v-icon>
-      <span class="tm-title">Include</span>
+      <span class="section-label">Include</span>
       <span class="tm-sp"></span>
       <span class="tm-count">{{ groupCountLabel }}</span>
     </div>
@@ -22,9 +22,9 @@
       }"
       :disabled="tier.locked ? undefined : !isReachable(tier)"
       :aria-pressed="tier.locked ? undefined : tier.enabled"
-      :title="reasonFor(tier)"
       @click="tier.locked ? undefined : emit('toggle', tier.id, !tier.enabled)"
     >
+      <Tooltip :text="reasonFor(tier) || ''" activator="parent" />
       <span class="cbox" :class="{ 'cbox--on': tier.enabled }">
         <v-icon v-if="tier.enabled" size="14">mdi-check</v-icon>
       </span>
@@ -76,6 +76,7 @@
 import { computed } from "vue";
 
 import DedupThresholdControl from "./DedupThresholdControl.vue";
+import Tooltip from "./Tooltip.vue";
 
 const props = defineProps({
   /**
@@ -168,14 +169,6 @@ function formatCount(value) {
   align-items: center;
   gap: var(--space-2);
   padding: var(--space-2) var(--space-3);
-}
-
-.tm-title {
-  font-size: var(--text-2xs);
-  font-weight: var(--weight-semibold);
-  text-transform: uppercase;
-  letter-spacing: var(--tracking-label);
-  color: rgba(var(--v-theme-on-surface), 0.5);
 }
 
 .tm-sp {
@@ -272,7 +265,7 @@ function formatCount(value) {
   padding: var(--space-3);
   border-radius: var(--radius-md);
   background: rgba(var(--v-theme-warning), 0.12);
-  border: 1px solid rgba(var(--v-theme-warning), 0.35);
+  border: 1px solid rgba(var(--v-theme-surface-warning), 0.35);
   font-size: var(--text-xs);
   line-height: var(--leading-body);
   color: rgb(var(--v-theme-on-surface));

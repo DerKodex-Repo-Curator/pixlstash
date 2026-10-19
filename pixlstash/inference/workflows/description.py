@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from pixlstash.pixl_logging import get_logger
 from pixlstash.tagger_plugins.florence2 import FLORENCE_PER_IMAGE_VRAM_MB
 from pixlstash.utils.image_processing.image_utils import ImageUtils
+from pixlstash.utils.image_processing.video_utils import VideoUtils
 from pixlstash.utils.vram_utils import is_vram_oom
 
 if TYPE_CHECKING:
@@ -212,7 +213,7 @@ class DescriptionWorkflow:
                 results[picture.id] = None
                 continue
             ext = os.path.splitext(picture_path)[1].lower()
-            if ext in _VIDEO_EXTS:
+            if ext in _VIDEO_EXTS or VideoUtils.is_animated_gif(picture_path):
                 results[picture.id] = self._engine.florence_service.generate_caption(
                     picture_path, _retry_on_cpu=False
                 )
@@ -255,6 +256,13 @@ class DescriptionWorkflow:
 
         Returns:
             Estimated VRAM in MB, or ``0`` on non-CUDA devices.
+
+        ``!= "cuda"`` rather than ``not is_accelerated(...)`` is correct and not
+        an unswept CUDA spelling: every captioner loads on the CPU on any
+        accelerator but CUDA - Florence-2 by the documented hold in its
+        ``_init``, JoyCaption by its own ``cuda if available else cpu`` device
+        pick - so there is genuinely no device memory to charge there. Lift
+        this together with whichever of those holds is lifted, not before.
         """
         if self._engine.device != "cuda":
             return 0

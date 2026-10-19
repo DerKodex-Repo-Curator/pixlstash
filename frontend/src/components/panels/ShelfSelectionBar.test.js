@@ -6,12 +6,13 @@
 // a deletion would wipe the curation for a whole disk on one press.
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { setActivePinia, createPinia } from "pinia";
 
 import ShelfSelectionBar from "./ShelfSelectionBar.vue";
 import { useModelFoldersStore } from "../../stores/useModelFoldersStore";
 import { useModelShelfStore } from "../../stores/useModelShelfStore";
+import { useNoticeStore } from "../../stores/useNoticeStore";
 
 // `AddToEntityControl` is stubbed rather than mounted: it reads the shared
 // entity lists on mount, and what this file has to assert about it is the props
@@ -31,11 +32,32 @@ const VMenuStub = {
     '<slot name="activator" :props="{}" /><slot /></div>',
 };
 
+// The tooltip is stubbed to carry its text on the element it wraps or sits in:
+// the real one renders nothing until it opens, and needs Vuetify besides.
+const TooltipStub = {
+  name: "Tooltip",
+  props: ["text", "activator"],
+  template:
+    '<span class="tip" :data-text="text"><slot name="activator" :props="{}" /></span>',
+};
+
 const globalOpts = {
   global: {
-    stubs: { "v-icon": true, AddToEntityControl: true, "v-menu": VMenuStub },
+    stubs: {
+      "v-icon": true,
+      AddToEntityControl: true,
+      "v-menu": VMenuStub,
+      Tooltip: TooltipStub,
+    },
   },
 };
+
+/** The tooltip text a control carries, whether the tip sits inside or around it. */
+function tip(wrapper) {
+  const inner = wrapper.find(".tip");
+  if (inner.exists()) return inner.attributes("data-text");
+  return wrapper.element.parentElement?.dataset.text;
+}
 
 /** The Assign picker for one entity type, as the bar configured it. */
 function picker(wrapper, type) {
@@ -82,6 +104,13 @@ function verb(wrapper, name) {
 beforeEach(() => {
   setActivePinia(createPinia());
   window.localStorage.clear();
+  // The ROW LIST, said out loud. Since #1438 the shelf's DEFAULT axis is the set
+  // grid, and that is a different screen over the same models: `selectedRows`
+  // reads the rows the screen the reader is on actually draws, so a test that
+  // seeds `store.rows` and never names a screen is asking the grid about a list
+  // it does not draw. `ModelShelf.test.js` makes the same choice, for the same
+  // reason.
+  useModelShelfStore().setView({ groupBy: "none" });
 });
 
 describe("the selection bar", () => {
@@ -109,7 +138,7 @@ describe("the selection bar", () => {
     const wrapper = mount(ShelfSelectionBar, globalOpts);
     const forget = verb(wrapper, "forget");
     expect(forget.attributes("disabled")).toBeDefined();
-    expect(forget.attributes("title")).toContain("files are gone");
+    expect(tip(forget)).toContain("files are gone");
   });
 
   it("refuses Forget on a drive it could not read", async () => {
@@ -133,14 +162,13 @@ describe("the selection bar", () => {
     const wrapper = mount(ShelfSelectionBar, globalOpts);
     const forget = verb(wrapper, "forget");
     expect(forget.attributes("disabled")).toBeUndefined();
-    expect(forget.attributes("title")).toContain("the 1 whose files are gone");
+    expect(tip(forget)).toContain("the 1 whose files are gone");
   });
 
   it("names every icon verb, and does not lean on the tooltip to do it", async () => {
     // The pill's verbs are icons, so `aria-label` is the only thing naming
     // them - and it has to be the VERB, stable across selections, because the
-    // `title` beside it is the refusal and changes with what is selected.
-    // `title` is not a reliable accessible name and does not exist on touch.
+    // tooltip beside it is the refusal and changes with what is selected.
     selectRows([row(1, "present")]);
     const wrapper = mount(ShelfSelectionBar, globalOpts);
     const verbs = wrapper.findAll("[data-verb]");
@@ -155,6 +183,27 @@ describe("the selection bar", () => {
     expect(wrapper.find('[data-verb="move"]').attributes("aria-label")).toBe(
       before,
     );
+  });
+
+  it("words Hide by the selection, and emits it rather than hiding", async () => {
+    const hideRow = (wrapper) =>
+      wrapper.findAll(".ctx-item").find((mi) => / models?( again)?$/.test(mi.text()));
+    const store = selectRows([row(1, "present"), row(2, "present")]);
+    const wrapper = mount(ShelfSelectionBar, globalOpts);
+    expect(hideRow(wrapper).text()).toBe("Hide 2 models");
+
+    await hideRow(wrapper).trigger("click");
+    expect(wrapper.emitted("hide-models")).toHaveLength(1);
+
+    // One of the two already hidden: the verb still hides, the one left.
+    store.setFilters({ showHidden: true });
+    store.hiddenModelIds = new Set([1]);
+    await wrapper.vm.$nextTick();
+    expect(hideRow(wrapper).text()).toBe("Hide model");
+    // Both hidden: now it is the way back.
+    store.hiddenModelIds = new Set([1, 2]);
+    await wrapper.vm.$nextTick();
+    expect(hideRow(wrapper).text()).toBe("Show 2 models again");
   });
 
   it("emits rather than acting, so the confirmations live in one place", async () => {
@@ -182,9 +231,32 @@ describe("the selection bar", () => {
     ]);
     const wrapper = mount(ShelfSelectionBar, globalOpts);
     expect(picker(wrapper, "character").props("subjectIds")).toEqual([1]);
-    expect(picker(wrapper, "character").attributes("title")).toContain(
-      "the 1 of 3",
+    expect(tip(picker(wrapper, "character"))).toContain("the 1 of 3");
+  });
+
+  it("hands Assign every member of a ticked stack, and reads theirs", async () => {
+    // One row stands for the stack, with the cover's id. Handing the picker
+    // that id alone assigned the cover and left the rest of the stack out, and
+    // the tri-state has to read partial when only some members are attached.
+    selectRows([
+      row(1, "present", {
+        stack_id: 7,
+        stack_position: 0,
+        attachments: [{ entity_type: "character", entity_id: 4 }],
+      }),
+      row(2, "present", { stack_id: 7, stack_position: 1 }),
+      row(3, "present", {
+        stack_id: 7,
+        stack_position: 2,
+        file_kind: "checkpoint",
+      }),
+    ]);
+    const wrapper = mount(ShelfSelectionBar, globalOpts);
+    expect(picker(wrapper, "character").props("subjectIds")).toEqual([1, 2]);
+    expect(picker(wrapper, "character").props("membership")["4"]).toEqual(
+      new Set(["1"]),
     );
+    expect(tip(picker(wrapper, "character"))).toContain("the 2 of 3");
   });
 
   it("refuses Assign when nothing in the selection can take one", async () => {
@@ -274,7 +346,7 @@ describe("the selection bar", () => {
     // The pill shows the figures and the sentence is in the tooltip: it floats
     // over the list and every character of it costs a row underneath.
     expect(wrapper.find(".selbar-count").text()).toBe("2· 400.0 MB");
-    expect(wrapper.find(".selbar-count").attributes("title")).toBe(
+    expect(tip(wrapper.find(".selbar-count"))).toBe(
       "2 models selected · 400.0 MB",
     );
   });
@@ -285,9 +357,7 @@ describe("the selection bar", () => {
     selectRows([row(1, "present")]);
     const wrapper = mount(ShelfSelectionBar, globalOpts);
     expect(wrapper.find(".selbar-count").text()).toBe("1");
-    expect(wrapper.find(".selbar-count").attributes("title")).toBe(
-      "1 model selected",
-    );
+    expect(tip(wrapper.find(".selbar-count"))).toBe("1 model selected");
   });
 
   it("offers Stack for two present adapters in one folder", async () => {
@@ -309,7 +379,7 @@ describe("the selection bar", () => {
     const wrapper = mount(ShelfSelectionBar, globalOpts);
     const stack = verb(wrapper, "stack");
     expect(stack.attributes("disabled")).toBeDefined();
-    expect(stack.attributes("title")).toContain("one folder");
+    expect(tip(stack)).toContain("one folder");
   });
 
   it("names the missing file, not the folders, when a copy is not there", async () => {
@@ -320,8 +390,8 @@ describe("the selection bar", () => {
     const wrapper = mount(ShelfSelectionBar, globalOpts);
     const stack = verb(wrapper, "stack");
     expect(stack.attributes("disabled")).toBeDefined();
-    expect(stack.attributes("title")).toContain("on this machine");
-    expect(stack.attributes("title")).not.toContain("folder");
+    expect(tip(stack)).toContain("on this machine");
+    expect(tip(stack)).not.toContain("folder");
   });
 
   it("refuses Stack on one model or a checkpoint", async () => {
@@ -335,9 +405,7 @@ describe("the selection bar", () => {
     ];
     store.toggleSelected(2);
     await wrapper.vm.$nextTick();
-    expect(verb(wrapper, "stack").attributes("title")).toContain(
-      "Only adapters",
-    );
+    expect(tip(verb(wrapper, "stack"))).toContain("Only adapters");
   });
 
   it("OFFERS Stack on a row that is already stacked, as a fuse", async () => {
@@ -350,16 +418,14 @@ describe("the selection bar", () => {
     await wrapper.vm.$nextTick();
 
     expect(verb(wrapper, "stack").attributes("disabled")).toBeUndefined();
-    expect(verb(wrapper, "stack").attributes("title")).toContain("Fuse");
+    expect(tip(verb(wrapper, "stack"))).toContain("Fuse");
   });
 
   it("refuses Ungroup unless everything selected is in a stack", async () => {
     const store = selectRows([row(1, "present")]);
     const wrapper = mount(ShelfSelectionBar, globalOpts);
     expect(verb(wrapper, "unstack").attributes("disabled")).toBeDefined();
-    expect(verb(wrapper, "unstack").attributes("title")).toContain(
-      "not part of a stack",
-    );
+    expect(tip(verb(wrapper, "unstack"))).toContain("not part of a stack");
 
     store.rows = [row(3, "present", { stack_id: 7 })];
     store.clearSelection();
@@ -375,11 +441,37 @@ describe("the selection bar", () => {
     // all of them" and "never mind" are the two things you say about a
     // selection, so they sit on the selection itself.
     const clear = wrapper
-      .findAll(".shelf-mi")
+      .findAll(".ctx-item")
       .find((item) => item.text().includes("Clear selection"));
     await clear.trigger("click");
     expect(store.selectedRows).toHaveLength(0);
     expect(store.rows).toHaveLength(1);
+  });
+});
+
+describe("Set trigger words", () => {
+  const item = (wrapper) =>
+    wrapper
+      .findAll(".ctx-item")
+      .find((mi) => mi.text().includes("Set trigger words"));
+
+  it("is offered on adapters and emits its verb", async () => {
+    selectRows([row(1, "present"), row(2, "present", { file_kind: "unknown" })]);
+    const wrapper = mount(ShelfSelectionBar, globalOpts);
+    expect(item(wrapper).attributes("disabled")).toBeUndefined();
+    await item(wrapper).trigger("click");
+    expect(wrapper.emitted("set-trigger-words")).toHaveLength(1);
+  });
+
+  it("stays listed, disabled, on a selection holding a base model", async () => {
+    selectRows([
+      row(1, "present"),
+      row(2, "present", { file_kind: "checkpoint", kind: null }),
+    ]);
+    const wrapper = mount(ShelfSelectionBar, globalOpts);
+    expect(item(wrapper).attributes("disabled")).toBeDefined();
+    await item(wrapper).trigger("click");
+    expect(wrapper.emitted("set-trigger-words")).toBeUndefined();
   });
 });
 
@@ -417,7 +509,7 @@ describe("the delete verb", () => {
     const wrapper = mount(ShelfSelectionBar, globalOpts);
     const del = verb(wrapper, "delete");
     expect(del.attributes("disabled")).toBeDefined();
-    expect(del.attributes("title")).toContain("your own folders");
+    expect(tip(del)).toContain("your own folders");
   });
 
   it("refuses a copy on a drive it could not read", () => {
@@ -457,7 +549,7 @@ describe("the delete verb", () => {
     await wrapper.vm.$nextTick();
     const del = verb(wrapper, "delete");
     expect(del.attributes("aria-label")).toBe("Permanently delete");
-    expect(del.attributes("title")).toContain("no undo");
+    expect(tip(del)).toContain("no undo");
 
     window.dispatchEvent(new KeyboardEvent("keyup", { shiftKey: false }));
     await wrapper.vm.$nextTick();
@@ -485,12 +577,81 @@ describe("the delete verb", () => {
     selectRows([row(1, "present")]);
     const wrapper = mount(ShelfSelectionBar, globalOpts);
     const item = wrapper
-      .findAll(".shelf-mi")
+      .findAll(".ctx-item")
       .find((mi) => mi.text().includes("Move to Trash"));
-    expect(item.classes()).toContain("shelf-mi--danger");
+    expect(item.classes()).toContain("ctx-item--danger");
 
     await item.trigger("click", { shiftKey: true });
     expect(wrapper.emitted("delete")).toEqual([[true]]);
+  });
+});
+
+describe("Copy SHA-256", () => {
+  // The hash is in the file line's tooltip; this is its route for a keyboard
+  // and for anyone who needs the characters rather than a look at them.
+  const item = (wrapper) =>
+    wrapper.findAll(".ctx-item").find((mi) => mi.text().includes("SHA-256"));
+
+  it("puts every selected model's whole hash on the clipboard", async () => {
+    const writeText = vi.fn().mockResolvedValue();
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    try {
+      selectRows([row(1, "present"), row(2, "present")]);
+      const wrapper = mount(ShelfSelectionBar, globalOpts);
+      await item(wrapper).trigger("click");
+      expect(writeText).toHaveBeenCalledWith(
+        `${"1".repeat(64)}\n${"2".repeat(64)}`,
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("says how many of the selection had no hash to copy", async () => {
+    const writeText = vi.fn().mockResolvedValue();
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    try {
+      selectRows([
+        row(1, "present"),
+        row(2, "present", { sha256: null }),
+        row(3, "present"),
+      ]);
+      const wrapper = mount(ShelfSelectionBar, globalOpts);
+      await item(wrapper).trigger("click");
+      await flushPromises();
+      expect(useNoticeStore().notices.at(-1).text).toBe(
+        "Copied 2 SHA-256 hashes. 1 of 3 selected had none.",
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("is refused, with the reason, for a checkpoint not hashed yet", () => {
+    selectRows([row(1, "present", { sha256: null, hash_pending: true })]);
+    const wrapper = mount(ShelfSelectionBar, globalOpts);
+    expect(item(wrapper).attributes("disabled")).toBeDefined();
+    expect(tip(item(wrapper))).toBe("Not hashed yet");
+  });
+
+  it("does not promise a hash to a model that never gets one", () => {
+    // A cached Hugging Face repo is a directory: nothing hashes it.
+    selectRows([
+      row(1, "present", {
+        sha256: null,
+        hash_pending: false,
+        file_kind: "unknown",
+      }),
+    ]);
+    const wrapper = mount(ShelfSelectionBar, globalOpts);
+    expect(tip(item(wrapper))).toBe("No file hash");
+    const newSet = wrapper
+      .findAll(".ctx-item")
+      .find((mi) => mi.text().includes("New workflow set"));
+    expect(newSet.attributes("disabled")).toBeDefined();
+    expect(tip(newSet)).toBe(
+      "A set keeps its models by file hash, and this one has none.",
+    );
   });
 });
 
@@ -500,7 +661,7 @@ describe("Open in file manager", () => {
   // offered, and that pressing it hands the decision to the view.
   const item = (wrapper) =>
     wrapper
-      .findAll(".shelf-mi")
+      .findAll(".ctx-item")
       .find((mi) => mi.text().includes("Open in file manager"));
 
   it("is offered for one model whose file is actually there", () => {
@@ -537,7 +698,7 @@ describe("Open in file manager", () => {
       selectRows([row(1, state)]);
       const wrapper = mount(ShelfSelectionBar, globalOpts);
       expect(item(wrapper).attributes("disabled")).toBeDefined();
-      expect(item(wrapper).attributes("title")).toContain("no copy of this");
+      expect(tip(item(wrapper))).toContain("no copy of this");
     }
   });
 
@@ -574,7 +735,7 @@ describe("the two verbs that act inside a run", () => {
   }
 
   function menuItem(wrapper, text) {
-    return wrapper.findAll(".shelf-mi").find((b) => b.text().includes(text));
+    return wrapper.findAll(".ctx-item").find((b) => b.text().includes(text));
   }
 
   it("offers both verbs on one member of a run", () => {
@@ -596,7 +757,7 @@ describe("the two verbs that act inside a run", () => {
     expect(wrapper.vm.coverable).toBe(false);
     const entry = menuItem(wrapper, "Make this the cover");
     expect(entry.attributes("disabled")).toBeDefined();
-    expect(entry.attributes("title")).toContain("already stands for its run");
+    expect(tip(entry)).toContain("already stands for its run");
     // Still releasable: the cover is a file of the run like any other, and
     // taking it out promotes the one behind it.
     expect(wrapper.vm.releasable).toBe(true);
@@ -610,9 +771,7 @@ describe("the two verbs that act inside a run", () => {
     expect(wrapper.vm.selectedMembers).toHaveLength(0);
     expect(wrapper.vm.coverable).toBe(false);
     expect(wrapper.vm.releasable).toBe(false);
-    expect(
-      menuItem(wrapper, "Take out of this run").attributes("title"),
-    ).toContain("Ungroup");
+    expect(tip(menuItem(wrapper, "Take out of this run"))).toContain("Ungroup");
   });
 
   it("refuses a cover on two files at once: a run has one", () => {
@@ -639,9 +798,7 @@ describe("the two verbs that act inside a run", () => {
     selectInRun([2]);
     const wrapper = mount(ShelfSelectionBar, globalOpts);
     expect(wrapper.vm.unstackable).toBe(false);
-    expect(verb(wrapper, "unstack").attributes("title")).toContain(
-      "select the run itself",
-    );
+    expect(tip(verb(wrapper, "unstack"))).toContain("select the run itself");
 
     // ...and the run itself still ungroups, which is the positive control.
     selectInRun([1, 2]);
@@ -654,9 +811,9 @@ describe("the two verbs that act inside a run", () => {
     const wrapper = mount(ShelfSelectionBar, globalOpts);
     expect(wrapper.vm.coverable).toBe(false);
     expect(wrapper.vm.releasable).toBe(false);
-    expect(
-      menuItem(wrapper, "Take out of this run").attributes("title"),
-    ).toContain("not part of a run");
+    expect(tip(menuItem(wrapper, "Take out of this run"))).toContain(
+      "not part of a run",
+    );
   });
 
   it("emits rather than calling, like every other verb here", async () => {
@@ -666,5 +823,261 @@ describe("the two verbs that act inside a run", () => {
     await menuItem(wrapper, "Take out of this run").trigger("click");
     expect(wrapper.emitted("make-cover")).toHaveLength(1);
     expect(wrapper.emitted("remove-from-stack")).toHaveLength(1);
+  });
+});
+
+describe("Hide, over selected cards from pictures", () => {
+  const hideRows = (wrapper) =>
+    wrapper.findAll(".ctx-item").filter((b) => /workflow sets?( again)?$/.test(b.text()));
+
+  it("is not on the menu while no card from pictures is selected", () => {
+    // The row list draws no sets, and a file picked in a tray is not one.
+    selectRows([row(1, "present")]);
+    const wrapper = mount(ShelfSelectionBar, globalOpts);
+    expect(hideRows(wrapper)).toHaveLength(0);
+  });
+
+  it("leads both menus, counts the cards and emits", async () => {
+    selectRows([row(1, "present"), row(2, "present")]);
+    const wrapper = mount(ShelfSelectionBar, {
+      ...globalOpts,
+      props: { sets: [{ hidden: false }, { hidden: false }] },
+    });
+    // Under `⋯` and at the pointer: one list, drawn twice.
+    expect(hideRows(wrapper).map((b) => b.text())).toEqual([
+      "Hide 2 workflow sets",
+      "Hide 2 workflow sets",
+    ]);
+    for (const menu of wrapper.findAll(".shelf-menu[role='menu']").slice(-2)) {
+      expect(menu.find(".ctx-item").text()).toBe("Hide 2 workflow sets");
+    }
+    await hideRows(wrapper)[0].trigger("click");
+    expect(wrapper.emitted("hide-sets")).toHaveLength(1);
+    // Never the file verbs' emits: this one touches no file.
+    expect(wrapper.emitted("delete")).toBeUndefined();
+    expect(wrapper.emitted("forget")).toBeUndefined();
+  });
+
+  it("offers Show again once every selected card is hidden", () => {
+    selectRows([row(1, "present")]);
+    const wrapper = mount(ShelfSelectionBar, {
+      ...globalOpts,
+      props: { sets: [{ hidden: true }] },
+    });
+    expect(hideRows(wrapper)[0].text()).toBe("Show workflow set again");
+  });
+});
+
+describe("Keep one copy", () => {
+  // The gate is the row's own count of copies ON THE DISK, which is what the
+  // shelf calls a duplicate everywhere else: the hub is content-addressed, so a
+  // second `present` copy IS the same bytes written twice.
+  const twice = (id) => ({
+    ...row(id, "present"),
+    locations: [
+      {
+        state: "present",
+        folder_id: 1,
+        folder_path: "/a",
+        relpath: "x.safetensors",
+      },
+      {
+        state: "present",
+        folder_id: 2,
+        folder_path: "/b",
+        relpath: "y.safetensors",
+      },
+    ],
+  });
+
+  it("is offered for one model with two copies on the disk", () => {
+    selectRows([twice(1)]);
+    const wrapper = mount(ShelfSelectionBar, globalOpts);
+    expect(wrapper.vm.mergeable).toBe(true);
+  });
+
+  it("is refused for a model with one copy", () => {
+    selectRows([row(1, "present")]);
+    const wrapper = mount(ShelfSelectionBar, globalOpts);
+    expect(wrapper.vm.mergeable).toBe(false);
+  });
+
+  it("is refused for a copy that is only registered, not on the disk", () => {
+    // Two rows and one file is not a duplicate: `missing` is a registration,
+    // and offering the verb there would promise to reclaim disk that is not
+    // being used.
+    selectRows([
+      {
+        ...row(1, "present"),
+        locations: [
+          { state: "present", folder_id: 1, folder_path: "/a", relpath: "x" },
+          { state: "missing", folder_id: 2, folder_path: "/b", relpath: "y" },
+        ],
+      },
+    ]);
+    const wrapper = mount(ShelfSelectionBar, globalOpts);
+    expect(wrapper.vm.mergeable).toBe(false);
+  });
+
+  it("is refused for a whole run", async () => {
+    // A collapsed run is one ROW and several models, and it carries the cover's
+    // copy count - so the verb would be offered on the run and act on the cover
+    // alone while the pill said six. It deletes bytes; it asks for a model.
+    const cover = twice(1);
+    selectRows([
+      {
+        ...cover,
+        members: [cover, twice(2)],
+        memberIds: [1, 2],
+      },
+    ]);
+    const wrapper = mount(ShelfSelectionBar, globalOpts);
+    expect(wrapper.vm.mergeable).toBe(false);
+  });
+
+  it("is refused for two models at once", async () => {
+    // The keeper is a per-model choice; a batch would be a table of radio
+    // groups rather than a dialog.
+    const store = selectRows([twice(1)]);
+    store.rows = [...store.rows, twice(2)];
+    store.toggleSelected(2);
+    const wrapper = mount(ShelfSelectionBar, globalOpts);
+    await wrapper.vm.$nextTick();
+    expect(wrapper.vm.mergeable).toBe(false);
+  });
+});
+
+describe("Clone set to edit", () => {
+  const cloneItem = (wrapper) =>
+    wrapper
+      .findAll(".ctx-item")
+      .find((b) => b.text().includes("Clone set to edit"));
+
+  /** A checkpoint that ran with one LoRA, the checkpoint selected. */
+  function selectHead() {
+    const store = selectRows([
+      row(1, "present", { file_kind: "checkpoint", kind: null }),
+      row(2, "present"),
+    ]);
+    store.toggleSelected(2);
+    store.workflowSets = {
+      combinations: [
+        {
+          key: "1+2",
+          models: [
+            { id: 1, name: "m1.safetensors", kind: "checkpoint" },
+            { id: 2, name: "m2.safetensors", kind: "adapter" },
+          ],
+          recipes: 1,
+          picture_count: 1,
+          covers: [],
+        },
+      ],
+      handMade: [],
+      setChecks: [],
+    };
+    return store;
+  }
+
+  it("is on the menu opened on a card, and names that card's set", async () => {
+    selectHead();
+    const wrapper = mount(ShelfSelectionBar, globalOpts);
+    wrapper.vm.openContextMenu(1, 2, "model:1");
+    await wrapper.vm.$nextTick();
+    await cloneItem(wrapper).trigger("click");
+    expect(wrapper.emitted("clone-set")).toHaveLength(1);
+    expect(wrapper.emitted("clone-set")[0][0].key).toBe("model:1");
+  });
+
+  it("is not on a menu opened on anything else, though the same file is selected", async () => {
+    // A tray row, a row of the list: the head file selected, but no card.
+    selectHead();
+    const wrapper = mount(ShelfSelectionBar, globalOpts);
+    wrapper.vm.openContextMenu(1, 2);
+    await wrapper.vm.$nextTick();
+    expect(cloneItem(wrapper)).toBeUndefined();
+    // Nor under the pill's ⋯ once a card's menu has closed.
+    wrapper.vm.openContextMenu(1, 2, "model:1");
+    wrapper.vm.contextOpen = false;
+    await wrapper.vm.$nextTick();
+    expect(cloneItem(wrapper)).toBeUndefined();
+  });
+});
+
+describe("the Models rail's selection", () => {
+  /** A menu row of the rail's verbs, by its words. */
+  const railItem = (menu, label) =>
+    menu.findAll(".ctx-item").find((b) => b.text().includes(label));
+
+  it("keeps the shelf's pill down: the rail has its own footer and menu", async () => {
+    const store = selectRows([row(1, "present"), row(2, "present")]);
+    const wrapper = mount(ShelfSelectionBar, globalOpts);
+    expect(wrapper.find(".selbar").exists()).toBe(true);
+    store.setRailSelection([2]);
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".selbar").exists()).toBe(false);
+  });
+
+  it("gates the rail's rows by the rail's selection, as the shelf's are", async () => {
+    // Row 2's file is gone and row 1's is not: Remove from shelf follows the
+    // rail's pick, not what the shelf last had selected.
+    const store = selectRows([row(1, "present")]);
+    store.rows = [...store.rows, row(2, "missing")];
+    const wrapper = mount(ShelfSelectionBar, {
+      ...globalOpts,
+      props: { rail: true },
+    });
+    expect(wrapper.vm.forgettable).toHaveLength(0);
+    // The shelf's selection is the shelf's pill's: this mount draws none.
+    expect(wrapper.find(".selbar").exists()).toBe(false);
+    store.setRailSelection([2]);
+    expect(wrapper.vm.forgettable.map((r) => r.id)).toEqual([2]);
+  });
+
+  it("draws only rows in the rail's mount, and asks the shelf instead of emitting", async () => {
+    const store = selectRows([row(1, "present")]);
+    store.setRailSelection([1]);
+    const wrapper = mount(ShelfSelectionBar, {
+      ...globalOpts,
+      props: { rail: true },
+    });
+    // Nothing of its own on screen, even with a selection to act on.
+    expect(wrapper.find(".selbar").exists()).toBe(false);
+    expect(wrapper.find(".ctx-item").exists()).toBe(false);
+
+    const menu = mount(wrapper.vm.RailVerbs, globalOpts);
+    // The rail leads with its own New workflow set and Hide model, so the
+    // shelf's are left out.
+    expect(railItem(menu, "New workflow set")).toBeUndefined();
+    expect(railItem(menu, "Hide")).toBeUndefined();
+    await railItem(menu, "Set kind").trigger("click");
+    expect(store.verbRequest).toEqual({ verb: "set-kind", args: [] });
+    expect(wrapper.emitted("set-kind")).toBeUndefined();
+    expect(wrapper.emitted("picked")).toHaveLength(1);
+    menu.unmount();
+  });
+
+  it("passes the press's own Shift on with Delete", async () => {
+    const store = selectRows([
+      row(1, "present", {
+        locations: [
+          { state: "present", folder_id: 1, folder_path: "/m", relpath: "x" },
+        ],
+      }),
+    ]);
+    useModelFoldersStore().folders = [
+      { id: 1, path: "/m", deletable: true },
+    ];
+    store.setRailSelection([1]);
+    const wrapper = mount(ShelfSelectionBar, {
+      ...globalOpts,
+      props: { rail: true },
+    });
+    const menu = mount(wrapper.vm.RailVerbs, globalOpts);
+    const del = menu.find(".ctx-item--danger");
+    expect(del.attributes("disabled")).toBeUndefined();
+    await del.trigger("click", { shiftKey: true });
+    expect(store.verbRequest).toEqual({ verb: "delete", args: [true] });
+    menu.unmount();
   });
 });

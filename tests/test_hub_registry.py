@@ -479,6 +479,67 @@ class TestDetach:
         assert reattached.name == "second"
 
 
+class TestForget:
+    def test_forgetting_a_registration_erases_its_rows_and_no_others(
+        self, hub, registry, tmp_path
+    ):
+        """Nothing could cover a forgotten library's ghosts again, and nothing
+        could name it to erase them later. Another library's stay."""
+        registry.attach(make_vault_folder(tmp_path, "first"))
+        kept = registry.attach(make_vault_folder(tmp_path, "kept"))
+        gone = registry.attach(make_vault_folder(tmp_path, "gone"))
+        with hub.transaction() as conn:
+            for library in (kept, gone):
+                conn.execute(
+                    "INSERT INTO workflow_picture_ghost (library_uuid, pixel_sha, "
+                    "instance_hash, thumbnail, created_at) "
+                    "VALUES (?, 'sha', 'instance', x'00', '2026-09-13')",
+                    (library.uuid,),
+                )
+                conn.execute(
+                    "INSERT INTO workflow_recipe_instance (library_uuid, "
+                    "instance_hash, structural_hash, hash_version, document, "
+                    "first_seen_at) VALUES (?, 'instance', 'recipe', 'v1', '{}', "
+                    "'2026-09-15')",
+                    (library.uuid,),
+                )
+                conn.execute(
+                    "INSERT INTO workflow_picture_input (library_uuid, "
+                    "workflow_name, node_id, mode, pixel_sha) "
+                    "VALUES (?, 'edit.json', '1', 'fixed', 'sha')",
+                    (library.uuid,),
+                )
+                conn.execute(
+                    "INSERT INTO workflow_group_hidden (workflow_id, "
+                    "library_uuid, hidden) VALUES ('wf', ?, 1)",
+                    (library.uuid,),
+                )
+                conn.execute(
+                    "INSERT INTO workflow_set_hidden (library_uuid, set_key) "
+                    "VALUES (?, 'set-key')",
+                    (library.uuid,),
+                )
+                conn.execute(
+                    "INSERT INTO model_hidden (library_uuid, model_id) VALUES (?, 1)",
+                    (library.uuid,),
+                )
+
+        registry.forget(gone.id)
+
+        for table in (
+            "workflow_picture_ghost",
+            "workflow_recipe_instance",
+            "workflow_picture_input",
+            "workflow_group_hidden",
+            "workflow_set_hidden",
+            "model_hidden",
+        ):
+            rows = hub.connection.execute(
+                f"SELECT library_uuid FROM {table}"
+            ).fetchall()
+            assert [row[0] for row in rows] == [kept.uuid], table
+
+
 class TestLibraryIdentity:
     """The uuid contract: stable, never reused, and never taken from a vault."""
 

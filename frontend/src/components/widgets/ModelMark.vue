@@ -8,7 +8,8 @@
        model this is - but NOT on the ring's label, which is the only thing on
        the row that says what the model is assigned to now that the column is
        gone (#904). -->
-  <span class="mmark" :class="ringClass" :title="ring?.label || undefined">
+  <span class="mmark" :class="ringClass">
+    <Tooltip :text="ring?.label || ''" activator="parent" :describe="false" />
     <span class="mmark-face" aria-hidden="true">
       <!-- KEYED on the URL, so each candidate in the fallback chain gets its
            own element. Reusing one element across two srcs is what makes an
@@ -34,14 +35,90 @@
         :color="ring.iconHue || undefined"
         >{{ ring.icon }}</v-icon
       >
+      <!-- The named tile (#1951). A release: its maker's glyph (or the
+           letters in its place) centred on the maker's colour, its version on
+           a pill off the top-end corner; Chroma's eye fills the tile. A
+           re-branded fine-tune: its own name. -->
+      <span
+        v-else-if="tile?.release"
+        class="mmark-named mmark-named--release"
+        :style="{ background: tile.background, color: mark.ink }"
+      >
+        <img
+          v-if="tile.release.glyph?.kind === 'full'"
+          class="mmark-img"
+          :src="tile.release.glyph.url"
+          alt=""
+        />
+        <img
+          v-else-if="tile.release.glyph"
+          class="mmark-glyph"
+          :class="{
+            'mmark-glyph--shadowed': tile.release.glyph.kind === 'glyph',
+          }"
+          :src="tile.release.glyph.url"
+          alt=""
+        />
+        <span v-else-if="tile.release.letters" class="mmark-letters">{{
+          tile.release.letters
+        }}</span>
+      </span>
+      <span
+        v-else-if="tile"
+        class="mmark-named"
+        :style="{
+          background: tile.background,
+          color: mark.ink,
+          '--mmark-name': tile.scale,
+        }"
+      >
+        <span class="mmark-name">
+          <span v-for="(line, i) in tile.lines" :key="i">{{ line }}</span>
+        </span>
+      </span>
       <span
         v-else
         class="mmark-initials"
+        :class="{ 'mmark-initials--two': detail }"
         :style="{ backgroundColor: mark.color, color: mark.ink }"
       >
-        {{ mark.initials }}
+        <span>{{ mark.initials }}</span>
+        <span v-if="detail">{{ detail }}</span>
       </span>
     </span>
+    <!-- Outside the face, because the face clips: the tab and the version
+         pill sit over the corners rather than inside them. -->
+    <!-- A release's version: the role tab's pair at the top-end corner, a
+         step larger, so the two read as one family told apart by corner. -->
+    <span
+      v-if="showReleaseVersion"
+      class="mmark-version mmark-release-version"
+      aria-hidden="true"
+      :style="{ backgroundColor: mark.ink, color: tile.edge }"
+      >{{ tile.release.version }}</span
+    >
+    <!-- The named tile's tab: a role, or a bolt for a few-step model with a
+         speed LoRA's step count. A plain pill: an outline in the tile's own
+         colour read as a smudge against the tile. -->
+    <span
+      v-if="showTab"
+      class="mmark-version mmark-tab"
+      aria-hidden="true"
+      :style="{ backgroundColor: mark.ink, color: tile.edge }"
+      ><v-icon v-if="tile.tab.bolt" class="mmark-bolt">mdi-lightning-bolt</v-icon
+      >{{ tile.tab.text }}</span
+    >
+    <span
+      v-else-if="showVersion"
+      class="mmark-version"
+      aria-hidden="true"
+      :style="{
+        backgroundColor: mark.ink,
+        color: mark.color,
+        borderColor: mark.color,
+      }"
+      >{{ mark.version }}</span
+    >
     <!-- The full stop is load-bearing: this text is concatenated into the
          cell's accessible name, and without a separator it runs into whatever
          the next cell says. -->
@@ -74,6 +151,8 @@ import { characterThumbnailUrl } from "../../api/characters";
 import { modelIconUrl } from "../../api/modelIcons";
 import { pictureSetThumbnailUrl } from "../../api/pictureSets";
 import { generatedMark } from "../../utils/modelShelf";
+import { namedTile } from "../../utils/modelTile";
+import Tooltip from "./Tooltip.vue";
 
 /** entity type → the resource module that addresses its thumbnail. */
 const ENTITY_THUMBNAIL = {
@@ -94,6 +173,20 @@ const props = defineProps({
    * "assigned to nothing", and it belongs on a shelf row.
    */
   ring: { type: Object, default: null },
+  /**
+   * A second line of letters under the initials, for a host that draws
+   * several marks of one family side by side with no names beside them (the
+   * workflow card, `markDetails`).
+   */
+  detail: { type: String, default: null },
+  /**
+   * Draw the server's named tile (`mark`, `mark_tab`, `mark_colors`,
+   * `mark_icon`, `mark_letters`, `mark_band`) where the row has one, for a
+   * host that prints no name beside
+   * the mark (the workflow card). The shelf leaves it off: its rows say the
+   * name already.
+   */
+  named: { type: Boolean, default: false },
 });
 
 const iconUrl = computed(() =>
@@ -178,6 +271,35 @@ const faceUrl = computed(() => {
 
 const mark = computed(() => generatedMark(props.row));
 
+const tile = computed(() =>
+  props.named ? namedTile(props.row, mark.value.color) : null,
+);
+
+// Like the version, the tab belongs to the tile and not to a picture of the
+// model's own or a set's icon.
+const showTab = computed(
+  () => Boolean(tile.value?.tab) && !faceUrl.value && !props.ring?.icon,
+);
+
+// Like the tab: drawn only where the tile itself is.
+const showReleaseVersion = computed(
+  () =>
+    Boolean(tile.value?.release?.version) &&
+    !faceUrl.value &&
+    !props.ring?.icon,
+);
+
+// The version belongs to the generated mark: a picture or a set's icon in the
+// square says nothing about which version the file is. A named tile carries
+// its version on its own pill.
+const showVersion = computed(
+  () =>
+    Boolean(mark.value.version) &&
+    !tile.value &&
+    !faceUrl.value &&
+    !props.ring?.icon,
+);
+
 const ringClass = computed(() =>
   props.ring ? `mmark--ring mmark--${props.ring.style}` : "",
 );
@@ -223,22 +345,165 @@ const ringClass = computed(() =>
    inline because `generatedMark` hands them out together - the tile is
    renormalised to a pinned lightness precisely so the ink can stay constant,
    and splitting the pair across inline style and a stylesheet is what would
-   let one of them change without the other. */
+   let one of them change without the other.
+
+   The letters are a share of the tile rather than a step of the type ramp, so
+   they fill it at every size the mark is drawn at: 55% is the most two wide
+   letters (WW, MW) take without touching the edges. The ComfyUI pack's
+   `paintMark` uses the same share. */
 .mmark-initials {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   width: 100%;
   height: 100%;
-  font-size: var(--text-xs);
+  font-size: calc(var(--entity-thumb) * 0.55);
   font-weight: var(--weight-medium);
-  letter-spacing: 0.02em;
+  letter-spacing: -0.02em;
+  line-height: 1;
+}
+
+/* Two lines of two, packed into the top-start corner so the version tab over
+   the bottom-end one covers no letter: 0.36 of the card's 32px mark is
+   11.5px, and two lines of it at 0.9 end 3px above the tab. Semibold, because 10px
+   at the single line's medium weight thins out on the tile. Measured in a
+   browser against the widest pair (WM beside a two-digit tab). */
+.mmark-initials--two {
+  align-items: flex-start;
+  justify-content: flex-start;
+  box-sizing: border-box;
+  padding: var(--space-1) 0 0 var(--space-1);
+  font-size: calc(var(--entity-thumb) * 0.36);
+  font-weight: var(--weight-semibold);
+  line-height: 0.9;
+}
+
+/* The named tile (#1951). The name is packed into the top-start corner like
+   the two-line initials, so the tab over the bottom-end one covers none of
+   it, and sized by `namedTile` as a share of the tile's line (the tile less
+   its padding), so it fills the line at whatever size the mark is drawn.
+   Never below 8.25px, a FIXED floor and the design's own value rather than a
+   step of the type ramp: the smallest a name stays legible on the tile.
+   `model-tile-names.spec.js` holds every known name to it. */
+.mmark-named {
+  position: relative;
+  display: flex;
+  width: 100%;
+  height: 100%;
+}
+
+.mmark-name {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  box-sizing: border-box;
+  padding: var(--space-1) 0 0 var(--space-1);
+  font-size: max(
+    8.25px,
+    calc((var(--entity-thumb) - 2 * var(--space-1)) * var(--mmark-name))
+  );
+  /* The face `namedTile` measures, named rather than inherited: the card sits
+     inside Vuetify's application font, which is not the one measured. */
+  font-family: var(--font-ui);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.02em;
+  line-height: 0.9;
+  white-space: nowrap;
+}
+
+/* A release's tile: the glyph (or the letters in its place) centred, in the
+   same place whatever the pills say, so a strip lines its glyphs up. */
+.mmark-named--release {
+  align-items: center;
+  justify-content: center;
+}
+
+.mmark-glyph {
+  width: calc(var(--entity-thumb) * 24 / 32);
+  height: calc(var(--entity-thumb) * 24 / 32);
+}
+
+/* A maker's white glyph, with the hard shadow Krea's own K is drawn with. */
+.mmark-glyph--shadowed {
+  filter: drop-shadow(
+    calc(var(--entity-thumb) / 36) calc(var(--entity-thumb) / 36) 0
+      rgb(var(--v-theme-scrim))
+  );
+}
+
+/* Where the maker has no glyph: its letters (Z, Wa, HI, Lu), set like one. */
+.mmark-letters {
+  font-size: calc(var(--entity-thumb) * 16 / 32);
+  font-family: var(--font-ui);
+  font-weight: var(--weight-bold);
+  letter-spacing: -0.04em;
+  line-height: 1;
+  text-shadow: calc(var(--entity-thumb) / 36) calc(var(--entity-thumb) / 36) 0
+    rgb(var(--v-theme-scrim));
+}
+
+.mmark-bolt {
+  font-size: var(--text-2xs);
+}
+
+/* The version tab (the mark design round's D2): the tile's own pair inverted,
+   so it needs no colour of its own and clears the same contrast the initials
+   do. A fixed size, like the initials, rather than a share of the tile: at
+   24px a proportional tab was 11px high with 8px digits, too small to read.
+   It hangs 6px past the corner, over the ring where there is one. */
+.mmark-version {
+  position: absolute;
+  right: -6px;
+  bottom: -6px;
+  z-index: var(--z-raised);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 var(--space-1);
+  border: 1px solid;
+  border-radius: var(--radius-pill);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-bold);
+  line-height: 1;
+}
+
+/* A named tile's tab, with no outline: an outline in the tile's own colour
+   read as a smudge against it. 14px, grown OUTWARD from the 12px it was:
+   it hangs 2px further past the corner, so its inner edge stays 24px down
+   and reaches no further over the glyph. Its widest word, BASE, stays inside
+   the card's 32px tile in DejaVu Sans, which `model-tile-names.spec.js`
+   measures. */
+.mmark-tab {
+  right: -6px;
+  bottom: -6px;
+  min-width: 14px;
+  height: 14px;
+  border: 0;
+  font-size: var(--text-3xs);
+}
+
+/* A release's version: the tab's pill at the top-end corner, two ramp steps
+   larger (--text-xs) and hung 7px out, so its inner edge stays 9px down. The
+   widest, Qwen's 2511, stays inside the card's tile. */
+.mmark-release-version {
+  top: -7px;
+  right: -7px;
+  bottom: auto;
+  min-width: 16px;
+  height: 16px;
+  border: 0;
+  font-size: var(--text-xs);
+  letter-spacing: -0.02em;
 }
 
 /* ── The assignment ring ───────────────────────────────────────────────────
    A pseudo-element, deliberately not a border (which would push the picture in
    and make an assigned mark a different size from an unassigned one) and not an
-   outline (which would fight `--focus-ring` on the row).
+   outline (which would fight the focus outline on the row).
 
    The 2px GAP is what makes it legible. A ring drawn directly against an
    arbitrary thumbnail is not one contrast problem but one per image; detached,

@@ -5,9 +5,16 @@
       <button
         class="rs-rail-close"
         type="button"
-        title="Close (Esc)"
+        aria-label="Close"
+        aria-keyshortcuts="Escape"
         @click="emit('close')"
       >
+        <Tooltip
+          text="Close"
+          shortcut="Esc"
+          activator="parent"
+          :describe="false"
+        />
         <v-icon size="18">mdi-close</v-icon>
       </button>
       <h1 class="rs-rail-title">Review tags</h1>
@@ -21,7 +28,7 @@
         type="button"
         @click="store.showBoard()"
       >
-        <v-icon size="17" class="rs-rail-board-icon">mdi-heart-pulse</v-icon>
+        <v-icon size="16" class="rs-rail-board-icon">mdi-heart-pulse</v-icon>
         <span class="rs-rail-board-label">Tag health</span>
       </button>
 
@@ -42,13 +49,13 @@
         >
           <span class="rs-rail-session-row">
             <span class="rs-rail-session-tag" :title="s.tag">{{ s.tag }}</span>
-            <v-icon
-              v-if="s.stale"
-              size="14"
-              class="rs-rail-stale"
-              title="vault changed since this scan"
-              >mdi-clock-alert-outline</v-icon
-            >
+            <Tooltip v-if="s.stale" text="vault changed since this scan">
+              <template #activator="{ props: tipProps }">
+                <v-icon size="14" class="rs-rail-stale" v-bind="tipProps"
+                  >mdi-clock-alert-outline</v-icon
+                >
+              </template>
+            </Tooltip>
             <span class="rs-rail-session-count">{{ progressText(s) }}</span>
           </span>
           <span class="rs-rail-progress">
@@ -68,19 +75,19 @@
           <span class="rs-rail-session-scope" :title="scopeLabel(s)">{{
             scopeLabel(s)
           }}</span>
-          <v-icon
-            v-if="scopeSetLocked(s)"
-            size="12"
-            class="rs-rail-scope-lock"
-            :title="scopeSetLockTitle(s)"
-            >mdi-lock-outline</v-icon
-          >
+          <Tooltip v-if="scopeSetLocked(s)" :text="scopeSetLockTitle(s)">
+            <template #activator="{ props: tipProps }">
+              <v-icon size="12" class="rs-rail-scope-lock" v-bind="tipProps"
+                >mdi-lock-outline</v-icon
+              >
+            </template>
+          </Tooltip>
           <button
             class="rs-rail-abort"
             type="button"
-            title="Abort this review"
             @click.stop="openAbortDialog(s.id)"
           >
+            <Tooltip text="Abort this review" activator="parent" />
             <v-icon size="13">mdi-close-circle-outline</v-icon>
             Abort
           </button>
@@ -110,11 +117,6 @@
             class="rs-archived-clear"
             :class="{ 'rs-archived-clear--armed': archivedClearArmed }"
             type="button"
-            :title="
-              archivedClearArmed
-                ? 'Click again to clear every archived review - this cannot be undone'
-                : 'Clear all archived reviews'
-            "
             :aria-label="
               archivedClearArmed
                 ? 'Confirm: clear every archived review'
@@ -122,6 +124,14 @@
             "
             @click="onClearArchivedClick"
           >
+            <Tooltip
+              :text="
+                archivedClearArmed
+                  ? 'Click again to clear every archived review - this cannot be undone'
+                  : 'Clear all archived reviews'
+              "
+              activator="parent"
+            />
             <v-icon size="14">mdi-trash-can-outline</v-icon>
             <span v-if="archivedClearArmed">Sure?</span>
           </button>
@@ -138,9 +148,12 @@
           <button
             class="rs-rail-item rs-rail-archived"
             type="button"
-            :title="`Show the receipt for “${a.tag}”`"
             @click="store.openArchived(a.id)"
           >
+            <Tooltip
+              :text="`Show the receipt for “${a.tag}”`"
+              activator="parent"
+            />
             <v-icon size="14" class="rs-rail-archived-check">mdi-check</v-icon>
             <span class="rs-rail-archived-tag" :title="a.tag">{{ a.tag }}</span>
             <span class="rs-rail-archived-sum">{{ archivedSummary(a) }}</span>
@@ -152,10 +165,14 @@
           <button
             class="rs-rail-archived-del"
             type="button"
-            :title="`Delete the archived review for “${a.tag}”`"
             :aria-label="`Delete the archived review for ${a.tag}`"
             @click.stop="onDeleteArchived(a.id)"
           >
+            <Tooltip
+              :text="`Delete the archived review for “${a.tag}”`"
+              activator="parent"
+              :describe="false"
+            />
             <v-icon size="13">mdi-close</v-icon>
           </button>
         </div>
@@ -187,9 +204,12 @@
           <button
             class="rs-abort-btn rs-abort-btn--keep"
             type="button"
-            title="Abort the review; the changes stand"
             @click="abortKeep"
           >
+            <Tooltip
+              text="Abort the review; the changes stand"
+              activator="parent"
+            />
             Keep {{ abortDialog.changes }} change{{
               abortDialog.changes === 1 ? "" : "s"
             }}
@@ -197,9 +217,12 @@
           <button
             class="rs-abort-btn rs-abort-btn--undo"
             type="button"
-            title="Reverse every change this review made, then abort"
             @click="abortUndo"
           >
+            <Tooltip
+              text="Reverse every change this review made, then abort"
+              activator="parent"
+            />
             Undo {{ abortDialog.changes }} change{{
               abortDialog.changes === 1 ? "" : "s"
             }}
@@ -233,23 +256,37 @@
           class="rs-shelf-clear"
           :class="{ 'rs-shelf-clear--armed': clearArmed }"
           type="button"
-          :title="
+          :aria-label="
             clearArmed
               ? 'Click again to clear every sticker - this cannot be undone'
               : 'Clear all stickers'
           "
           @click="onClearClick"
         >
+          <Tooltip
+            :text="
+              clearArmed
+                ? 'Click again to clear every sticker - this cannot be undone'
+                : 'Clear all stickers'
+            "
+            activator="parent"
+            :describe="false"
+          />
           <v-icon size="14">mdi-trash-can-outline</v-icon>
           <span v-if="clearArmed">Sure?</span>
         </button>
         <button
           class="rs-shelf-toggle"
           type="button"
-          :title="shelfOpen ? 'Collapse the shelf' : 'Show the shelf'"
+          :aria-label="shelfOpen ? 'Collapse the shelf' : 'Show the shelf'"
           :aria-expanded="shelfOpen"
           @click="shelfOpen = !shelfOpen"
         >
+          <Tooltip
+            :text="shelfOpen ? 'Collapse the shelf' : 'Show the shelf'"
+            activator="parent"
+            :describe="false"
+          />
           <v-icon size="15">{{
             shelfOpen ? "mdi-chevron-down" : "mdi-chevron-up"
           }}</v-icon>
@@ -275,6 +312,7 @@
 import { nextTick, onUnmounted, ref } from "vue";
 import { useReviewSessionsStore } from "../../stores/useReviewSessionsStore";
 import ReviewSticker from "./ReviewSticker.vue";
+import Tooltip from "../widgets/Tooltip.vue";
 
 const emit = defineEmits(["close", "new-review"]);
 const store = useReviewSessionsStore();
@@ -502,13 +540,12 @@ function archivedSummary(a) {
   border-radius: var(--radius-sm);
   color: rgb(var(--v-theme-on-primary));
   background: rgb(var(--v-theme-primary));
-  transition: filter 0.12s;
 }
 .rs-rail-close:hover {
-  filter: brightness(0.85);
+  background-image: var(--hover-shade);
 }
 .rs-rail-title {
-  font-size: 0.95rem;
+  font-size: var(--text-md);
   font-weight: var(--weight-bold);
   letter-spacing: 0.01em;
   white-space: nowrap;
@@ -533,11 +570,17 @@ function archivedSummary(a) {
   border-radius: var(--radius-sm);
   color: rgb(var(--v-theme-on-dark-surface));
 }
+/* The rail is dark in both themes: the dark-surface hover wash, and the
+   dark-surface olive for the row that is selected. */
 .rs-rail-item:hover {
-  background: rgba(var(--v-theme-on-dark-surface), 0.08);
+  background: rgba(var(--v-theme-on-dark-surface), 0.16);
 }
 .rs-rail-item--active {
-  background: rgba(var(--v-theme-on-dark-surface), 0.12);
+  background: rgba(var(--v-theme-dark-surface-primary), 0.2);
+}
+.rs-rail-item--active:hover {
+  background: linear-gradient(rgba(var(--v-theme-on-dark-surface), 0.16), rgba(var(--v-theme-on-dark-surface), 0.16))
+    rgba(var(--v-theme-dark-surface-primary), 0.2);
 }
 
 .rs-rail-board {
@@ -569,9 +612,16 @@ function archivedSummary(a) {
   border-radius: var(--radius-sm);
 }
 .rs-rail-session-wrap:hover,
-.rs-rail-session-wrap:focus-within,
+.rs-rail-session-wrap:focus-within {
+  background: rgba(var(--v-theme-on-dark-surface), 0.16);
+}
 .rs-rail-session-wrap--active {
-  background: rgba(var(--v-theme-on-dark-surface), 0.12);
+  background: rgba(var(--v-theme-dark-surface-primary), 0.2);
+}
+.rs-rail-session-wrap--active:hover,
+.rs-rail-session-wrap--active:focus-within {
+  background: linear-gradient(rgba(var(--v-theme-on-dark-surface), 0.16), rgba(var(--v-theme-on-dark-surface), 0.16))
+    rgba(var(--v-theme-dark-surface-primary), 0.2);
 }
 .rs-rail-session-wrap:hover .rs-rail-session,
 .rs-rail-session-wrap:focus-within .rs-rail-session,
@@ -593,7 +643,7 @@ function archivedSummary(a) {
   white-space: nowrap;
 }
 .rs-rail-stale {
-  color: rgb(var(--v-theme-warning));
+  color: rgb(var(--v-theme-dark-surface-warning));
 }
 .rs-rail-session-count {
   font-size: var(--text-2xs);
@@ -603,7 +653,7 @@ function archivedSummary(a) {
 }
 .rs-rail-progress {
   height: 3px;
-  border-radius: 2px;
+  border-radius: var(--radius-pill);
   background: rgba(var(--v-theme-on-dark-surface), 0.18);
   overflow: hidden;
 }
@@ -647,8 +697,8 @@ function archivedSummary(a) {
   display: inline-flex;
   flex-shrink: 0;
   align-items: center;
-  gap: 4px;
-  padding: 2px 6px;
+  gap: var(--space-2);
+  padding: var(--space-1) 6px;
   border-radius: var(--radius-sm);
   font-size: var(--text-2xs);
   font-weight: var(--weight-semibold);
@@ -665,7 +715,7 @@ function archivedSummary(a) {
 .rs-abort-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 4350;
+  z-index: var(--z-modal);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -682,7 +732,7 @@ function archivedSummary(a) {
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-4);
 }
 .rs-abort-title {
   font-size: 15px;
@@ -696,11 +746,11 @@ function archivedSummary(a) {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 8px;
+  gap: var(--space-3);
 }
 .rs-abort-btn {
   height: 32px;
-  padding: 0 12px;
+  padding: 0 var(--space-4);
   border-radius: var(--radius-sm);
   font-size: var(--text-2xs);
   font-weight: var(--weight-semibold);
@@ -729,7 +779,7 @@ function archivedSummary(a) {
   align-items: center;
   justify-content: center;
   gap: 7px;
-  margin: var(--space-2) 2px 2px;
+  margin: var(--space-2) var(--space-1) var(--space-1);
   height: 34px;
   border: 1px dashed rgba(var(--v-theme-on-dark-surface), 0.3);
   border-radius: var(--radius-sm);
@@ -738,7 +788,7 @@ function archivedSummary(a) {
   font-weight: var(--weight-semibold);
 }
 .rs-rail-new:hover {
-  background: rgba(var(--v-theme-on-dark-surface), 0.08);
+  background: rgba(var(--v-theme-on-dark-surface), 0.16);
   color: rgb(var(--v-theme-on-dark-surface));
 }
 
@@ -783,9 +833,16 @@ function archivedSummary(a) {
   border-radius: var(--radius-sm);
 }
 .rs-rail-archived-wrap:hover,
-.rs-rail-archived-wrap:focus-within,
+.rs-rail-archived-wrap:focus-within {
+  background: rgba(var(--v-theme-on-dark-surface), 0.16);
+}
 .rs-rail-archived-wrap--active {
-  background: rgba(var(--v-theme-on-dark-surface), 0.12);
+  background: rgba(var(--v-theme-dark-surface-primary), 0.2);
+}
+.rs-rail-archived-wrap--active:hover,
+.rs-rail-archived-wrap--active:focus-within {
+  background: linear-gradient(rgba(var(--v-theme-on-dark-surface), 0.16), rgba(var(--v-theme-on-dark-surface), 0.16))
+    rgba(var(--v-theme-dark-surface-primary), 0.2);
 }
 .rs-rail-archived-wrap:hover .rs-rail-archived,
 .rs-rail-archived-wrap:focus-within .rs-rail-archived,
@@ -812,7 +869,7 @@ function archivedSummary(a) {
   white-space: nowrap;
 }
 .rs-rail-archived-sum {
-  font-size: 11px;
+  font-size: var(--text-2xs);
   white-space: nowrap;
 }
 
@@ -892,7 +949,7 @@ function archivedSummary(a) {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 2px 9px 4px;
+  padding: var(--space-1) 9px var(--space-2);
   align-content: flex-start;
 }
 </style>

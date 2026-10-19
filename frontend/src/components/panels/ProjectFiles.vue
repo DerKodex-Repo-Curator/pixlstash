@@ -9,11 +9,11 @@
       @dragleave="onDragLeave"
       @drop.prevent="onDrop"
     >
-      <v-icon size="14" class="pf-header-icon">mdi-paperclip</v-icon>
+      <v-icon size="16" class="pf-header-icon">mdi-paperclip</v-icon>
       <span class="pf-title">Project Files</span>
       <span v-if="files.length > 0" class="pf-count">{{ files.length }}</span>
       <span class="pf-spacer"></span>
-      <v-icon size="14" class="pf-chevron">
+      <v-icon size="16" class="pf-chevron">
         {{ expanded ? "mdi-chevron-down" : "mdi-chevron-right" }}
       </v-icon>
     </div>
@@ -37,13 +37,14 @@
       <div v-else-if="files.length === 0 && !uploading" class="pf-empty">
         <v-icon size="30" class="pf-empty-icon">mdi-upload-outline</v-icon>
         <span>Drag files or URLs here to add</span>
-        <button
-          class="pf-add-url-btn pf-add-url-btn--empty"
+        <AppButton
+          size="sm"
+          icon-left="link-plus"
+          class="pf-add-url-btn--empty"
           @click.stop="showUrlForm = !showUrlForm"
         >
-          <v-icon size="13">mdi-link-plus</v-icon>
           Add a URL
-        </button>
+        </AppButton>
       </div>
 
       <!-- Uploading indicator -->
@@ -59,14 +60,16 @@
           :key="file.id"
           class="pf-file-card"
           :class="{ 'pf-url-card': file.url }"
-          :title="file.url || file.original_filename"
+          :title="file.url ? undefined : file.original_filename"
           @click="openFile(file)"
         >
+          <Tooltip :text="file.url || ''" activator="parent" />
           <button
             class="pf-file-delete"
-            title="Remove"
+            aria-label="Remove"
             @click.stop="deleteFile(file)"
           >
+            <Tooltip text="Remove" activator="parent" :describe="false" />
             <v-icon size="13">mdi-close</v-icon>
           </button>
           <v-icon size="34" class="pf-file-icon">{{ fileIcon(file) }}</v-icon>
@@ -86,10 +89,14 @@
         <v-icon size="12">mdi-upload-outline</v-icon>
         Drag more files or URLs here
         <span class="pf-hint-sep">·</span>
-        <button class="pf-add-url-btn" @click.stop="showUrlForm = !showUrlForm">
-          <v-icon size="12">mdi-link-plus</v-icon>
+        <AppButton
+          variant="ghost"
+          size="sm"
+          icon-left="link-plus"
+          @click.stop="showUrlForm = !showUrlForm"
+        >
           Add URL
-        </button>
+        </AppButton>
       </div>
 
       <!-- Add URL form -->
@@ -110,20 +117,17 @@
           @keydown.escape="showUrlForm = false"
         />
         <div class="pf-url-form-actions">
-          <button
-            class="pf-url-save"
+          <AppButton size="sm" @click="showUrlForm = false"> Cancel </AppButton>
+          <AppButton
+            variant="primary"
+            size="sm"
+            icon-left="plus"
+            :disabled="!urlInput.trim()"
+            :loading="addingUrl"
             @click="addUrl"
-            :disabled="!urlInput.trim() || addingUrl"
-            :aria-busy="addingUrl ? 'true' : undefined"
           >
-            <v-icon size="12" :class="{ 'mdi-spin': addingUrl }">{{
-              addingUrl ? "mdi-loading" : "mdi-plus"
-            }}</v-icon>
             Add
-          </button>
-          <button class="pf-url-cancel" @click="showUrlForm = false">
-            Cancel
-          </button>
+          </AppButton>
         </div>
       </div>
 
@@ -144,6 +148,8 @@ import {
 } from "../../api/projects";
 import { useSubmitGuard } from "../../composables/useSubmitGuard";
 import { errorDetail } from "../../utils/apiError";
+import AppButton from "../widgets/AppButton.vue";
+import Tooltip from "../widgets/Tooltip.vue";
 import { API_BASE_URL } from "../../utils/apiClient";
 const props = defineProps({
   projectId: { type: Number, required: true },
@@ -278,11 +284,7 @@ async function submitUrl() {
   const title = urlTitle.value.trim() || url;
   uploadError.value = null;
   try {
-    const created = await addProjectAttachmentUrl(
-      props.projectId,
-      url,
-      title,
-    );
+    const created = await addProjectAttachmentUrl(props.projectId, url, title);
     files.value.push(created);
     urlInput.value = "";
     urlTitle.value = "";
@@ -401,7 +403,7 @@ onMounted(() => {
 }
 
 .pf-header.pf-drag-active {
-  background: rgba(var(--v-theme-accent), 0.1);
+  background: var(--active-wash);
 }
 
 .pf-header-icon {
@@ -414,8 +416,7 @@ onMounted(() => {
 }
 
 .pf-count {
-  background: rgba(var(--v-theme-accent), 0.25);
-  color: rgb(var(--v-theme-accent));
+  color: inherit;
   font-size: var(--text-xs);
   font-weight: var(--weight-semibold);
   padding: 0 var(--space-2);
@@ -446,24 +447,24 @@ onMounted(() => {
 }
 
 .pf-panel.pf-drag-active {
-  background: rgba(var(--v-theme-accent), 0.06);
+  background: var(--active-wash);
 }
 
 .pf-drop-overlay {
   position: absolute;
   inset: 0;
-  z-index: 10;
+  z-index: var(--z-raised);
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: var(--space-3);
-  background: rgba(var(--v-theme-accent), 0.15);
+  background: var(--active-wash);
   border-radius: 0 0 var(--radius-md) var(--radius-md);
-  color: rgb(var(--v-theme-accent));
+  color: var(--active-text);
   font-size: var(--text-sm);
   font-weight: var(--weight-semibold);
-  border: 2px dashed rgb(var(--v-theme-accent));
+  border: 2px dashed var(--active-bar);
   pointer-events: none;
 }
 
@@ -517,8 +518,7 @@ onMounted(() => {
 }
 
 .pf-file-card:hover {
-  background: rgba(var(--v-theme-accent), 0.15);
-  border-color: rgba(var(--v-theme-accent), 0.4);
+  background: var(--hover-wash);
 }
 
 .pf-file-card:hover .pf-file-delete {
@@ -589,7 +589,7 @@ onMounted(() => {
 
 .pf-error {
   font-size: var(--text-xs);
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
   text-align: center;
   margin-top: var(--space-3);
   padding: var(--space-2) var(--space-3);
@@ -604,7 +604,7 @@ onMounted(() => {
 
 .pf-url-meta {
   font-size: var(--text-2xs);
-  color: rgba(var(--v-theme-accent), 0.6);
+  color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
   margin-top: var(--space-2);
   line-height: 1.3;
   word-break: break-all;
@@ -619,23 +619,7 @@ onMounted(() => {
   opacity: 0.4;
 }
 
-.pf-add-url-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  color: rgba(var(--v-theme-on-surface), 0.45);
-  font-size: var(--text-xs);
-  padding: 0;
-  transition: color 0.15s;
-}
-
-.pf-add-url-btn:hover {
-  color: rgba(var(--v-theme-accent), 0.9);
-}
-
 .pf-add-url-btn--empty {
-  font-size: var(--text-sm);
-  color: rgba(var(--v-theme-on-surface), 0.35);
   margin-top: var(--space-2);
 }
 
@@ -655,71 +639,12 @@ onMounted(() => {
   padding: var(--space-2) var(--space-3);
   font-size: var(--text-xs);
   color: rgb(var(--v-theme-on-surface));
-  outline: none;
   box-sizing: border-box;
-  transition: border-color 0.15s;
-}
-
-.pf-url-input:focus {
-  border-color: rgba(var(--v-theme-accent), 0.6);
 }
 
 .pf-url-form-actions {
   display: flex;
   gap: var(--space-2);
   justify-content: flex-end;
-}
-
-.pf-url-save,
-.pf-url-cancel {
-  font-size: var(--text-xs);
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-sm);
-  transition:
-    background 0.12s,
-    opacity 0.12s;
-}
-
-.pf-url-save {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  background: rgba(var(--v-theme-accent), 0.85);
-  color: rgb(var(--v-theme-on-accent));
-}
-
-.pf-url-save:hover:not(:disabled) {
-  background: rgb(var(--v-theme-accent));
-}
-
-.pf-url-save:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-
-/* Pending is not disabled: the spinner is the only thing telling the user their
-   click landed, so it must not fade with the rest (visual-language.md §11). The
-   spin also survives reduced motion - a frozen mdi-loading is a static broken
-   ring, and @mdi/font puts the animation on ::before, which is what the global
-   reset in design-tokens.css zeroes. */
-.pf-url-save:disabled[aria-busy="true"] {
-  opacity: 1;
-  cursor: progress;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .pf-url-save .mdi-spin::before {
-    animation-duration: 2s !important;
-    animation-iteration-count: infinite !important;
-  }
-}
-
-.pf-url-cancel {
-  background: rgba(var(--v-theme-on-surface), 0.08);
-  color: rgba(var(--v-theme-on-surface), 0.7);
-}
-
-.pf-url-cancel:hover {
-  background: rgba(var(--v-theme-on-surface), 0.14);
 }
 </style>

@@ -23,6 +23,8 @@ class TaskType(str, Enum):
     REFERENCE_FOLDER_SCAN = "ReferenceFolderScanTask"
     SMART_SCORE = "SmartScoreTask"
     TEXT_SCORE = "TextScoreTask"
+    PROMPT_MATCH = "PromptMatchTask"
+    OCR = "OcrTask"
     GFS_SNAPSHOT = "EnsureGfsSnapshotTask"
     TAG_HEALTH_AUTO_REBUILD = "TagHealthAutoRebuildTask"
     SCRAPHEAP_RETENTION_PURGE = "ScrapheapRetentionPurgeTask"
@@ -35,7 +37,11 @@ class TaskType(str, Enum):
     SNAPSHOT_IDENTITY_SCRUB = "SnapshotIdentityScrubTask"
     CHECKPOINT_HASH = "CheckpointHashTask"
     MODEL_FOLDER_SCAN = "ModelFolderScanTask"
+    DOWNLOADS_INTAKE = "DownloadsIntakeTask"
     LAYOUT_MOVE = "LayoutMoveTask"
+    GHOST_CASCADE = "GhostCascadeTask"
+    WORKFLOW_CARD_BACKFILL = "WorkflowCardBackfillTask"
+    SAVED_RECIPE_CONVERT = "SavedRecipeConvertTask"
 
     @staticmethod
     def all():

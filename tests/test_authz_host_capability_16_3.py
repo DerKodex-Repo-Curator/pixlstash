@@ -34,6 +34,7 @@ import pytest
 
 from pixlstash.auth import (
     READ_BLOCKED_GET_PATHS,
+    READ_BLOCKED_GET_PREFIXES,
     is_local_ip,
     is_local_or_tailscale_ip,
     is_loopback_ip,
@@ -85,6 +86,7 @@ _LOOPBACK_ROUTE_KEYS = {
     ("POST", "/api/v1/server-config/open"),
     ("POST", "/api/v1/pictures/export/folder"),
     ("POST", "/api/v1/test-hooks/ws-event"),
+    ("POST", "/api/v1/comfyui/pack/install"),
 }
 
 
@@ -168,10 +170,10 @@ def test_loopback_owner_only_is_justification_required():
     assert ok == []
 
 
-def test_host_capability_tier_split_is_47_local_7_loopback():
+def test_host_capability_tier_split_is_49_local_7_loopback():
     """The loopback tier is the 5 file-manager spawns, the process restart and
-    the e2e test hook; the filesystem/folder routes stay LOCAL_OWNER_ONLY. 52
-    routes carry a locality tier = 47 local + 7 loopback.
+    the e2e test hook; the filesystem/folder routes stay LOCAL_OWNER_ONLY. 56
+    routes carry a locality tier = 49 local + 7 loopback.
 
     History, so a future change to this number arrives with its reason: 16 = 13 +
     3 originally; 17 = 13 + 4 after CSO Condition 1 folded in
@@ -422,6 +424,54 @@ def test_host_capability_tier_split_is_47_local_7_loopback():
     the ``GET /server-config/layout`` argument. Neither takes a host path and
     neither spawns anything, so the loopback count is unchanged.
 
+    56 = 49 + 7 with the first-import pair: ``POST /libraries/{library_uuid}/
+    promote`` renames the import's temporary database onto ``vault.db`` and
+    ``POST /libraries/{library_uuid}/discard`` deletes it and the folders
+    PixlStash made. Each writes inside a host folder (``POST /libraries``'
+    class) and closes and reopens the active vault (``POST /libraries/active``'
+    class). Both take a registry uuid, never a path, and refuse any library not
+    on its first import. Neither spawns anything.
+
+    57 = 50 + 7 with ``POST /model-files/merge`` (#1439), the per-copy delete:
+    it keeps the copy the body names and removes every other ``present`` copy of
+    that model. That is ``POST /model-files/delete``'s unlink narrowed to the
+    copies the caller did *not* name, so it is on that route's tier for that
+    route's reason - the destruction itself - and fewer bytes is not a weaker
+    authority. It takes no host path (a ``model.id`` and a ``(folder_id,
+    relpath)`` the scanner wrote), contains every path with the same
+    ``_contained_path``, and deletes no hub row at all: the removed copies keep
+    their ``model_file`` rows at ``state = 'removed'``. It also reads the owner's
+    configured ComfyUI for its advertised model list, which is the outbound read
+    the run pre-flight already makes on the same credential. Nothing spawns, so
+    the loopback count is unchanged.
+
+    56 = 49 + 7 when ``POST /libraries/{library_uuid}/promote`` was removed: its
+    only caller, "Start an empty library here", left the first-import wizard
+    because nobody wants an empty library in a folder full of pictures (an empty
+    folder gets ``vault.db`` from ``POST /libraries`` directly). A finished
+    import still promotes its vault, from the commit, not through a route.
+
+    57 = 49 + 8 with ``POST /comfyui/pack/install``: it writes code (the
+    ComfyUI-PixlStash nodes) into a ComfyUI ``custom_nodes`` folder on this
+    machine and restarts ComfyUI, the host-shell class, so loopback only.
+
+    59 = 51 + 8 with ``POST`` and ``DELETE /comfyui/link`` retargeted from
+    ``OWNER_ONLY`` (#1810): linking has this server push a full-access token to
+    whatever answers at the saved ComfyUI address on its own network, and
+    saving that address is allowed remotely, so a remote owner could aim it.
+
+    60 = 52 + 8 with ``PUT /users/me/token/{token_id}/libraries`` (#1787): it
+    lets a token reach libraries it was not minted in, which is the owner's
+    decision on the local network and not one a remote session may take (a
+    token may not either, which the handler sees to).
+
+    61 = 53 + 8 with ``POST /pictures/move-to-library``. It is on this tier for
+    ``POST /libraries/active``'s reason, not the path-authority one: it opens a
+    library that is not the active one with write authority, runs its pending
+    migrations and holds the switch lock while it copies, and its refusals name
+    that library's host folder, which ``GET /libraries`` redacts for a remote
+    owner. It takes a registry uuid and no path.
+
     Arithmetic, not judgement."""
     loopback = {
         key
@@ -434,8 +484,8 @@ def test_host_capability_tier_split_is_47_local_7_loopback():
         if rp.policy is AccessPolicy.LOCAL_OWNER_ONLY
     }
     assert loopback == _LOOPBACK_ROUTE_KEYS, loopback
-    assert len(loopback) == 7, sorted(loopback)
-    assert len(local) == 47, sorted(local)
+    assert len(loopback) == 8, sorted(loopback)
+    assert len(local) == 53, sorted(local)
 
 
 # ===========================================================================
@@ -878,13 +928,11 @@ def test_every_untemplated_owner_class_get_is_on_the_read_blocked_belt():
     owed by *tier*, not by someone grading the payload.
 
     The templated ones cannot be expressed in an exact-match frozenset at all.
-    The locality-tier ones are pinned as a known set rather than ignored: adding
-    a sixth fails here, and closing the gap needs prefix matching (the follow-up
-    recorded in ``tests/test_model_shelf_api.py`` and
-    ``docs/backend_architecture.md`` §16.3). The templated ``OWNER_ONLY`` GETs
-    are deliberately *not* pinned - that tier grows with ordinary feature work,
-    and a pin there would fail an unrelated route addition with a message about
-    a belt it cannot join.
+    They used to be pinned here as a known gap; ``READ_BLOCKED_GET_PREFIXES``
+    closed it (#1293), so every templated owner-class GET must now sit under a
+    prefix. A new one under a path share tokens also use (``/pictures/{id}/…``)
+    cannot take a prefix; that is a real hole under the rollback, and this is
+    where it is decided rather than discovered.
 
     **``GET /adapters/{sha256}/file`` joined that set on 2026-08-15, and it is
     the sharpest member of it.** The other two serve a run listing and a preview
@@ -916,20 +964,19 @@ def test_every_untemplated_owner_class_get_is_on_the_read_blocked_belt():
         f"READ_BLOCKED_GET_PATHS in pixlstash/auth.py."
     )
 
-    tier = (AccessPolicy.LOCAL_OWNER_ONLY, AccessPolicy.LOOPBACK_OWNER_ONLY)
-    tier_gets = {
+    # The templated ones are held by READ_BLOCKED_GET_PREFIXES (#1293), which
+    # closed the gap this test used to pin as five known routes.
+    must_be_prefixed = {path for path in owner_class_gets if "{" in path}
+    assert len(must_be_prefixed) >= 16, sorted(must_be_prefixed)
+    uncovered = sorted(
         path
-        for (method, path), rp in ROUTE_POLICIES.items()
-        if method == "GET" and rp.policy in tier
-    }
-    templated_gap = sorted(path for path in tier_gets if "{" in path)
-    assert templated_gap == [
-        "/api/v1/adapters/{sha256}/file",
-        "/api/v1/model-folders/{folder_id}/runs",
-        "/api/v1/model-folders/{folder_id}/runs/{run_name}/samples/{filename}",
-        "/api/v1/models/{model_id}/samples",
-        "/api/v1/models/{model_id}/samples/{filename}",
-    ], templated_gap
+        for path in must_be_prefixed
+        if not path.startswith(READ_BLOCKED_GET_PREFIXES)
+    )
+    assert uncovered == [], (
+        f"templated owner-class GETs no READ_BLOCKED_GET_PREFIXES entry covers: "
+        f"{uncovered}"
+    )
 
 
 # ---- LOOPBACK_OWNER_ONLY (7) - the flag-immune red line --------------------

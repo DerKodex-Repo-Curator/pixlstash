@@ -73,13 +73,16 @@ const globalOpts = {
       "v-menu": VMenuStub,
       "v-slider": true,
       "v-switch": true,
-      GbFilterPanel: true,
-      TbComfyPanel: true,
+      VTooltip: true,
+      FilterMenu: true,
       TbExportPanel: true,
       TbImportPanel: true,
       TbTagPanel: true,
       UndoControl: true,
       TbGlobalActions: true,
+      // The real Export/Import panels host AppDialogs, whose VDialog needs an
+      // installed Vuetify; these tests are about the toolbar's menus.
+      AppDialog: true,
     },
   },
 };
@@ -106,7 +109,7 @@ describe("Toolbar - icon menu attachment", () => {
       { TbExportPanel: false, TbImportPanel: false },
     );
     const iconMenus = [
-      ["Search (F)", ".gb-search-panel"],
+      ["Search", ".gb-search-panel"],
       ["Export current grid to zip", ".tb-export-panel"],
       ["Import photos", ".tb-import-panel"],
     ];
@@ -115,13 +118,13 @@ describe("Toolbar - icon menu attachment", () => {
       const menu = wrapper
         .findAll(".v-menu-stub")
         .find((candidate) =>
-          candidate.find(`button[title="${title}"]`).exists(),
+          candidate.find(`button[aria-label="${title}"]`).exists(),
         );
       expect(menu, `${title} menu`).toBeTruthy();
       expect(menu.attributes("data-location")).toBe("bottom end");
       expect(menu.attributes("data-origin")).toBe("top end");
 
-      await menu.find(`button[title="${title}"]`).trigger("click");
+      await menu.find(`button[aria-label="${title}"]`).trigger("click");
       expect(wrapper.find(`${panelSelector} .tbm-caret`).classes()).toContain(
         "tbm-caret--icon-center-end",
       );
@@ -224,8 +227,19 @@ describe("Toolbar - the shell band's one box recipe", () => {
       "src/components/views/LibraryInsights.vue",
       ".ins-toolbar",
     );
+    // The three bars that gained the app-wide tail in #1415. The Workflows
+    // one is `WorkflowsView` since F1b; it copied the shelf's box recipe so
+    // the screen that replaced it sits at the same height.
+    const workflows = blockOf(
+      "src/components/views/WorkflowsView.vue",
+      ".wfv-toolbar",
+    );
+    const moves = blockOf(
+      "src/components/views/MovesReview.vue",
+      ".mv-toolbar",
+    );
 
-    for (const block of [grid, dq, shelf, insights]) {
+    for (const block of [grid, dq, shelf, insights, workflows, moves]) {
       expect(block).toContain("height: 36px");
       expect(block).toContain("box-sizing: border-box");
       // min-height + vertical padding is exactly the recipe that drifted.
@@ -258,6 +272,8 @@ describe("Toolbar - the shell band's one box recipe", () => {
     expect(rightInset(dq)).toBe(rightInset(grid));
     expect(rightInset(shelf)).toBe(rightInset(grid));
     expect(rightInset(insights)).toBe(rightInset(grid));
+    expect(rightInset(workflows)).toBe(rightInset(grid));
+    expect(rightInset(moves)).toBe(rightInset(grid));
 
     // Two of the three bars LEAD with an identity (the queue's count, the
     // shelf's title) and each carries a quieter count beneath it. They read as
@@ -300,6 +316,50 @@ describe("Toolbar - the shell band's one box recipe", () => {
     expect(decl(insTitle, "font-weight")).toBe(decl(qtitle, "font-weight"));
     expect(decl(insSub, "font-size")).toBe(decl(qsub, "font-size"));
     expect(decl(insSub, "color")).toBe(decl(qsub, "color"));
+
+    // The two bars that joined the loop above lead with an identity too, and
+    // were unguarded: the workflow library shipped its title at --text-lg and
+    // its count at a fourth ink, the same drift the shelf's --text-xl was
+    // (#1415).
+    const wfTitle = blockOf(
+      "src/components/views/WorkflowsView.vue",
+      ".wfv-title",
+    );
+    const wfSub = blockOf(
+      "src/components/views/WorkflowsView.vue",
+      ".wfv-sub",
+    );
+    const mvTitle = blockOf(
+      "src/components/views/MovesReview.vue",
+      ".mv-title",
+    );
+    const mvSub = blockOf("src/components/views/MovesReview.vue", ".mv-sub");
+
+    for (const [title, sub] of [
+      [wfTitle, wfSub],
+      [mvTitle, mvSub],
+    ]) {
+      expect(decl(title, "font-size")).toBe(decl(qtitle, "font-size"));
+      expect(decl(title, "font-weight")).toBe(decl(qtitle, "font-weight"));
+      expect(decl(sub, "font-size")).toBe(decl(qsub, "font-size"));
+      expect(decl(sub, "color")).toBe(decl(qsub, "color"));
+    }
+
+    // And the identity is also where each bar GIVES. Every member of these
+    // bars is `nowrap`, so a bar with no shrinking member pushes its surplus
+    // through the right edge, where the grid area's `overflow: hidden` clips
+    // it - and what sits at that edge is the app-wide tail, including the
+    // toggle that had just narrowed the column by opening the rail (#1415).
+    // `min-width: 0` is the half that actually lets a nowrap flex item shrink.
+    const wfTail = blockOf(
+      "src/components/views/WorkflowsView.vue",
+      ".wfv-bar-tail",
+    );
+    for (const identity of [wfTitle, mvTitle]) {
+      expect(identity).toContain("min-width: 0");
+      expect(identity).toMatch(/flex-shrink: [1-9]/);
+    }
+    expect(wfTail).toContain("flex: 0 0 auto");
   });
 });
 
@@ -327,9 +387,9 @@ describe("Toolbar - Recently changed stacks", () => {
     const stacked = mountToolbar();
     await openSortMenu(stacked);
     expect(stacked.text()).toContain("Recently changed stacks");
-    const badge = stacked.find(".tbm-toggle-filter-badge");
+    const badge = stacked.find(".gb-sort-filter-badge");
     expect(badge.exists()).toBe(true);
-    expect(badge.attributes("title")).toBe(
+    expect(badge.findComponent({ name: "Tooltip" }).props("text")).toBe(
       "Only available when viewing stacks",
     );
     expect(badge.attributes("aria-label")).toBe(
@@ -433,7 +493,7 @@ describe("Toolbar - the export control names what it will export", () => {
   const exportTitle = (wrapper) =>
     wrapper
       .findAll("button.tb-export-btn")
-      .map((b) => b.attributes("title"))
+      .map((b) => b.attributes("aria-label"))
       .at(0);
 
   it("offers the whole grid while nothing is selected", () => {
@@ -459,7 +519,7 @@ describe("Toolbar - the export control names what it will export", () => {
     await wrapper.find(".tbo-trigger").trigger("click");
     const labels = wrapper
       .find(".tbo-panel")
-      .findAll(".tbm-action")
+      .findAll(".ctx-item")
       .map((b) => b.text());
     expect(labels).toContain("Export 3 pictures to zip");
     expect(labels).not.toContain("Export grid to zip");
@@ -481,30 +541,55 @@ describe("Toolbar - the ⋯ overflow mirrors its controls", () => {
     filterStore.comfyuiConfigured = true;
     const wrapper = mountToolbar();
     const panel = await openOverflow(wrapper);
-    const labels = panel.findAll(".tbm-action").map((b) => b.text());
+    const labels = panel.findAll(".ctx-item").map((b) => b.text());
     expect(labels).toEqual([
+      "Generate with ComfyUI…",
       "Export grid to zip",
       "Import photos…",
-      "Generate with ComfyUI…",
       "View options…",
     ]);
   });
 
-  // The rows honour the SAME v-ifs as the buttons they mirror: no ComfyUI
-  // configured, no row; read-only drops Import (owner-only dialog) and
-  // History (there is no UndoControl to open).
-  it("mirrors the v-ifs: ComfyUI row only when configured", async () => {
+  // The rail panel this used to open is gone (v1.12 F5); the entry stays and
+  // opens the Run popup instead. Without a door here, starting a run with
+  // nothing selected meant navigating to Workflows first - every other entry
+  // point is selection-scoped or needs a picture open.
+  it("opens the Run popup with no selection, picker unset", async () => {
+    const filterStore = useFilterStore();
+    filterStore.comfyuiConfigured = true;
+    const wrapper = mountToolbar();
+    const { useRunDialogStore } = await import("../../stores/useRunDialogStore");
+    const runDialog = useRunDialogStore();
+
+    await wrapper
+      .find('button[aria-label^="Generate new pictures"]')
+      .trigger("click");
+
+    expect(runDialog.source).toMatchObject({
+      kind: "card",
+      pickWorkflow: true,
+    });
+    // No pictures, so the card is the run's own source and the popup picks
+    // where the output is filed.
+    expect(runDialog.source.pictureIds).toEqual([]);
+  });
+
+  it("hides the entry entirely when ComfyUI is not configured", async () => {
     const wrapper = mountToolbar();
     const panel = await openOverflow(wrapper);
-    const labels = panel.findAll(".tbm-action").map((b) => b.text());
-    expect(labels).not.toContain("Generate with ComfyUI…");
+    expect(panel.findAll(".ctx-item").map((b) => b.text())).not.toContain(
+      "Generate with ComfyUI…",
+    );
+    expect(
+      wrapper.find('button[aria-label^="Generate new pictures"]').exists(),
+    ).toBe(false);
   });
 
   it("honours read-only: the Import row is gone", async () => {
     readOnlyRef.value = true;
     const wrapper = mountToolbar();
     const panel = await openOverflow(wrapper);
-    const labels = panel.findAll(".tbm-action").map((b) => b.text());
+    const labels = panel.findAll(".ctx-item").map((b) => b.text());
     expect(labels).not.toContain("Import photos…");
     // Review never folds (amendment #2), so no row exists to gate.
     expect(labels).not.toContain("Review and fix tags…");
@@ -514,7 +599,7 @@ describe("Toolbar - the ⋯ overflow mirrors its controls", () => {
     const wrapper = mountToolbar();
     const panel = await openOverflow(wrapper);
     const row = (label) =>
-      panel.findAll(".tbm-action").find((b) => b.text() === label);
+      panel.findAll(".ctx-item").find((b) => b.text() === label);
 
     await row("Export grid to zip").trigger("click");
     expect(wrapper.emitted("confirm-export-zip")).toHaveLength(1);
@@ -527,14 +612,43 @@ describe("Toolbar - the ⋯ overflow mirrors its controls", () => {
   // The controls the amendment pinned OUT of the burger stay first-class.
   it("keeps Review and the global pair as visible controls", () => {
     const wrapper = mountToolbar();
-    expect(wrapper.find('button[title="Review and fix tags"]').exists()).toBe(
+    expect(wrapper.find('button[aria-label="Review and fix tags"]').exists()).toBe(
       true,
     );
     expect(
-      wrapper.find('button[title="Review and fix tags"]').classes(),
+      wrapper.find('button[aria-label="Review and fix tags"]').classes(),
     ).not.toContain("tb-fold-700");
     expect(wrapper.findComponent({ name: "TbGlobalActions" }).exists()).toBe(
       true,
     );
+  });
+});
+
+describe("Toolbar - the funnel is lit by the filter strip's chips", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  function funnel(wrapper) {
+    return wrapper
+      .findAll(".v-menu-stub")
+      .map((menu) => menu.find("button"))
+      .find((b) => b.exists() && b.attributes("aria-label") === "Filters");
+  }
+
+  it("is lit while a filter is on, and off when none is", async () => {
+    const wrapper = mountToolbar({ selectedCharacter: "ALL" });
+    expect(funnel(wrapper).classes()).not.toContain("bar-btn--active");
+    useFilterStore().tagFilter = ["hat"];
+    await wrapper.vm.$nextTick();
+    expect(funnel(wrapper).classes()).toContain("bar-btn--active");
+  });
+
+  // "No character" only applies in All Pictures, where it has a chip. In a set
+  // view it has none, so the funnel must not claim a filter nobody can see.
+  it("stays dark for a No character flag left over outside All Pictures", async () => {
+    useFilterStore().noCharacterFilter = true;
+    const wrapper = mountToolbar({ selectedCharacter: "null" });
+    expect(funnel(wrapper).classes()).not.toContain("bar-btn--active");
   });
 });

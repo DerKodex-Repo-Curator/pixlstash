@@ -1,18 +1,39 @@
-import { computed, onScopeDispose, reactive, ref } from "vue";
+import {
+  computed,
+  onScopeDispose,
+  reactive,
+  ref,
+  shallowRef,
+  watch,
+} from "vue";
 import { defineStore } from "pinia";
 import { clearModelIcons, setModelIcon } from "../api/modelIcons";
+import { mergeModelCopies } from "../api/modelFiles";
 import {
+  addWorkflowSetMembers,
   BASE_MODEL_UNASSIGNED,
+  createWorkflowSet,
   deleteModels,
+  deleteWorkflowSet,
   editModels,
+  fetchWorkflowSets,
+  putSetVerdict,
+  putMemberVerdict,
   forgetModels,
   listAdapters,
   listBaseModelCompletions,
   listCheckpoints,
+  removeWorkflowSetMembers,
+  renameWorkflowSet,
   setAdapterAttachments,
+  setModelsHidden,
+  setWorkflowSetDeclines,
+  setWorkflowSetsHidden,
 } from "../api/modelShelf";
 import { onSessionReset } from "../utils/apiClient";
+import { useConfirm } from "../composables/useConfirm";
 import { useNoticeStore } from "./useNoticeStore";
+import { useOperationStore } from "./useOperationStore";
 import { errorDetail } from "../utils/apiError";
 import {
   adapterKindKey,
@@ -23,7 +44,10 @@ import {
   capabilityLabel,
   compareGroups,
   defaultSortDirection,
+  deriveModelName,
+  quantFromFilename,
   fileKindLabel,
+  hideModelsVerb,
   locationState,
   presentCopies,
   trashName,
@@ -31,6 +55,24 @@ import {
   offlineFolders,
   UNSET_GROUP_KEY,
 } from "../utils/modelShelf";
+import {
+  defaultSlot,
+  handMadeBase,
+  handMadeCard,
+  handMadeName,
+  headModel,
+  hideSetsVerb,
+  pictureCount,
+  PICK_ORDERS,
+  railListed,
+  rowBaseModel,
+  rowMatches,
+  setCard,
+  setCheckpoint,
+  setGroups,
+  worksWith,
+} from "../utils/workflowSets";
+import { checksByKey, comboKey } from "../utils/setVerdicts";
 
 /** Where the `Show` selection is remembered between visits. */
 const FILTERS_KEY = "pixlstash:modelShelfFilters";
@@ -47,6 +89,13 @@ const FILTERS_KEY = "pixlstash:modelShelfFilters";
 const FILTERS_SCHEMA_VERSION = 1;
 
 /**
+ * Where the Models rail's and the slot pickers' order is remembered. Its own
+ * key: it is not the shelf's sort, and a reset of the shelf's view does not
+ * reach it.
+ */
+const PICK_ORDER_KEY = "pixlstash:modelPickOrder";
+
+/**
  * Where the view axes are remembered: grouping, sort, and what is collapsed.
  *
  * A second key rather than more fields in {@link FILTERS_KEY}: `resetFilters`
@@ -55,8 +104,35 @@ const FILTERS_SCHEMA_VERSION = 1;
  */
 const VIEW_KEY = "pixlstash:modelShelfView";
 
-/** Bumped when the shape below changes; a blob from another `v` is discarded. */
-const VIEW_SCHEMA_VERSION = 1;
+/**
+ * Bumped when the shape below changes; a blob from another `v` is discarded.
+ *
+ * Bumped to 2 for #1438, where `groupBy` changed DEFAULT rather than shape - and
+ * **a version this file recognises rather than one it discards**, which is the
+ * distinction worth keeping. Every blob written under 1 carries
+ * `groupBy: "none"` whether anyone chose it or not, so the new default has to
+ * reach people who already use the shelf; but nothing else in the blob went
+ * stale, and the first version of this change threw the lot away because that is
+ * what a bump conventionally means here. It cost every existing reader their
+ * dragged column widths, their collapsed groups on five axes and their sort, for
+ * a change to one field (#1479 review).
+ *
+ * So {@link VIEW_MIGRATIONS} names the fields a version is not allowed to carry
+ * forward, and `storedView` reads every other field out of an older blob exactly
+ * as it reads a current one. A future bump that really is a shape change still
+ * discards: leave its version out of that table and it falls through to the
+ * defaults whole.
+ */
+const VIEW_SCHEMA_VERSION = 2;
+
+/**
+ * Per stored version, the `view` fields a read must NOT take from it.
+ *
+ * A blob at version 1 predates the set grid, so its `groupBy` is not evidence of
+ * a choice - `none` was the only thing it could say. Everything else it holds is
+ * still exactly what the reader set.
+ */
+const VIEW_MIGRATIONS = { 1: ["groupBy"] };
 
 /**
  * Ceiling on remembered collapsed groups, per axis, oldest dropped.
@@ -77,7 +153,30 @@ const COMPLETION_RETRY_MS = 30_000;
  * several features is listed under EACH of them, which `groupsOf` already
  * supports because `folder` needed the same fan-out for a file copied twice.
  */
-export const GROUP_BY_KEYS = ["none", "base_model", "folder", "feature"];
+export const GROUP_BY_KEYS = [
+  "none",
+  "workflow_set",
+  "base_model",
+  "folder",
+  "feature",
+];
+
+/**
+ * The one axis that is not a band over the row list.
+ *
+ * `workflow_set` swaps the list for a card grid, because its groups OVERLAP: a
+ * VAE belongs to every set it has run in, and a sticky band can only put a row
+ * in one place. The other four stay exactly as they were - `groups` is not asked
+ * to express this one, and the grid reads `setGroups` instead.
+ */
+export const GRID_GROUP_BY = "workflow_set";
+
+/**
+ * How an open set's tray draws its models: as cards, or as a list whose
+ * columns are `Model`, `Kind`, `Size`, `In other sets`. The Workflows grid's
+ * stack panel had the same pair until #1623 removed it.
+ */
+export const TRAY_VIEWS = ["grid", "list"];
 
 /**
  * How folder groups are laid out, which is a sub-choice of `Folder` rather than
@@ -217,6 +316,30 @@ function compareOn(a, b, key, direction) {
   );
 }
 
+/**
+ * What one copy of a model is called on disk, for a draw that stands for it.
+ *
+ * `model.filename` is whichever copy the scanner met first, so byte-identical
+ * files under different names (`ae.sft`, `ae.safetensors`) are one model with
+ * one filename, and every draw under the folder axis read as the first. The
+ * name follows too, unless somebody gave the model one.
+ *
+ * @param {Object} row - a shown row, carrying `name` from `modelName`.
+ * @param {Object} location - the one copy this draw stands for.
+ * @returns {{filename: string, name: Object}|{}} fields to spread over the row.
+ */
+export function copyName(row, location) {
+  const filename = String(location?.relpath || "")
+    .split(/[\\/]/)
+    .pop();
+  if (!filename || filename === row.filename) return {};
+  return {
+    filename,
+    name:
+      row.name?.state === "named" ? row.name : modelName({ ...row, filename }),
+  };
+}
+
 /** "1 model" / "12 models", so no receipt ever reads "1 models". */
 function modelCount(n) {
   return `${Number(n).toLocaleString()} ${n === 1 ? "model" : "models"}`;
@@ -234,13 +357,33 @@ const MAX_MODELS_PER_ICON_SET = 500;
 // had committed. It also leaves sockets for the row thumbnails.
 const ICON_SET_CONCURRENCY = 6;
 
+// The server's cap on a set name (`MAX_SET_NAME_LENGTH` in the set service).
+const MAX_SET_NAME_LENGTH = 200;
+
+// The glyph on each set verb's receipt: the one on the control that did it
+// where there is one, else the picture sets' own add/remove glyphs.
+const SET_RECEIPT_ICONS = {
+  create: "mdi-plus",
+  add: "mdi-playlist-plus",
+  remove: "mdi-playlist-minus",
+  rename: "mdi-pencil-outline",
+  delete: "mdi-layers-remove",
+  "keep-out": "mdi-call-split",
+  "offer-again": "mdi-restore",
+  hide: "mdi-eye-off-outline",
+  unhide: "mdi-eye-outline",
+  twin: "mdi-layers",
+};
+
 /** What each curated column is called in a receipt. */
 const FIELD_WORDS = {
   display_name: "name",
   base_model: "base model",
   kind: "algorithm",
   file_kind: "type",
+  suggest_kind: "kind suggestion",
   capabilities: "features",
+  trigger_words: "trigger words",
 };
 
 /**
@@ -304,6 +447,111 @@ export function forgetReceipt(gone, kept, vanished = 0, engines = 0) {
       : "Nothing to forget.";
   }
   return [`Forgot ${modelCount(gone)}.`, ...notes].join(" ");
+}
+
+/**
+ * Say what a merge removed, where it put it, and what it left alone.
+ *
+ * The one sentence that has to be there is what SURVIVED: a reader who has just
+ * removed a copy of a 20 GB checkpoint needs to know the shelf still holds the
+ * model, or the receipt reads like the delete they did not ask for.
+ *
+ * The refusals reuse the delete's vocabulary where the reason is the same, and
+ * the two that are this route's own are said in its own words: a keeper the shelf
+ * cannot find is the refusal that saved the reader from a redownload, and "only
+ * one copy" is a list that was a minute old.
+ *
+ * @param {number} gone - models now down to one copy.
+ * @param {Array<{reason: string}>} refused - the server's refusals, verbatim.
+ * @param {boolean} permanent - whether the copies were unlinked or trashed.
+ * @param {string} trash - what the SERVER calls its trash.
+ * @param {number} [filesRemoved=0] - how many files actually moved.
+ */
+export function mergeReceipt(
+  gone,
+  refused,
+  permanent,
+  trash,
+  filesRemoved = 0,
+) {
+  const counts = new Map();
+  for (const item of refused || []) {
+    counts.set(item?.reason, (counts.get(item?.reason) || 0) + 1);
+  }
+  const notes = [];
+  const note = (reason, sentence) => {
+    const n = counts.get(reason);
+    if (n) notes.push(sentence(n));
+    counts.delete(reason);
+  };
+  note(
+    "keeper_not_present",
+    (n) =>
+      `The copy you chose to keep is gone, so ${modelCount(n)} was left alone.`,
+  );
+  note("not_a_duplicate", (n) => `${modelCount(n)} already had only one copy.`);
+  note(
+    "no_such_copy",
+    (n) =>
+      `${modelCount(n)} no longer has the copy you chose. Rescan that folder.`,
+  );
+  note(
+    "keeper_is_that_copy",
+    (n) =>
+      `${modelCount(n)} has two names for one file — a shortcut — so there was nothing to reclaim.`,
+  );
+  note(
+    "not_a_user_folder",
+    (n) =>
+      `${modelCount(n)} keeps a spare copy in a folder PixlStash manages, which it will not delete from.`,
+  );
+  note(
+    "is_a_builtin_engine",
+    (n) =>
+      `${modelCount(n)} ${n === 1 ? "is one" : "are ones"} PixlStash downloaded for itself and would fetch again.`,
+  );
+  note(
+    "unreachable_copy",
+    (n) =>
+      `${modelCount(n)} ${n === 1 ? "has a copy" : "have copies"} on a drive that is not plugged in.`,
+  );
+  note(
+    "trash_unavailable",
+    (n) =>
+      `This server cannot reach a ${trash}, so ${modelCount(n)} ${n === 1 ? "was" : "were"} kept.`,
+  );
+  note(
+    "partly_deleted",
+    (n) => `${modelCount(n)} lost some spare copies before the removal failed.`,
+  );
+  note(
+    "escapes_its_folder",
+    (n) =>
+      `${modelCount(n)} is recorded outside its own folder. Rescan that folder.`,
+  );
+  note(
+    "no_such_model",
+    (n) => `${modelCount(n)} ${n === 1 ? "was" : "were"} already gone.`,
+  );
+  const rest = [...counts.values()].reduce((sum, n) => sum + n, 0);
+  if (rest) {
+    notes.push(`${modelCount(rest)} was left alone; the server said why.`);
+  }
+  if (!gone) {
+    return notes.length
+      ? `Nothing was removed. ${notes.join(" ")}`
+      : "There was nothing to merge.";
+  }
+  const spares =
+    filesRemoved === 1 ? "The spare copy" : `${filesRemoved} spare copies`;
+  const where = filesRemoved
+    ? permanent
+      ? `${spares} ${filesRemoved === 1 ? "is" : "are"} deleted.`
+      : `${spares} ${filesRemoved === 1 ? "is" : "are"} in your ${trash}.`
+    : "";
+  return [`Kept one copy of ${modelCount(gone)}.`, where, ...notes]
+    .filter(Boolean)
+    .join(" ");
 }
 
 /**
@@ -441,10 +689,19 @@ export function assignReceipt(done, failed, entityName, attaching) {
  */
 function defaultView() {
   return {
-    groupBy: "none",
+    // The set grid, not the flat list: "which of these work together" is the
+    // question the shelf is actually asked, and a grouping that answers it only
+    // once somebody finds the menu is not the default it deserves.
+    groupBy: GRID_GROUP_BY,
     sortKey: "added_at",
     sortDirection: "desc",
     folderLayout: "drive",
+    // How an open set's tray draws its models: as cards or as a comparison
+    // list. Carried at all times and only read under `workflow_set`, exactly as
+    // `folderLayout` is only read under `folder`. Remembered for every tray
+    // rather than per tray, because the switch answers "how do I read a tray"
+    // rather than anything about the one in front of you.
+    trayView: "grid",
     columnWidths: { ...DEFAULT_COLUMN_WIDTHS },
   };
 }
@@ -486,6 +743,15 @@ function defaultFilters() {
     // a shelf that opens showing four rows of an eighteen-hundred-row library
     // with no obvious reason why.
     duplicatesOnly: false,
+    // Draw the models this library hides too, marked, so one can be shown
+    // again. Not restored on startup either, for the same reason: it is how a
+    // hide is taken back, not a way to keep the shelf.
+    showHidden: false,
+    // The name filter's text, matched as the Models rail's picker matches: the
+    // name the row shows or its filename. Not restored on startup either: a
+    // search is a question, and a shelf that opened still narrowed by
+    // yesterday's would read as missing models.
+    name: "",
   };
 }
 
@@ -514,6 +780,18 @@ function writeStored(key, value) {
     window.localStorage?.setItem(key, JSON.stringify(value));
   } catch (err) {
     console.warn(`[shelf] could not remember ${key} for next time`, err);
+  }
+}
+
+/**
+ * Drop a key this build no longer reads. Hides moved to the server (#1869), so
+ * a browser's old per-browser copy is dead weight; it is not carried over.
+ */
+function forgetStored(key) {
+  try {
+    window.localStorage?.removeItem(key);
+  } catch (err) {
+    console.warn(`[shelf] could not clear ${key}`, err);
   }
 }
 
@@ -555,15 +833,23 @@ function storedFilters() {
 function storedView() {
   const parsed = readStored(VIEW_KEY);
   const view = defaultView();
-  // A blob an older build wrote is discarded whole rather than half-applied.
-  if (!parsed || parsed.v !== VIEW_SCHEMA_VERSION) return view;
-  if (GROUP_BY_KEYS.includes(parsed.groupBy)) view.groupBy = parsed.groupBy;
+  if (!parsed) return view;
+  // A blob from a version this build does not know is discarded whole rather
+  // than half-applied. One it DOES know is read field by field, minus whatever
+  // that version is not allowed to carry forward.
+  const stale =
+    parsed.v === VIEW_SCHEMA_VERSION ? [] : VIEW_MIGRATIONS[parsed.v];
+  if (!stale) return view;
+  if (!stale.includes("groupBy") && GROUP_BY_KEYS.includes(parsed.groupBy)) {
+    view.groupBy = parsed.groupBy;
+  }
   // Read per field rather than gated behind a schema bump: a blob written
   // before the layout choice existed is still a valid remembered sort, and
   // bumping the version to add one field would throw that away for everyone.
   if (FOLDER_LAYOUTS.includes(parsed.folderLayout)) {
     view.folderLayout = parsed.folderLayout;
   }
+  if (TRAY_VIEWS.includes(parsed.trayView)) view.trayView = parsed.trayView;
   if (SORT_KEYS.includes(parsed.sortKey)) view.sortKey = parsed.sortKey;
   if (parsed.sortDirection === "asc" || parsed.sortDirection === "desc") {
     view.sortDirection = parsed.sortDirection;
@@ -592,7 +878,13 @@ function storedCollapsed() {
   const parsed = readStored(VIEW_KEY);
   const collapsed = {};
   for (const axis of GROUP_BY_KEYS) collapsed[axis] = new Set();
-  if (!parsed || parsed.v !== VIEW_SCHEMA_VERSION) return collapsed;
+  // Same rule as `storedView`: a known older version is read, an unknown one is
+  // discarded. What a reader collapsed under `Base model` did not stop being
+  // true because the default axis changed.
+  if (!parsed) return collapsed;
+  if (parsed.v !== VIEW_SCHEMA_VERSION && !VIEW_MIGRATIONS[parsed.v]) {
+    return collapsed;
+  }
   for (const axis of GROUP_BY_KEYS) {
     const keys = parsed.collapsed?.[axis];
     if (!Array.isArray(keys)) continue;
@@ -761,26 +1053,33 @@ const BLOCKS = [
   "support",
 ];
 
+/** The blocks some workflow-set slot takes: what the Models rail lists. */
+const RAIL_BLOCKS = ["adapters", "checkpoints", "unclassified", "support"];
+
 /**
  * Which block a row came from, so a fetch only replaces what it asked for.
  *
- * `support` is the one block that is two kinds. A VAE and a text encoder are
- * separate answers to "what is this file" and one answer to "what does the
- * shelf show", so they are separate `file_kind`s and one checkbox - the alt
- * being two boxes nobody wants to tick separately.
+ * `support` is the one block that is several kinds. A VAE, a text encoder, a
+ * ControlNet and an upscaler are separate answers to "what is this file" and
+ * one answer to "what does the shelf show", so they are separate `file_kind`s
+ * and one checkbox - the alt being boxes nobody wants to tick separately.
  */
+const SUPPORT_KINDS = ["vae", "text_encoder", "controlnet", "upscaler"];
+
 function blockOf(row) {
   if (row.file_kind === "checkpoint") return "checkpoints";
   if (row.file_kind === "unknown") return "unclassified";
   if (row.file_kind === "engine") return "engines";
-  if (row.file_kind === "vae" || row.file_kind === "text_encoder") {
-    return "support";
-  }
+  if (SUPPORT_KINDS.includes(row.file_kind)) return "support";
   return "adapters";
 }
 
 export const useModelShelfStore = defineStore("modelShelf", () => {
+  // The per-browser hide list, retired with #1869; removed once it is seen.
+  forgetStored("pixlstash:modelShelfHiddenSets");
   const filters = reactive(storedFilters() || defaultFilters());
+  /** Whether the Models rail is mounted; see `fetchedBlocks`. */
+  const railMounted = ref(false);
   /** Grouping and sort. A view preference, not part of the `Show` selection. */
   const view = reactive(storedView());
   /** Collapsed group keys, per axis. Replaced wholesale so templates react. */
@@ -789,6 +1088,12 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
   const rows = ref([]);
   /** Model ids the last scan added, for the `New` badge. Never persisted. */
   const newIds = ref(new Set());
+  /**
+   * Models arrived from the watched Downloads folder since the owner last
+   * looked at the shelf: the sidebar's `new` tag on Models. The sidebar clears
+   * it while the shelf is open. Never persisted.
+   */
+  const unseenArrivals = ref(false);
   const loading = ref(false);
   const error = ref("");
   /** True once a fetch has completed, so "empty" and "not asked yet" differ. */
@@ -799,7 +1104,10 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
   let epoch = 0;
 
   function remember() {
-    writeStored(FILTERS_KEY, { v: FILTERS_SCHEMA_VERSION, ...filters });
+    // The name text is left out: it is never restored, so writing it on every
+    // keystroke would only leave a search lying in storage.
+    const { name: _name, ...kept } = filters;
+    writeStored(FILTERS_KEY, { v: FILTERS_SCHEMA_VERSION, ...kept });
   }
 
   /** Persist the view axes and the collapsed sets as one versioned blob. */
@@ -851,30 +1159,28 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     const before = new Set(rows.value.map((row) => row.id));
     loading.value = true;
     error.value = "";
+    // Read before the request goes out: a tick while it is on the wire is the
+    // next fetch's business.
+    const blocks = fetchedBlocks();
+    const hidesAtStart = modelHideEvents;
     try {
-      const requests = [];
-      if (filters.adapters) requests.push(listAdapters());
-      if (filters.checkpoints) requests.push(listCheckpoints());
-      if (filters.unclassified) {
-        requests.push(listAdapters({ fileKind: "unknown" }));
-      }
-      // The engines block: PixlStash's own taggers and scorers, the
-      // InsightFace packs and every HuggingFace repo in the cache. Same
-      // route, same shape, one more `file_kind`.
-      if (filters.engines) requests.push(listAdapters({ fileKind: "engine" }));
-      // Two requests for one checkbox: the route takes a single `file_kind`,
-      // and these two kinds are one thing to a reader deciding what to keep.
-      if (filters.support) {
-        requests.push(listAdapters({ fileKind: "vae" }));
-        requests.push(listAdapters({ fileKind: "text_encoder" }));
-      }
-      const results = await Promise.all(requests);
+      const results = await Promise.all(blockRequests(blocks));
       if (startedAt !== epoch) return;
-      const refreshed = new Set(BLOCKS.filter((block) => filters[block]));
+      const refreshed = new Set(blocks);
       rows.value = [
         ...rows.value.filter((row) => !refreshed.has(blockOf(row))),
         ...results.flat(),
       ];
+      // Each row says whether this library hides it. Skipped when a hide was
+      // sent or answered while the read was out: the local list is newer.
+      if (modelHideEvents === hidesAtStart) {
+        const hidden = new Set(hiddenModelIds.value);
+        for (const row of results.flat()) {
+          if (row.hidden) hidden.add(row.id);
+          else hidden.delete(row.id);
+        }
+        hiddenModelIds.value = hidden;
+      }
       // Cleared on every ordinary fetch, so the badge is exactly "what the scan
       // you just ran added" and never a stale mark from three refreshes ago.
       newIds.value = markNew
@@ -884,6 +1190,10 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
         : new Set();
       loaded.value = true;
       pruneSelection();
+      // A scan can add a model, and a model with no card is what the reader of
+      // the set grid is looking for. Only a scan: an ordinary filter tick must
+      // not re-run a window over every picture in the vault.
+      if (markNew && setsLoaded.value) loadWorkflowSets({ force: true });
     } catch (err) {
       if (startedAt !== epoch) return;
       error.value = errorDetail(err) || err?.message || String(err);
@@ -898,6 +1208,60 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     } finally {
       if (startedAt === epoch) loading.value = false;
     }
+  }
+
+  /**
+   * The requests for some blocks: one per block, one per kind for `support`.
+   *
+   * @param {Array<string>} blocks - `BLOCKS` entries.
+   */
+  function blockRequests(blocks) {
+    const requests = [];
+    if (blocks.includes("adapters")) requests.push(listAdapters());
+    if (blocks.includes("checkpoints")) requests.push(listCheckpoints());
+    if (blocks.includes("unclassified")) {
+      requests.push(listAdapters({ fileKind: "unknown" }));
+    }
+    // The engines block: PixlStash's own taggers and scorers, the
+    // InsightFace packs and every HuggingFace repo in the cache. Same
+    // route, same shape, one more `file_kind`.
+    if (blocks.includes("engines")) {
+      requests.push(listAdapters({ fileKind: "engine" }));
+    }
+    // Several requests for one checkbox: the route takes a single
+    // `file_kind`, and these kinds are one thing to a reader deciding what to
+    // keep.
+    if (blocks.includes("support")) {
+      for (const fileKind of SUPPORT_KINDS) {
+        requests.push(listAdapters({ fileKind }));
+      }
+    }
+    return requests;
+  }
+
+  /**
+   * The blocks a fetch reads: the ticked ones, plus every block a set slot
+   * takes while the Models rail is mounted. The rail lists those whatever
+   * Show says, and `rows` is everything known rather than the shown set, so
+   * reading them in the same fetch keeps them as fresh as the shown ones: a
+   * scan or a session reset refreshes them too.
+   */
+  function fetchedBlocks() {
+    return BLOCKS.filter(
+      (block) => filters[block] || (railMounted.value && RAIL_BLOCKS.includes(block)),
+    );
+  }
+
+  /**
+   * The rail asks for its blocks as it mounts (and lets go as it unmounts).
+   * One extra fetch only when Show has left one of them unticked.
+   */
+  function setRailMounted(mounted) {
+    railMounted.value = mounted;
+    if (mounted && !RAIL_BLOCKS.every((block) => filters[block])) {
+      return fetchRows();
+    }
+    return null;
   }
 
   /**
@@ -1056,12 +1420,59 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     completionsAttemptedAt = 0;
   }
 
+  /**
+   * One raw row with the fields the list and the verbs read off it.
+   *
+   * Extracted because `visibleRows` is no longer the only screen: the set grid
+   * draws models the `Show` narrowing leaves out of it, and a row selected there
+   * has to reach the verb bar wearing the same shape as one picked off the list.
+   */
+  function displayRow(row) {
+    return {
+      ...row,
+      name: modelName(row),
+      locState: locationState(row.locations),
+      // Counted HERE, off the row's whole `locations`, and carried on the row
+      // from then on. The folder axis narrows a draw to the one copy that
+      // folder holds, so a template calling `presentCopies` at render time
+      // would report `1` for exactly the rows this is meant to mark.
+      copies: presentCopies(row.locations),
+      isNew: newIds.value.has(row.id),
+      // The store's list, not the row's own field: a hide lands here first.
+      hidden: hiddenModelIds.value.has(row.id),
+    };
+  }
+
+  /**
+   * The rows a list may OFFER or draw: every row but the ones this library
+   * hides, unless `Show` asks for those too. The row list, the rail and the
+   * set tray's choosers all start here, so a hidden model is left out of each
+   * by one rule rather than one check per menu.
+   */
+  const offeredRows = computed(() =>
+    filters.showHidden
+      ? rows.value
+      : rows.value.filter((row) => !hiddenModelIds.value.has(row.id)),
+  );
+
+  /**
+   * What the Models rail lists and its closed handle counts: every offered row
+   * some set slot takes, a stack folded into its leader as the row list folds
+   * it. The leader is the one file the rail offers. Folded after the hidden
+   * rows are left out, so a stack whose leader alone is hidden is stood for by
+   * its next member.
+   */
+  const railRows = computed(() =>
+    collapseStacks(offeredRows.value.filter(railListed)),
+  );
+
   /** The rows the current selection actually shows, with display fields. */
   const visibleRows = computed(() => {
     const kinds = filters.adapterKinds;
     const bases = filters.baseModels;
     const capabilities = filters.capabilities;
-    const shown = rows.value
+    const needle = filters.name.trim().toLowerCase();
+    const shown = offeredRows.value
       .filter((row) => {
         // The type checkboxes narrow here as well as choosing what to fetch:
         // a block already fetched stays in `rows` so its options survive.
@@ -1104,19 +1515,12 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
         if (filters.duplicatesOnly && presentCopies(row.locations) < 2) {
           return false;
         }
+        // Per file, before the fold below, so a run whose cover's name does
+        // not match is still found by the step that does.
+        if (!rowMatches(row, needle)) return false;
         return true;
       })
-      .map((row) => ({
-        ...row,
-        name: modelName(row),
-        locState: locationState(row.locations),
-        // Counted HERE, off the row's whole `locations`, and carried on the row
-        // from then on. The folder axis narrows a draw to the one copy that
-        // folder holds, so a template calling `presentCopies` at render time
-        // would report `1` for exactly the rows this is meant to mark.
-        copies: presentCopies(row.locations),
-        isNew: newIds.value.has(row.id),
-      }));
+      .map(displayRow);
     // Folded LAST, so the filters narrow individual models and the stack is
     // then built from what survived. Folding first would let a stack whose
     // cover matches drag hidden members back into view.
@@ -1245,11 +1649,21 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
                 // appending it separates them and changes nothing for the
                 // single-copy rows that are the rest of the shelf.
                 rowKey: `${row.id}:${group.key}:${group.location.relpath}`,
+                ...copyName(row, group.location),
                 locState: locationState([group.location]),
                 locations: [group.location],
                 ...(row.members ? { members: narrow(row.members, group) } : {}),
               }
             : { ...row, rowKey: `${row.id}:${group.key}` },
+        );
+      }
+    }
+    // A draw named for its own copy can land out of name order, because the
+    // rows were sorted on the model's name before the fan-out.
+    if (axis === "folder" && view.sortKey === "name") {
+      for (const bucket of byKey.values()) {
+        bucket.rows.sort(
+          (a, b) => compareOn(a, b, "name", view.sortDirection) || a.id - b.id,
         );
       }
     }
@@ -1265,6 +1679,1622 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
    * "offline", and the banner's count must not shrink when the reader narrows
    * the list.
    */
+  // ── The workflow sets (#1438) ─────────────────────────────────────────────
+  //
+  // Its own payload and its own epoch, because it is a DIFFERENT read from the
+  // row list: `fetchRows` runs on every `Show` checkbox and this one is a window
+  // over every kept picture in the vault. Fetched once when something needs it
+  // and again after a scan, never per filter tick.
+  const workflowSets = ref({
+    combinations: [],
+    handMade: [],
+    setChecks: [],
+    hiddenSets: [],
+  });
+  const setsLoading = ref(false);
+  const setsError = ref("");
+  const setsLoaded = ref(false);
+  let setsEpoch = 0;
+  // Hide writes, numbered as they are sent. An answer is applied only when no
+  // newer write has been applied, so answers that land out of order cannot put
+  // an older list on top. `ponytail:` issue order stands in for the server's
+  // order; a version on the answer would make it exact.
+  let hideSent = 0;
+  let hideApplied = 0;
+  // Moves on every send and every applied answer. A read that straddles one
+  // keeps the local list rather than its own snapshot, which may predate it.
+  let hideEvents = 0;
+
+  // ── Hidden models ─────────────────────────────────────────────────────────
+  //
+  // Which models the ACTIVE library hides, by `model.id`: a per-library answer
+  // kept on the server (`model_hidden`), like a set's hide. ONE list for the
+  // row list, the rail and the set grid, whichever payload brought it - every
+  // model list carries `hidden` on its rows and the set payload carries the
+  // whole list, so the grid can leave a model out before its block is read.
+  const hiddenModelIds = ref(new Set());
+  // The same ordering guards the set hides use just above, for the same race:
+  // an answer landing out of order, or a read that was out while a hide landed.
+  let modelHideSent = 0;
+  let modelHideApplied = 0;
+  let modelHideEvents = 0;
+
+  /** The stack whose member panel is open, by its card key. */
+  const openSetKey = ref("");
+
+  /**
+   * The Models rail (design B, a sibling of the shelf in App.vue), as far as
+   * the set grid has to see it: the shelf rows a drag from it carries, while
+   * it is in the air, and the set its *Fits* filter is on, which the set
+   * panel's *Models · N fit* button sets.
+   *
+   * The drag is the rail's own pointer drag, not the browser's, so the rows
+   * live here for its length, and `railOver` is the `data-rail-drop` key of
+   * the target under the pointer, which that target lights up from.
+   */
+  const railDrag = shallowRef(null);
+  const railOver = ref("");
+  /** What the drag carries, in words: one model's name, or how many. */
+  const railDragWhat = computed(() => {
+    const dragged = railDrag.value ?? [];
+    return dragged.length === 1
+      ? modelName(dragged[0]).text || dragged[0].filename
+      : `${dragged.length} models`;
+  });
+  const railFitsSetId = ref(null);
+
+  /**
+   * The order the Models rail and every slot's ＋ picker list models in: one
+   * choice for both, so the list the rail shows is the list the picker shows.
+   */
+  const pickOrder = ref(
+    PICK_ORDERS.find((o) => o.id === readStored(PICK_ORDER_KEY)?.order)?.id ??
+      "name",
+  );
+
+  function setPickOrder(order) {
+    if (!PICK_ORDERS.some((o) => o.id === order)) return;
+    pickOrder.value = order;
+    writeStored(PICK_ORDER_KEY, { order });
+  }
+
+  /**
+   * Read which models have run together, once.
+   *
+   * `force` is what a scan passes: a scan can add a model, and a model with no
+   * card is exactly what the reader is looking at. Nothing else refetches -
+   * the fold, the sort and every filter are applied to what is in hand, so
+   * changing them costs no request.
+   *
+   * A failure leaves the previous payload standing and reports itself; the grid
+   * renders the error ahead of the cards, as the row list already does.
+   *
+   * @param {{force?: boolean}} [options]
+   */
+  async function loadWorkflowSets({ force = false } = {}) {
+    // Two guards, not one. `setsLoaded` drops a repeat AFTER the first read
+    // landed; `setsLoading` drops one made while it is still on the wire, which
+    // is the reachable case - the grid asks on mount and the dialog asks when it
+    // opens, and each request is a window over every kept picture in the vault.
+    // `force` overrides both: a scan has changed the answer.
+    if (!force && (setsLoaded.value || setsLoading.value)) return;
+    const startedAt = (setsEpoch += 1);
+    const hidesAtStart = hideEvents;
+    const modelHidesAtStart = modelHideEvents;
+    setsLoading.value = true;
+    setsError.value = "";
+    try {
+      const body = await fetchWorkflowSets();
+      if (startedAt !== setsEpoch) return;
+      workflowSets.value = {
+        combinations: body.combinations,
+        handMade: body.hand_made ?? [],
+        setChecks: body.set_checks ?? [],
+        // A hide sent or answered while this read was out is newer than the
+        // read's own list, which may have been served before it landed.
+        hiddenSets:
+          hideEvents === hidesAtStart
+            ? (body.hidden_sets ?? [])
+            : workflowSets.value.hiddenSets,
+      };
+      // The whole list, so it replaces: the same rule as the set hides above.
+      // Only a payload that carries one, or the rows' own answer would be
+      // wiped by a read that never asked.
+      if (
+        modelHideEvents === modelHidesAtStart &&
+        Array.isArray(body.hidden_models)
+      ) {
+        hiddenModelIds.value = new Set(body.hidden_models);
+      }
+      setsLoaded.value = true;
+    } catch (err) {
+      if (startedAt !== setsEpoch) return;
+      setsError.value = errorDetail(err) || err?.message || String(err);
+    } finally {
+      if (startedAt === setsEpoch) setsLoading.value = false;
+    }
+  }
+
+  /**
+   * Every model the current `Show` selection leaves on screen, runs expanded.
+   *
+   * **`visibleRows` is not a list of models.** `collapseStacks` draws a run as
+   * its COVER, so a stacked row's `id` is the cover's and the rest of the run
+   * lives in `memberIds`. Matching a combination's members against `row.id`
+   * therefore dropped every set that reached the shelf through a non-cover step
+   * of a run, so the grid's empty state claimed no picture recorded it.
+   *
+   * The `memberIds ?? [id]` fan-out is the same one `selectVisible` and
+   * `modelsBehind` already use for the same reason.
+   */
+  const shownModelIds = computed(
+    () =>
+      new Set(visibleRows.value.flatMap((row) => row.memberIds ?? [row.id])),
+  );
+
+  /**
+   * The combinations the current `Show` selection leaves on screen.
+   *
+   * A combination survives when ANY of its members is visible, and then it is
+   * drawn WHOLE. Narrowing a card's member list to the ticked kinds would be a
+   * lie about the combination - the files ran together and the card's offer is
+   * "run exactly this" - so the filter decides which cards are shown and never
+   * what a shown card contains.
+   */
+  const visibleCombinations = computed(() => {
+    const shown = shownModelIds.value;
+    return workflowSets.value.combinations.filter(
+      (combination) =>
+        // A combination one of the owner's sets can build is drawn on THAT
+        // card and not again as evidence (#1520): evidence cards are built only
+        // from the pictures no hand-made set covers.
+        !combination.covered_by?.length &&
+        // A card is named after its head, so a hidden head takes its card
+        // with it - otherwise the hidden model would be the card's own title.
+        !isHiddenHere(headModel(combination)?.id) &&
+        ((combination.models ?? []).some((model) => shown.has(model.id)) ||
+          // Named after a missing base model, which has no shelf row for
+          // `Show` to filter on: drawn always, or hiding its support files
+          // would hide the one card for that file.
+          Boolean(combination.missing?.length)),
+    );
+  });
+
+  /**
+   * The cards the set grid draws: one per base model that has made a picture.
+   *
+   * Each entry carries the card, the group's members (the union, each with its
+   * own evidence and how widely it is shared) and the combinations behind it - so
+   * the tray under an open card needs no second lookup and nothing has to
+   * re-derive the grouping to answer a question about one member.
+   */
+  const evidenceGroups = computed(() =>
+    setGroups(visibleCombinations.value).map((whole) => {
+      // The check is the whole combination's, read before the hidden members
+      // are left out: a hide is a view choice and changes no verdict.
+      const check = checkOf(whole.models);
+      // The one narrowing of what a shown card CONTAINS. `Show` never does it
+      // (see `visibleCombinations`); a model this library hides is not drawn
+      // anywhere on its shelf, a tray included.
+      const group = {
+        ...whole,
+        // Every member, hidden or not: what a copy of the set is made of
+        // (`cloneSetFromPictures`), so the copy covers the same pictures.
+        allModels: whole.models,
+        models: whole.models
+          .filter((model) => !isHiddenHere(model.id))
+          // Drawn only while `Show` asks for the hidden ones, and then marked.
+          .map((model) =>
+            hiddenModelIds.value.has(model.id)
+              ? { ...model, hidden: true }
+              : model,
+          ),
+      };
+      return {
+        ...group,
+        hidden: hiddenSetKeys.value.has(group.key),
+        check,
+        card: {
+          ...setCard(group),
+          hidden: hiddenSetKeys.value.has(group.key),
+          // The owner's word only; PixlStash's check never reaches the card.
+          verdict: check?.verdict ?? null,
+        },
+      };
+    }),
+  );
+
+  // ── The owner's verdicts (docs/ideas/workflow-set-verdicts.md) ───────────
+
+  const checkIndex = computed(() => checksByKey(workflowSets.value.setChecks));
+
+  /** The `set_checks` entry for exactly these members, or null (none served). */
+  function checkOf(models) {
+    return checkIndex.value.get(comboKey(models.map((m) => m.id))) ?? null;
+  }
+
+  function patchCheck(key, patch) {
+    workflowSets.value = {
+      ...workflowSets.value,
+      setChecks: workflowSets.value.setChecks.map((entry) =>
+        entry.combo_key === key ? patch(entry) : entry,
+      ),
+    };
+  }
+
+  /** Record the owner's verdict on a whole set. */
+  async function answerSetVerdict(key, verdict) {
+    await putSetVerdict(key, verdict);
+    patchCheck(key, (entry) => ({ ...entry, verdict }));
+  }
+
+  /** Record the owner's verdict on one member of the set `key` names. */
+  async function answerMemberVerdict(key, modelId, verdict) {
+    await putMemberVerdict(key, modelId, verdict);
+    patchCheck(key, (entry) => ({
+      ...entry,
+      suspects: entry.suspects.map((s) =>
+        s.model_id === modelId ? { ...s, verdict } : s,
+      ),
+      member_verdicts: [
+        ...entry.member_verdicts.filter((m) => m.model_id !== modelId),
+        { model_id: modelId, verdict },
+      ],
+    }));
+    // The model's own row wears the mark, and the rows came from another route.
+    fetchRows();
+  }
+
+  /** The evidence cards drawn: the hidden ones only while Show hidden is on. */
+  const setGroupList = computed(() =>
+    showHiddenSets.value
+      ? evidenceGroups.value
+      : evidenceGroups.value.filter((group) => !group.hidden),
+  );
+
+  /** How many of the sets `Show` leaves on screen are hidden. */
+  const hiddenSetCount = computed(() => {
+    const derived = evidenceGroups.value.filter((group) => group.hidden).length;
+    const hand = handMadeSets.value.filter((set) =>
+      hiddenSetKeys.value.has(`hand:${set.id}`),
+    ).length;
+    return derived + hand;
+  });
+
+  // ── Hiding models ─────────────────────────────────────────────────────────
+
+  /** Whether a list should leave this model out: hidden, and not asked for. */
+  function isHiddenHere(id) {
+    return !filters.showHidden && hiddenModelIds.value.has(id);
+  }
+
+  /**
+   * Hide or show models in this library, on the server.
+   *
+   * Never throws: a failure is reported and the previous answer stands.
+   *
+   * @param {Array<number>} ids - `model.id`s.
+   * @param {boolean} hide - true hides, false shows again.
+   * @returns {Promise<boolean>} false when the write did not land.
+   */
+  async function changeModelsHidden(ids, hide) {
+    const sent = (modelHideSent += 1);
+    modelHideEvents += 1;
+    try {
+      const hidden = await setModelsHidden(ids, hide);
+      if (sent > modelHideApplied) {
+        modelHideApplied = sent;
+        modelHideEvents += 1;
+        hiddenModelIds.value = new Set(hidden);
+      }
+    } catch (err) {
+      useNoticeStore().push({
+        level: "error",
+        text:
+          errorDetail(err) ||
+          "Could not change which models this library hides.",
+      });
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Hide over a selection of models: the one rule the menus' row is worded by
+   * (`hideModelsVerb`), so what it says is what runs. It hides the ones still
+   * shown, and shows them again only when every one is already hidden.
+   *
+   * A hidden model leaves the screen and so leaves the selection, which is
+   * read off the screen (`selectedRows`): no verb can reach a row nobody sees.
+   *
+   * @param {Array<Object>} models - rows, a stack already expanded to members.
+   */
+  async function toggleHiddenModels(models) {
+    const verb = hideModelsVerb(
+      models.map((model) => model.id),
+      hiddenModelIds.value,
+    );
+    if (!verb) return;
+    const acted = models.filter(
+      (model) => hiddenModelIds.value.has(model.id) !== verb.hide,
+    );
+    const ids = acted.map((model) => model.id);
+    if (!(await changeModelsHidden(ids, verb.hide))) return;
+    // A model that left the screen leaves the selection, as a hidden set's
+    // head does (`changeHidden`): otherwise Undo or *Hidden models* would
+    // bring it back lit, with the pill armed by no gesture.
+    if (verb.hide && !filters.showHidden) {
+      const gone = new Set(ids);
+      selectedIds.value = new Set(
+        [...selectedIds.value].filter((id) => !gone.has(id)),
+      );
+    }
+    const one = modelName(acted[0]).text || acted[0].filename || "the model";
+    const what = ids.length === 1 ? `"${one}"` : `${ids.length} models`;
+    useOperationStore().showLocalReceipt({
+      summary: verb.hide
+        ? `Hid ${what} in this library. No file was touched.`
+        : `${what} ${ids.length === 1 ? "is" : "are"} shown again.`,
+      icon: verb.icon,
+      undo: () => changeModelsHidden(ids, !verb.hide),
+      redo: () => changeModelsHidden(ids, verb.hide),
+    });
+  }
+
+  // ── Hiding sets from pictures ─────────────────────────────────────────────
+  //
+  // A set from pictures is the library's own reading of its recipes, so there
+  // is nothing to delete: the next read would draw it again. Hide is the verb,
+  // remembered by group key (the base model's id, or a missing one's name).
+  //
+  // The answer is per library and lives on the server (`workflow_set_hidden`,
+  // #1869), served with the set payload under `hiddenSets`: a set hidden in one
+  // library is still drawn in another, and it survives a browser or a machine
+  // change. Hand-made sets hide the same way, under their own `hand:<id>` keys.
+
+  /** The keys the active library hides, as the last read or write left them. */
+  const hiddenSetKeys = computed(() => new Set(workflowSets.value.hiddenSets));
+
+  /** Draw the hidden sets too, dimmed, so one can be shown again. */
+  const showHiddenSets = ref(false);
+
+  /**
+   * Hide or show sets, on the server, and close what the hide took away.
+   *
+   * Never throws: a failure is reported and the previous answer stands, so a
+   * fire-and-forget caller (a card's eye button, the verb bar) needs no catch.
+   *
+   * @param {Array<string>} keys - the sets' own keys.
+   * @param {boolean} hide - true hides, false shows again.
+   * @returns {Promise<boolean>} false when the write did not land, so a caller
+   *   whose own work depends on it (the twin swap) can fail rather than report
+   *   a state the server never took.
+   */
+  async function changeHidden(keys, hide) {
+    const notices = useNoticeStore();
+    const sent = (hideSent += 1);
+    hideEvents += 1;
+    try {
+      const hiddenSets = await setWorkflowSetsHidden(keys, hide);
+      if (sent > hideApplied) {
+        hideApplied = sent;
+        hideEvents += 1;
+        workflowSets.value = { ...workflowSets.value, hiddenSets };
+      }
+    } catch (err) {
+      notices.push({
+        level: "error",
+        text: errorDetail(err) || "Could not change what this library hides.",
+      });
+      return false;
+    }
+    // Only when the card actually leaves the screen: with "Show them" on it is
+    // drawn dimmed, and dropping the selection under a visible card would be a
+    // change the reader did not ask for.
+    if (!hide || showHiddenSets.value) return true;
+    // A hidden card leaves the screen, so it leaves the selection and the open
+    // panel with it: otherwise Undo or "Show them" would bring it back lit, with
+    // the file pill armed by no gesture.
+    if (keys.includes(openSetKey.value)) openSetKey.value = "";
+    const gone = new Set(
+      evidenceGroups.value
+        .filter((group) => keys.includes(group.key))
+        .map((group) => group.head?.id),
+    );
+    if ([...selectedIds.value].some((id) => gone.has(id))) {
+      selectedIds.value = new Set(
+        [...selectedIds.value].filter((id) => !gone.has(id)),
+      );
+    }
+    const goneSets = new Set(
+      keys
+        .filter((key) => key.startsWith("hand:"))
+        .map((key) => Number(key.slice(5))),
+    );
+    if ([...selectedSetIds.value].some((id) => goneSets.has(id))) {
+      selectedSetIds.value = new Set(
+        [...selectedSetIds.value].filter((id) => !goneSets.has(id)),
+      );
+    }
+    return true;
+  }
+
+  /**
+   * Hide sets, with a receipt whose Undo shows them again.
+   *
+   * @param {Array<Object>} groups - entries of `setGroups` or `handMadeGroups`.
+   */
+  async function hideSets(groups) {
+    const fresh = groups.filter((group) => !hiddenSetKeys.value.has(group.key));
+    if (!fresh.length) return;
+    const keys = fresh.map((group) => group.key);
+    const wasOpen = keys.includes(openSetKey.value) ? openSetKey.value : "";
+    // The receipt claims the hide happened, so it waits for the write to land:
+    // a failed PUT is already noticed, and raising Undo over it would offer to
+    // undo a change the server never took.
+    if (!(await changeHidden(keys, true))) return;
+    raiseSetReceipt(
+      fresh.length === 1
+        ? `Hid the set "${fresh[0].card.name}". No file was touched.`
+        : `Hid ${fresh.length} sets. No file was touched.`,
+      "hide",
+      async () => {
+        if (!(await changeHidden(keys, false))) return false;
+        // Undo puts back the tray the hide closed, unless another has opened.
+        if (wasOpen && !openSetKey.value) openSetKey.value = wasOpen;
+        return true;
+      },
+      async () => changeHidden(keys, true),
+    );
+  }
+
+  /**
+   * Show hidden sets again, with a receipt whose Undo hides them.
+   *
+   * @param {Array<Object>} groups - entries of `setGroups` or `handMadeGroups`.
+   */
+  async function unhideSets(groups) {
+    const keys = groups
+      .map((group) => group.key)
+      .filter((key) => hiddenSetKeys.value.has(key));
+    if (!keys.length) return;
+    if (!(await changeHidden(keys, false))) return;
+    raiseSetReceipt(
+      keys.length === 1
+        ? `"${groups.find((g) => g.key === keys[0]).card.name}" is shown again.`
+        : `${keys.length} sets are shown again.`,
+      "unhide",
+      async () => changeHidden(keys, true),
+      async () => changeHidden(keys, false),
+    );
+  }
+
+  /**
+   * Hide over a selection of sets: the one rule the menus' row is worded by
+   * (`hideSetsVerb`), so what it says is what runs.
+   *
+   * @param {Array<Object>} groups - entries of `setGroups` or `handMadeGroups`.
+   */
+  function toggleHiddenSets(groups) {
+    if (hideSetsVerb(groups)?.hide) hideSets(groups);
+    else unhideSets(groups);
+  }
+
+  /**
+   * The owner's own sets (#1520), newest first, each shaped as the grid draws
+   * it. Not narrowed by `Show`: the owner made them, and a kind checkbox hiding
+   * one would read as the set having gone. `models` is the ON-SHELF members, the
+   * ones a tray row can select; the slots draw every member from `set`.
+   */
+  const handMadeSets = computed(() =>
+    (workflowSets.value.handMade ?? []).map(withShelfNames),
+  );
+
+  /**
+   * A set with every member called what the shelf calls it (#1520 feedback).
+   *
+   * The server names a member by its stored display name or its FILENAME, so a
+   * set named after its checkpoint read "realvisXL_v5.safetensors" while the
+   * shelf row beside it read "RealVis XL v5". On the shelf, a member takes the
+   * row's own `modelName`; off it, the label it was kept under, with a filename
+   * run through the same `deriveModelName` the shelf uses. Every set this store
+   * hands out or names in a receipt goes through here, so one name is shown
+   * everywhere.
+   *
+   * `modelName` drops the precision from a filename, so each member and each
+   * offered model also carries the row's `quant`: a set holding the BF16 file
+   * and offered the FP8 one otherwise shows two tiles reading the same name.
+   */
+  function withShelfNames(set) {
+    if (!set) return set;
+    const byId = new Map(rows.value.map((row) => [row.id, row]));
+    const shelfName = (model) => {
+      const row = byId.get(model.id);
+      return (row && modelName(row).text) || model.name;
+    };
+    // An offer is a list to pick from, so a model this library hides is not
+    // in it, and an offer of nothing else is no offer.
+    const offered = (set.offer?.models ?? []).filter(
+      (model) => !isHiddenHere(model.id),
+    );
+    return {
+      ...set,
+      // The merge offer's models (#1523) are always on the shelf.
+      offer: offered.length
+        ? {
+            ...set.offer,
+            head_name: shelfName({
+              id: set.offer.head_id,
+              name: set.offer.head_name,
+            }),
+            models: offered.map((model) => ({
+              ...model,
+              name: shelfName(model),
+              quant: byId.get(model.id)?.quant ?? null,
+            })),
+          }
+        : null,
+      members: (set.members ?? []).map((member) => {
+        const row = member.id != null ? byId.get(member.id) : null;
+        const kept = member.label || member.name || "";
+        // Only a filename is rewritten; a label kept verbatim keeps its quant.
+        const isFile = /\.[a-z0-9]{2,12}$/i.test(kept);
+        const name = row
+          ? modelName(row).text || member.name
+          : (isFile && deriveModelName(kept)) || kept;
+        const quant = isFile ? quantFromFilename(kept) : null;
+        return {
+          ...member,
+          name: name || member.name,
+          quant: row ? (row.quant ?? null) : quant,
+        };
+      }),
+    };
+  }
+
+  /** What a set is called, in the shelf's names - for receipts. */
+  function setLabel(set) {
+    return handMadeName(withShelfNames(set));
+  }
+  /** Every hand-made set as a card, before the name filter. */
+  const allHandMadeGroups = computed(() =>
+    handMadeSets.value
+      .map((set) => {
+        const models = (set.members ?? []).filter(
+          (m) => m.on_shelf && m.id != null,
+        );
+        const check = checkOf(models);
+        const hidden = hiddenSetKeys.value.has(`hand:${set.id}`);
+        return {
+          key: `hand:${set.id}`,
+          set,
+          head: null,
+          models,
+          check,
+          hidden,
+          card: {
+            ...handMadeCard(set),
+            verdict: check?.verdict ?? null,
+            hidden,
+          },
+        };
+      })
+      // A hand-made set hides the same way a derived one does (#1869): the
+      // owner's own grouping, still theirs, just out of the way until shown.
+      .filter((group) => showHiddenSets.value || !group.hidden),
+  );
+
+  /**
+   * The hand-made cards the set grid draws: narrowed by the name filter alone,
+   * to the sets whose own name or one of whose models' names matches. The
+   * other `Show` filters leave these cards alone, as they always have; the name
+   * does not, or typing one would narrow every card on the grid but these.
+   */
+  const handMadeGroups = computed(() => {
+    const needle = filters.name.trim().toLowerCase();
+    if (!needle) return allHandMadeGroups.value;
+    const named = new Set(
+      rows.value.filter((row) => rowMatches(row, needle)).map((row) => row.id),
+    );
+    // A loaded row also matches by filename, but a row is only here when its
+    // block was fetched, so the name the member's card shows (and its label)
+    // count too: a set must not drop out because its kind was never fetched.
+    const hit = (text) => (text ?? "").toLowerCase().includes(needle);
+    return allHandMadeGroups.value.filter(
+      (group) =>
+        hit(setLabel(group.set)) ||
+        (group.set.members ?? []).some(
+          (member) =>
+            named.has(member.id) || hit(member.name) || hit(member.label),
+        ),
+    );
+  });
+
+  /**
+   * The hand-made sets a surface other than the grid offers or names (the
+   * rail, the set chooser). Hidden is a filter on the library (#1869), so a
+   * set hidden here is left out of those too, until "Show them" draws it. The
+   * name filter is not: it narrows the grid, not what a chooser offers.
+   */
+  const shownHandMadeSets = computed(() =>
+    allHandMadeGroups.value.map((group) => group.set),
+  );
+
+  /**
+   * Every model the set grid can show in an OPEN tray, as well as its card heads.
+   *
+   * **Not the same set as `shownModelIds`, which is why it exists.** A
+   * combination survives the `Show` narrowing when ANY of its members is visible
+   * and is then drawn WHOLE, so a tray routinely holds files the row list is
+   * hiding - untick Adapters and a checkpoint's OPEN card still lists the
+   * LoRAs that ran with it. Those are on screen, the reader can point at them,
+   * and without this the verb bar would take the click and then show nothing,
+   * because `selectedRows` is built from `visibleRows`.
+   *
+   * Intersected with `rows` because a verb writes a SHELF ROW: a combination can
+   * name a model from a block this session has never fetched, and there is
+   * nothing to rename, move or delete for one of those.
+   */
+  const setGridModelIds = computed(() => {
+    const known = new Set(rows.value.map((row) => row.id));
+    const ids = new Set();
+    const hand = handMadeGroups.value.find((g) => g.key === openSetKey.value);
+    for (const model of hand?.models ?? []) {
+      if (known.has(model.id)) ids.add(model.id);
+    }
+    for (const group of setGroupList.value) {
+      // A closed tray is not on screen. Keeping all its members here made
+      // Select all and the verb bar reach files with no selected representation.
+      if (group.key !== openSetKey.value) {
+        if (known.has(group.head?.id)) ids.add(group.head.id);
+        continue;
+      }
+      for (const model of group.models ?? []) {
+        if (known.has(model.id)) ids.add(model.id);
+      }
+    }
+    return ids;
+  });
+
+  /**
+   * The rows the set grid draws, folded exactly as the row list folds its own.
+   *
+   * **This is the grid's `visibleRows`, and it exists so there is one shape of
+   * "the screen" rather than two.** `selectedRows`, `selectVisible` and
+   * `modelsBehind` all read whichever of the two the active axis names, so every
+   * rule they encode - a verb may only act on what the reader can see, a range is
+   * measured over drawn rows, a run is atomic - holds on both screens from one
+   * piece of code instead of one screen's worth of special cases.
+   *
+   * **Runs are NOT folded here, and that is the difference from `visibleRows`.**
+   * A card is one model and stands for that model alone. An earlier draft pulled
+   * a whole run in whenever any step of it was on a card, on the reasoning that
+   * a run is atomic - and on this screen the effect was that clicking one card
+   * lit up every other card built on the same run, and a verb aimed at the set
+   * in front of you reached files in sets you were not looking at. That is the
+   * wrong shape for the grid: the question it answers is *what is in THIS
+   * workflow set*, and a card names exactly one file in it.
+   *
+   * The atomic gesture still exists where the reader can see the run: the row
+   * list draws it as one row and takes it whole. Picking one file out of a run
+   * is the shelf's own documented exception, and a card is that gesture - it
+   * names the one file a recipe recorded.
+   */
+  const setGridRows = computed(() => {
+    const drawn = setGridModelIds.value;
+    if (!drawn.size) return [];
+    return rows.value.filter((row) => drawn.has(row.id)).map(displayRow);
+  });
+
+  /**
+   * The rows the SCREEN the reader is on draws, whichever screen that is.
+   *
+   * The one place the two views are told apart. Everything that asks "what is on
+   * screen" asks this, so neither view can grow a rule the other does not have.
+   */
+  const screenRows = computed(() =>
+    view.groupBy === GRID_GROUP_BY ? setGridRows.value : visibleRows.value,
+  );
+
+  /** Open or close one group's tray. One at a time, like the workflows grid's. */
+  function toggleSet(key) {
+    openSetKey.value = openSetKey.value === key ? "" : key;
+  }
+
+  /**
+   * Forget an open stack that no longer exists.
+   *
+   * **A key is not a group.** A `Show` tick that hides a group's every member
+   * takes the card away and leaves the key behind, and the key then survives a
+   * `groupBy` switch and a post-scan refetch, silently reopening the moment some
+   * later payload happens to mint it again (#1479 review). Reconciled here rather
+   * than in the grid because the key lives here and the grid is not the only
+   * thing that can change what it names.
+   */
+  watch([setGroupList, handMadeGroups], ([groups, hand]) => {
+    if (!openSetKey.value) return;
+    if (![...groups, ...hand].some((group) => group.key === openSetKey.value)) {
+      openSetKey.value = "";
+    }
+  });
+
+  // ── Hand-made sets: selection and verbs (#1520) ───────────────────────────
+  //
+  // **Sets are selected as sets, in a selection of their own.** A hand-made
+  // card stands for the SET, whose verbs (Rename, Delete set) touch no file; a
+  // model card or tray member stands for one file, whose verbs are the shelf's.
+  // The two kinds can be held together - Ctrl+click adds either kind, and
+  // select-all takes both - and each keeps its own pill, so a file Delete and
+  // a set Delete are never behind one button. A replacing gesture (a plain
+  // click, a Shift-range) drops the other kind, as it drops everything else.
+
+  /** Selected hand-made set ids. */
+  const selectedSetIds = ref(new Set());
+
+  /**
+   * A checkpoint just put into a set, `{setId, modelId}`, or null.
+   *
+   * The design offers to set a checkpoint's base model ONCE, at the moment it
+   * goes in, because the slot suggestions follow it. Recorded here, by every
+   * write that can put one in (the slot popup, New workflow set with this
+   * checkpoint), so the tray can ask whichever gesture it came from.
+   */
+  const checkpointAdded = ref(null);
+
+  /**
+   * Record a checkpoint that went in, read off the SERVER's answer - the
+   * members it actually stored - never the request: a member added without a
+   * slot is placed by the server, and a refused one never went in at all.
+   *
+   * @param {number} setId
+   * @param {Array<Object>} members - the stored members that were just added.
+   */
+  function noteCheckpoint(setId, members) {
+    const checkpoint = members.find(
+      (m) => m.slot === "checkpoint" && m.on_shelf && m.id != null,
+    );
+    if (checkpoint) {
+      checkpointAdded.value = { setId, modelId: checkpoint.id };
+    }
+  }
+  let setAnchor = null;
+
+  const selectedSets = computed(() =>
+    handMadeSets.value.filter((set) => selectedSetIds.value.has(set.id)),
+  );
+
+  /**
+   * Click, Ctrl+click, Shift+click on a hand-made card.
+   *
+   * @param {number} id
+   * @param {{ctrl?: boolean, shift?: boolean}} mods
+   * @param {Array<number>} ordered - the set ids in drawn order, for a range.
+   */
+  function selectSet(id, { ctrl = false, shift = false } = {}, ordered = []) {
+    if (!ctrl) {
+      clearSelection();
+      clearMissingSelection();
+    }
+    if (shift && setAnchor != null) {
+      const from = ordered.indexOf(setAnchor);
+      const to = ordered.indexOf(id);
+      if (from >= 0 && to >= 0) {
+        const [a, b] = from < to ? [from, to] : [to, from];
+        selectedSetIds.value = new Set(ordered.slice(a, b + 1));
+        return;
+      }
+    }
+    const next = ctrl ? new Set(selectedSetIds.value) : new Set();
+    if (ctrl && next.has(id)) next.delete(id);
+    else next.add(id);
+    selectedSetIds.value = next;
+    setAnchor = id;
+  }
+
+  function clearSetSelection() {
+    if (selectedSetIds.value.size) selectedSetIds.value = new Set();
+  }
+
+  // ── Sets named after a missing base model: selection ────────────────────
+  //
+  // A third kind, beside models and hand-made sets: such a card has no shelf
+  // row behind it, so no file verb can touch it, but its missing file can be
+  // replaced in every workflow that loads it, several sets at a time. Held
+  // and cleared by the same rules as the hand-made sets.
+
+  /** Selected missing-base cards, by group key (`missing:<name>`). */
+  const selectedMissingKeys = ref(new Set());
+  let missingAnchor = null;
+
+  /** The selected missing-base cards' groups, in drawn order: what Hide takes. */
+  const selectedMissingGroups = computed(() =>
+    setGroupList.value.filter((group) =>
+      selectedMissingKeys.value.has(group.key),
+    ),
+  );
+
+  /** The selected missing heads, in drawn order: `{name, names, workflowsByName, …}`. */
+  const selectedMissing = computed(() =>
+    selectedMissingGroups.value.map((group) => group.head),
+  );
+
+  /**
+   * Click, Ctrl+click, Shift+click on a card named after a missing file.
+   *
+   * @param {string} key
+   * @param {{ctrl?: boolean, shift?: boolean}} mods
+   * @param {Array<string>} ordered - the missing keys in drawn order.
+   */
+  function selectMissing(key, { ctrl = false, shift = false } = {}, ordered = []) {
+    if (!ctrl) {
+      clearSelection();
+      clearSetSelection();
+    }
+    if (shift && missingAnchor != null) {
+      const from = ordered.indexOf(missingAnchor);
+      const to = ordered.indexOf(key);
+      if (from >= 0 && to >= 0) {
+        const [a, b] = from < to ? [from, to] : [to, from];
+        selectedMissingKeys.value = new Set(ordered.slice(a, b + 1));
+        return;
+      }
+    }
+    const next = ctrl ? new Set(selectedMissingKeys.value) : new Set();
+    if (ctrl && next.has(key)) next.delete(key);
+    else next.add(key);
+    selectedMissingKeys.value = next;
+    missingAnchor = key;
+  }
+
+  function clearMissingSelection() {
+    if (selectedMissingKeys.value.size) selectedMissingKeys.value = new Set();
+    missingAnchor = null;
+  }
+
+  /** Every drawn card named after a missing base model, by key. */
+  const missingSetKeys = computed(() =>
+    setGroupList.value
+      .filter((group) => group.head?.missing)
+      .map((group) => group.key),
+  );
+
+  /**
+   * The set grid's "N sets are missing their checkpoint · Select them": a
+   * selection shortcut, not a second verb. It REPLACES the selection, as a
+   * plain click does, so the pill that comes up acts on exactly these.
+   */
+  function selectAllMissing() {
+    clearSelection();
+    clearSetSelection();
+    selectedMissingKeys.value = new Set(missingSetKeys.value);
+    missingAnchor = missingSetKeys.value[0] ?? null;
+  }
+
+  // A card that is no longer drawn (its file was replaced) cannot stay selected.
+  watch(setGroupList, (groups) => {
+    const live = new Set(
+      groups.filter((group) => group.head?.missing).map((group) => group.key),
+    );
+    const kept = [...selectedMissingKeys.value].filter((key) => live.has(key));
+    if (kept.length !== selectedMissingKeys.value.size) {
+      selectedMissingKeys.value = new Set(kept);
+    }
+  });
+
+  // A set that is gone cannot stay selected.
+  watch(handMadeSets, (sets) => {
+    const live = new Set(sets.map((set) => set.id));
+    const kept = [...selectedSetIds.value].filter((id) => live.has(id));
+    if (kept.length !== selectedSetIds.value.size) {
+      selectedSetIds.value = new Set(kept);
+    }
+  });
+
+  /**
+   * Run one set write, refetch, and show its receipt with Undo.
+   *
+   * The receipt is the grid's own pill (`ActionReceipt`, raised through
+   * `showLocalReceipt`), because sets are not in the operation log but a
+   * receipt must read the same everywhere: one at a time, a draining countdown,
+   * Undo flipping to Redo. Each write replaces the pill, so its Undo is always
+   * the latest write's, as on the grid. An undo that could itself lose
+   * work - undoing a create after the set has been filled - goes through the
+   * delete verb, so it gets a receipt and an Undo of its own; a failed undo says
+   * so. The refetch is the whole payload because coverage moves with
+   * membership: adding one LoRA can pull a combination off the evidence cards
+   * and onto this one.
+   *
+   * @param {Function} write - the call.
+   * @param {Object} options
+   * @param {string|Function} options.receipt - the sentence, or one from the
+   *   result.
+   * @param {Function} options.undo - reverses the result; may resolve a value
+   *   `redo` needs.
+   * @param {Function} [options.redo] - `(undoResult) => Promise`, for a write
+   *   that cannot simply run again (a restored set has a new id). Defaults to
+   *   running `write` again.
+   * @param {Function} [options.hasUndo] - `(result) => boolean`; false narrates
+   *   in a plain notice, for a write that changed nothing.
+   * @param {string} options.verb - a `SET_RECEIPT_ICONS` key.
+   * @param {string} options.failure - the sentence when the write fails.
+   * @param {boolean} [options.quiet] - no receipt: the caller narrates it, as
+   *   the set picker does while it is open (#1574). A failure still says so.
+   * @returns {Promise<*>} what `write` resolved to, or null when it failed.
+   */
+  async function setWrite(write, options) {
+    const { receipt, undo, redo, hasUndo, verb, failure, quiet } = options;
+    const notices = useNoticeStore();
+    let result;
+    let call;
+    try {
+      call = write();
+      setWritesInFlight.add(call);
+      result = await call;
+    } catch (err) {
+      notices.push({
+        level: "error",
+        text: errorDetail(err) || failure,
+      });
+      return null;
+    } finally {
+      if (call) setWritesInFlight.delete(call);
+    }
+    await loadWorkflowSets({ force: true });
+    if (quiet) return result;
+    const text = typeof receipt === "function" ? receipt(result) : receipt;
+    if (!text) return result;
+    if (hasUndo && !hasUndo(result)) {
+      notices.push({ level: "info", text });
+      return result;
+    }
+    raiseSetReceipt(
+      text,
+      verb,
+      () => undo(result),
+      (undone) => (redo ? redo(undone) : setWrite(write, options)),
+    );
+    return result;
+  }
+
+  /**
+   * The grid's pill for one set write, with Undo and Redo.
+   *
+   * @param {string} text - the sentence.
+   * @param {string} verb - a `SET_RECEIPT_ICONS` key.
+   * @param {Function} undo - `() => Promise`; resolves `false` for an undo that
+   *   failed through a verb which already said so, else what `redo` needs.
+   * @param {Function} redo - `(undoResult) => Promise`.
+   */
+  function raiseSetReceipt(text, verb, undo, redo) {
+    const notices = useNoticeStore();
+    let undone;
+    useOperationStore().showLocalReceipt({
+      summary: text,
+      icon: SET_RECEIPT_ICONS[verb],
+      destructive: verb === "delete",
+      undo: async () => {
+        try {
+          // `false` is an undo that failed through a verb which already said
+          // so (undoing a create runs the delete verb, which never throws).
+          const out = await undo();
+          if (out === false) return false;
+          undone = out;
+          return true;
+        } catch (err) {
+          console.warn("[ModelShelf] a set undo failed", { err });
+          notices.push({
+            level: "error",
+            // `err.message` too: an undo that partly failed says how much
+            // itself, and that sentence is not a server detail.
+            text:
+              errorDetail(err) || err?.message || "That could not be undone.",
+          });
+          return false;
+        } finally {
+          await loadWorkflowSets({ force: true });
+        }
+      },
+      redo: () => redo(undone),
+    });
+  }
+
+  /**
+   * The set from pictures a hand-made set holds exactly the models of, or null.
+   *
+   * Read from every combination, not only the uncovered ones: the hand-made
+   * set covers its twin's combinations, which is why the twin left the grid.
+   * A member off the shelf rules a match out, since no set from pictures can
+   * hold a file the shelf does not have. So does a twin some OTHER hand-made
+   * set also covers: deleting this one would not bring it back on screen.
+   * And a `cloned` set has none: it was copied from its twin on purpose
+   * (`cloneSetFromPictures`), so matching it is the point, not an accident.
+   */
+  function automaticTwin(set) {
+    if (set?.cloned) return null;
+    const members = set?.members ?? [];
+    if (!members.length || members.some((m) => !m.on_shelf || m.id == null)) {
+      return null;
+    }
+    const ids = new Set(members.map((m) => m.id));
+    return (
+      setGroups(workflowSets.value.combinations).find(
+        (group) =>
+          !group.head?.missing &&
+          group.models.length === ids.size &&
+          group.models.every((model) => ids.has(model.id)) &&
+          group.combinations.every((combination) => {
+            // Covered by this set, and by no other: an empty list is a payload
+            // that has not caught up, never a match.
+            const by = combination.covered_by ?? [];
+            return by.length > 0 && by.every((id) => id === set.id);
+          }),
+      ) ?? null
+    );
+  }
+
+  /**
+   * A hand-made set that re-creates a set from pictures gives way to it.
+   *
+   * The two would be one set drawn twice, so the hand-made one is deleted and
+   * the set from pictures is shown (unhidden, if it was) and opened, with a
+   * receipt that says why. Its Undo brings the hand-made set back, kept-out
+   * models included, and hides the twin again if it was hidden.
+   *
+   * Asked when the owner closes the set's tray, never on each add: a set is
+   * built one model at a time, and on the way it routinely passes through a
+   * set from pictures (a checkpoint that only ever ran alone) that it is not
+   * meant to stop at.
+   *
+   * A hidden hand-made set is never swapped (`yieldOne`): hiding is the owner
+   * keeping it out of the way, and each route that closes its tray - the hide
+   * itself, "Show them" turning off, a read that brings the hide - lands here.
+   *
+   * @param {number} setId
+   * @returns {Promise<boolean>} true when the set gave way.
+   */
+  async function yieldToTwin(setId, { reopen = false } = {}) {
+    if (yielding.has(setId)) return false;
+    yielding.add(setId);
+    try {
+      return await yieldOne(setId, reopen);
+    } finally {
+      yielding.delete(setId);
+    }
+  }
+
+  async function yieldOne(setId, reopen) {
+    // A tray closes the instant it is asked to, with an add or a removal
+    // still on the wire: decide on the membership after it, never before -
+    // including a write that started while this one was being waited out.
+    while (setWritesInFlight.size) {
+      await Promise.allSettled([...setWritesInFlight]);
+      await loadWorkflowSets({ force: true });
+    }
+    // Checked after the wait, since a hide may have landed while it was out.
+    // Not re-checked on unhide: the next close of the tray asks again.
+    if (hiddenSetKeys.value.has(`hand:${setId}`)) return false;
+    const set = handMadeSets.value.find((candidate) => candidate.id === setId);
+    const twin = automaticTwin(set);
+    if (!twin) return false;
+    const name = setLabel(set);
+    const twinName = setCard(twin).name;
+    const wasHidden = hiddenSetKeys.value.has(twin.key);
+    const done = await setWrite(() => deleteWorkflowSet(set.id), {
+      receipt: `"${name}" holds the same models as the set from pictures "${twinName}", so that set is shown instead. No file was touched.`,
+      undo: async () => {
+        const restored = await createWorkflowSet({
+          name: set.name ?? null,
+          members: (set.members ?? []).map(memberBack),
+        });
+        if (set.declined?.length) {
+          await setWorkflowSetDeclines(restored.id, set.declined);
+        }
+        // `false` (the hide did not land, already reported) fails the undo:
+        // the twin would otherwise stay shown over the set this undid.
+        if (wasHidden && !(await changeHidden([twin.key], true))) return false;
+        return restored;
+      },
+      // The swap again, checked again: the restored set may have changed since.
+      redo: async (restored) => {
+        if (await yieldToTwin(restored.id, { reopen: true })) return true;
+        useNoticeStore().push({
+          level: "info",
+          text: `"${name}" no longer matches a set from pictures, so it was kept.`,
+        });
+        return false;
+      },
+      verb: "twin",
+      failure: "The set could not be swapped for the set from pictures.",
+    });
+    if (!done) return false;
+    // A twin that would not come back on screen means the swap left nothing
+    // shown where the hand-made set was: fail it rather than report the swap.
+    if (wasHidden && !(await changeHidden([twin.key], false))) return false;
+    // Opened only over a closed tray: an owner who has opened another set
+    // since keeps it, and this never moves the view off a hand-made tray -
+    // which the watch below would read as that set being closed too.
+    const over = openSetKey.value;
+    if (!over || (reopen && !over.startsWith("hand:"))) {
+      clearSetSelection();
+      openSetKey.value = twin.key;
+    }
+    return true;
+  }
+
+  /** Every set write on the wire, which a reconciliation waits out. */
+  const setWritesInFlight = new Set();
+  /** The set ids a `yieldToTwin` is already deciding. */
+  const yielding = new Set();
+
+  // Closing a hand-made set's tray - or opening another - is the owner done
+  // with it, which is when a re-created set from pictures gives way.
+  watch(openSetKey, (_, left) => {
+    if (!left?.startsWith("hand:")) return;
+    const setId = Number(left.slice(5));
+    yieldToTwin(setId).catch((err) => {
+      console.warn("[ModelShelf] checking a set against its twin failed", {
+        setId,
+        err,
+      });
+      useNoticeStore().push({
+        level: "error",
+        text:
+          errorDetail(err) ||
+          "The set could not be checked against the sets from pictures.",
+      });
+    });
+  });
+
+  /** A removed or deleted member, as the create and add routes take it back. */
+  function memberBack(member) {
+    return { sha256: member.sha256, slot: member.slot, label: member.label };
+  }
+
+  /**
+   * Make a set, optionally with members, and open its tray.
+   *
+   * @param {{name?: string|null, members?: Array<Object>}} [body]
+   * @returns {Promise<Object|null>} the new set.
+   */
+  async function createHandMadeSet(body = {}) {
+    const created = await setWrite(() => createWorkflowSet(body), {
+      receipt: (set) =>
+        `Made "${setLabel(set)}" with ${(set.members ?? []).length} ${
+          (set.members ?? []).length === 1 ? "model" : "models"
+        }.`,
+      // Through the delete verb, not a bare call: this receipt can still be up
+      // while the set is filled, and undoing it then would take every model added
+      // since with no way back. The delete's own receipt offers that way back.
+      undo: async (set) => (await deleteHandMadeSets([set])) ?? false,
+      verb: "create",
+      failure: "The set could not be made.",
+    });
+    if (created) {
+      clearSelection();
+      openSetKey.value = `hand:${created.id}`;
+      noteCheckpoint(created.id, created.members ?? []);
+    }
+    return created;
+  }
+
+  /**
+   * A hand-made copy of a set from pictures, so it can be edited: the models
+   * on its card, the head as the checkpoint and the rest by kind. Marked
+   * `cloned`, which keeps it while it still matches that set (`automaticTwin`).
+   * The card it copies leaves the grid, since the copy covers its pictures;
+   * deleting the copy brings the card back.
+   *
+   * @param {Object} group - an entry of `setGroups`, never a missing-base one.
+   * @returns {Promise<Object|null>} the new set.
+   */
+  async function cloneSetFromPictures(group) {
+    if (!group?.head || group.head.missing || cloning.has(group.key)) {
+      return null;
+    }
+    // One clone per card: a second press while the first is on the wire would
+    // make a twin of the clone, and neither would ever give way.
+    cloning.add(group.key);
+    try {
+      return await createHandMadeSet({
+        cloned: true,
+        // `allModels`, not the drawn ones: a copy that left out a member this
+        // library hides would not cover the card's pictures, and the card
+        // would stay on the grid beside its own copy.
+        members: (group.allModels ?? group.models)
+          // An engine is not a file a workflow loads, so no set holds one, and
+          // the pictures that ran with it stay on the card.
+          .filter((model) => model.kind !== "engine")
+          .map((model) => ({
+            model_id: model.id,
+            slot:
+              model.id === group.head.id
+                ? "checkpoint"
+                : defaultSlot(model.kind),
+          })),
+      });
+    } finally {
+      cloning.delete(group.key);
+    }
+  }
+
+  /** The keys of the sets from pictures a clone is being made of. */
+  const cloning = new Set();
+
+  /** The `cloned` mark as a create body carries it: only when it is set. */
+  function clonedBack(set) {
+    return set?.cloned ? { cloned: true } : {};
+  }
+
+  /**
+   * Make a copy of a set: the same members in the same slots, by hash, so a
+   * member off the shelf is copied too. What it was kept separate from is not
+   * copied; the copy is offered the merge afresh.
+   *
+   * @param {Object} set - a set from `handMadeSets`.
+   * @returns {Promise<Object|null>} the new set.
+   */
+  function duplicateHandMadeSet(set) {
+    return createHandMadeSet({
+      // Cut to the server's limit, in code points as it counts them, keeping
+      // " copy" so a long name's copy is neither a 422 nor indistinguishable.
+      name: `${Array.from(setLabel(set))
+        .slice(0, MAX_SET_NAME_LENGTH - " copy".length)
+        .join("")} copy`,
+      members: (set.members ?? []).map(memberBack),
+      ...clonedBack(set),
+    });
+  }
+
+  /** Rename one set; an empty name goes back to the checkpoint's. */
+  function renameHandMadeSet(set, name) {
+    const before = set.name ?? null;
+    const next = String(name ?? "").trim() || null;
+    if (next === before) return Promise.resolve(set);
+    return setWrite(() => renameWorkflowSet(set.id, next), {
+      receipt: (renamed) => `Renamed the set "${setLabel(renamed)}".`,
+      undo: () => renameWorkflowSet(set.id, before),
+      verb: "rename",
+      failure: "The set could not be renamed.",
+    });
+  }
+
+  /**
+   * Delete sets. Files are never touched, so there is no confirm: the receipt's
+   * Undo recreates each set from the snapshot the server returned.
+   */
+  async function deleteHandMadeSets(sets) {
+    if (!sets.length) return null;
+    return setWrite(
+      // Settled one by one: a set another tab already deleted must not cost
+      // the receipt - and so the Undo - of the ones this call did delete.
+      async () => {
+        const settled = await Promise.allSettled(
+          sets.map((set) => deleteWorkflowSet(set.id)),
+        );
+        const deleted = settled
+          .filter((r) => r.status === "fulfilled")
+          .map((r) => r.value.deleted);
+        const failed = settled.filter((r) => r.status === "rejected");
+        if (!deleted.length) throw failed[0].reason;
+        return { deleted, failed: failed.length };
+      },
+      {
+        receipt: ({ deleted, failed }) =>
+          (deleted.length === 1
+            ? `Deleted the set "${setLabel(deleted[0])}". No file was touched.`
+            : `Deleted ${deleted.length} sets. No file was touched.`) +
+          (failed
+            ? ` ${failed} could not be deleted and ${failed === 1 ? "is" : "are"} still there.`
+            : ""),
+        // Settled one by one, like the delete: one set that cannot come back
+        // must not hide the ones that did, and the failure says how many. A
+        // partial restore still counts as undone, so Redo can delete the sets
+        // that did come back.
+        undo: async ({ deleted }) => {
+          const settled = await Promise.allSettled(
+            deleted.map((snapshot) =>
+              createWorkflowSet({
+                name: snapshot.name ?? null,
+                members: (snapshot.members ?? []).map(memberBack),
+                ...clonedBack(snapshot),
+              }),
+            ),
+          );
+          const failed = settled.filter((r) => r.status === "rejected");
+          if (failed.length === deleted.length) throw failed[0].reason;
+          if (failed.length) {
+            console.warn("[ModelShelf] a set restore failed", {
+              reasons: failed.map((r) => r.reason),
+            });
+            useNoticeStore().push({
+              level: "error",
+              text: `${failed.length} of ${deleted.length} sets could not be restored.`,
+            });
+          }
+          return settled
+            .filter((r) => r.status === "fulfilled")
+            .map((r) => r.value);
+        },
+        // The restored sets have new ids, so Redo deletes those.
+        redo: (restored) => deleteHandMadeSets(restored),
+        verb: "delete",
+        failure: "The set could not be deleted.",
+      },
+    );
+  }
+
+  /**
+   * Add shelf models to a set, each in its own slot unless one is given.
+   *
+   * @param {Object} set
+   * @param {Array<{model_id: number, slot?: string}>} members
+   * @param {{joined?: boolean, quiet?: boolean}} [options] - `joined` says in
+   *   the receipt how many pictures joined the set, which is what a merge
+   *   (#1523) is for; `quiet` raises no receipt (see `announceAdded`).
+   */
+  async function addToHandMadeSet(
+    set,
+    members,
+    { joined = false, quiet = false } = {},
+  ) {
+    if (!members.length) return null;
+    const before = Number(set.picture_count) || 0;
+    const result = await setWrite(
+      () => addWorkflowSetMembers(set.id, members),
+      {
+        receipt: ({ added, set: after }) => {
+          if (!added.length) {
+            return `Nothing added: "${setLabel(set)}" already holds ${
+              members.length === 1 ? "it" : "them"
+            }.`;
+          }
+          const gained = (Number(after?.picture_count) || 0) - before;
+          return (
+            `Added ${added.length} ${added.length === 1 ? "model" : "models"} to "${setLabel(set)}".` +
+            (joined && gained > 0 ? ` ${pictureCount(gained)} joined it.` : "")
+          );
+        },
+        undo: ({ added }) => removeWorkflowSetMembers(set.id, added),
+        hasUndo: ({ added }) => added.length > 0,
+        verb: "add",
+        failure: "Those models could not be added to the set.",
+        quiet,
+      },
+    );
+    if (result?.added?.length) {
+      const added = new Set(result.added);
+      noteCheckpoint(
+        set.id,
+        (result.set?.members ?? []).filter((m) => added.has(m.sha256)),
+      );
+    }
+    return result;
+  }
+
+  /**
+   * Ask before a set gets a second checkpoint. Nothing does that silently: a
+   * two-model workflow wants one, but a mis-drop of a checkpoint onto a set
+   * looks exactly like it.
+   *
+   * @param {Object} set
+   * @param {Array<{model_id: number, slot: string}>} members - slots resolved.
+   * @returns {Promise<boolean>} whether to go ahead.
+   */
+  async function confirmSecondCheckpoint(set, members) {
+    const current = setCheckpoint(withShelfNames(set));
+    const incoming = members.filter((m) => m.slot === "checkpoint");
+    if (!current || !incoming.length) return true;
+    const byId = new Map(rows.value.map((row) => [row.id, row]));
+    const names = incoming.map(
+      (m) => modelName(byId.get(m.model_id) ?? {}).text || "this checkpoint",
+    );
+    return useConfirm().confirm({
+      title: `Add a second checkpoint to "${setLabel(set)}"?`,
+      message: `It already has ${current.name}. ${names.join(", ")} would go in beside it, as a two-model workflow does.`,
+      confirmLabel: "Add as 2nd",
+    });
+  }
+
+  /**
+   * Shelf rows into a set, from a drop: each to `slotId`, or to the slot its
+   * kind goes to. One write and one receipt with Undo, the ＋ chooser's own.
+   *
+   * @param {Object} set
+   * @param {Array<Object>} models - shelf rows.
+   * @param {string} [slotId]
+   */
+  async function addRowsToHandMadeSet(set, models, slotId = "") {
+    const members = models
+      .filter((row) => row.sha256)
+      .map((row) => ({
+        model_id: row.id,
+        slot: slotId || defaultSlot(row.file_kind),
+      }));
+    if (!members.length) return null;
+    // The card already refused this during the drag; this is the same rule
+    // stated where the write happens.
+    if (railDropRefusal(set, models)) return null;
+    if (!(await confirmSecondCheckpoint(set, members))) return null;
+    return addToHandMadeSet(set, members);
+  }
+
+  /**
+   * Why a hand-made set will not take these shelf rows, or "" when it will:
+   * it holds them all already, or any one it would add is on another base
+   * model. One rule for the rail's *Add to set…* menu and for a drag over a
+   * card, so a card refuses while the pointer is over it rather than after
+   * the drop. A model with no known base model is not a conflict.
+   *
+   * @param {Object} set
+   * @param {Array<Object>} models - shelf rows.
+   */
+  function railDropRefusal(set, models) {
+    const held = new Set((set.members ?? []).map((member) => member.sha256));
+    const fresh = models.filter((row) => !held.has(row.sha256));
+    if (models.length && !fresh.length) return "Already in it";
+    const base = handMadeBase(set);
+    const other = fresh.map(rowBaseModel).find((b) => b && b !== base);
+    return base && other ? `${base}, not ${other}` : "";
+  }
+
+  /** A new set holding these shelf rows, each in its kind's slot. */
+  function createSetFromRows(models) {
+    const members = models
+      .filter((row) => row.sha256)
+      .map((row) => ({ model_id: row.id, slot: defaultSlot(row.file_kind) }));
+    if (!members.length) return Promise.resolve(null);
+    return createHandMadeSet({ members });
+  }
+
+  /**
+   * One receipt for the models a set picker added while it was open (#1574).
+   *
+   * The picker adds quietly and narrates each add in its own status line, so
+   * five LoRAs picked one by one are one pill when it closes, not five that
+   * replace each other. Undo takes all of them back out.
+   *
+   * @param {Object} set
+   * @param {Array<{model_id: number, slot: string, sha256: string, name: string}>}
+   *   added - in the order they went in.
+   * @param {string} noun - the slot's plural, e.g. "LoRAs".
+   */
+  function announceAdded(set, added, noun) {
+    if (!added.length) return;
+    const what =
+      added.length === 1 ? `"${added[0].name}"` : `${added.length} ${noun}`;
+    raiseSetReceipt(
+      `Added ${what} to "${setLabel(set)}".`,
+      "add",
+      () =>
+        removeWorkflowSetMembers(
+          set.id,
+          added.map((m) => m.sha256),
+        ),
+      () =>
+        addToHandMadeSet(
+          set,
+          added.map(({ model_id, slot }) => ({ model_id, slot })),
+        ),
+    );
+  }
+
+  /** Take members off a set, by hash. The files stay on the shelf. */
+  function removeFromHandMadeSet(set, sha256s, { quiet = false } = {}) {
+    if (!sha256s.length) return Promise.resolve(null);
+    return setWrite(() => removeWorkflowSetMembers(set.id, sha256s), {
+      quiet,
+      receipt: ({ removed }) =>
+        `Took ${removed.length} ${removed.length === 1 ? "model" : "models"} off "${setLabel(set)}". The ${
+          removed.length === 1 ? "file stays" : "files stay"
+        } on the shelf.`,
+      undo: ({ removed }) =>
+        addWorkflowSetMembers(set.id, removed.map(memberBack)),
+      verb: "remove",
+      failure: "Those models could not be taken off the set.",
+    });
+  }
+
+  /**
+   * Keep models out of a set's merge offer (#1523): all of them ("Keep
+   * separate"), or one ghost.
+   *
+   * The server stores the list whole, so every write here is a DELTA applied to
+   * the latest list at the moment it runs, one at a time: two quick Deletes on
+   * two ghosts both land, and undoing an older Keep separate takes out only
+   * what that one added rather than putting back a list a later one extended.
+   *
+   * @param {Object} set - a set from `handMadeSets`, carrying its `offer`.
+   * @param {Array<Object>} [models] - offered models; all of them if omitted.
+   */
+  function keepOutOfHandMadeSet(set, models) {
+    const offer = set.offer;
+    const out = (models ?? offer?.models ?? []).map((m) => m.sha256);
+    if (!out.length) return Promise.resolve(null);
+    const receipt = models
+      ? `Kept ${models.map((m) => m.name).join(", ")} out of "${setLabel(set)}".`
+      : `Kept "${setLabel(set)}" separate from ${
+          offer.picture_count
+            ? pictureCount(offer.picture_count)
+            : "those recipes"
+        }.`;
+    return setWrite(() => changeDeclines(set.id, { add: out }), {
+      receipt,
+      undo: () => changeDeclines(set.id, { remove: out }),
+      verb: "keep-out",
+      failure: "The set could not be kept separate.",
+    });
+  }
+
+  /** Forget every Keep separate on a set, so its merge offer comes back. */
+  function offerMergeAgain(set) {
+    return setWrite(() => changeDeclines(set.id, { clear: true }), {
+      receipt: `The suggested models are offered again on "${setLabel(set)}".`,
+      undo: ({ previous }) => changeDeclines(set.id, { add: previous }),
+      verb: "offer-again",
+      failure: "The suggested models could not be offered again.",
+    });
+  }
+
+  let declineQueue = Promise.resolve();
+
+  /**
+   * One change to a set's kept-out list, queued behind any still in flight
+   * and computed from the list the last write returned.
+   */
+  function changeDeclines(setId, { add = [], remove = [], clear = false }) {
+    const run = async () => {
+      const current =
+        latestDeclines.get(setId) ??
+        handMadeSets.value.find((s) => s.id === setId)?.declined ??
+        [];
+      const gone = new Set(remove);
+      const next = clear
+        ? []
+        : [...new Set([...current.filter((sha) => !gone.has(sha)), ...add])];
+      const result = await setWorkflowSetDeclines(setId, next);
+      latestDeclines.set(setId, result?.set?.declined ?? next);
+      return result;
+    };
+    const queued = declineQueue.then(run, run);
+    declineQueue = queued.catch(() => null);
+    return queued;
+  }
+
+  // What each set's list was after this session's last write to it, as the
+  // server answered it. Kept across refetches: one that left before the last
+  // write landed would otherwise hand the next write a stale list. Dropped
+  // only for a set that is gone.
+  const latestDeclines = new Map();
+  watch(handMadeSets, (sets) => {
+    const live = new Set(sets.map((set) => set.id));
+    for (const id of [...latestDeclines.keys()]) {
+      if (!live.has(id)) latestDeclines.delete(id);
+    }
+  });
+
+  /** The hand-made sets holding any of these model ids, for the delete warning. */
+  function handMadeSetsHolding(ids) {
+    const wanted = new Set(ids);
+    return handMadeSets.value.filter((set) =>
+      (set.members ?? []).some((m) => m.on_shelf && wanted.has(m.id)),
+    );
+  }
+
+  /**
+   * What one model has been seen beside, ranked by the recipes and ComfyUI
+   * runs backing each.
+   *
+   * Read from the whole payload rather than from `visibleCombinations`: the
+   * question is what this file has run with, and a `Show` checkbox is about what
+   * the grid draws. Hiding a companion because its kind is unticked would turn a
+   * view setting into a claim about the evidence.
+   *
+   * @param {number} modelId
+   */
+  function worksWithModel(modelId) {
+    return worksWith(workflowSets.value.combinations, modelId);
+  }
+
   const offlineMounts = computed(() => offlineFolders(rows.value));
 
   /**
@@ -1306,8 +3336,8 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
    * Never refetches: every field the five sort keys read is already on the list
    * payload, so a direction flip is a resort of what is in hand.
    *
-   * @param {Object} patch - any of `groupBy`, `folderLayout`, `sortKey`,
-   *   `sortDirection`.
+   * @param {Object} patch - any of `groupBy`, `folderLayout`, `fold`,
+   *   `sortKey`, `sortDirection`.
    */
   function setView(patch) {
     // A NEW sort key arrives at its own end unless the caller named one. Here
@@ -1375,6 +3405,8 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     if (filters.baseModels.length) n += 1;
     if (filters.capabilities.length) n += 1;
     if (filters.duplicatesOnly) n += 1;
+    if (filters.showHidden) n += 1;
+    if (filters.name.trim()) n += 1;
     return n;
   });
 
@@ -1421,14 +3453,61 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
   const selectedIds = ref(new Set());
 
   /**
+   * The Models rail's selection, by hub `model.id`, while it has one; else
+   * null.
+   *
+   * The rail is a third screen: its rows are in front of the reader too, so
+   * the verbs may act on them. There is one model selection at a time, as in a
+   * two-pane file manager: the rail taking it drops the shelf's, and a model
+   * picked on the shelf drops this one, which the rail watches for.
+   * `clearSelection` leaves it alone: clicking a set card clears the shelf's
+   * models, and the reader who selected here to add to that set still means
+   * them. The shelf's own keys never act on it (`ownSelection` in
+   * `ModelShelf.vue`); the rail answers its own.
+   */
+  const railSelection = ref(null);
+
+  /** The rail's selection changed: `ids` is all of it, empty for none. */
+  function setRailSelection(ids) {
+    // None is not a claim on the selection: the shelf keeps its own.
+    if (!ids?.length) {
+      railSelection.value = null;
+      return;
+    }
+    clearSelection();
+    railSelection.value = new Set(ids);
+  }
+
+  /**
+   * A shelf verb asked for from outside the shelf's own bar, as `{verb,
+   * args}`. The rail's menu and keys ask; `ModelShelf.vue` owns every
+   * confirmation and runs it against the selection, as it does for its bar.
+   */
+  const verbRequest = shallowRef(null);
+
+  function requestVerb(verb, ...args) {
+    verbRequest.value = { verb, args };
+  }
+
+  /**
    * The selected models as rows, in the order the list draws them.
    *
-   * Derived from `visibleRows` and NOT from `rows`, which is load-bearing: a
+   * Derived from `screenRows` and NOT from `rows`, which is load-bearing: a
    * verb may only ever act on something the reader can see. Narrowing the
    * `Show` selection therefore drops rows out of the selection, and an
    * unclassified file has to have its box ticked before it can be corrected at
    * all. With no undo behind any of this, "you cannot act on what is off
    * screen" is the safer half of the trade.
+   *
+   * **`screenRows` and not `visibleRows`, because the shelf has two screens.**
+   * On the set grid the row list is not drawn at all, so reading it there would
+   * arm the bar over models that screen shows nowhere - a selection carried in
+   * from the list, or a model in no set, with Delete live over a
+   * grid that cannot show the reader what it would take. It cuts the other way
+   * too: a combination is drawn WHOLE, so a tray lists files the row list is
+   * hiding, and those are on screen and must be actionable. Switching axis moves
+   * the selection between the two answers, which is the invariant holding rather
+   * than bending.
    */
   /**
    * A run counts as one row while the whole of it is selected; the moment part
@@ -1438,9 +3517,15 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
    * empty selection and every verb a phantom to gate on.
    */
   const selectedRows = computed(() => {
+    // The rail lists every file by itself, so a step of a run stands alone
+    // there: the "one file picked out of a run" gesture, not the run.
+    const inRail = railSelection.value;
+    if (inRail) {
+      return rows.value.filter((row) => inRail.has(row.id)).map(displayRow);
+    }
     const chosen = selectedIds.value;
     const out = [];
-    for (const row of visibleRows.value) {
+    for (const row of screenRows.value) {
       if (!row.members || row.members.length < 2) {
         if (chosen.has(row.id)) out.push(row);
         continue;
@@ -1479,6 +3564,17 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
   );
 
   /**
+   * The selected models as rows, a ticked stack expanded into its members.
+   *
+   * {@link selectedModelIds} for a verb that needs more than the id: Assign
+   * addresses each model by its own `sha256` and unions its own `attachments`,
+   * and a stack row carries only the cover's.
+   */
+  const selectedModels = computed(() =>
+    selectedRows.value.flatMap((row) => row.members ?? [row]),
+  );
+
+  /**
    * The model a Shift-range measures from: the last one picked deliberately.
    *
    * Held apart from the selection itself, exactly as `lastSelectedImageId` is
@@ -1486,6 +3582,9 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
    * be recovered from what is selected afterwards.
    */
   const anchorId = ref(null);
+  // A set-grid head occurs once as a card and once in its open tray. Its model
+  // id alone cannot say which occurrence established a range anchor.
+  const anchorOccurrence = ref(null);
 
   function isSelected(id) {
     return selectedIds.value.has(id);
@@ -1504,6 +3603,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     else next.add(id);
     selectedIds.value = next;
     anchorId.value = id;
+    anchorOccurrence.value = id;
   }
 
   /**
@@ -1537,13 +3637,24 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
    * `visibleRows`, so the lookup misses and the id comes back alone. That is
    * the intent rather than a gap - opening a run and pointing at one file
    * inside it is how that file is taken out of the run, or made its cover.
+   *
+   * **A card on the set grid is the same gesture**, reached differently: that
+   * card names the one file a recipe recorded, `setGridRows` does not fold runs,
+   * so the lookup finds a row standing for itself and the id comes back alone.
+   * Folding them was tried and is wrong here - it lit up every other card built
+   * on the same run and pointed a verb at sets the reader was not looking at.
    */
   function modelsBehind(id) {
-    const row = visibleRows.value.find((candidate) => candidate.id === id);
+    const row = screenRows.value.find((candidate) => candidate.id === id);
     return row?.memberIds?.length ? row.memberIds : [id];
   }
 
-  function selectFromClick(id, { ctrl = false, shift = false } = {}, order) {
+  function selectFromClick(
+    id,
+    { ctrl = false, shift = false } = {},
+    order,
+    occurrence = id,
+  ) {
     const behind = modelsBehind(id);
     if (ctrl) {
       // Toggled as a unit: a run is in the selection or it is not.
@@ -1555,11 +3666,21 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
       }
       selectedIds.value = next;
       anchorId.value = id;
+      anchorOccurrence.value = occurrence;
       return;
     }
+    // A plain click or a range REPLACES the selection, selected sets included;
+    // only Ctrl adds a model beside them.
+    clearSetSelection();
+    clearMissingSelection();
     const sequence = Array.isArray(order) ? order : [];
-    const from = sequence.indexOf(anchorId.value);
-    const to = sequence.indexOf(id);
+    const idOf = (item) => (typeof item === "object" ? item.id : item);
+    const occurrenceOf = (item) =>
+      typeof item === "object" ? item.occurrence : item;
+    const from = sequence.findIndex(
+      (item) => occurrenceOf(item) === anchorOccurrence.value,
+    );
+    const to = sequence.findIndex((item) => occurrenceOf(item) === occurrence);
     if (shift && from >= 0 && to >= 0) {
       const [start, end] = from <= to ? [from, to] : [to, from];
       // An OPEN run is in the sequence member by member, so its cover must
@@ -1568,7 +3689,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
       // its third, through the cover. A CLOSED run has only its cover in the
       // sequence and still expands to the whole thing, which is what makes a
       // range over collapsed rows take whole runs.
-      const drawn = new Set(sequence);
+      const drawn = new Set(sequence.map(idOf));
       const withinRange = (rowId) => {
         const behind = modelsBehind(rowId);
         return behind.length > 1 &&
@@ -1579,26 +3700,88 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
       // The anchor stays where it was: dragging a range out and back with
       // repeated Shift+clicks has to measure from the same end each time.
       selectedIds.value = new Set(
-        sequence.slice(start, end + 1).flatMap(withinRange),
+        sequence
+          .slice(start, end + 1)
+          .map(idOf)
+          .flatMap(withinRange),
       );
       return;
     }
     selectedIds.value = new Set(behind);
     anchorId.value = id;
+    anchorOccurrence.value = occurrence;
   }
 
-  /** Select every model the current filters show, ungrouped duplicates and all. */
+  /**
+   * Select everything the screen shows: every model, ungrouped duplicates and
+   * all, and on the set grid every hand-made ("Grouped by you") set as well.
+   *
+   * Two screens, two answers to "shown", one expression: `screenRows` is the
+   * list the reader is looking at, runs taken whole either way. On the set grid
+   * that differs from the row list in both directions - it leaves out a model no
+   * recipe names, and it takes in one the `Show` narrowing hides from the list
+   * while a card still lists it.
+   *
+   * Select-all means all of it, so both kinds are taken and both pills come up
+   * together - but only what is drawn: a hand-made set that its own hide takes
+   * off the grid (with "Show them" off) must not be selected, or Delete would
+   * take it off screen unasked. `Show` never narrows a hand-made set, so the
+   * set's own hide is the only thing that does.
+   */
   function selectVisible() {
+    const drawn = screenRows.value;
+    if (view.groupBy === GRID_GROUP_BY && handMadeGroups.value.length) {
+      selectedSetIds.value = new Set(
+        handMadeGroups.value.map((group) => group.set.id),
+      );
+      setAnchor = handMadeGroups.value[0].set.id;
+    }
+    if (view.groupBy === GRID_GROUP_BY && missingSetKeys.value.length) {
+      selectedMissingKeys.value = new Set(missingSetKeys.value);
+      missingAnchor = missingSetKeys.value[0];
+    }
+    // **With nothing drawn the selection is left alone, and this is where that
+    // is decided.** It used to be a guard at one caller, reading `visibleRows`;
+    // on the set grid that is the wrong list, so the key said "select" and
+    // silently replaced a selection the reader still held with an empty one -
+    // no undo, and (the bar being gated on `selectedRows`) nothing on screen to
+    // do it deliberately. The other caller, the pill's *Select all shown*, never
+    // had the guard at all. One refusal here answers for both.
+    if (!drawn.length) return;
     selectedIds.value = new Set(
-      visibleRows.value.flatMap((row) => row.memberIds ?? [row.id]),
+      drawn.flatMap((row) => row.memberIds ?? [row.id]),
     );
-    anchorId.value = visibleRows.value[0]?.id ?? null;
+    anchorId.value = drawn[0]?.id ?? null;
+    anchorOccurrence.value = anchorId.value;
   }
 
   function clearSelection() {
     if (selectedIds.value.size) selectedIds.value = new Set();
     anchorId.value = null;
+    anchorOccurrence.value = null;
   }
+
+  // Every path that selects on the shelf, in one place. Sync, because a shelf
+  // gesture reads `selectedRows` in the same breath as it selects (a row drag).
+  watch(
+    selectedIds,
+    (ids) => {
+      if (ids.size) railSelection.value = null;
+    },
+    { flush: "sync" },
+  );
+
+  // Sets are selected on the set grid only; leaving it must not leave a
+  // selection behind that Delete could act on unseen.
+  watch(
+    () => view.groupBy,
+    (axis) => {
+      if (axis !== GRID_GROUP_BY) {
+        clearSetSelection();
+        clearMissingSelection();
+      }
+    },
+  );
 
   /**
    * Drop ids the shelf no longer holds.
@@ -1639,9 +3822,11 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
    *
    * @param {number[]} ids - model ids. A stack cover passes its members.
    * @param {Object} changes - as {@link editSelected}.
+   * @param {Object} [receipt] - the success notice's `text` and `action`, for
+   *   a caller that can say more than which columns it wrote.
    * @returns {Promise<boolean>} true when the write landed.
    */
-  async function editModelIds(ids, changes) {
+  async function editModelIds(ids, changes, receipt = null) {
     const notices = useNoticeStore();
     if (!ids.length) return false;
     try {
@@ -1653,6 +3838,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
       notices.push({
         level: "success",
         text: editReceipt(body?.updated?.length ?? ids.length, changes),
+        ...receipt,
       });
       return true;
     } catch (err) {
@@ -1758,6 +3944,48 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
   }
 
   /**
+   * Keep one copy of a model and remove the rest, then say what survived.
+   *
+   * The keeper comes from the gesture - the dialog's own radio - and is passed
+   * straight through, so what the reader chose is what is kept. The model is NOT
+   * removed from the shelf and the removed copy's row is not dropped either, so
+   * the list is re-read rather than the row taken out of it: the row is still
+   * there, with one fewer copy.
+   *
+   * @param {Array<{model_id: number, folder_id: number, relpath: string}>} keep -
+   *   one entry per model: the copy that stays.
+   * @param {Object} [options]
+   * @param {boolean} [options.permanent=false] - unlink rather than trash.
+   * @returns {Promise<boolean>} true when the call was made at all.
+   */
+  async function mergeCopies(keep, { permanent = false } = {}) {
+    const notices = useNoticeStore();
+    if (!keep?.length) return false;
+    try {
+      const body = await mergeModelCopies(keep, { permanent });
+      await fetchRows();
+      const gone = body?.merged?.length ?? 0;
+      notices.push({
+        level: gone ? "success" : "info",
+        text: mergeReceipt(
+          gone,
+          body?.refused ?? [],
+          Boolean(body?.permanent),
+          body?.trash_name || trashName(),
+          body?.files_removed ?? 0,
+        ),
+      });
+      return true;
+    } catch (err) {
+      notices.push({
+        level: "error",
+        text: errorDetail(err) || "Could not remove those copies.",
+      });
+      return false;
+    }
+  }
+
+  /**
    * Attach or detach one character/set across the selected adapters.
    *
    * `PUT /adapters/{sha256}/attachments` REPLACES one adapter's whole set, so
@@ -1765,7 +3993,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
    * blind write of just the new entity, which would silently detach every other
    * character already using the model.
    *
-   * The rows are re-read from `selectedRows` rather than trusted from the
+   * The rows are re-read from `selectedModels` rather than trusted from the
    * payload: the picker emits ids it was handed, and between the menu opening
    * and the click landing the selection may have moved. Anything no longer
    * selected, or without a hash to address, is dropped rather than written.
@@ -1791,7 +4019,9 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
   }) {
     const notices = useNoticeStore();
     const wanted = new Set(subjectIds.map((id) => String(id)));
-    const targets = selectedRows.value.filter(
+    // Off `selectedModels`, not `selectedRows`: a ticked stack is one row with
+    // the cover's id and hash, and assigning it has to reach every member.
+    const targets = selectedModels.value.filter(
       (row) => wanted.has(String(row.id)) && row.sha256,
     );
     if (!targets.length) return false;
@@ -1952,12 +4182,27 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     }
   }
 
+  /**
+   * The server moved models in from the Downloads folder (`models_arrived`).
+   *
+   * Re-read with `markNew` only when the shelf has been read: the badge is a
+   * diff against the last fetch, and against no fetch every row would be new.
+   */
+  function onModelsArrived() {
+    unseenArrivals.value = true;
+    if (loaded.value) fetchRows({ markNew: true });
+  }
+
   function resetForSession() {
     epoch += 1;
     rows.value = [];
     newIds.value = new Set();
+    unseenArrivals.value = false;
     selectedIds.value = new Set();
+    railSelection.value = null;
+    verbRequest.value = null;
     anchorId.value = null;
+    anchorOccurrence.value = null;
     loaded.value = false;
     error.value = "";
     loading.value = false;
@@ -1966,6 +4211,31 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     // the stamp beside it would otherwise say "already fetched" forever.
     fetchedCompletions.value = [];
     invalidateBaseModelCompletions();
+    // The sets go with the rows, for the reason the completions do: they are
+    // derived from this machine's models and this library's pictures, and the
+    // credential that could read both has just changed.
+    setsEpoch += 1;
+    // A hide still on the wire answers into the session it was sent in: drop it.
+    hideApplied = hideSent;
+    modelHideApplied = modelHideSent;
+    // Another library, another list: nothing it hides is known yet.
+    hiddenModelIds.value = new Set();
+    workflowSets.value = {
+      combinations: [],
+      handMade: [],
+      setChecks: [],
+      hiddenSets: [],
+    };
+    setsLoaded.value = false;
+    setsLoading.value = false;
+    setsError.value = "";
+    openSetKey.value = "";
+    railDrag.value = null;
+    railOver.value = "";
+    railFitsSetId.value = null;
+    selectedSetIds.value = new Set();
+    clearMissingSelection();
+    checkpointAdded.value = null;
   }
 
   const unsubscribeSessionReset = onSessionReset(resetForSession);
@@ -1987,7 +4257,9 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
    */
   function setFilters(patch, { refetch = false } = {}) {
     Object.assign(filters, patch);
-    remember();
+    // The name text is never stored, so a keystroke in the name field writes
+    // nothing.
+    if (Object.keys(patch).some((key) => key !== "name")) remember();
     return refetch ? fetchRows() : Promise.resolve();
   }
 
@@ -1997,7 +4269,12 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     collapsed,
     selectedIds,
     selectedRows,
+    railSelection,
+    setRailSelection,
+    verbRequest,
+    requestVerb,
     anchorId,
+    anchorOccurrence,
     isSelected,
     toggleSelected,
     selectFromClick,
@@ -2007,15 +4284,19 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     editModelIds,
     forgetSelected,
     deleteSelected,
+    mergeCopies,
     setIconOnSelected,
     clearIconsOnSelected,
     selectedModelIds,
+    selectedModels,
     setAttachment,
     rows,
     loading,
     loaded,
     error,
     fetchRows,
+    unseenArrivals,
+    onModelsArrived,
     adapterKindOptions,
     capabilityOptions,
     baseModelOptions,
@@ -2023,6 +4304,68 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     loadBaseModelCompletions,
     visibleRows,
     groups,
+    workflowSets,
+    answerSetVerdict,
+    answerMemberVerdict,
+    setsLoading,
+    setsError,
+    setsLoaded,
+    loadWorkflowSets,
+    setRailMounted,
+    shownModelIds,
+    visibleCombinations,
+    setGroups: setGroupList,
+    hiddenSetCount,
+    showHiddenSets,
+    hiddenModelIds,
+    offeredRows,
+    railRows,
+    toggleHiddenModels,
+    hideSets,
+    unhideSets,
+    toggleHiddenSets,
+    setGridModelIds,
+    setGridRows,
+    screenRows,
+    openSetKey,
+    toggleSet,
+    handMadeSets,
+    handMadeGroups,
+    shownHandMadeSets,
+    selectedSetIds,
+    selectedMissingKeys,
+    selectedMissingGroups,
+    selectedMissing,
+    selectMissing,
+    clearMissingSelection,
+    missingSetKeys,
+    selectAllMissing,
+    selectedSets,
+    selectSet,
+    clearSetSelection,
+    createHandMadeSet,
+    duplicateHandMadeSet,
+    renameHandMadeSet,
+    deleteHandMadeSets,
+    addToHandMadeSet,
+    addRowsToHandMadeSet,
+    railDropRefusal,
+    createSetFromRows,
+    cloneSetFromPictures,
+    confirmSecondCheckpoint,
+    railDrag,
+    railOver,
+    railDragWhat,
+    railFitsSetId,
+    pickOrder,
+    setPickOrder,
+    announceAdded,
+    removeFromHandMadeSet,
+    keepOutOfHandMadeSet,
+    offerMergeAgain,
+    handMadeSetsHolding,
+    checkpointAdded,
+    worksWithModel,
     offlineMounts,
     renderedCount,
     activeCount,

@@ -15,7 +15,7 @@ from datetime import datetime, UTC
 from .event_types import EventType
 from .pixl_logging import get_logger
 from .tasks.base_task import BaseTask, QueueType, TaskPriority, TaskStatus
-from .utils.vram_utils import empty_cuda_cache
+from .utils.vram_utils import empty_device_cache
 
 
 logger = get_logger(__name__)
@@ -195,7 +195,7 @@ class TaskRunner:
             error: The out-of-memory error, for the log line.
         """
         try:
-            if empty_cuda_cache():
+            if empty_device_cache():
                 with TaskRunner._vram_cache_lock:
                     TaskRunner._vram_cache_ts = 0.0
         except Exception:
@@ -664,12 +664,16 @@ class TaskRunner:
 
         Raises:
             TimeoutError: The task did not complete within *timeout_s* seconds.
+                It is cancelled, so if it had not started it never runs.
             TaskCancelledError: The task was cancelled before completing
                 (e.g. the runner was stopped).
             RuntimeError: The task failed; the original error message is included.
         """
         self.submit(task)
         if not task._done_event.wait(timeout=timeout_s):
+            # Nobody is waiting any more: a task still queued is skipped when the
+            # worker reaches it, rather than running for no one.
+            task.on_cancel()
             raise TimeoutError(
                 f"Task {task.id} ({task.type}) did not complete within {timeout_s}s"
             )
@@ -773,7 +777,7 @@ class TaskRunner:
                 # reservation.
                 if task.queue_type == QueueType.GPU:
                     try:
-                        if empty_cuda_cache():
+                        if empty_device_cache():
                             with TaskRunner._vram_cache_lock:
                                 TaskRunner._vram_cache_ts = 0.0
                     except Exception:
@@ -807,7 +811,7 @@ class TaskRunner:
                             0, self._vram_reserved_mb - vram_reserved_mb
                         )
                     try:
-                        if empty_cuda_cache():
+                        if empty_device_cache():
                             with TaskRunner._vram_cache_lock:
                                 TaskRunner._vram_cache_ts = 0.0
                     except Exception:

@@ -9,10 +9,11 @@ import { login } from "../../utils/apiClient";
 import { getAuthState } from "../../api/users";
 import AppButton from "../widgets/AppButton.vue";
 import AppStepper from "../widgets/AppStepper.vue";
+import Tooltip from "../widgets/Tooltip.vue";
 import SettingsSection from "./SettingsSection.vue";
 import SettingsRow from "./SettingsRow.vue";
 import SettingsTwoCol from "./SettingsTwoCol.vue";
-import { VSwitch, VIcon, VTooltip, VProgressLinear } from "vuetify/components";
+import { VSwitch, VIcon, VProgressLinear } from "vuetify/components";
 import { errorDetail } from "../../utils/apiError";
 
 const props = defineProps({
@@ -36,7 +37,7 @@ const checkForUpdatesModel = computed({
 
 const desktop = typeof window !== "undefined" ? window.pixlstashDesktop : null;
 
-const state = ref(null); // { bundled: {accel,label,active}, items: [...] }
+const state = ref(null); // { dev?, bundled: {accel,label,active}, items: [...] }
 const busy = ref(false);
 const error = ref("");
 const progress = ref(null); // { message, fraction } while installing
@@ -395,7 +396,7 @@ watch(
         >
           <v-switch
             v-model="serverDraft.enabled"
-            color="accent"
+            color="primary"
             density="compact"
             hide-details
             :disabled="busy"
@@ -409,16 +410,16 @@ watch(
             :dim="!serverDraft.enabled"
           >
             <div class="server-port-control">
-              <v-tooltip
+              <Tooltip
                 v-if="portConflict"
                 :text="portWarning"
                 location="top"
-                max-width="280"
+                :describe="false"
               >
                 <template #activator="{ props: tooltipProps }">
                   <v-icon
                     v-bind="tooltipProps"
-                    color="error"
+                    color="surface-error"
                     size="18"
                     tabindex="0"
                     class="server-port-warning"
@@ -426,11 +427,12 @@ watch(
                     >mdi-alert-circle</v-icon
                   >
                 </template>
-              </v-tooltip>
+              </Tooltip>
               <AppStepper
                 :model-value="String(serverDraft.port)"
                 :min="1024"
                 :max="65535"
+                mono
                 :disabled="!serverDraft.enabled || busy"
                 @update:model-value="serverDraft.port = Number($event)"
               />
@@ -443,7 +445,7 @@ watch(
           >
             <v-switch
               v-model="serverDraft.ssl"
-              color="accent"
+              color="primary"
               density="compact"
               hide-details
               :disabled="!serverDraft.enabled || busy"
@@ -512,7 +514,7 @@ watch(
             </template>
           </div>
           <AppButton
-            variant="primary_green"
+            variant="primary"
             size="sm"
             class="compute-apply-btn"
             :disabled="
@@ -539,7 +541,7 @@ watch(
         >
           <v-switch
             :model-value="hideToTrayOnClose"
-            color="accent"
+            color="primary"
             density="compact"
             hide-details
             @update:model-value="setHideToTray($event)"
@@ -551,7 +553,7 @@ watch(
         >
           <v-switch
             v-model="checkForUpdatesModel"
-            color="accent"
+            color="primary"
             density="compact"
             hide-details
           />
@@ -567,7 +569,7 @@ watch(
       >
         <v-switch
           :model-value="shellCommand"
-          color="accent"
+          color="primary"
           density="compact"
           hide-details
           @update:model-value="setShellCommand($event)"
@@ -616,9 +618,11 @@ watch(
         <SettingsRow
           :label="state.bundled.label"
           :sub="
-            state.bundled.active
-              ? 'Built-in runtime · active'
-              : 'Built-in runtime'
+            state.dev
+              ? 'The Python environment this run started from · active'
+              : state.bundled.active
+                ? 'Built-in runtime · active'
+                : 'Built-in runtime'
           "
         >
           <AppButton
@@ -641,7 +645,7 @@ watch(
         >
           <AppButton
             v-if="!item.installed"
-            variant="primary_green"
+            variant="primary"
             size="sm"
             :disabled="busy"
             :aria-label="`Install ${item.label}`"
@@ -652,7 +656,7 @@ watch(
           <template v-else>
             <AppButton
               v-if="!item.active"
-              variant="primary_green"
+              variant="primary"
               size="sm"
               :disabled="busy"
               :aria-label="`Use ${item.label}`"
@@ -672,7 +676,11 @@ watch(
           </template>
         </SettingsRow>
 
-        <div v-if="!state.items.length" class="compute-note">
+        <div v-if="state.dev" class="compute-note">
+          Development run: GPU support comes from that Python environment. GPU
+          add-ons are installed and switched from the installed app.
+        </div>
+        <div v-else-if="!state.items.length" class="compute-note">
           No discrete GPU detected - the built-in runtime is the best fit for
           this machine.
         </div>
@@ -698,7 +706,7 @@ watch(
             :model-value="progress.fraction >= 0 ? progress.fraction * 100 : 0"
             color="accent"
             height="6"
-            rounded
+            rounded="pill"
           />
           <div class="compute-note">{{ progress.message }}</div>
         </div>
@@ -815,11 +823,6 @@ watch(
   border-radius: var(--radius-sm);
   background: rgba(var(--v-theme-on-surface), 0.06);
   color: inherit;
-  outline: none;
-}
-
-.owner-input:focus {
-  border-color: rgb(var(--v-theme-primary));
 }
 
 .owner-password-field {
@@ -839,10 +842,16 @@ watch(
   align-items: center;
   color: rgba(var(--v-theme-on-surface), 0.7);
   padding: var(--space-2);
+  border-radius: var(--radius-sm);
+}
+
+.owner-password-toggle:hover {
+  color: rgb(var(--v-theme-on-surface));
+  background: var(--hover-wash);
 }
 
 .settings-error {
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
   font-size: var(--text-xs);
   white-space: pre-wrap;
 }

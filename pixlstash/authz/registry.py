@@ -211,6 +211,16 @@ ROUTE_POLICIES: dict[tuple[str, str], RoutePolicy] = {
         _OWNER,
         justification="Update API token; PATCH blocked for READ tokens; owner only",
     ),
+    ("PUT", "/api/v1/users/me/token/{token_id}/libraries"): RoutePolicy(
+        _LOCAL,
+        justification=(
+            "Sets whether a token is pinned to one library or covers every "
+            "one (#1787). Widening a credential across libraries is the "
+            "owner's decision on the local network: a remote owner session "
+            "is refused here, and any token, local or not, by the handler "
+            "(_refuse_token_credential). Deliberately NOT library_independent."
+        ),
+    ),
     ("GET", "/api/v1/users/me/watermark"): RoutePolicy(_ANY),
     ("POST", "/api/v1/users/me/watermark"): RoutePolicy(
         _OWNER,
@@ -358,6 +368,46 @@ ROUTE_POLICIES: dict[tuple[str, str], RoutePolicy] = {
             "allow_remote_host_ops=true (§16.3.1)."
         ),
     ),
+    ("GET", "/api/v1/server-config/ghost-retention"): RoutePolicy(
+        _OWNER,
+        justification=(
+            "Owner server-config read; returns no per-object data. Sibling of "
+            "GET /server-config/scrapheap-retention (same owner-settings "
+            "tier). It reports a PRIVACY position — which thumbnails and "
+            "prompts of destroyed pictures this install keeps — so owner_only "
+            "rather than any_token. Not a §16.3 host-capability route."
+        ),
+    ),
+    ("PATCH", "/api/v1/server-config/ghost-retention"): RoutePolicy(
+        _OWNER,
+        justification=(
+            "Owner server-config write; PATCH is blocked for READ tokens, so "
+            "only an unscoped owner reaches it. Sibling of PATCH "
+            "/server-config/scrapheap-retention. It sets which picture ghosts "
+            "a purge may keep and performs NO destruction itself, so the §16.3 "
+            "host-capability tiers do not apply."
+        ),
+    ),
+    ("DELETE", "/api/v1/server-config/ghost-retention/ghosts"): RoutePolicy(
+        _OWNER,
+        justification=(
+            "Owner privacy erase; DELETE is blocked for READ tokens, so only an "
+            "unscoped owner reaches it. Destroys the active library's picture ghosts "
+            "(retained thumbnails and prompts of pictures the owner already "
+            "destroyed) and nothing on disk, so it is owner data hygiene rather "
+            "than a §16.3 host capability."
+        ),
+    ),
+    ("DELETE", "/api/v1/server-config/ghost-retention/model-ghosts"): RoutePolicy(
+        _OWNER,
+        justification=(
+            "Owner privacy purge; DELETE is blocked for READ tokens, so only an "
+            "unscoped owner reaches it. Sibling of DELETE "
+            "/server-config/ghost-retention/ghosts. Forgets the model filenames "
+            "hub recipes keep for models not on the shelf and nothing on disk, "
+            "so owner data hygiene rather than a §16.3 host capability."
+        ),
+    ),
     ("POST", "/api/v1/server-config/open"): RoutePolicy(
         _LOOPBACK,
         justification="§16.3.1 RED LINE: opens the server config path in the host file browser (_open_in_os → os.startfile/open/xdg-open - same host-GUI spawn as pictures/open-location and reference-folders/open); loopback-only, allow_remote_host_ops can NOT loosen it",
@@ -413,6 +463,11 @@ ROUTE_POLICIES: dict[tuple[str, str], RoutePolicy] = {
         _LOCAL,
         library_access=LibraryAccessMode.HUB_ONLY,
         justification="§16.3 tier for the POST /libraries/active reason rather than the path-authority one: it takes a registry uuid, never a host path, and removes no file - it clears the attached flag and keeps the row. What it exercises is authority over other principals' state, because every share link pointing at that library stops working until the folder is added again. The active library is refused by the registry; owner + loopback/LAN/Tailscale, or remote owner iff allow_remote_host_ops=true (§16.3.1)",
+    ),
+    ("POST", "/api/v1/libraries/{library_uuid}/discard"): RoutePolicy(
+        _LOCAL,
+        library_access=LibraryAccessMode.SWITCH_WRITER,
+        justification="§16.3 and the strictest reading of it: it DELETES files inside a host folder - the import's temporary database and the thumbnail cache PixlStash wrote - and closes and reopens the active vault to do it. Both halves are already on this tier (POST /libraries for write authority inside a folder, POST /libraries/active for resetting every client's session). It takes a registry uuid, never a caller-supplied path, and the registry refuses anything but a library still on its first import, so the only files it can reach are ones PixlStash created itself and the owner never kept. No picture file is touched; owner + loopback/LAN/Tailscale, or remote owner iff allow_remote_host_ops=true (§16.3.1)",
     ),
     ("POST", "/api/v1/libraries/active"): RoutePolicy(
         _LOCAL,
@@ -483,6 +538,55 @@ ROUTE_POLICIES: dict[tuple[str, str], RoutePolicy] = {
     # constraints would reject) and that is a data check, not a scope one.
     ("PATCH", "/api/v1/models"): RoutePolicy(_OWNER),
     ("POST", "/api/v1/models/forget"): RoutePolicy(_OWNER),
+    # Which models the active library hides: a hub row per library, the shelf's
+    # tier, the owner's own view of their shelf (as the set hide below).
+    ("PUT", "/api/v1/models/hidden"): RoutePolicy(_OWNER),
+    # The question in front of Delete (#1314): which support files the models
+    # would leave with nothing to serve. Reads hub rows only and changes
+    # nothing, so it sits with the shelf reads rather than with the delete's
+    # §16.3 tier.
+    ("POST", "/api/v1/models/companions"): RoutePolicy(_OWNER),
+    # The set grid (#1438): which shelf models a kept picture proves ran
+    # together, read off the same `workflow_recipe_asset` self-join as the
+    # companions route above. It counts pictures of the ACTIVE library, so it
+    # sizes the whole vault the way the shelf's own `used by` counts already do
+    # - owner tier for the same reason those are, and no per-object scope to
+    # narrow it to: a set is a fact about the machine's models, not about a
+    # picture a token was granted.
+    ("GET", "/api/v1/models/workflow-sets"): RoutePolicy(_OWNER),
+    # Hand-made workflow sets (#1520): the owner's own groupings of shelf
+    # models, stored in the hub. They write hub rows only (never a file or a
+    # model row) and every answer carries the same whole-library evidence as
+    # the read above, so they sit on its tier. Keyed by a hub set id, which no
+    # share token is ever scoped to.
+    ("POST", "/api/v1/models/workflow-sets"): RoutePolicy(_OWNER),
+    ("PATCH", "/api/v1/models/workflow-sets/{set_id}"): RoutePolicy(_OWNER),
+    ("DELETE", "/api/v1/models/workflow-sets/{set_id}"): RoutePolicy(_OWNER),
+    ("POST", "/api/v1/models/workflow-sets/{set_id}/members"): RoutePolicy(_OWNER),
+    ("POST", "/api/v1/models/workflow-sets/{set_id}/members/remove"): RoutePolicy(
+        _OWNER
+    ),
+    # The models kept out of a set's merge offer (#1523): same rows, same tier.
+    ("PUT", "/api/v1/models/workflow-sets/{set_id}/declines"): RoutePolicy(_OWNER),
+    # Which sets the active library hides (#1869): a hub row per library, the
+    # grid's tier, the owner's own view of their shelf.
+    ("PUT", "/api/v1/models/workflow-sets/hidden"): RoutePolicy(_OWNER),
+    # The owner's verdicts on a set and on its members (workflow-set-verdicts
+    # spec). Hub rows keyed by a combination of `model.id`s, which no share
+    # token is ever scoped to, and the owner's own judgement about the
+    # machine's models: the grid's tier.
+    ("PUT", "/api/v1/models/workflow-sets/verdicts/{combo_key}"): RoutePolicy(_OWNER),
+    ("DELETE", "/api/v1/models/workflow-sets/verdicts/{combo_key}"): RoutePolicy(
+        _OWNER
+    ),
+    (
+        "PUT",
+        "/api/v1/models/workflow-sets/verdicts/{combo_key}/members/{model_id}",
+    ): RoutePolicy(_OWNER),
+    (
+        "DELETE",
+        "/api/v1/models/workflow-sets/verdicts/{combo_key}/members/{model_id}",
+    ): RoutePolicy(_OWNER),
     # The shelf's sixth verb, and the one route on this block that spawns a
     # process on the host's desktop. Same authority - and same red-line tier -
     # as POST /pictures/{id}/open-location: what it can do is bounded by what
@@ -663,6 +767,15 @@ ROUTE_POLICIES: dict[tuple[str, str], RoutePolicy] = {
         _LOCAL,
         justification="§16.3 unlinks the owner's model files (OS trash by default, permanent on request) out of registered host folders - the unlink half of POST /model-moves standing alone, and the shelf's only destructive verb. Takes no host path: the ids address rows the scanner wrote, every path is contained against its registered folder - lexically for the file so a symlinked model loses its link and not the bytes it points at, and by realpath for the directory holding it so no symlinked component can redirect the unlink (`_contained_path`) - and only `user` and `managed` folders are eligible, so PixlStash's own engine roots, the InsightFace packs and the shared HuggingFace cache are refused whole; owner + loopback/LAN/Tailscale, or remote owner iff allow_remote_host_ops=true (§16.3.1)",
     ),
+    # Keep one copy of a duplicated model and remove the rest (#1439). The same
+    # unlink as the delete above, narrowed to the copies the caller did NOT name,
+    # so it sits on the same tier for the same reason. It destroys fewer bytes
+    # and no rows at all - the removed copies keep their `model_file` row at
+    # `state = 'removed'` - but "fewer bytes" is not a weaker authority.
+    ("POST", "/api/v1/model-files/merge"): RoutePolicy(
+        _LOCAL,
+        justification="§16.3 unlinks the owner's redundant model copies (OS trash by default, permanent on request) out of registered host folders - POST /model-files/delete's unlink narrowed to the copies of a model other than the one the body names as the keeper, so it is that route's authority class exactly. Takes no host path: the body names a model.id and a (folder_id, relpath) the scanner wrote, every path is contained against its registered folder by the same `_contained_path`, and only the copies being REMOVED need a folder whose contents are the owner's. It also reads the owner's configured ComfyUI for its advertised model list, which is the same outbound read the run pre-flight already makes on the same credential; owner + loopback/LAN/Tailscale, or remote owner iff allow_remote_host_ops=true (§16.3.1)",
+    ),
     # ── filesystem.py (§16.3 host-capability; Step-3 → LOCAL_OWNER_ONLY) ─────
     ("GET", "/api/v1/filesystem/browse"): RoutePolicy(
         _LOCAL,
@@ -688,15 +801,17 @@ ROUTE_POLICIES: dict[tuple[str, str], RoutePolicy] = {
     # ── folder_structure.py commit (§16.3 host-capability; v1.11 Phase 3) ───
     ("POST", "/api/v1/folder-structure/commit"): RoutePolicy(
         _LOCAL,
-        justification="§16.3: commits an accepted mapping over the same host path the read already walked - registers it for in-place indexing (the reference-folders/POST write) and creates the projects/people/sets/tags it names; owner + loopback/LAN/Tailscale, or remote owner iff allow_remote_host_ops=true (§16.3.1)",
+        justification="§16.3: commits an accepted mapping over the same host path the read already walked - registers it for in-place indexing (the reference-folders/POST write) and creates the projects/people/sets/tags it names. For a library still on its first import it is also the only way that import becomes a library: when the commit finishes it renames the temporary database onto vault.db and closes and reopens the active vault, resetting every client's session - POST /libraries/active's class, which the removed /promote route used to carry; owner + loopback/LAN/Tailscale, or remote owner iff allow_remote_host_ops=true (§16.3.1)",
     ),
     ("GET", "/api/v1/folder-structure/commit/status"): RoutePolicy(
         _LOCAL,
-        justification="§16.3: carries the commit's result, the same host-path class as GET .../read/status; owner + loopback/LAN/Tailscale, or remote owner iff allow_remote_host_ops=true (§16.3.1)",
+        library_access=LibraryAccessMode.HUB_ONLY,
+        justification="§16.3: carries the commit's result, the same host-path class as GET .../read/status; owner + loopback/LAN/Tailscale, or remote owner iff allow_remote_host_ops=true (§16.3.1). HUB_ONLY admission because the state it reports lives on the Server, not in any vault, and it has to keep answering while the library is closed and reopened - which is exactly what the end of a first import does. It keeps the library pin: what it returns is library content.",
     ),
     ("DELETE", "/api/v1/folder-structure/commit"): RoutePolicy(
         _LOCAL,
-        justification="§16.3: stops the owner's in-flight commit (abort, or 'organise later') - authority over another principal's operation, on the same tier as the route that starts it, exactly as DELETE .../read is to POST .../read; owner + loopback/LAN/Tailscale, or remote owner iff allow_remote_host_ops=true (§16.3.1)",
+        library_access=LibraryAccessMode.HUB_ONLY,
+        justification="§16.3: stops the owner's in-flight commit (abort, or 'organise later') - authority over another principal's operation, on the same tier as the route that starts it, exactly as DELETE .../read is to POST .../read; owner + loopback/LAN/Tailscale, or remote owner iff allow_remote_host_ops=true (§16.3.1). HUB_ONLY admission alongside its status sibling: it writes one flag on server-held state and touches no vault, and refusing it mid-swap would leave the owner unable to stop work they can still see running. It keeps the library pin.",
     ),
     # ── import_folders.py (§16.3 host-capability) ───────────────────────────
     (
@@ -770,6 +885,11 @@ ROUTE_POLICIES: dict[tuple[str, str], RoutePolicy] = {
     ("GET", "/api/v1/pictures/{id}/faces"): RoutePolicy(_PIC, id_param="id"),
     ("GET", "/api/v1/pictures/{id}/{field}"): RoutePolicy(_PIC, id_param="id"),
     ("GET", "/api/v1/pictures/{id}/anomaly_region"): RoutePolicy(_PIC, id_param="id"),
+    ("GET", "/api/v1/pictures/{id}/text"): RoutePolicy(_PIC, id_param="id"),
+    # Re-reads one picture's text: derived data only, nothing the owner wrote is
+    # touched. Same class as the other per-picture mutations; READ tokens are
+    # refused earlier by the middleware (POST not in READ_SAFE).
+    ("POST", "/api/v1/pictures/{id}/text/read"): RoutePolicy(_PIC, id_param="id"),
     ("GET", "/api/v1/pictures/thumbnails/{id}.webp"): RoutePolicy(_PIC, id_param="id"),
     ("PATCH", "/api/v1/pictures/{id}"): RoutePolicy(_PIC, id_param="id"),
     ("POST", "/api/v1/pictures/{id}/face"): RoutePolicy(_PIC, id_param="id"),
@@ -943,6 +1063,27 @@ ROUTE_POLICIES: dict[tuple[str, str], RoutePolicy] = {
             "Write-enabled picture-scoped grant, the POST /pictures/rotate "
             "class. READ tokens are refused earlier by the middleware: POST is "
             "not in READ_SAFE. Gate loops enforce_picture_scope over every id."
+        ),
+    ),
+    # Not picture-scoped like DELETE /pictures, whose soft delete is this
+    # route's last step: it also WRITES into a second library, and a share
+    # grant reaches pictures in one library, never the registry.
+    ("POST", "/api/v1/pictures/move-to-library"): RoutePolicy(
+        _LOCAL,
+        justification=(
+            "§16.3 tier for POST /libraries/active's reason, not the "
+            "path-authority one: it opens a library that is not the active one "
+            "with write authority, runs its pending migrations and holds the "
+            "switch lock while it copies, and its refusals carry that "
+            "library's host folder path, as the switch's do. It takes a "
+            "registry uuid, never a caller-supplied path, and the destination "
+            "is that library's own root. The gate pins the credential to the "
+            "ACTIVE library; the handler asks the same token_covers_library of "
+            "the TARGET, which the gate cannot see because it is named in the "
+            "body, so a token good for one library cannot write into another. "
+            "READ tokens are refused earlier by the middleware: POST is not in "
+            "READ_SAFE; owner + loopback/LAN/Tailscale, or remote owner iff "
+            "allow_remote_host_ops=true (§16.3.1)"
         ),
     ),
     ("POST", "/api/v1/pictures/rotate"): RoutePolicy(
@@ -1373,10 +1514,43 @@ ROUTE_POLICIES: dict[tuple[str, str], RoutePolicy] = {
         "/api/v1/pictures/guest-scores",
     ): _LIST_AWARE,  # READ_SAFE; scope-filters ids
     # ── comfyui.py ──────────────────────────────────────────────────────────
-    ("GET", "/api/v1/comfyui/workflows"): RoutePolicy(_ANY),
+    # Every stored workflow file by name, whatever the Workflows view hides, so
+    # it sits on that view's tier rather than open to share tokens.
+    ("GET", "/api/v1/comfyui/workflows"): RoutePolicy(
+        _OWNER,
+        justification="Names every stored workflow file, hidden workflows included; owner only like GET /workflows",
+    ),
     ("DELETE", "/api/v1/comfyui/workflows/{workflow_name}"): RoutePolicy(
         _OWNER,
         justification="Delete workflow; DELETE blocked for READ tokens; owner only",
+    ),
+    ("POST", "/api/v1/comfyui/workflows/{workflow_name}/card"): RoutePolicy(
+        _OWNER,
+        justification="File a stored workflow on its Workflows card and return the key; writes the hub like the import beside it; owner only",
+    ),
+    ("GET", "/api/v1/comfyui/pixlstash-node"): RoutePolicy(
+        _OWNER,
+        justification="Whether the owner's ComfyUI has the ComfyUI-PixlStash node; reaches the owner's ComfyUI; owner only",
+    ),
+    ("GET", "/api/v1/comfyui/link"): RoutePolicy(
+        _OWNER,
+        justification="Whether the owner's ComfyUI is linked and through which URL; owner only",
+    ),
+    ("POST", "/api/v1/comfyui/link"): RoutePolicy(
+        _LOCAL,
+        justification="Mints a ComfyUI-scope token and has this server push it to whatever answers at the saved ComfyUI address on its own network: the server's network position is the authority, so a local owner only (§16.3, #1810)",
+    ),
+    ("DELETE", "/api/v1/comfyui/link"): RoutePolicy(
+        _LOCAL,
+        justification="Revokes the ComfyUI link token and has this server write into the saved ComfyUI's settings on its own network; a local owner only, like the link it undoes (§16.3, #1810)",
+    ),
+    ("POST", "/api/v1/comfyui/pack/install"): RoutePolicy(
+        _LOOPBACK,
+        justification="Writes code (the ComfyUI-PixlStash nodes) into a ComfyUI custom_nodes folder on this machine, trashes an older copy and restarts ComfyUI: the host-shell class, loopback only (§16.3)",
+    ),
+    ("POST", "/api/v1/comfyui/probe"): RoutePolicy(
+        _OWNER,
+        justification="Makes this server fetch an address the owner names; the same reach comfyui_url already has; owner only",
     ),
     ("POST", "/api/v1/comfyui/abort"): RoutePolicy(
         _OWNER,
@@ -1386,21 +1560,16 @@ ROUTE_POLICIES: dict[tuple[str, str], RoutePolicy] = {
         _OWNER,
         justification="Import workflow; POST blocked for READ tokens; owner only",
     ),
-    ("POST", "/api/v1/comfyui/run_i2i"): RoutePolicy(
-        _PIC, body_ids="picture_ids"
-    ),  # loops enforce_picture_scope over body picture_ids
-    ("POST", "/api/v1/comfyui/run_t2i"): RoutePolicy(
-        _PIC, body_ids="source_picture_id"
-    ),  # NEEDS REVIEW: single optional body id, enforce_picture_scope only when present
+    ("POST", "/api/v1/comfyui/workflows/convert"): RoutePolicy(
+        _OWNER,
+        justification="Store ComfyUI's API conversion of an editor workflow beside its stored file, storing the file first as an import would; writes stored workflow files like the import beside it; owner only",
+    ),
     ("GET", "/api/v1/comfyui/pictures/{picture_id}/workflow"): RoutePolicy(
         _PIC, id_param="picture_id"
     ),
     ("GET", "/api/v1/comfyui/pictures/{picture_id}/recipe"): RoutePolicy(
         _PIC, id_param="picture_id"
     ),
-    ("POST", "/api/v1/comfyui/run_recipe"): RoutePolicy(
-        _PIC, body_ids="picture_id"
-    ),  # required single body id; re-extracts the graph from the scoped picture
     # ── snapshots.py (all require_unscoped_owner) ───────────────────────────
     ("GET", "/api/v1/snapshots"): RoutePolicy(
         _OWNER, justification="require_unscoped_owner"
@@ -1622,6 +1791,10 @@ ROUTE_POLICIES: dict[tuple[str, str], RoutePolicy] = {
         _LOCAL,
         justification="§16.3 host-path disclosure: names the scanned tagger-plugin folders on the server's disk and returns plugin import errors carrying host paths; owner + loopback/LAN/Tailscale, or remote owner iff allow_remote_host_ops=true (§16.3.1)",
     ),
+    ("POST", "/api/v1/taggers/face-crop-retag"): RoutePolicy(
+        _OWNER,
+        justification="Library-wide face-crop retag (or its dry-run count); POST blocked for READ tokens; owner only",
+    ),
     ("POST", "/api/v1/taggers/{name}/download"): RoutePolicy(
         _OWNER,
         justification="Download tagger plugin; POST blocked for READ tokens; owner only",
@@ -1629,6 +1802,246 @@ ROUTE_POLICIES: dict[tuple[str, str], RoutePolicy] = {
     ("DELETE", "/api/v1/taggers/{name}/artifacts/{artifact_id}"): RoutePolicy(
         _OWNER,
         justification="Delete tagger artifact; DELETE blocked for READ tokens; owner only",
+    ),
+    # ── workflows.py (workflow implementation plan §F1/§F2, the library view) ─
+    # OWNER_ONLY throughout, and it is a decision rather than a default. The
+    # grid (`GET /workflows`, one entry per workflow since #1623) is
+    # `variant_activity` and a `ROW_NUMBER()` window over every non-deleted
+    # picture in the vault, so it hands out whole-library counts AND the
+    # picture ids of every workflow's cover strip; the detail adds the default
+    # recipe the owner's best pictures were made with, read out of stored
+    # instance documents. A picture-, set- or project-scoped token holding any
+    # of it would learn the size of the whole library, one workflow at a time,
+    # which is the whole-library disclosure class §16 exists for. Nothing here is a host path or a host
+    # capability, so none of it climbs to the §16.3 tier; nothing here mutates.
+    ("GET", "/api/v1/workflows"): RoutePolicy(_OWNER),
+    ("GET", "/api/v1/workflows/{workflow_id}"): RoutePolicy(_OWNER),
+    ("GET", "/api/v1/workflows/{workflow_id}/pictures"): RoutePolicy(_OWNER),
+    # The workflow writes (#1623). OWNER_ONLY throughout and, unlike the reads
+    # above it, this tier is not even a judgement about disclosure: every one
+    # of them is the owner editing their own library - what a workflow is
+    # called, what its default recipe is, which topologies belong together -
+    # and none of it is scoped to a picture, a set, a character or a project,
+    # so there is no narrower policy that could describe it. The verbs carry
+    # their own belt as well: the READ-token middleware refuses PATCH, PUT and
+    # POST before the gate reads a declaration.
+    #
+    # Several answer with the workflow they changed, which is the same
+    # whole-library disclosure `GET /workflows/{workflow_id}` is owner only
+    # for. Nothing here is a host path or a host capability.
+    ("PATCH", "/api/v1/workflows/{workflow_id}"): RoutePolicy(
+        _OWNER,
+        justification="Name, notes and hidden on one workflow; PATCH blocked for READ tokens; owner only",
+    ),
+    # The workflow's LoRAs counted over the whole vault.
+    ("GET", "/api/v1/workflows/{workflow_id}/lora-summary"): RoutePolicy(
+        _OWNER,
+        justification="Which LoRAs a workflow's pictures share and which change, counted over the whole library; owner only",
+    ),
+    ("PUT", "/api/v1/workflows/{workflow_id}/model-fix"): RoutePolicy(
+        _OWNER,
+        justification="Replace a missing model in a workflow's base graph, which re-keys the cards of its topology; PUT blocked for READ tokens; owner only",
+    ),
+    ("PUT", "/api/v1/workflows/{workflow_id}/default-lora"): RoutePolicy(
+        _OWNER,
+        justification="Puts one LoRA in or out of a workflow's default recipe; PUT blocked for READ tokens; owner only",
+    ),
+    ("PUT", "/api/v1/workflows/{workflow_id}/defaults"): RoutePolicy(
+        _OWNER,
+        justification="A workflow's default-recipe parameters; PUT blocked for READ tokens; owner only",
+    ),
+    ("PUT", "/api/v1/workflows/{workflow_id}/pins"): RoutePolicy(
+        _OWNER,
+        justification="A workflow's pinned parameters; PUT blocked for READ tokens; owner only",
+    ),
+    # Expose a parameter: the literal inputs of the workflow's graph, resolved
+    # out of the whole library like the LoRA chain's, with ComfyUI's options.
+    ("GET", "/api/v1/workflows/{workflow_id}/form-inputs"): RoutePolicy(
+        _OWNER,
+        justification="A workflow's graph inputs and their values, resolved from the whole library; owner only",
+    ),
+    ("PUT", "/api/v1/workflows/{workflow_id}/inputs"): RoutePolicy(
+        _OWNER,
+        justification="A workflow's picture-input setup, which names a Fixed picture by content; PUT blocked for READ tokens; owner only",
+    ),
+    # The file gestures (v1.12 B8). Every one of them resolves the base graph
+    # the way the run route does - from the linked file, from the whole
+    # library's best picture, or from a stored instance document - so each one
+    # discloses a workflow assembled out of the library rather than out of any
+    # one object a scoped token could hold. The export is the sharpest of them:
+    # it hands back a graph in full, and the scrub that keeps the prompt and
+    # the forgotten model names out of it is a privacy measure for the file's
+    # READER, never a reason a scoped token could be allowed to ask.
+    ("GET", "/api/v1/workflows/{workflow_id}/export"): RoutePolicy(
+        _OWNER,
+        justification="Export a workflow's graph with its default recipe, resolved from the whole library; owner only",
+    ),
+    ("GET", "/api/v1/workflows/{workflow_id}/graph"): RoutePolicy(
+        _OWNER,
+        justification="A workflow's graph unscrubbed, for the owner's own ComfyUI; owner only",
+    ),
+    ("POST", "/api/v1/workflows/{workflow_id}/duplicate"): RoutePolicy(
+        _OWNER,
+        justification="Write a copy of a workflow's graph to disk; POST blocked for READ tokens; owner only",
+    ),
+    ("POST", "/api/v1/workflows/{workflow_id}/fixed-copy"): RoutePolicy(
+        _OWNER,
+        justification="Write a copy of a workflow's graph with this ComfyUI's repairs applied; POST blocked for READ tokens; owner only",
+    ),
+    # The LoRA chain editor (#1478). The read resolves the base graph out of
+    # the whole library like its siblings, names the shelf LoRA each loader
+    # loads, and reaches the owner's ComfyUI for object_info; the write is the
+    # insertion above generalised to the whole chain: a new workflow, or with
+    # `overwrite` this workflow's next version.
+    ("GET", "/api/v1/workflows/{workflow_id}/lora-chain"): RoutePolicy(
+        _OWNER,
+        justification="A workflow's LoRA loaders and the shelf LoRAs they load, resolved from the whole library; owner only",
+    ),
+    ("PUT", "/api/v1/workflows/{workflow_id}/lora-chain"): RoutePolicy(
+        _OWNER,
+        justification="Write a workflow's graph with its LoRA chain edited, as a copy or over the workflow itself; PUT blocked for READ tokens; owner only",
+    ),
+    # Clone with new models: the read names the shelf's checkpoints, VAEs and
+    # text encoders and what recipes have run together, which is the whole
+    # shelf and the whole hub; the write is a Duplicate with filenames replaced.
+    ("GET", "/api/v1/workflows/{workflow_id}/model-swap"): RoutePolicy(
+        _OWNER,
+        justification="A workflow's model files, the shelf's models and the recipes' co-occurrence, all whole-library; owner only",
+    ),
+    ("POST", "/api/v1/workflows/{workflow_id}/set-clone-plans"): RoutePolicy(
+        _OWNER,
+        justification="What a workflow's clone onto each shelf workflow set would write: its graph and the whole shelf; POST blocked for READ tokens; owner only",
+    ),
+    ("POST", "/api/v1/workflows/{workflow_id}/clone-with-models"): RoutePolicy(
+        _OWNER,
+        justification="Write a copy of a workflow's graph with model files replaced; POST blocked for READ tokens; owner only",
+    ),
+    # Saving over a workflow (#1849). The changes that wait on a workflow name
+    # its loaders and shelf models; a save resolves the base graph out of the
+    # whole library as a run does and writes a version of it; the versions are
+    # the owner's own history of one workflow; and the people read names every
+    # person a LoRA is attached to. None is one object a scoped token holds.
+    ("GET", "/api/v1/workflows/{workflow_id}/changes"): RoutePolicy(
+        _OWNER,
+        justification="A workflow's unsaved changes and which save is open for them, read against the whole shelf; owner only",
+    ),
+    ("PUT", "/api/v1/workflows/{workflow_id}/changes"): RoutePolicy(
+        _OWNER,
+        justification="Replace a workflow's unsaved changes; PUT blocked for READ tokens; owner only",
+    ),
+    ("DELETE", "/api/v1/workflows/{workflow_id}/changes"): RoutePolicy(
+        _OWNER,
+        justification="Discard a workflow's unsaved changes; DELETE blocked for READ tokens; owner only",
+    ),
+    ("POST", "/api/v1/workflows/{workflow_id}/save"): RoutePolicy(
+        _OWNER,
+        justification="Write a workflow's changes over it as its next version; POST blocked for READ tokens; owner only",
+    ),
+    ("POST", "/api/v1/workflows/{workflow_id}/save-as-new"): RoutePolicy(
+        _OWNER,
+        justification="Write a workflow's graph with its changes as a new workflow; POST blocked for READ tokens; owner only",
+    ),
+    ("GET", "/api/v1/workflows/{workflow_id}/versions"): RoutePolicy(
+        _OWNER,
+        justification="The versions kept of a workflow's graph; owner only",
+    ),
+    ("POST", "/api/v1/workflows/{workflow_id}/versions/{version}/restore"): RoutePolicy(
+        _OWNER,
+        justification="Make an earlier version of a workflow's graph its newest; POST blocked for READ tokens; owner only",
+    ),
+    ("PUT", "/api/v1/workflows/{workflow_id}/graph"): RoutePolicy(
+        _OWNER,
+        justification="Store a whole graph over a workflow as its next version, or as a new workflow; PUT blocked for READ tokens; owner only",
+    ),
+    ("GET", "/api/v1/workflows/{workflow_id}/people"): RoutePolicy(
+        _OWNER,
+        justification="Every person with a LoRA for a workflow's base model, read across the whole library and shelf; owner only",
+    ),
+    ("DELETE", "/api/v1/workflows/{workflow_id}"): RoutePolicy(
+        _OWNER,
+        justification="Send a workflow's imported file to the trash; DELETE blocked for READ tokens; owner only",
+    ),
+    # The run route and its dry run (v1.12 B7). OWNER_ONLY, which is NARROWER
+    # than the PICTURE_SCOPED run routes in comfyui.py it will eventually
+    # replace, and deliberately so: those replay one named picture's own
+    # embedded graph, so a picture-scoped token asking to re-run a picture it
+    # holds is asking about its own object. This one runs a WORKFLOW, a
+    # whole-library identity - the graph it submits is resolved from the
+    # library's best picture or its stored instances whatever the caller was
+    # scoped to, with a default recipe read off the whole library, the body
+    # names LoRAs by shelf digest, and the answer reports every workflow a
+    # selection groups into along with the model filenames it is missing.
+    # There is no per-object check that could describe any of that, so it is
+    # the owner's route or nobody's. The pre-flight carries exactly the same
+    # disclosure as the run and is declared identically rather than one tier
+    # down: a dry run that told a scoped token which models the library has
+    # would be the whole leak with none of the generation.
+    ("POST", "/api/v1/workflows/run"): RoutePolicy(
+        _OWNER,
+        justification="Run a workflow; resolves a graph from the whole library; owner only",
+    ),
+    ("POST", "/api/v1/workflows/run/preflight"): RoutePolicy(
+        _OWNER,
+        justification="Dry run of the above; same disclosure, submits nothing; owner only",
+    ),
+    ("POST", "/api/v1/workflows/run/opening"): RoutePolicy(
+        _OWNER,
+        justification="Build the graph a run would submit and hold it for the owner's ComfyUI to open; resolves a graph from the whole library and may upload its pictures to ComfyUI; POST blocked for READ tokens; owner only",
+    ),
+    ("GET", "/api/v1/workflows/runs/{prompt_id}"): RoutePolicy(
+        _OWNER,
+        justification="How a run the owner started ended: ComfyUI's error text and the ids of the pictures it added, whichever part of the library they landed in; owner only",
+    ),
+    # ── recipes.py (saved recipes, plan §5.5 / step B6) ─────────────────────
+    # OWNER_ONLY throughout, and a decision rather than a default. A saved
+    # recipe holds the owner's prompt and names the models they run, and the
+    # listing's credit counts kept pictures across a whole stack of workflows,
+    # which is the same whole-library disclosure the reads above are owner-only
+    # for. The writes are the owner editing their own library; nothing here is a
+    # host path or a host capability, so none of it climbs to the §16.3 tier.
+    ("GET", "/api/v1/recipes"): RoutePolicy(_OWNER),
+    ("POST", "/api/v1/recipes"): RoutePolicy(
+        _OWNER,
+        justification="Save a recipe; POST blocked for READ tokens; owner only",
+    ),
+    ("PUT", "/api/v1/recipes/order"): RoutePolicy(
+        _OWNER,
+        justification="Reorder saved recipes; PUT blocked for READ tokens; owner only",
+    ),
+    ("GET", "/api/v1/recipes/used"): RoutePolicy(
+        _OWNER,
+        justification=(
+            "The looks the stack's own pictures carry, prompts in full. A "
+            "SUPERSET of the credit figure on GET /recipes, which counts these "
+            "same rows: that route says how many pictures a saved recipe "
+            "accounts for, this one says what every one was made with, and "
+            "whether a saved recipe keeps it. "
+            "Owner only for the reason the listing is, and more so"
+        ),
+    ),
+    ("PATCH", "/api/v1/recipes/{recipe_id}"): RoutePolicy(
+        _OWNER,
+        justification="Edit a saved recipe; PATCH blocked for READ tokens; owner only",
+    ),
+    ("DELETE", "/api/v1/recipes/{recipe_id}"): RoutePolicy(
+        _OWNER,
+        justification="Delete a saved recipe; DELETE blocked for READ tokens; owner only",
+    ),
+    # Export (v1.12 B8) shares the listing's reasoning and adds one of its own:
+    # it returns the prompt the owner wrote in full, which is the single thing
+    # the workflow export exists to strip.
+    ("GET", "/api/v1/recipes/{recipe_id}/export"): RoutePolicy(
+        _OWNER,
+        justification="Export a saved recipe, prompt included; owner only",
+    ),
+    # Builds the recipe's graph the way a run does, out of the whole library,
+    # and stores it as a new manual workflow: a hub write of the owner's own.
+    ("POST", "/api/v1/recipes/{recipe_id}/extract-workflow"): RoutePolicy(
+        _OWNER,
+        justification=(
+            "Store a saved recipe's run graph as a manual workflow; POST "
+            "blocked for READ tokens; owner only"
+        ),
     ),
     # ── test_hooks.py (mounted ONLY when enable_test_hooks=True) ─────────────
     # Conditionally mounted, but ALWAYS declared: the gate resolves declarations
@@ -1702,9 +2115,9 @@ if _undeclared_conditionals:  # pragma: no cover - import-time invariant
 del _undeclared_conditionals
 
 # WS routes: see authn/websocket.py - the HTTP authz gate does NOT cover
-# WebSockets; their chokepoint is authenticate_websocket (plan §6). The two WS
-# routes (/ws/comfyui, /api/v1/ws/updates) are acknowledged in the coverage
+# WebSockets; their chokepoint is authenticate_websocket (plan §6). The one WS
+# route (/api/v1/ws/updates) is acknowledged in the coverage
 # matrix (tests/test_architecture_guardrails.py::test_websocket_routes_are_acknowledged)
-# and are deliberately absent from ROUTE_POLICIES.
+# and is deliberately absent from ROUTE_POLICIES.
 
 __all__ = ["ROUTE_POLICIES", "CONDITIONALLY_MOUNTED_ROUTES"]

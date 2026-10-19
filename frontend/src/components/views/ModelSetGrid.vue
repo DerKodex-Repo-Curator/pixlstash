@@ -1,0 +1,2396 @@
+<template>
+  <div class="msg" role="region" aria-label="Workflow sets">
+    <p class="visually-hidden" role="status">{{ announcement }}</p>
+
+    <p v-if="store.setsLoading && !store.setsLoaded" class="msg__state">
+      Reading which models have run together…
+    </p>
+    <p v-else-if="store.setsError" class="msg__state" role="alert">
+      {{ store.setsError }}
+    </p>
+    <!-- Two empty states, deliberately distinct, for the reason the row list
+         keeps three: "you filtered everything out" is one click from fixed and
+         "no picture records its models" is not, and stating the second when the
+         first is true tells the reader something false about their library.
+         With no combination a card could be named after, the filters are
+         hiding none, so that is the second state whatever Show says. -->
+    <div
+      v-else-if="
+        nothingShown &&
+        store.activeCount &&
+        !hasHandMade &&
+        store.workflowSets.combinations.some(headModel)
+      "
+      class="msg__state"
+    >
+      <p class="msg__lead">No workflow set matches these filters.</p>
+      <p>
+        {{ store.workflowSets.combinations.length.toLocaleString() }} set{{
+          store.workflowSets.combinations.length === 1 ? "" : "s"
+        }}
+        are being left out by Show.
+      </p>
+      <AppButton @click="store.resetFilters()">Reset filters</AppButton>
+    </div>
+    <div
+      v-else
+      class="msg__scroll"
+      :class="{ 'msg__scroll--edge-tab': !sidebarStore.modelsRailOpen }"
+      @pointerdown="
+        pressedBackground = $event.button === 0 && isBackground($event)
+      "
+      @click.capture="swallowAfterTrayMove"
+      @dblclick.capture="swallowAfterTrayMove"
+      @click="onBackgroundClick"
+    >
+      <!-- No evidence to draw, said above a grid that still holds the New
+           workflow set tile: making a set by hand is exactly what an owner
+           with no recorded pictures can still do (#1520). -->
+      <div
+        v-if="nothingShown && !hasHandMade"
+        class="msg__state msg__state--inline"
+      >
+        <p class="msg__lead">
+          No picture in this library records a base model it used.
+        </p>
+        <p>
+          A set is read off a recipe, which arrives with a picture that carries
+          its workflow. Until one does, there is nothing here to group — which
+          says nothing about the models on the shelf. You can still make a set
+          by hand.
+        </p>
+      </div>
+      <div
+        ref="gridEl"
+        class="msg__grid"
+        role="treegrid"
+        aria-label="Workflow sets"
+        aria-multiselectable="true"
+        :style="{
+          '--wf-columns': columns,
+          '--wf-column-min': `${COLUMN_MIN}px`,
+          '--wf-gap': `${COLUMN_GAP}px`,
+        }"
+        @keydown="onKeyDown"
+      >
+        <template v-for="(entry, index) in flatRows" :key="entry.id">
+          <!-- The panel is drawn once, in the slot its FIRST member holds; the
+               rest of the member entries are index space only. -->
+          <ModelSetSlotsPanel
+            v-if="entry.kind === 'slot' && entry.first && openHand"
+            :panel-id="PANEL_ID"
+            :set="openHand.set"
+            :name="openName"
+            :columns="columns"
+            :column-index="openColumnIndex"
+            :cursor-key="cursorKey"
+            :gap="COLUMN_GAP"
+            :selected-ids="store.selectedIds"
+            :selectable-ids="store.setGridModelIds"
+            :marks="marksById"
+            :check="openHand.check"
+            :save-set="(verdict) => answerVerdict(openHand, verdict)"
+            :save-member="
+              (modelId, verdict) =>
+                answerMemberVerdict(openHand, modelId, verdict)
+            "
+            :can-fill-from-set="fillSetItems.length > 0"
+            :can-fill-from-pictures="fillPictureItems.length > 0"
+            :base-offer="baseOffer"
+            :fit-count="openFitCount"
+            :drag-rows="store.railDrag"
+            :drag-over="store.railOver"
+            :drag-refused="railTargets.get(store.openSetKey)?.refused ?? ''"
+            @models-fit="showFitsInRail"
+            @drop-slot="(slotId) => dropOnSet(openHand.set, slotId)"
+            @set-base="setCheckpointBase"
+            @dismiss-base="store.checkpointAdded = null"
+            @close="closePanel"
+            @select="onSlotClick"
+            @menu="onSlotMenu"
+            @remove="removeMember"
+            @add="({ slotId, el }) => openChooser('slot', el, slotId)"
+            @fill="({ mode, el }) => openChooser(mode, el)"
+            @pick="openWorksWith"
+            @merge="mergeOffer()"
+            @keep-separate="keepSeparate()"
+            @add-ghost="(ghost) => mergeOffer([ghost])"
+            @offer-again="store.offerMergeAgain(openHand.set)"
+            @cursor="(key) => moveToKey(key)"
+          />
+
+          <ModelSetPanel
+            v-else-if="
+              (entry.kind === 'member' && entry.memberIndex === 0) ||
+              entry.trayAnchor
+            "
+            :panel-id="PANEL_ID"
+            :name="openName"
+            :missing="openGroup?.head?.missing ? openGroup.head : null"
+            :members="openMembers"
+            :view="store.view.trayView"
+            :columns="trayColumns"
+            :column-index="openColumnIndex"
+            :cursor-key="cursorKey"
+            :gap="COLUMN_GAP"
+            :selected-ids="store.selectedIds"
+            :selectable-ids="store.setGridModelIds"
+            :marks="marksById"
+            :check="openGroup?.check ?? null"
+            :save-set="(verdict) => answerVerdict(openGroup, verdict)"
+            :save-member="
+              (modelId, verdict) =>
+                answerMemberVerdict(openGroup, modelId, verdict)
+            "
+            @close="closePanel"
+            @clone="store.cloneSetFromPictures(openGroup)"
+            @view="(value) => store.setView({ trayView: value })"
+            @pick="openWorksWith"
+            @select="onMemberClick"
+            @menu="onMemberMenu"
+            @replace-missing="(head) => emit('replace-missing', [head])"
+          />
+
+          <!-- The way in to a hand-made set, first because the grid leads with
+               the newest sets. A row like any card, so the arrows reach it and
+               Enter presses it; N does the same from anywhere in the grid. -->
+          <div
+            v-else-if="entry.kind === 'new'"
+            class="msg__newrow"
+            role="row"
+            aria-level="1"
+            aria-label="New workflow set"
+            aria-keyshortcuts="N"
+            :tabindex="index === cursorIndex ? 0 : -1"
+            data-key="new"
+            :data-rail-drop="railTargets.has('new') ? 'new' : undefined"
+            @click="onNewClick(entry)"
+            @rail-drop="onRailDrop(entry)"
+          >
+            <div class="msg__cell" role="gridcell">
+              <div class="msg__new" data-testid="new-workflow-set">
+                <v-icon size="24" aria-hidden="true">mdi-plus</v-icon>
+                <span class="msg__new-label" aria-hidden="true"
+                  >New workflow set</span
+                >
+                <kbd class="msg__kbd" aria-hidden="true">N</kbd>
+              </div>
+              <span
+                v-if="railTargets.has('new')"
+                class="msg__drop"
+                :class="{
+                  'msg__drop--over': dropKey === 'new',
+                  'msg__drop--refused': railTargets.get('new').refused,
+                }"
+                aria-hidden="true"
+                data-testid="rail-drop-mark"
+                ><span class="msg__drop-label">{{
+                  railTargets.get('new').refused || railTargets.get('new').label
+                }}</span></span
+              >
+            </div>
+          </div>
+
+          <div
+            v-else-if="entry.kind === 'card'"
+            class="msg__row"
+            :class="{
+              'msg__row--dim': store.railDrag && !entry.hand,
+              'msg__row--refused': railTargets.get(entry.key)?.refused,
+            }"
+            role="row"
+            aria-level="1"
+            :aria-expanded="String(store.openSetKey === entry.key)"
+            :aria-controls="
+              store.openSetKey === entry.key ? PANEL_ID : undefined
+            "
+            :aria-owns="
+              store.openSetKey === entry.key ? memberRowIds : undefined
+            "
+            :aria-posinset="entry.cardIndex + 1"
+            :aria-setsize="cardCount"
+            :aria-selected="
+              entry.hand
+                ? String(store.selectedSetIds.has(entry.setId))
+                : entry.missingKey
+                  ? String(store.selectedMissingKeys.has(entry.missingKey))
+                  : selectable(entry.headId)
+                    ? String(cardSelected(entry))
+                    : undefined
+            "
+            :tabindex="index === cursorIndex ? 0 : -1"
+            :data-key="entry.key"
+            @click="onRowClick(entry, $event)"
+            @dblclick="targetOwnsTheGesture($event) || toggle(entry)"
+            @contextmenu="onRowMenu(entry, $event)"
+            :data-rail-drop="railTargets.has(entry.key) ? entry.key : undefined"
+            :data-rail-refused="railTargets.get(entry.key)?.refused || undefined"
+            @rail-drop="onRailDrop(entry)"
+          >
+            <div class="msg__cell" role="gridcell">
+              <ModelSetCard
+                :card="entry.card"
+                :expanded="store.openSetKey === entry.key"
+                :selected="
+                  entry.hand
+                    ? store.selectedSetIds.has(entry.setId)
+                    : entry.missingKey
+                      ? store.selectedMissingKeys.has(entry.missingKey)
+                      : cardSelected(entry)
+                "
+                :panel-id="store.openSetKey === entry.key ? PANEL_ID : ''"
+                @toggle="store.toggleSet(entry.key)"
+                @offer="openOffer(entry.setId)"
+                @add="answerOffer(entry, true)"
+                @keep-separate="answerOffer(entry, false)"
+                @hide="hideCard(entry)"
+                @unhide="unhideCard(entry)"
+              />
+              <span
+                v-if="railTargets.has(entry.key)"
+                class="msg__drop"
+                :class="{
+                  'msg__drop--over': dropKey === entry.key,
+                  'msg__drop--refused': railTargets.get(entry.key).refused,
+                }"
+                aria-hidden="true"
+                data-testid="rail-drop-mark"
+                ><span class="msg__drop-label">{{
+                  railTargets.get(entry.key).refused || railTargets.get(entry.key).label
+                }}</span></span
+              >
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <!-- Hidden sets are out of the grid, not gone: say so, without a count,
+           and let them be drawn again so one can be shown. Derived and
+           hand-made alike. -->
+      <p v-if="store.hiddenSetCount" class="msg__hidden">
+        <span>Some sets are hidden.</span>
+        <AppButton
+          variant="ghost"
+          size="sm"
+          :icon-left="store.showHiddenSets ? 'eye-off-outline' : 'eye-outline'"
+          data-testid="toggle-hidden-sets"
+          @click="store.showHiddenSets = !store.showHiddenSets"
+          >{{ store.showHiddenSets ? "Leave them out" : "Show them" }}</AppButton
+        >
+      </p>
+    </div>
+
+    <WorkflowSetChooser
+      :open="Boolean(chooser)"
+      :target="chooser?.target"
+      :label="chooserLabel"
+      :heading="chooserHeading.title"
+      :subheading="chooserHeading.sub"
+      :note="chooserNote"
+      :sections="chooserSections"
+      :query="chooserQuery"
+      :pick="chooser?.mode === 'slot'"
+      :placeholder="chooserPlaceholder"
+      :empty-text="chooserEmpty"
+      :status="chooserStatus"
+      :order="store.pickOrder"
+      @update:query="(value) => (chooserQuery = value)"
+      @update:order="store.setPickOrder"
+      @add="addChosen"
+      @undo="undoLastPick"
+      @close="closeChooser"
+    />
+  </div>
+</template>
+
+<script setup>
+/**
+ * The model shelf's Workflow set axis, as a card grid (#1438).
+ *
+ * **A card is one base model, and its tray holds the models that have run with
+ * it.** One card per checkpoint - or per diffusion file, where a graph loads one
+ * instead - and ▸ opens the union of everything it has co-occurred with, as cards
+ * or as a comparison list. The card's SHAPE and the tray's are the shipped
+ * workflow grid's, because a reader should not have to learn a second card or a
+ * second switch; the components are this screen's own, because that grid's card
+ * and panel have grown a vocabulary ("Stack of 3 workflows", "Saved recipes", a
+ * menu of workflow verbs) that would be wrong words and dead controls on a set.
+ * See `ModelSetCard.vue` and `ModelSetPanel.vue`.
+ *
+ * **A union is not reproducible, and the tray says so.** Two files in one tray
+ * may never have run together; the exact combinations live behind `Works with`,
+ * which reads the per-recipe evidence rather than the union.
+ *
+ * **A card stands for ONE model: the base model it is named after.** That is the
+ * whole of what makes this screen safe to act on. The shelf's selection is by
+ * `model.id` and carries verbs that destroy bytes, so a card standing for its
+ * whole SET would put a shared VAE behind a Delete aimed at a checkpoint. (The
+ * Delete KEY on a card is the exception: it hides the set from pictures, and
+ * reaches no file.) It
+ * stands for its head instead - the file whose name, kind and mark the card
+ * already draws - and the other members of the set are selected one at a time in
+ * the tray, where each row is one model. An EVIDENCE card never selects a set.
+ *
+ * **A hand-made card is the exception, and it is safe for the same reason**
+ * (#1520): it selects its SET into a separate selection (`selectedSetIds`)
+ * whose verbs - Rename, Delete set - touch no file, and taking a set drops any
+ * selected files and vice versa, so no pill ever holds both vocabularies.
+ *
+ * **A RUN is the one thing a card can stand for besides one file, and it has to
+ * be.** `shownModelIds` fans a run out into its members, so a card can be named
+ * after step 2 of 6 with nothing on it saying so; the shelf holds runs atomic
+ * everywhere (`services/stack_membership`), and letting a card mean one step
+ * would let Forget destroy half of one from a screen that draws no runs. The
+ * store folds them instead - `setGridRows` pulls a whole run in the moment any
+ * step of it is on a card - so such a card selects the run, the bar counts it as
+ * one row and states its whole size, and the verbs write all of it.
+ *
+ * Everything else is the row list's own contract, reached through the same store:
+ * click replaces, Ctrl/Cmd+click toggles, Shift+click takes the range in DRAWN
+ * order, Space toggles, Shift+arrow extends, F2 renames what the cursor is on,
+ * and right-click (and the Menu key, and Shift+F10) opens the shelf's full verb
+ * menu after making the row under the pointer the selection. The verb bar and
+ * the destructive keys are `ModelShelf.vue`'s, unchanged: this view only feeds
+ * them.
+ *
+ * ONE FLAT LIST, exactly as `WorkflowsView` builds one: the cards and, while a
+ * stack is open, its members are one index space, so the cursor crosses the
+ * panel boundary with the same `index ± columns` arithmetic. The padding holes
+ * are what keep `index % columns` naming the column a row is drawn in.
+ */
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { VIcon } from "vuetify/components";
+
+import { useEntityListsStore } from "../../stores/useEntityListsStore";
+import { useSidebarStore } from "../../stores/useSidebarStore";
+import { useModelShelfStore } from "../../stores/useModelShelfStore";
+import {
+  assignmentRing,
+  formatModelSize,
+  modelName,
+} from "../../utils/modelShelf";
+import {
+  fillFromPictures,
+  fillFromSets,
+  handMadeName,
+  headModel,
+  rowMatches,
+  SET_SLOTS,
+  setCheckpoint,
+  setCheckpoints,
+  setFits,
+  setSlots,
+  slotSuggestions,
+  witnessCount,
+} from "../../utils/workflowSets";
+
+import ModelSetPanel from "../panels/ModelSetPanel.vue";
+import ModelSetSlotsPanel from "../panels/ModelSetSlotsPanel.vue";
+import WorkflowSetChooser from "../panels/WorkflowSetChooser.vue";
+import AppButton from "../widgets/AppButton.vue";
+import ModelSetCard from "../widgets/ModelSetCard.vue";
+
+/**
+ * The two numbers the column count is derived from, and the only copy of them.
+ *
+ * The workflows grid's own figures, because the card is the same card: written
+ * onto the grid as custom properties rather than read back out of the sheet, so
+ * the arithmetic here and the track the browser paints are the same two numbers
+ * by construction.
+ */
+const COLUMN_MIN = 240;
+const COLUMN_GAP = 12;
+
+const PANEL_ID = "msg-set-panel";
+
+const emit = defineEmits([
+  "works-with",
+  "menu",
+  "rename",
+  "set-menu",
+  "rename-set",
+  "replace-missing",
+  "missing-menu",
+]);
+
+const store = useModelShelfStore();
+
+const gridEl = ref(null);
+const columns = ref(1);
+// The cursor is an entry id, not an index: `flatRows` is rebuilt by a fold
+// change, by a stack opening and by one closing, and an index held across any
+// of those names a different card - or, when the list shrinks, none, which
+// takes the grid's only tab stop with it.
+const cursorId = ref("");
+const announcement = ref("");
+
+// Hidden sets are out of the grid, not absent: they keep the grid (and its
+// "Show them" line) up rather than claim no picture recorded a model.
+const nothingShown = computed(
+  () => !store.setGroups.length && !store.hiddenSetCount,
+);
+
+const hasHandMade = computed(() => store.handMadeGroups.length > 0);
+
+/** Every card on the grid, hand-made first: what `aria-setsize` counts. */
+const cardCount = computed(
+  () => store.handMadeGroups.length + store.setGroups.length,
+);
+
+/** `model.id` → `icon_sha256`, so a hand-made card and tile wear real marks. */
+const iconsById = computed(
+  () =>
+    new Map(
+      store.rows
+        .filter((row) => row.icon_sha256)
+        .map((row) => [row.id, row.icon_sha256]),
+    ),
+);
+
+const entityLists = useEntityListsStore();
+
+/**
+ * The shelf's own mark for every on-shelf model in the OPEN tray, by id:
+ * `{row, ring, style}`, exactly what a shelf row hands `ModelMark`.
+ *
+ * So a LoRA assigned to a person wears that person's face and ring here as it
+ * does in the row list, instead of a generated initials square - the tray is
+ * where a whole set's models get assigned, and it could not show who they
+ * already belong to. Only the open tray's members, not the whole shelf: a ring
+ * is a lookup per model and a closed tray draws none.
+ */
+const marksById = computed(() => {
+  const ids = new Set(
+    (openHand.value?.models ?? openGroup.value?.models ?? []).map((m) => m.id),
+  );
+  const marks = new Map();
+  for (const row of store.rows) {
+    if (!ids.has(row.id)) continue;
+    const ring = assignmentRing(row.attachments, {
+      characters: entityLists.characters,
+      sets: entityLists.pictureSets,
+    });
+    marks.set(row.id, {
+      row,
+      ring,
+      style: ring.hue ? { "--mmark-ring": ring.hue } : {},
+    });
+  }
+  return marks;
+});
+
+/** The open hand-made group, or null. */
+const openHand = computed(
+  () =>
+    store.handMadeGroups.find((group) => group.key === store.openSetKey) ??
+    null,
+);
+
+/** The open evidence group, or null. */
+const openGroup = computed(
+  () => store.setGroups.find((group) => group.key === store.openSetKey) ?? null,
+);
+
+/**
+ * The open group's models, head first, each flagged if it is the one the set is
+ * named after - which is what the tray marks rather than re-deriving.
+ */
+const openMembers = computed(() => {
+  const group = openGroup.value;
+  if (!group) return [];
+  return group.models.map((model) => ({
+    ...model,
+    head: model.id === group.head?.id,
+  }));
+});
+
+/**
+ * Record the owner's answer. A mark only, so a refusal costs nothing but the
+ * mark: it is logged with the set it was for and rethrown, so the panel keeps
+ * the question open and says it could not save.
+ */
+async function answerVerdict(group, verdict) {
+  const key = group?.check?.combo_key;
+  if (!key) return;
+  try {
+    await store.answerSetVerdict(key, verdict);
+  } catch (err) {
+    console.error("Could not record the set verdict", { key, verdict, err });
+    throw err; // the panel shows the refusal beside the question
+  }
+}
+
+async function answerMemberVerdict(group, modelId, verdict) {
+  const key = group?.check?.combo_key;
+  if (!key) return;
+  try {
+    await store.answerMemberVerdict(key, modelId, verdict);
+  } catch (err) {
+    console.error("Could not record the member verdict", {
+      key,
+      modelId,
+      verdict,
+      err,
+    });
+    throw err;
+  }
+}
+
+const openName = computed(
+  () =>
+    (openHand.value && handMadeName(openHand.value.set)) ||
+    openGroup.value?.card.name ||
+    "Set",
+);
+
+/**
+ * How many columns the TRAY draws its member cards in.
+ *
+ * One column in List, whatever the grid above is doing: the rows are full-width,
+ * and the flat list's column arithmetic has to agree with what is painted or Down
+ * lands on the wrong row.
+ */
+const trayColumns = computed(() =>
+  store.view.trayView === "list" ? 1 : columns.value,
+);
+
+/**
+ * The cards, with the open stack's members spliced in at its row's end.
+ *
+ * `{kind: "card"|"member"|"hole", id, key, ...}`. `hole` pads the member block
+ * out to whole rows, so every card after the panel keeps naming the column it
+ * is drawn in.
+ */
+const flatRows = computed(() => {
+  const hand = store.handMadeGroups.map((group, cardIndex) => ({
+    kind: "card",
+    hand: true,
+    id: `card:${group.key}`,
+    key: group.key,
+    // A hand-made card IS its set: selecting it selects the set, never a file.
+    setId: group.set.id,
+    card: {
+      ...group.card,
+      markIcon: iconsById.value.get(group.card.markModel?.id) ?? null,
+    },
+    headId: null,
+    cardIndex,
+  }));
+  const evidence = store.setGroups.map((group, cardIndex) => ({
+    kind: "card",
+    id: `card:${group.key}`,
+    key: group.key,
+    card: group.card,
+    // The model the card IS, which is what a selection or a verb is aimed at.
+    headId: group.head?.id ?? null,
+    // Named after a file the shelf does not hold: no row to select, so the
+    // card is selected as itself, for Replace (`selectedMissingKeys`).
+    missingKey: group.head?.missing ? group.key : null,
+    cardIndex: hand.length + cardIndex,
+  }));
+  const cards = [{ kind: "new", id: "new", key: "new" }, ...hand, ...evidence];
+  const openKey = store.openSetKey;
+  if (!openKey) return cards;
+  const at = cards.findIndex((entry) => entry.key === openKey);
+  if (at < 0) return cards;
+  const cols = Math.max(1, columns.value);
+  const rowEnd = (Math.floor(at / cols) + 1) * cols;
+  // The stack's OWN row is padded to whole first, not just the member block: a
+  // stack in the last, incomplete row would otherwise splice the block in at a
+  // length that is not a multiple of `cols`, and from there the column
+  // arithmetic stops describing the screen.
+  const head = cards.slice(0, rowEnd);
+  while (head.length < rowEnd) {
+    head.push({ kind: "hole", id: `hole:head:${head.length}` });
+  }
+  if (openHand.value) {
+    // A hand-made tray's stops are its tiles, slot by slot. Padded to whole
+    // GRID rows, so every card after it keeps naming its column; inside the
+    // tray the arrows walk slots rather than columns (see `onKeyDown`).
+    // The merge offer's strip (#1523) is the tray's first stop, a slot row
+    // of its own above the Checkpoint slot, so Up and Down step through it.
+    const offer = openHand.value.set.offer
+      ? [
+          {
+            kind: "slot",
+            id: "slot:offer",
+            key: "offer",
+            slotId: "",
+            slotIndex: -1,
+            member: null,
+            offer: true,
+            first: true,
+          },
+        ]
+      : [];
+    const tiles = [
+      ...offer,
+      ...setSlots(openHand.value.set).flatMap(({ slot, items }, slotIndex) =>
+        items.map((item, itemIndex) => ({
+          kind: "slot",
+          id: `slot:${item.key}`,
+          key: item.key,
+          slotId: slot.id,
+          slotIndex,
+          member: item.member,
+          ghost: item.ghost ?? null,
+          first: !offer.length && slotIndex === 0 && itemIndex === 0,
+        })),
+      ),
+    ];
+    const padded = Math.ceil(Math.max(tiles.length, 1) / cols) * cols;
+    while (tiles.length < padded) {
+      tiles.push({ kind: "hole", id: `hole:block:${tiles.length}` });
+    }
+    return [...head, ...tiles, ...cards.slice(rowEnd)];
+  }
+  const block = openMembers.value.map((member, memberIndex) => ({
+    kind: "member",
+    id: `member:${member.id}`,
+    key: String(member.id),
+    modelId: member.id,
+    memberIndex,
+  }));
+  // The TRAY's own column count, which is 1 in List: the padding has to make the
+  // member block a whole number of the rows that are actually painted, or the
+  // cursor's `index ± columns` walks out of the tray.
+  const trayCols = Math.max(1, trayColumns.value);
+  const padded = Math.ceil(Math.max(block.length, 1) / trayCols) * trayCols;
+  // A set named after a missing file may have no shelf member at all; its
+  // tray is still drawn, in the first hole, for the note that links the fix.
+  const anchored = block.length > 0;
+  while (block.length < padded) {
+    block.push({
+      kind: "hole",
+      id: `hole:block:${block.length}`,
+      trayAnchor: !anchored && block.length === 0,
+    });
+  }
+  return [...head, ...block, ...cards.slice(rowEnd)];
+});
+
+/** The open card's column, for the panel's notch. */
+const openColumnIndex = computed(() => {
+  const at = flatRows.value.findIndex(
+    (entry) => entry.kind === "card" && entry.key === store.openSetKey,
+  );
+  return at < 0 ? 0 : at % Math.max(1, columns.value);
+});
+
+/** Where the cursor is now. Always a real row: it falls back to the first. */
+const cursorIndex = computed(() => {
+  const at = flatRows.value.findIndex((entry) => entry.id === cursorId.value);
+  if (at >= 0) return at;
+  // The first CARD, not the New tile ahead of it: the grid is opened to read
+  // sets, and the tile is one arrow (or N) away.
+  const card = flatRows.value.findIndex((entry) => entry.kind === "card");
+  return card >= 0 ? card : (firstStop(0, 1) ?? 0);
+});
+
+/** The cursor's key when it is inside the panel, else "". */
+const cursorKey = computed(() => {
+  const entry = flatRows.value[cursorIndex.value];
+  return entry?.kind === "member" || entry?.kind === "slot" ? entry.key : "";
+});
+
+/**
+ * The member rows' DOM ids, for the open card's `aria-owns`.
+ *
+ * The panel is a full-width band after the LAST card of the open card's row, so
+ * in DOM order the member rows follow whichever card ends that row. `aria-owns`
+ * re-parents them in the accessibility tree without moving a pixel, which is
+ * what makes the treegrid true.
+ */
+const memberRowIds = computed(() =>
+  openMembers.value.map((member) => `${PANEL_ID}-row-${member.id}`).join(" "),
+);
+
+// ── Columns from the real container width ─────────────────────────────────
+
+function measure() {
+  const width = gridEl.value?.clientWidth ?? 0;
+  const next = Math.max(
+    1,
+    Math.floor((width + COLUMN_GAP) / (COLUMN_MIN + COLUMN_GAP)),
+  );
+  // Written only when it CHANGED. `columns` decides the height, the height can
+  // decide whether the scroller has a scrollbar, and the scrollbar decides
+  // `clientWidth` - so an unconditional write at a boundary width feeds the
+  // observer its own output and can oscillate (#1479 review). The guard breaks
+  // the loop: the same count re-observed is not a change.
+  if (next !== columns.value) columns.value = next;
+}
+
+let observer = null;
+watch(gridEl, (element) => {
+  observer?.disconnect();
+  observer = null;
+  if (!element || typeof ResizeObserver === "undefined") return;
+  observer = new ResizeObserver(measure);
+  observer.observe(element);
+  measure();
+});
+
+onBeforeUnmount(() => {
+  observer?.disconnect();
+  observer = null;
+});
+
+// The grid is mounted by the axis, so this is where the read is asked for: the
+// store's own guard makes the repeat free.
+store.loadWorkflowSets();
+
+/**
+ * A stack opening or closing announces itself: every row below it moves, and a
+ * reader who is not on that card hears nothing otherwise.
+ */
+watch(
+  () => store.openSetKey,
+  (key, previous) => {
+    if (key) {
+      const count = openHand.value
+        ? (openHand.value.set.members ?? []).length
+        : openMembers.value.length;
+      announcement.value = `${openName.value} opened, ${count} models`;
+      // A set opened from outside the grid - just made, from the tile or from
+      // a checkpoint's menu - takes the cursor, and the view scrolls to it.
+      const at = flatRows.value.findIndex(
+        (entry) => entry.kind === "card" && entry.key === key,
+      );
+      const current = flatRows.value[cursorIndex.value];
+      if (
+        at >= 0 &&
+        key.startsWith("hand:") &&
+        current?.key !== key &&
+        current?.kind !== "slot"
+      ) {
+        moveCursor(at);
+        nextTick(() =>
+          rowElement(flatRows.value[at])?.scrollIntoView?.({
+            block: "nearest",
+          }),
+        );
+      }
+      return;
+    }
+    announcement.value = `${previous ? "Set" : ""} closed`.trim();
+  },
+);
+
+function toggle(entry) {
+  if (entry?.kind === "card") store.toggleSet(entry.key);
+}
+
+/**
+ * Close the panel and put the cursor back on the card that opened it.
+ *
+ * Esc and the panel's own Close come through here. ▸ does not: that is a click
+ * on a card, and the cursor belongs where the reader left it.
+ */
+function closePanel() {
+  const key = store.openSetKey;
+  if (!key) return;
+  store.toggleSet(key);
+  const at = flatRows.value.findIndex(
+    (entry) => entry.kind === "card" && entry.key === key,
+  );
+  if (at >= 0) moveCursor(at);
+}
+
+/**
+ * One file inside a combination: what else has this run with?
+ *
+ * Emitted rather than answered here. `ModelShelf.vue` mounts the one dialog for
+ * both entry points - this grid and the row list's context menu - because two
+ * mounted copies with a ref each is two dialogs that can disagree about which
+ * is open, and this component is the shelf's own child.
+ */
+function openWorksWith(file) {
+  if (file) emit("works-with", file);
+}
+
+// ── Selection ─────────────────────────────────────────────────────────────
+
+/**
+ * The model one flat entry stands for: a card's base model, a tray row's file.
+ *
+ * `null` for a hole, and for the rare card whose base model is not a row on this
+ * shelf - a combination can name a file from a block this session never fetched,
+ * and there is no row to rename, move or delete for one of those.
+ */
+function modelIdOf(entry) {
+  if (entry?.kind === "card") return entry.headId;
+  if (entry?.kind === "member") return entry.modelId;
+  if (entry?.kind === "slot" && entry.member?.on_shelf) return entry.member.id;
+  return null;
+}
+
+/**
+ * Is there a shelf row behind this id for a verb to write?
+ *
+ * A row that answers `false` still takes the cursor from a click - it is a place
+ * on the screen - but it takes no selection, carries no `aria-selected` and
+ * opens no verb menu, because there is nothing for a verb to write.
+ */
+function selectable(id) {
+  return id != null && store.setGridModelIds.has(id);
+}
+
+/**
+ * The drawn occurrences, in order, which is what a Shift-range spans.
+ *
+ * Read off `flatRows`, so a range that crosses an open tray takes the cards
+ * before it, the tray's own rows, and the cards after - the order on screen and
+ * not the order the payload arrived in. Occurrences stay distinct: a set's
+ * head is drawn twice while its tray is open, and a Shift-range starts from the
+ * occurrence the reader clicked. The store deduplicates model ids only after it
+ * has sliced that occurrence range.
+ */
+const orderedEntries = computed(() =>
+  flatRows.value
+    .map((entry) => ({ id: modelIdOf(entry), occurrence: entry.id }))
+    .filter((entry) => selectable(entry.id)),
+);
+
+/** A gesture aimed at whatever the cursor is on. */
+function selectCursor(event) {
+  selectEntry(flatRows.value[cursorIndex.value], event);
+}
+
+/**
+ * The models whose selection was made from a TRAY row rather than their card.
+ *
+ * Selection is by model id, and a set's head is drawn twice while its tray is
+ * open - as the card and as the tray's first row - so without this, picking the
+ * checkpoint in the tray lit the card too, and read as having picked the whole
+ * set. So while the open tray shows a model that was picked there, the card
+ * named after it stays unlit; close the tray and the card is the only mark left,
+ * so it lights again rather than leave a live selection drawn nowhere.
+ *
+ * Kept only for selections this grid made: a change from anywhere else (Select
+ * all, the bar, the row list) clears it, and the cards follow the selection again.
+ */
+const trayPicked = ref(new Set());
+let ownSelection = null;
+
+watch(
+  () => store.selectedIds,
+  (ids) => {
+    if (ids !== ownSelection) trayPicked.value = new Set();
+  },
+);
+
+/** The models the open tray is drawing, each with its own selection mark. */
+const trayModelIds = computed(
+  () =>
+    new Set(
+      // Either tray: a hand-made set's on-shelf members are rows the reader
+      // can see just as an evidence tray's are (#1520).
+      [...openMembers.value, ...(openHand.value?.models ?? [])].map(
+        (member) => member.id,
+      ),
+    ),
+);
+
+/** Is this card's head selected by a tray row the reader can see? */
+function shownInTray(headId) {
+  return trayPicked.value.has(headId) && trayModelIds.value.has(headId);
+}
+
+/** A card is drawn selected: its head is, and not by way of a visible tray row. */
+function cardSelected(entry) {
+  return store.isSelected(entry.headId) && !shownInTray(entry.headId);
+}
+
+/**
+ * The sets from pictures whose cards are drawn selected, in drawn order: what
+ * the bar's Hide acts on. A head picked in its open tray is a FILE and lights
+ * no card, so it names no set here either.
+ */
+const selectedCardGroups = computed(() =>
+  store.setGroups.filter((group) =>
+    cardSelected({ headId: group.head?.id }),
+  ),
+);
+
+/**
+ * The card heads a Shift-range from the anchor to `occurrence` passes over, or
+ * null when the store will not take it as a range (no anchor on this screen).
+ */
+function rangeCardHeads(occurrence) {
+  const order = orderedEntries.value;
+  const from = order.findIndex(
+    (item) => item.occurrence === store.anchorOccurrence,
+  );
+  const to = order.findIndex((item) => item.occurrence === occurrence);
+  if (from < 0 || to < 0) return null;
+  return new Set(
+    order
+      .slice(Math.min(from, to), Math.max(from, to) + 1)
+      .filter((item) => item.occurrence.startsWith("card:"))
+      .map((item) => item.id),
+  );
+}
+
+/**
+ * A click on the scroller or a gap in the grid clears both selections. Decided
+ * by where the press started: one that slips off a card onto another fires its
+ * click on the grid, and that is a fumbled pick, not a click on nothing.
+ * Primary button only, and a click with `detail` 0 (Enter or Space on a
+ * control inside, or a programmatic one) never counts: a press can end
+ * without a click, and its leftover flag must not arm a later keyboard one.
+ */
+let pressedBackground = false;
+
+function isBackground(event) {
+  return event.target === event.currentTarget || event.target === gridEl.value;
+}
+
+function onBackgroundClick(event) {
+  if (pressedBackground && event.detail > 0) {
+    store.clearSetSelection();
+    store.clearSelection();
+  }
+  pressedBackground = false;
+}
+
+/**
+ * A card was clicked: it takes the cursor, and it takes the selection.
+ *
+ * The cursor moves either way - a click inside the card is still a statement
+ * about where the reader is - but a click the card's own ▸ owns stops there.
+ */
+function onRowClick(entry, event) {
+  cursorId.value = entry.id;
+  if (targetOwnsTheGesture(event)) return;
+  if (entry.hand) selectSetEntry(entry, event);
+  else if (entry.missingKey) selectMissingEntry(entry, event);
+  else selectEntry(entry, event);
+  followWithTray(entry, event);
+}
+
+/**
+ * With a tray open, a plain click on another card moves the tray to it.
+ *
+ * Opening the first tray is still a double click (or ▸, or Enter): a click on a
+ * closed grid only selects. Ctrl and Shift are left out because they build a
+ * selection across cards, and the tray would follow none of them in particular.
+ */
+let trayMovedByClick = false;
+
+function followWithTray(entry, event) {
+  if (!store.openSetKey || store.openSetKey === entry.key) return;
+  if (event.ctrlKey || event.metaKey || event.shiftKey) return;
+  store.toggleSet(entry.key);
+  trayMovedByClick = true;
+  // A tray closing above the card pulls it up, possibly out of view.
+  nextTick(() => rowElement(entry)?.scrollIntoView?.({ block: "nearest" }));
+}
+
+/**
+ * The rest of a double click whose first press moved the tray: nothing.
+ *
+ * Moving the tray moves every row below it, so the second press lands on
+ * whatever slid under the pointer - another card, a tray row, a tray button -
+ * and the `dblclick` would close the tray the first press just opened.
+ * Listened for in the capture phase so it is stopped before any of them.
+ */
+function swallowAfterTrayMove(event) {
+  if (!trayMovedByClick) return;
+  if (event.type === "click" && event.detail <= 1) {
+    trayMovedByClick = false;
+    return;
+  }
+  if (event.type === "dblclick") trayMovedByClick = false;
+  event.stopPropagation();
+  event.preventDefault();
+}
+
+/** The missing-base card keys in drawn order, which a Shift-range spans. */
+const orderedMissingKeys = computed(() =>
+  flatRows.value
+    .filter((entry) => entry.kind === "card" && entry.missingKey)
+    .map((entry) => entry.missingKey),
+);
+
+function selectMissingEntry(entry, event = {}) {
+  store.selectMissing(
+    entry.missingKey,
+    {
+      ctrl: Boolean(event.ctrlKey || event.metaKey),
+      shift: Boolean(event.shiftKey),
+    },
+    orderedMissingKeys.value,
+  );
+}
+
+// ── Hand-made sets (#1520) ────────────────────────────────────────────────
+
+/** The hand-made set ids in drawn order, which is what a Shift-range spans. */
+const orderedSetIds = computed(() =>
+  flatRows.value.filter((entry) => entry.hand).map((entry) => entry.setId),
+);
+
+function selectSetEntry(entry, event = {}) {
+  store.selectSet(
+    entry.setId,
+    {
+      ctrl: Boolean(event.ctrlKey || event.metaKey),
+      shift: Boolean(event.shiftKey),
+    },
+    orderedSetIds.value,
+  );
+}
+
+/** Right-click, Menu or Shift+F10 on a hand-made card: the set's own menu. */
+function openSetMenu(entry, x, y) {
+  if (!store.selectedSetIds.has(entry.setId)) selectSetEntry(entry);
+  emit("set-menu", { x, y, el: rowElement(entry) });
+}
+
+function onNewClick(entry) {
+  cursorId.value = entry.id;
+  createSet();
+}
+
+/** Make an empty set and open it. Its tray says what to add first. */
+async function createSet() {
+  await store.createHandMadeSet({});
+}
+
+/** Delete the selected sets, or the one under the cursor. No file is touched. */
+function deleteSets(entry) {
+  if (entry?.hand && !store.selectedSetIds.has(entry.setId)) {
+    selectSetEntry(entry);
+  }
+  return store.deleteHandMadeSets(store.selectedSets);
+}
+
+function onSlotClick({ member, event }) {
+  cursorId.value = `slot:m:${member.sha256}`;
+  if (!member.on_shelf) return;
+  selectEntry(flatRows.value[cursorIndex.value], event);
+}
+
+function onSlotMenu({ member, event }) {
+  cursorId.value = `slot:m:${member.sha256}`;
+  if (
+    member.on_shelf &&
+    openMenu(flatRows.value[cursorIndex.value], event.clientX, event.clientY)
+  ) {
+    event.preventDefault();
+  }
+}
+
+/** The group behind a set card: a set from pictures, or a hand-made one. */
+function groupOf(entry) {
+  return (
+    store.setGroups.find((group) => group.key === entry?.key) ??
+    store.handMadeGroups.find((group) => group.key === entry?.key) ??
+    null
+  );
+}
+
+/** Hide one set, derived or hand-made. Never a file. */
+function hideCard(entry) {
+  const group = groupOf(entry);
+  if (group) store.hideSets([group]);
+}
+
+function unhideCard(entry) {
+  const group = groupOf(entry);
+  if (group) store.unhideSets([group]);
+}
+
+/** Remove from set - the tile's ✕, and the member menu's verb. */
+function removeMember(member) {
+  if (openHand.value) {
+    store.removeFromHandMadeSet(openHand.value.set, [member.sha256]);
+  }
+}
+
+// The chooser: one popup for a slot's ＋ and both Fill buttons.
+const chooser = ref(null);
+const chooserQuery = ref("");
+
+const fillPictureItems = computed(() =>
+  openHand.value
+    ? fillFromPictures(
+        openHand.value.set,
+        store.workflowSets.combinations,
+        // The rows a list may offer: a model this library hides is not one.
+        store.offeredRows,
+      )
+    : [],
+);
+
+const fillSetItems = computed(() =>
+  openHand.value
+    ? fillFromSets(openHand.value.set, store.shownHandMadeSets).filter(
+        (item) => !store.hiddenModelIds.has(item.id) || store.filters.showHidden,
+      )
+    : [],
+);
+
+const chooserSlot = computed(() =>
+  SET_SLOTS.find((slot) => slot.id === chooser.value?.slotId),
+);
+
+const rowsById = computed(
+  () => new Map(store.rows.map((row) => [row.id, row])),
+);
+
+/** A shelf row for a fill item; a bare one if the shelf has lost it since. */
+function fillRow(item) {
+  return (
+    rowsById.value.get(item.id) ?? { id: item.id, display_name: item.name }
+  );
+}
+
+/**
+ * A Fill checklist's items, grouped by slot: every row is evidence of the
+ * same kind, so there is no rank to draw, only where each one will land.
+ */
+function fillSections(items, detail) {
+  const needle = chooserQuery.value.trim().toLowerCase();
+  return SET_SLOTS.map((slot) => ({
+    id: slot.id,
+    label: slot.label,
+    items: items
+      .filter((item) => item.slot === slot.id)
+      .map((item) => ({
+        id: item.id,
+        row: fillRow(item),
+        detail: detail(item),
+        checked: true,
+      }))
+      .filter((entry) => rowMatches(entry.row, needle)),
+  }));
+}
+
+const chooserSections = computed(() => {
+  const mode = chooser.value?.mode;
+  const set = openHand.value?.set;
+  if (!mode || !set) return [];
+  if (mode === "pictures") {
+    return fillSections(fillPictureItems.value, witnessCount);
+  }
+  if (mode === "set") {
+    return fillSections(fillSetItems.value, (item) => item.from.join(", "));
+  }
+  return slotSuggestions({
+    set,
+    slotId: chooser.value.slotId,
+    rows: store.offeredRows,
+    sets: store.shownHandMadeSets,
+    combinations: store.workflowSets.combinations,
+    query: chooserQuery.value,
+    order: store.pickOrder,
+  }).map((section) => ({
+    ...section,
+    items: section.held
+      ? section.items
+      : section.items.map((row) => ({
+          id: row.id,
+          row,
+          detail: formatModelSize(row.file_size),
+        })),
+  }));
+});
+
+const chooserLabel = computed(() => {
+  const name = openHand.value ? handMadeName(openHand.value.set) : "";
+  if (chooser.value?.mode === "pictures") return `Fill "${name}" from pictures`;
+  if (chooser.value?.mode === "set") return `Fill "${name}" from a set`;
+  return chooserSlot.value ? `${chooserSlot.value.add} to "${name}"` : "";
+});
+
+/** A checklist's title and context line; a slot's picker has none. */
+const chooserHeading = computed(() => {
+  const mode = chooser.value?.mode;
+  const set = openHand.value?.set;
+  if (!set || mode === "slot") return { title: "", sub: "" };
+  const into = `into ${handMadeName(set)}`;
+  const checkpoint = setCheckpoint(set);
+  if (mode === "pictures") {
+    return {
+      title: "Fill from pictures",
+      sub: `${into}, from pictures of ${
+        setCheckpoints(set).length > 1
+          ? "its checkpoints"
+          : (checkpoint?.name ?? "its checkpoint")
+      }`,
+    };
+  }
+  return {
+    title: "Fill from a set",
+    sub: checkpoint?.base_model
+      ? `${into}, from your other ${checkpoint.base_model} sets`
+      : `${into}, from your other sets`,
+  };
+});
+
+const chooserNote = computed(() => {
+  const mode = chooser.value?.mode;
+  const set = openHand.value?.set;
+  if (mode === "set" && !setCheckpoint(set)) {
+    return "Add a checkpoint to narrow this to its base model.";
+  }
+  if (
+    mode === "slot" &&
+    chooser.value.slotId !== "checkpoint" &&
+    !setCheckpoints(set).some((m) => m.on_shelf)
+  ) {
+    return "Add a checkpoint first to rank these by what works with it.";
+  }
+  return "";
+});
+
+const chooserPlaceholder = computed(() =>
+  chooserSlot.value ? `Filter ${chooserSlot.value.noun}` : "Filter",
+);
+
+const chooserEmpty = computed(() =>
+  chooser.value?.mode === "slot"
+    ? `No ${chooserSlot.value?.noun ?? "models"} on the shelf to add.`
+    : "Nothing to add: the set already holds all of them.",
+);
+
+/**
+ * What a slot's picker has added since it opened, in order: its status line,
+ * the Undo in it, and the one receipt it leaves behind when it closes.
+ */
+const picked = ref([]);
+/**
+ * What the status line says when the last thing that happened was not an
+ * add: an Undo, or a pick the set already held.
+ */
+const pickNote = ref("");
+
+const chooserStatus = computed(() => {
+  const list = picked.value;
+  const undo = list.length > 0;
+  if (pickNote.value) return { text: pickNote.value, undo };
+  if (!undo) return null;
+  const text =
+    list.length === 1
+      ? `Added ${list[0].name}`
+      : list.length === 2
+        ? `Added ${list[0].name} and ${list[1].name}`
+        : `Added ${list.length} ${chooserSlot.value?.noun ?? "models"}`;
+  return { text, undo };
+});
+
+/**
+ * Open the chooser beside the control that asked for it.
+ *
+ * @param {"slot"|"pictures"|"set"} mode
+ * @param {Element} el - the ＋ tile or fill button, which is also where focus
+ *   goes back to.
+ * @param {string} [slotId]
+ */
+function openChooser(mode, el, slotId = "") {
+  if (!openHand.value) return;
+  chooserQuery.value = "";
+  picked.value = [];
+  pickNote.value = "";
+  const box = el?.getBoundingClientRect?.();
+  chooser.value = {
+    mode,
+    slotId,
+    setId: openHand.value.set.id,
+    target: box ? [box.left, box.bottom] : [0, 0],
+    returnTo: slotId ? `slot:add:${slotId}` : cursorId.value,
+    // Decided by what the TRIGGER is, not by where the cursor was: a Fill
+    // button opened while the cursor rested on a ＋ tile is still a button.
+    triggerIsTile: Boolean(slotId),
+    // The control that asked - a ＋ tile or a Fill button in the tray's bar.
+    // A Fill button is not a cursor stop, so the cursor alone cannot return
+    // focus to it.
+    trigger: el ?? null,
+  };
+}
+
+/**
+ * The one-time "has no base model" offer for the open set, or null.
+ *
+ * Up while the checkpoint the store just recorded going into THIS set is still
+ * its checkpoint and still has no base model. The guess is the shelf's own
+ * fuzzy identification, which the shelf shows as a guess and never stores as
+ * the base model - here it only pre-fills the field.
+ */
+const baseOffer = computed(() => {
+  const added = store.checkpointAdded;
+  const set = openHand.value?.set;
+  if (!added || !set || added.setId !== set.id) return null;
+  // Whichever checkpoint went in: a two-model set's second one too.
+  const checkpoint = setCheckpoints(set).find((m) => m.id === added.modelId);
+  if (!checkpoint || checkpoint.base_model) return null;
+  const row = store.rows.find((candidate) => candidate.id === checkpoint.id);
+  const fuzzy = String(row?.base_model_source ?? "").endsWith("_fuzzy");
+  return {
+    key: `${set.id}:${checkpoint.id}`,
+    name: checkpoint.name,
+    guess: fuzzy ? (row?.base_model_canonical ?? "") : "",
+  };
+});
+
+// Once means once: leaving the set's tray takes the offer away for good.
+watch(
+  () => store.openSetKey,
+  (key) => {
+    const added = store.checkpointAdded;
+    if (added && key !== `hand:${added.setId}`) store.checkpointAdded = null;
+  },
+);
+
+/** Set base model, from the offer: the shelf's own write, then the sets again. */
+let settingBase = false;
+async function setCheckpointBase(value) {
+  const offered = store.checkpointAdded;
+  // The offer stays up while the write is in flight: a second press waits.
+  if (offered?.modelId == null || settingBase) return;
+  settingBase = true;
+  let stored;
+  try {
+    stored = await store.editModelIds([offered.modelId], { base_model: value });
+  } finally {
+    settingBase = false;
+  }
+  // Only a stored answer ends the offer: a failed write keeps it up, with the
+  // typed value, to try again. An offer that changed meanwhile is not ours.
+  if (!stored) return;
+  if (store.checkpointAdded === offered) store.checkpointAdded = null;
+  await store.loadWorkflowSets({ force: true });
+}
+
+// ── The merge offer (#1523) ───────────────────────────────────────────────
+
+/** Put the cursor on a tray stop by its key, if it is drawn. */
+function moveToKey(key) {
+  const at = flatRows.value.findIndex(
+    (entry) => entry.kind === "slot" && entry.key === key,
+  );
+  if (at >= 0) moveCursor(at);
+  return at >= 0;
+}
+
+/**
+ * Open a set's tray with the cursor on its offer strip: the card's Review N…,
+ * and Review models to add… in the set's menu.
+ */
+async function openOffer(setId) {
+  const key = `hand:${setId}`;
+  if (store.openSetKey !== key) store.toggleSet(key);
+  await nextTick();
+  moveToKey("offer");
+}
+
+/**
+ * After a merge or a Keep separate the strip, or the ghost, is gone: the
+ * cursor goes where the reader expects - `key` if it is drawn now, else the
+ * tray's first stop - and never to <body>.
+ */
+function settleCursor(key) {
+  if (key && moveToKey(key)) return;
+  if (flatRows.value.some((entry) => entry.id === cursorId.value)) return;
+  const first = flatRows.value.findIndex((entry) => entry.kind === "slot");
+  if (first >= 0) moveCursor(first);
+}
+
+/** The strip's Add all - or one ghost's Add, which lands the cursor on its tile. */
+async function mergeOffer(models) {
+  const set = openHand.value?.set;
+  const adding = models ?? set?.offer?.models ?? [];
+  if (!set || !adding.length) return;
+  await store.addToHandMadeSet(
+    set,
+    adding.map((model) => ({ model_id: model.id, slot: model.slot })),
+    { joined: true },
+  );
+  settleCursor(adding.length === 1 ? `m:${adding[0].sha256}` : "");
+}
+
+/** Sets whose card answer is still being written. */
+const answering = new Set();
+
+/**
+ * The card's own answer to a one-model offer: Add to set, or Stop asking
+ * (Keep separate). The panel goes with the answer, taking the clicked button
+ * with it, so the cursor lands on the card rather than leaving focus on <body>.
+ */
+async function answerOffer(entry, add) {
+  const set = store.handMadeSets.find((candidate) => candidate.id === entry.setId);
+  // The offer stays drawn until the write's refetch lands: a second click
+  // meanwhile is the same answer, not a second write.
+  if (!set?.offer || answering.has(set.id)) return;
+  answering.add(set.id);
+  try {
+    if (add) {
+      await store.addToHandMadeSet(
+        set,
+        set.offer.models.map((model) => ({ model_id: model.id, slot: model.slot })),
+        { joined: true },
+      );
+    } else {
+      await store.keepOutOfHandMadeSet(set);
+    }
+  } finally {
+    answering.delete(set.id);
+  }
+  const at = flatRows.value.findIndex((row) => row.id === entry.id);
+  if (at >= 0) moveCursor(at);
+}
+
+/** Keep separate: the whole offer, or one ghost (Delete on it). */
+async function keepSeparate(models) {
+  const set = openHand.value?.set;
+  if (!set?.offer) return;
+  await store.keepOutOfHandMadeSet(set, models);
+  settleCursor("");
+}
+
+// ── Drops from the Models rail (design B) ─────────────────────────────────
+//
+// A hand-made card takes each model into the slot its kind goes to, a slot in
+// the open tray takes the models it fits (`ModelSetSlotsPanel` refuses the
+// rest), and New workflow set makes a set holding them. Evidence cards are
+// never targets: they dim for the whole drag. Each drop is one write and one
+// receipt with Undo, the ＋ chooser's own.
+//
+// Every target says so from the moment the drag starts, not only under the
+// pointer. The drag is the rail's own pointer drag (see `ModelsRail.vue`):
+// targets carry `data-rail-drop`, light up from `store.railOver`, and take
+// the drop as a `rail-drop` event.
+
+const sidebarStore = useSidebarStore();
+
+/** The card or tile the pointer is over with a rail drag, by row key. */
+const dropKey = computed(() =>
+  railTargets.value.has(store.railOver) ? store.railOver : "",
+);
+
+/**
+ * Every target of the drag in the air, by row key: `{label, refused}`, where
+ * `refused` is why a hand-made set will not take it (the card then refuses the
+ * drop and says why under the pointer). Empty while nothing is dragged.
+ */
+const railTargets = computed(() => {
+  const rows = store.railDrag;
+  const targets = new Map();
+  if (!rows?.length) return targets;
+  const setsById = new Map(store.handMadeSets.map((set) => [set.id, set]));
+  for (const entry of flatRows.value) {
+    if (entry.kind === "new") {
+      targets.set("new", {
+        label: `New set with ${store.railDragWhat}`,
+        refused: "",
+      });
+    } else if (entry.kind === "card" && entry.hand) {
+      const set = setsById.get(entry.setId);
+      if (!set) continue;
+      targets.set(entry.key, {
+        label: `Add ${store.railDragWhat}`,
+        refused: store.railDropRefusal(set, rows),
+      });
+    }
+  }
+  return targets;
+});
+
+/**
+ * A drop handed over by the rail (`rail-drop`). The rail only hands it to a
+ * target that does not refuse it; the check is repeated where the write is.
+ */
+async function onRailDrop(entry) {
+  const rows = store.railDrag;
+  const target = railTargets.value.get(entry.kind === "new" ? "new" : entry.key);
+  if (!rows?.length || !target || target.refused) return;
+  store.railDrag = null;
+  if (entry.kind === "new") {
+    await store.createSetFromRows(rows);
+    return;
+  }
+  const set = store.handMadeSets.find((candidate) => candidate.id === entry.setId);
+  if (set) await store.addRowsToHandMadeSet(set, rows);
+}
+
+/** A drop on one slot of the open tray, already checked to fit it. */
+async function dropOnSet(set, slotId) {
+  const rows = store.railDrag;
+  store.railDrag = null;
+  if (rows?.length) await store.addRowsToHandMadeSet(set, rows, slotId);
+}
+
+/** How many shelf models fit the open set: the tray's Models · N fit. */
+const openFitCount = computed(() =>
+  openHand.value
+    ? setFits(
+        openHand.value.set,
+        store.railRows,
+        store.workflowSets.combinations,
+      )
+        .rows.length
+    : 0,
+);
+
+/** Models · N fit: the rail, open on its Models tab, with Fits on this set. */
+function showFitsInRail() {
+  if (!openHand.value) return;
+  store.railFitsSetId = openHand.value.set.id;
+  sidebarStore.setModelsRailOpen(true);
+}
+
+/** Exposed so the shelf can open a new set with Fill from pictures ready. */
+function openFill(mode) {
+  const button = gridEl.value?.querySelector?.(
+    "[data-testid='model-set-slots-panel'] .msp__bar",
+  );
+  openChooser(mode, button);
+}
+
+function closeChooser() {
+  const { returnTo, trigger, triggerIsTile, slotId, setId } =
+    chooser.value ?? {};
+  chooser.value = null;
+  // What the popup added while open becomes ONE receipt now it has closed
+  // (#1573, #1574), rather than a pill per click replacing the one before.
+  const set = store.handMadeSets.find((candidate) => candidate.id === setId);
+  if (set && picked.value.length) {
+    const slot = SET_SLOTS.find((candidate) => candidate.id === slotId);
+    store.announceAdded(set, picked.value, slot?.noun ?? "models");
+  }
+  picked.value = [];
+  pickNote.value = "";
+  // A Fill button still on screen takes its focus back directly. A ＋ tile
+  // goes through the cursor, which also keeps the grid's roving tab stop on
+  // it.
+  if (trigger?.isConnected && !triggerIsTile) {
+    trigger.focus?.();
+    return;
+  }
+  // Programmatic overlays drop focus to <body>; put it back on the tile, or,
+  // when that is gone too, on the open set's card - never nowhere.
+  const at = flatRows.value.findIndex((entry) => entry.id === returnTo);
+  if (at >= 0) {
+    moveCursor(at);
+    return;
+  }
+  const card = flatRows.value.findIndex(
+    (entry) => entry.kind === "card" && entry.key === store.openSetKey,
+  );
+  moveCursor(card >= 0 ? card : (firstStop(0, 1) ?? 0));
+}
+
+/** Models a slot pick is still adding, so a quick second click is not a second add. */
+const picking = new Set();
+
+async function addChosen(ids) {
+  const set = openHand.value?.set;
+  const mode = chooser.value?.mode;
+  if (!set || !mode) return;
+  if (mode === "slot") {
+    await pickIntoSlot(set, chooser.value.slotId, ids);
+    return;
+  }
+  const items =
+    mode === "pictures" ? fillPictureItems.value : fillSetItems.value;
+  const wanted = new Set(ids);
+  const members = items
+    .filter((item) => wanted.has(item.id))
+    .map((item) => ({ model_id: item.id, slot: item.slot }));
+  closeChooser();
+  await store.addToHandMadeSet(set, members);
+}
+
+/**
+ * One click in a slot's popup adds that model (#1520 feedback: a tick and an
+ * Add button was two decisions for one). The Checkpoint slot holds one, so its
+ * popup closes, the add raises its own receipt, and the cursor lands on the
+ * checkpoint just added. Any other slot takes any number: the popup stays open,
+ * the added model drops out of the list, the status line says what went in, and
+ * the receipt waits for the popup to close (#1574).
+ */
+async function pickIntoSlot(set, slotId, ids) {
+  const fresh = ids.filter((id) => !picking.has(id));
+  if (!fresh.length) return;
+  fresh.forEach((id) => picking.add(id));
+  const single = slotId === "checkpoint";
+  if (single) closeChooser();
+  let result;
+  try {
+    result = await store.addToHandMadeSet(
+      set,
+      fresh.map((id) => ({ model_id: id, slot: slotId })),
+      { quiet: !single },
+    );
+  } finally {
+    fresh.forEach((id) => picking.delete(id));
+  }
+  if (!single) {
+    // By what the server stored, not what was asked: a model the set already
+    // held is not an add, and must not be undone as one.
+    const stored = new Set(result?.added ?? []);
+    const added = fresh
+      .map((id) => rowsById.value.get(id))
+      .filter((row) => row && stored.has(row.sha256))
+      .map((row) => ({
+        model_id: row.id,
+        slot: slotId,
+        sha256: row.sha256,
+        name: modelName(row).text || row.filename,
+      }));
+    // The popup may have closed while the add was out - or another opened on
+    // the same set - so its receipt is gone and this one is raised on its own.
+    const open = chooser.value;
+    if (
+      open?.mode === "slot" &&
+      open.setId === set.id &&
+      open.slotId === slotId
+    ) {
+      picked.value = [...picked.value, ...added];
+      // Stored nothing, with no error (the error is its own notice): say so
+      // rather than leave the click looking ignored.
+      pickNote.value =
+        result && !result.added?.length
+          ? "Already in this set, nothing added"
+          : "";
+    } else {
+      store.announceAdded(
+        set,
+        added,
+        SET_SLOTS.find((s) => s.id === slotId)?.noun ?? "models",
+      );
+    }
+    return;
+  }
+  const sha = store.rows.find((row) => row.id === fresh[0])?.sha256;
+  const at = flatRows.value.findIndex((entry) => entry.id === `slot:m:${sha}`);
+  if (at >= 0) moveCursor(at);
+}
+
+/** The status line's Undo: take the last add back out, quietly. */
+async function undoLastPick() {
+  const { setId, slotId } = chooser.value ?? {};
+  const set = store.handMadeSets.find((candidate) => candidate.id === setId);
+  const last = picked.value.at(-1);
+  if (!set || !last) return;
+  picked.value = picked.value.slice(0, -1);
+  const done = await store.removeFromHandMadeSet(set, [last.sha256], {
+    quiet: true,
+  });
+  const still =
+    chooser.value?.setId === setId && chooser.value?.slotId === slotId;
+  if (done) {
+    if (still) pickNote.value = `Took out ${last.name}`;
+  } else if (still) {
+    // Back in the set: the line goes back to the adds, not an earlier undo.
+    picked.value = [...picked.value, last];
+    pickNote.value = "";
+  } else {
+    // The popup closed while the undo was out, and it failed: the model is
+    // still in the set, so it still gets its receipt.
+    const noun = SET_SLOTS.find((slot) => slot.id === slotId)?.noun;
+    store.announceAdded(set, [last], noun ?? "models");
+  }
+}
+
+defineExpose({ openFill, openOffer, selectedCardGroups });
+
+/**
+ * Right-click a card or a tray row: the shelf's full verb inventory, at the
+ * pointer.
+ *
+ * The file-manager rule the row list already follows: right-clicking something
+ * that is NOT selected selects it and acts on it alone; right-clicking one of
+ * forty selected models leaves the forty alone. `ModelShelf.vue` owns the menu,
+ * because there is one `ShelfSelectionBar` and two views feeding it.
+ *
+ * Takes the ENTRY, not a model id: a set's head is drawn twice while its tray
+ * is open, and the occurrence decides whether its card lights.
+ */
+function openMenu(entry, x, y) {
+  // A missing-base card's menu is its own pill's: Replace is its verb.
+  if (entry?.kind === "card" && entry.missingKey) {
+    if (!store.selectedMissingKeys.has(entry.missingKey)) selectMissingEntry(entry);
+    emit("missing-menu", { x, y, el: rowElement(entry) });
+    return true;
+  }
+  const id = modelIdOf(entry);
+  if (!selectable(id)) return false;
+  if (!store.isSelected(id)) selectEntry(entry, {});
+  // The card, when it is one: Clone set to edit is about that card's set.
+  emit("menu", { x, y, setKey: entry.kind === "card" ? entry.key : "" });
+  return true;
+}
+
+function onRowMenu(entry, event) {
+  cursorId.value = entry.id;
+  if (entry.hand) {
+    event.preventDefault();
+    openSetMenu(entry, event.clientX, event.clientY);
+    return;
+  }
+  if (openMenu(entry, event.clientX, event.clientY)) {
+    event.preventDefault();
+  }
+}
+
+/** A tray row was clicked. The tray reports the member; the cursor follows it. */
+function onMemberClick({ member, event }) {
+  cursorId.value = `member:${member.id}`;
+  selectEntry(flatRows.value[cursorIndex.value], event);
+}
+
+/** Click, Ctrl+click, Shift+click - the row list's own three gestures. */
+function selectEntry(entry, event) {
+  const id = modelIdOf(entry);
+  if (!selectable(id)) return;
+  const ctrl = Boolean(event?.ctrlKey || event?.metaKey);
+  const shift = Boolean(event?.shiftKey);
+  // Ctrl or Space on a card drawn unlit adds it, as it looks: the model is
+  // already selected from the tray, so the toggle would REMOVE it instead.
+  if (
+    ctrl &&
+    entry.kind === "card" &&
+    shownInTray(id) &&
+    store.isSelected(id)
+  ) {
+    const next = new Set(trayPicked.value);
+    next.delete(id);
+    trayPicked.value = next;
+    store.anchorOccurrence = entry.id;
+    store.anchorId = id;
+    return;
+  }
+  // Read before the store moves the anchor. Ctrl wins over Shift, as it does there.
+  const rangeHeads = shift && !ctrl ? rangeCardHeads(entry.id) : null;
+  const before = store.selectedIds;
+  store.selectFromClick(id, { ctrl, shift }, orderedEntries.value, entry.id);
+  const after = store.selectedIds;
+  const fromTray = entry.kind === "member" || entry.kind === "slot";
+  if (rangeHeads) {
+    // A range lights the cards it passed over, and no card it did not.
+    trayPicked.value = new Set([...after].filter((m) => !rangeHeads.has(m)));
+  } else if (ctrl) {
+    // What a card adds was not selected before, so it was never tray-picked.
+    const next = new Set([...trayPicked.value].filter((m) => after.has(m)));
+    if (fromTray) {
+      for (const m of after) if (!before.has(m)) next.add(m);
+    }
+    trayPicked.value = next;
+  } else {
+    trayPicked.value = fromTray ? new Set(after) : new Set();
+  }
+  ownSelection = after;
+}
+
+function onMemberMenu({ member, event }) {
+  cursorId.value = `member:${member.id}`;
+  const entry = flatRows.value.find((row) => row.id === cursorId.value);
+  if (openMenu(entry, event.clientX, event.clientY)) {
+    event.preventDefault();
+  }
+}
+
+// ── The roving cursor ─────────────────────────────────────────────────────
+
+/** Is this flat entry somewhere the cursor can rest? Holes are not. */
+function isStop(entry) {
+  return ["card", "member", "slot", "new"].includes(entry?.kind);
+}
+
+/**
+ * Up or Down inside a hand-made tray: the first tile of the slot above or below,
+ * or out of the tray - Up to its card, Down to the row after it.
+ */
+function slotStop(index, direction) {
+  const rows = flatRows.value;
+  const here = rows[index];
+  for (let i = index; i >= 0 && i < rows.length; i += direction) {
+    const entry = rows[i];
+    if (entry?.kind !== "slot") {
+      if (direction < 0) {
+        return rows.findIndex(
+          (row) => row.kind === "card" && row.key === store.openSetKey,
+        );
+      }
+      return firstStop(i, 1);
+    }
+    if (entry.slotIndex !== here.slotIndex) {
+      if (direction > 0) return i;
+      // The FIRST tile of the slot above, not its last.
+      let first = i;
+      while (
+        rows[first - 1]?.kind === "slot" &&
+        rows[first - 1].slotIndex === entry.slotIndex
+      ) {
+        first -= 1;
+      }
+      return first;
+    }
+  }
+  return null;
+}
+
+/** First index at or after `index` that is a real row, travelling in `step`. */
+function firstStop(index, step) {
+  for (let i = index; i >= 0 && i < flatRows.value.length; i += step) {
+    if (isStop(flatRows.value[i])) return i;
+  }
+  return null;
+}
+
+/**
+ * Where the open tray's rows begin and end in `flatRows`.
+ *
+ * `null` with no tray open. In List the block is exactly the member entries -
+ * the padding only tops a block up to a whole number of TRAY rows, and a
+ * one-column tray is already whole - so scanning for them bounds it exactly.
+ */
+const trayBounds = computed(() => {
+  const rows = flatRows.value;
+  // A hand-made set's tray is `slot` entries (#1520); an evidence tray's are
+  // `member` entries. Only one tray is open at a time.
+  const first = rows.findIndex(
+    (entry) => entry.kind === "member" || entry.kind === "slot",
+  );
+  if (first < 0) return null;
+  const kind = rows[first].kind;
+  let last = first;
+  while (last + 1 < rows.length && rows[last + 1].kind === kind) last += 1;
+  return { first, last, kind };
+});
+
+/**
+ * Where a vertical step from the cursor lands.
+ *
+ * **Two grids of different widths, so a crossing is not arithmetic.** A List
+ * tray is one column whatever the card grid above it is doing, so the column a
+ * reader is travelling down has no counterpart on the other side. Stepping by
+ * the outer count carried that column offset into the tray: from the third card
+ * of a row, Down landed on the tray's third row rather than its first, and with
+ * a short tray it stepped over the tray entirely.
+ *
+ * So a crossing lands at the EDGE it arrives at - the tray's first row coming
+ * down, its last coming up - and inside the tray the step is one row, which is
+ * what the tray is drawn as.
+ */
+function verticalTarget(direction) {
+  const from = cursorIndex.value;
+  const cols = Math.max(1, columns.value);
+  const tray = trayBounds.value;
+  // A slots tray is never drawn in the grid's columns either: its tiles wrap
+  // per slot. Inside it, Up and Down are `slotStop`'s (see `onHandKey`), so
+  // only the crossing is decided here.
+  if (tray && (tray.kind === "slot" || trayColumns.value === 1)) {
+    if (flatRows.value[from]?.kind === "member") {
+      return firstStop(from + direction, direction);
+    }
+    const target = from + direction * cols;
+    if (direction > 0 && from < tray.first && target >= tray.first) {
+      return tray.first;
+    }
+    if (direction < 0 && from > tray.last && target <= tray.last) {
+      return tray.last;
+    }
+  }
+  return verticalStop(from + direction * cols, cols, direction);
+}
+
+/**
+ * The row above or below `index`, keeping its column.
+ *
+ * Steps by WHOLE ROWS over the padding holes, never one index at a time: a
+ * ragged last member row leaves holes in the middle of the index space, and a
+ * linear scan walks out of the column the reader is travelling down.
+ */
+function verticalStop(index, cols, direction) {
+  const total = flatRows.value.length;
+  for (let i = index; i >= 0 && i < total; i += direction * cols) {
+    if (isStop(flatRows.value[i])) return i;
+  }
+  return firstStop(Math.min(Math.max(index, 0), total - 1), direction);
+}
+
+/**
+ * The DOM row for one flat entry.
+ *
+ * Scoped by kind, not by key: a stack's seed holds the same key twice, once in
+ * the grid and once in the panel. A key is arbitrary text, so it is compared
+ * rather than spliced into a selector.
+ */
+function rowElement(entry) {
+  if (!entry) return undefined;
+  if (entry.kind === "new") return gridEl.value?.querySelector(".msg__newrow");
+  const selector =
+    entry.kind === "member" || entry.kind === "slot"
+      ? ".msp__member"
+      : ".msg__row";
+  return Array.from(gridEl.value?.querySelectorAll(selector) ?? []).find(
+    (element) => element.dataset.key === entry.key,
+  );
+}
+
+/**
+ * Put the cursor on whichever real row `index` names, if there is one.
+ *
+ * `extend` is Shift+arrow: the cursor moves AND the range grows, which is the
+ * keyboard's Shift+click. Without it the arrows only move, which is the roving
+ * contract - a reader can walk a grid of cards without arming a verb against
+ * every one they pass.
+ */
+function moveCursor(index, extend = false) {
+  const entry = flatRows.value[index];
+  if (!isStop(entry)) return;
+  cursorId.value = entry.id;
+  // Into a hand-made tray, the cursor is on FILES: a set selection left behind
+  // would turn the Delete a reader aims at a member into a set delete.
+  if (entry.kind === "slot") store.clearSetSelection();
+  if (extend) selectEntry(entry, { shiftKey: true });
+  nextTick(() => rowElement(entry)?.focus());
+}
+
+/**
+ * What an event inside the grid must NOT be treated as a grid gesture.
+ *
+ * `onKeyDown` is on the grid, so it sees every press inside it, including the
+ * ones aimed at the panel's own buttons - *Don't fold* and Close, which are real
+ * focusable controls. Unguarded, Enter on *Don't fold* was `preventDefault`ed
+ * and closed the stack instead of pressing the button, while Space still
+ * activated it: the same button answering two keys differently (#1479 review).
+ *
+ * **A CLICK asks the same question and needs the same answer.** The card's ▸ is
+ * a button inside a row that now selects, so its click bubbles out of the button
+ * and into the row: pressing "show me what is in this set" would replace the
+ * reader's selection with that card and arm a model they never pointed at for a
+ * verb with no undo. A disclosure control is navigation, not a pick.
+ *
+ * The row itself is the tab stop and is a plain div, so a gesture the grid IS
+ * meant to own never matches this.
+ */
+function targetOwnsTheGesture(event) {
+  return Boolean(
+    event.target?.closest?.(
+      "button, a[href], input, select, textarea, [role='button']",
+    ),
+  );
+}
+
+/**
+ * The context-menu key, which a row owes as much as it owes the right button.
+ *
+ * Two spellings, because two platforms spell it differently and a browser
+ * reports whichever the keyboard sent: the dedicated Menu key, and Shift+F10.
+ * The row list's own test, restated rather than imported for two lines.
+ */
+function isMenuKey(event) {
+  return event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey);
+}
+
+/**
+ * Up/Down pressed in the open tray's header bar (the Grid/List switch, Close).
+ *
+ * The bar sits between the card and its members, so Down enters the tray at its
+ * first member and Up returns to the card, wherever the cursor last was: a
+ * mouse click on the switch does not move it. Returns true when handled.
+ */
+function headerStep(event) {
+  const down = event.key === "ArrowDown";
+  if (!down && event.key !== "ArrowUp") return false;
+  if (!event.target?.closest?.(".msp__header")) return false;
+  event.preventDefault();
+  const rows = flatRows.value;
+  moveCursor(
+    down
+      ? rows.findIndex((e) => e.kind === "member" || e.kind === "slot")
+      : rows.findIndex((e) => e.kind === "card" && e.key === store.openSetKey),
+  );
+  return true;
+}
+
+/**
+ * The keys a hand-made set, its tray and the New tile answer differently.
+ *
+ * @returns {boolean} true when the press was handled here.
+ */
+function onHandKey(event, entry) {
+  const plain = !event.ctrlKey && !event.metaKey && !event.altKey;
+  // Not on a held key: each repeat would make another empty set.
+  if (
+    plain &&
+    !event.shiftKey &&
+    !event.repeat &&
+    (event.key === "n" || event.key === "N")
+  ) {
+    event.preventDefault();
+    createSet();
+    return true;
+  }
+  if (entry?.kind === "new" && (event.key === "Enter" || event.key === " ")) {
+    event.preventDefault();
+    createSet();
+    return true;
+  }
+  if (entry?.kind === "slot") {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const to = slotStop(
+        cursorIndex.value,
+        event.key === "ArrowDown" ? 1 : -1,
+      );
+      if (to != null && to >= 0) moveCursor(to, event.shiftKey);
+      return true;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      if (entry.offer) {
+        mergeOffer();
+      } else if (entry.ghost) {
+        mergeOffer([entry.ghost]);
+      } else if (!entry.member) {
+        openChooser("slot", rowElement(entry), entry.slotId);
+      } else if (entry.member.on_shelf) {
+        openWorksWith(entry.member);
+      }
+      return true;
+    }
+    if (
+      (event.key === "Delete" || event.key === "Backspace") &&
+      (entry.ghost || entry.offer)
+    ) {
+      // Keep one model out (a ghost) or the whole offer (the strip). Stopped,
+      // so the shelf's file Delete never sees a press aimed at a row that
+      // holds no file.
+      event.preventDefault();
+      event.stopPropagation();
+      if (!event.repeat) keepSeparate(entry.ghost ? [entry.ghost] : undefined);
+      return true;
+    }
+    if (event.key === "Backspace" && entry.member) {
+      // Remove from set, the keyboard's ✕. Delete stays the shelf's file
+      // delete, which warns - the design keeps that meaning on a member.
+      event.preventDefault();
+      removeMember(entry.member);
+      return true;
+    }
+    return false;
+  }
+  if (entry?.kind === "card" && !entry.hand) {
+    if (event.key !== "Delete" && event.key !== "Backspace") return false;
+    // A set from pictures cannot be deleted, only hidden: the key is aimed at
+    // the card under the cursor, never a selection. Stopped, so the shelf's
+    // file Delete never takes a press aimed at the set for its base model:
+    // the file verbs stay on the menu and the bar.
+    event.preventDefault();
+    event.stopPropagation();
+    if (!event.repeat) {
+      if (groupOf(entry)?.hidden) unhideCard(entry);
+      else hideCard(entry);
+    }
+    return true;
+  }
+  if (!entry?.hand) return false;
+  if (event.key === "Delete" || event.key === "Backspace") {
+    event.preventDefault();
+    event.stopPropagation();
+    // Not on a held key: one press, one delete, as N is one press, one set.
+    if (!event.repeat) deleteSets(entry);
+    return true;
+  }
+  if (event.key === "F2") {
+    event.preventDefault();
+    selectSetEntry(entry);
+    emit("rename-set");
+    return true;
+  }
+  if (event.key === " ") {
+    event.preventDefault();
+    selectSetEntry(entry, { ctrlKey: true });
+    return true;
+  }
+  if (isMenuKey(event)) {
+    event.preventDefault();
+    const box = rowElement(entry)?.getBoundingClientRect?.();
+    openSetMenu(entry, box ? box.left + 24 : 0, box ? box.bottom : 0);
+    return true;
+  }
+  return false;
+}
+
+function onKeyDown(event) {
+  if (headerStep(event)) return;
+  if (targetOwnsTheGesture(event)) return;
+  const entry = flatRows.value[cursorIndex.value];
+  const extend = event.shiftKey;
+  if (onHandKey(event, entry)) return;
+  switch (event.key) {
+    case "ArrowRight":
+      event.preventDefault();
+      moveCursor(firstStop(cursorIndex.value + 1, 1), extend);
+      return;
+    case "ArrowLeft":
+      event.preventDefault();
+      moveCursor(firstStop(cursorIndex.value - 1, -1), extend);
+      return;
+    case "ArrowDown":
+      event.preventDefault();
+      moveCursor(verticalTarget(1), extend);
+      return;
+    case "ArrowUp":
+      event.preventDefault();
+      moveCursor(verticalTarget(-1), extend);
+      return;
+    case " ":
+      // Space toggles, exactly as it does on a row: the keyboard's Ctrl+click,
+      // so a reader can build a selection without a pointer. Enter is NOT this
+      // key here - it already opens a tray and asks a model what it has run
+      // with, and those are the gestures this grid is read with.
+      //
+      // Refused before it is swallowed: a row with no shelf model behind it has
+      // no answer to Space, and `preventDefault` on a press nothing then handles
+      // takes the page's own scroll away for nothing.
+      if (entry?.kind === "card" && entry.missingKey) {
+        event.preventDefault();
+        selectMissingEntry(entry, { ctrlKey: true });
+        return;
+      }
+      if (!selectable(modelIdOf(entry))) return;
+      event.preventDefault();
+      selectCursor({ ctrlKey: true });
+      return;
+    case "F2":
+      // The rename key, which the verb menu advertises with an `F2` keycap - so
+      // it has to answer here or the cap is a lie on this screen. It renames the
+      // model under the CURSOR, as it does on a row: the press makes that one
+      // the selection first, rather than renaming whichever of forty the bar
+      // happens to hold.
+      if (!selectable(modelIdOf(entry))) return;
+      event.preventDefault();
+      selectCursor({});
+      emit("rename");
+      return;
+    case "Enter":
+      event.preventDefault();
+      // A card opens its tray; a member in that tray answers "what else has this
+      // model run with". **Now that a tray row IS one model, the keyboard reaches
+      // every one of them** - the earlier shape had a row per combination and
+      // could only offer the file it was named after, which was a real gap
+      // (#1479 review). The member cards' own name buttons stay at
+      // `tabindex="-1"` because the grid owns Tab; this is how a keyboard gets
+      // there.
+      if (entry?.kind === "card") {
+        store.toggleSet(entry.key);
+      } else if (entry?.kind === "member") {
+        openWorksWith(openMembers.value[entry.memberIndex]);
+      }
+      return;
+    case "Escape":
+      // An open tray first, and the press is stopped so it cannot ALSO reach
+      // the shelf's window listener and clear the selection on the way out:
+      // one Escape, one thing undone. With no tray open it is let through, and
+      // clearing the selection is what it means.
+      if (store.openSetKey) {
+        event.preventDefault();
+        event.stopPropagation();
+        closePanel();
+      }
+      return;
+    default:
+      if (isMenuKey(event)) {
+        // Over the row's own box, since there is no pointer to anchor to - the
+        // same offset the row list opens its menu at.
+        const box = rowElement(entry)?.getBoundingClientRect?.();
+        const x = box ? box.left + 24 : 0;
+        const y = box ? box.bottom : 0;
+        if (openMenu(entry, x, y)) event.preventDefault();
+      }
+  }
+}
+</script>
+
+<style scoped>
+.msg {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+/* The scroller carries the padding so the grid below is the bare track:
+   `measure()` reads the grid's `clientWidth`, which INCLUDES its own padding,
+   and a padded grid would be measured wider than the space the columns have. */
+.msg__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-4);
+}
+
+/* The closed Models rail's edge tab (34px) floats over this edge: the cards
+   stop short of it, as the Workflows cards do (`.wfv-scroll--edge-tab`). */
+.msg__scroll--edge-tab {
+  padding-right: calc(34px + var(--space-3));
+}
+
+.msg__grid {
+  display: grid;
+  grid-template-columns: repeat(var(--wf-columns), minmax(0, 1fr));
+  gap: var(--wf-gap);
+  align-items: start;
+}
+
+.msg__cell {
+  position: relative;
+  border-radius: var(--radius-md);
+}
+
+/* A rail drag (design B). Every target wears a dashed rim for the whole drag;
+   the one under the pointer fills with the active wash, solid rim, and says
+   what the drop does. An OVERLAY over the card rather than a ring on it, for
+   the reason `ModelSetCard`'s selection mark records: an inset shadow paints
+   under the cover's opaque pictures. A refused set keeps a neutral rim and
+   says why, hatched like the sidebar's refused rows. Evidence cards, never
+   targets, fade. */
+.msg__drop {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-raised);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-3);
+  border: var(--focus-width) dashed var(--active-bar);
+  border-radius: var(--radius-md);
+  pointer-events: none;
+  transition: background var(--dur-1) var(--ease-standard);
+}
+
+.msg__drop--over {
+  border-style: solid;
+  background: var(--active-wash);
+  box-shadow: var(--selection-ring);
+}
+
+.msg__drop--refused {
+  border-color: rgba(var(--v-theme-on-surface), 0.24);
+}
+
+.msg__drop--refused.msg__drop--over {
+  background: repeating-linear-gradient(
+    45deg,
+    transparent 0 var(--space-2),
+    rgba(var(--v-theme-border), 0.45) var(--space-2) var(--space-3)
+  );
+  box-shadow: none;
+}
+
+.msg__drop-label {
+  display: none;
+  max-width: 100%;
+  padding: var(--space-1) var(--space-3);
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: rgb(var(--v-theme-surface));
+  box-shadow: var(--elevation-2);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: rgb(var(--v-theme-on-surface));
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msg__drop--over .msg__drop-label {
+  display: block;
+}
+
+/* A hand-made set that refuses the drag fades like an evidence card, all but
+   its mark, which has to stay legible to say why under the pointer. */
+.msg__row--refused .msg__cell > :not(.msg__drop) {
+  opacity: var(--opacity-disabled);
+}
+
+.msg__row--dim {
+  opacity: var(--opacity-disabled);
+  transition: opacity var(--dur-1) var(--ease-standard);
+}
+
+.msg__state--inline {
+  padding: 0 0 var(--space-4);
+}
+
+/* The New workflow set tile: a dashed card-sized target, the design's ＋. It
+   is as tall as the row it sits in: the grid top-aligns its cards, so the
+   tile's row opts back into stretching and hands the height down to the tile.
+   `aspect-ratio` is what is left when nothing in the row is taller: the
+   tile's whole height in a row it has to itself, its floor beside a card. */
+.msg__newrow {
+  display: flex;
+  align-self: stretch;
+}
+
+.msg__newrow .msg__cell {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+}
+
+/* `min-width: 0` or the ratio works backwards: a stretched tile would claim
+   the width its new height implies and spill over the next column. */
+.msg__new {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  box-sizing: border-box;
+  aspect-ratio: 6 / 5;
+  border: 1px dashed rgb(var(--v-theme-border));
+  border-radius: var(--radius-md);
+  color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
+  cursor: pointer;
+}
+
+.msg__new:hover {
+  background: var(--hover-wash);
+  color: rgb(var(--v-theme-on-surface));
+}
+
+.msg__new-label {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.msg__kbd {
+  padding: 0 var(--space-2);
+  border: 1px solid rgb(var(--v-theme-border));
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: var(--text-2xs);
+}
+
+.msg__state {
+  margin: 0;
+  padding: var(--space-6) var(--space-5);
+  max-width: 68ch;
+  font-size: var(--text-sm);
+  color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
+}
+
+.msg__lead {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-md);
+  color: rgb(var(--v-theme-on-surface));
+}
+
+.msg__hidden {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: var(--space-4) 0 0;
+  font-size: var(--text-sm);
+  color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
+}
+</style>

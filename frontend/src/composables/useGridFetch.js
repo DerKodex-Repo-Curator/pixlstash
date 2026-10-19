@@ -6,6 +6,7 @@ import {
   getLikenessGroups,
   faceSearch,
   characterFaceSearch,
+  setLikenessSearch,
   likenessSearch,
   searchPictures,
   listPicturesByIds,
@@ -16,12 +17,20 @@ import { useEntityListsStore } from "../stores/useEntityListsStore";
 import { getStackColor, getStackThreshold } from "../utils/utils.js";
 import { cutFaceSuggestions } from "../utils/faceSuggestionCut.js";
 import {
+  cutSetSuggestions,
+  setCohesion,
+  SET_SUGGEST_FALLBACK_THRESHOLD,
+} from "../utils/setSuggestionCut.js";
+import {
   getPictureId,
   PIL_IMAGE_EXTENSIONS,
   VIDEO_EXTENSIONS,
 } from "../utils/media.js";
 import { debounce } from "../utils/utils";
-import { useFilterStore } from "../stores/useFilterStore";
+import {
+  useFilterStore,
+  workflowFilterParams,
+} from "../stores/useFilterStore";
 import { useGridStore } from "../stores/useGridStore";
 import { useSelectionStore } from "../stores/useSelectionStore";
 import { useUserPrefsStore } from "../stores/useUserPrefsStore";
@@ -84,6 +93,11 @@ export function useGridFetch(
     faceSearchThreshold,
     faceSearchMinRefs,
     faceSearchRanked,
+    setSuggestSet,
+    setSuggestThreshold,
+    setSuggestMinTags,
+    setSuggestRanked,
+    textSearchResults,
   },
   props,
   {
@@ -95,7 +109,6 @@ export function useGridFetch(
     triggerNewImageHighlight,
     updateVisibleThumbnails,
     fetchThumbnailsBatch,
-    maybeRefreshOverlayForComfyui,
     startSmartScoreProgress,
     completeSmartScoreProgress,
     onGridFetchStart,
@@ -202,10 +215,16 @@ export function useGridFetch(
       similarityCharacter: sortStore.selectedSimilarityCharacter ?? null,
       comfyuiModelFilter: filterStore.comfyuiModelFilter ?? [],
       comfyuiLoraFilter: filterStore.comfyuiLoraFilter ?? [],
+      // Changes which pictures the grid shows, so an unforced fetch must not
+      // early-return as a no-op against the previous state's key.
+      workflowFilter: new URLSearchParams(
+        workflowFilterParams(filterStore.workflowFilter),
+      ).toString(),
       referenceFolderIdFilter: referenceFolderIdFilter.value ?? null,
       filePathPrefixFilter: filePathPrefixFilter.value ?? null,
       importSourceFolderFilter: importSourceFolderFilter.value ?? null,
-      unassignedOnlyFilter: filterStore.unassignedOnlyFilter ?? false,
+      noCharacterFilter: filterStore.noCharacterFilter ?? false,
+      noSetFilter: filterStore.noSetFilter ?? false,
       applyTagFilter: userPrefsStore.applyTagFilter ?? false,
       reverseImageSearchPictureIds: reverseImageSearchPictureIds?.value ?? [],
       faceLikenessSearchFaceId: faceLikenessSearchFaceId?.value ?? null,
@@ -220,10 +239,39 @@ export function useGridFetch(
       faceSearchMinRefs: faceSearchCharacter?.value
         ? (faceSearchMinRefs?.value ?? null)
         : null,
+      // Same reasoning for the set suggestion's two knobs.
+      setSuggestSetId: setSuggestSet?.value?.id ?? null,
+      setSuggestThreshold: setSuggestSet?.value
+        ? (setSuggestThreshold?.value ?? null)
+        : null,
+      setSuggestMinTags: setSuggestSet?.value
+        ? (setSuggestMinTags?.value ?? null)
+        : null,
+      // Narrowing to text matches changes which pictures the grid shows.
+      textMatchesOnly: searchStore.textMatchesOnly === true,
     });
   }
 
-  function _appendSelectionParams(params) {
+  function _unassignedFilterOn() {
+    return !!(filterStore.noCharacterFilter || filterStore.noSetFilter);
+  }
+
+  /**
+   * "No character" and "In no set" are halves of one backend view,
+   * `character_id=UNASSIGNED`: both on is the whole of it (neither a person
+   * nor a set), one on narrows it with `unassigned_by`.
+   */
+  function _setUnassignedParams(params) {
+    params.set("character_id", String(UNASSIGNED_PICTURES_ID));
+    if (!(filterStore.noCharacterFilter && filterStore.noSetFilter)) {
+      params.set(
+        "unassigned_by",
+        filterStore.noCharacterFilter ? "character" : "set",
+      );
+    }
+  }
+
+  function _appendSelectionParams(params, { unassignedOnly = true } = {}) {
     if (hasSetSelection.value) {
       if (isSetOverlapView.value) {
         for (const setId of normalizedSelectedSetIds.value) {
@@ -307,9 +355,10 @@ export function useGridFetch(
       }
     } else if (
       selectionStore.selectedCharacter === ALL_PICTURES_ID &&
-      filterStore.unassignedOnlyFilter
+      unassignedOnly &&
+      _unassignedFilterOn()
     ) {
-      params.append("character_id", UNASSIGNED_PICTURES_ID);
+      _setUnassignedParams(params);
       if (projectStore.projectViewMode === "project") {
         params.append(
           "project_id",
@@ -381,6 +430,9 @@ export function useGridFetch(
     (filterStore.comfyuiLoraFilter || []).forEach((l) =>
       params.append("comfyui_lora", l),
     );
+    workflowFilterParams(filterStore.workflowFilter).forEach(([name, value]) =>
+      params.append(name, value),
+    );
     if (filterStore.minScoreFilter != null) {
       params.append("min_score", filterStore.minScoreFilter);
     }
@@ -450,6 +502,48 @@ export function useGridFetch(
     return params.toString();
   }
 
+  /**
+   * The grid's view with none of the filter menu's filters: what the filter
+   * strip's "of N" counts, and what each menu row adds one filter to for its
+   * own count. Stack leaders only, like the grid stream, so the numbers agree
+   * with the tiles. "No character" is a filter here, so it is left out.
+   * `null` during a search: `/pictures/count` cannot count a search's hits, and
+   * no number is better than the view's number beside 40 search results.
+   */
+  function buildFilterCountBaseQuery() {
+    if (searchStore.searchQuery && searchStore.searchQuery.trim()) return null;
+    const params = new URLSearchParams();
+    _appendSelectionParams(params, { unassignedOnly: false });
+    params.append("stack_leaders_only", "true");
+    // Character likeness changes the row set, so the count needs the sort.
+    if (
+      sortStore.selectedSort === "CHARACTER_LIKENESS" &&
+      sortStore.selectedSimilarityCharacter
+    ) {
+      params.append("sort", "CHARACTER_LIKENESS");
+      params.append(
+        "reference_character_id",
+        sortStore.selectedSimilarityCharacter,
+      );
+    }
+    if (referenceFolderIdFilter.value != null) {
+      params.append(
+        "reference_folder_id",
+        String(referenceFolderIdFilter.value),
+      );
+    }
+    if (filePathPrefixFilter.value != null) {
+      params.append("file_path_prefix", filePathPrefixFilter.value);
+    }
+    if (importSourceFolderFilter.value != null) {
+      params.append("import_source_folder", importSourceFolderFilter.value);
+    }
+    if (userPrefsStore.applyTagFilter) {
+      params.append("apply_tag_filter", "true");
+    }
+    return params.toString();
+  }
+
   function buildLikenessGroupQueryParams() {
     const params = new URLSearchParams();
     _appendSelectionParams(params);
@@ -459,6 +553,9 @@ export function useGridFetch(
     );
     (filterStore.comfyuiLoraFilter || []).forEach((l) =>
       params.append("comfyui_lora", l),
+    );
+    workflowFilterParams(filterStore.workflowFilter).forEach(([name, value]) =>
+      params.append(name, value),
     );
     if (filterStore.minScoreFilter != null) {
       params.append("min_score", filterStore.minScoreFilter);
@@ -593,6 +690,37 @@ export function useGridFetch(
     }
     const requestId = Date.now();
     fetchAllGridImages.lastRequestId = requestId;
+    // A suggestion search's ranked list and its picture rows, cached in
+    // `cache` against the subject `id` (under `key`) so neither slider costs a
+    // round trip; only a new subject or a force refetches. Null when a newer
+    // fetch overtook this one.
+    async function rankedWithRows(cache, key, id, search, phase) {
+      const cached = cache?.value;
+      if (!force && cached?.[key] === id && cached.matches)
+        return cached.matches;
+      let raw;
+      try {
+        raw = await search(id);
+      } catch (error) {
+        error.gridFetchPhase = phase;
+        throw error;
+      }
+      if (fetchAllGridImages.lastRequestId !== requestId) return null;
+      const ranked = Array.isArray(raw) ? raw : [];
+      const rowsById = {};
+      if (ranked.length) {
+        const rows = await listPicturesByIds(
+          ranked.map((r) => r.picture_id),
+          { fields: "grid" },
+        );
+        if (fetchAllGridImages.lastRequestId !== requestId) return null;
+        for (const pic of Array.isArray(rows) ? rows : []) {
+          rowsById[pic.id] = pic;
+        }
+      }
+      if (cache) cache.value = { [key]: id, matches: ranked, rowsById };
+      return ranked;
+    }
     try {
       let images = [];
 
@@ -605,10 +733,16 @@ export function useGridFetch(
         !_hasSearch &&
         !_hasReverseImageSearch &&
         !!faceSearchCharacter?.value?.id;
+      const _hasSetSuggestSearch =
+        !_hasSearch &&
+        !_hasReverseImageSearch &&
+        !_hasCharacterFaceSearch &&
+        !!setSuggestSet?.value?.id;
       const _hasFaceLikenessSearch =
         !_hasSearch &&
         !_hasReverseImageSearch &&
         !_hasCharacterFaceSearch &&
+        !_hasSetSuggestSearch &&
         !!faceLikenessSearchFaceId?.value;
 
       if (_isLikenessSort) {
@@ -648,54 +782,64 @@ export function useGridFetch(
         // different combine mode: a server-side k-of-n would put a round trip
         // under a drag. Only a change of character (or an explicit force)
         // refetches.
-        const character = faceSearchCharacter.value;
-        const cached = faceSearchRanked?.value;
-        let ranked =
-          !force && cached?.characterId === character.id
-            ? cached.matches
-            : null;
+        const ranked = await rankedWithRows(
+          faceSearchRanked,
+          "characterId",
+          faceSearchCharacter.value.id,
+          characterFaceSearch,
+          "character-face-search-request",
+        );
         if (!ranked) {
-          let raw;
-          try {
-            raw = await characterFaceSearch(character.id);
-          } catch (error) {
-            error.gridFetchPhase = "character-face-search-request";
-            throw error;
-          }
-          if (fetchAllGridImages.lastRequestId !== requestId) {
-            if (isSortedFetch && options?.showProgress === true)
-              completeSmartScoreProgress(loadId, 0, false);
-            return;
-          }
-          ranked = Array.isArray(raw) ? raw : [];
-          const rowsById = {};
-          if (ranked.length) {
-            const rows = await listPicturesByIds(
-              ranked.map((r) => r.picture_id),
-              { fields: "grid" },
-            );
-            if (fetchAllGridImages.lastRequestId !== requestId) {
-              if (isSortedFetch && options?.showProgress === true)
-                completeSmartScoreProgress(loadId, 0, false);
-              return;
-            }
-            for (const pic of Array.isArray(rows) ? rows : []) {
-              rowsById[pic.id] = pic;
-            }
-          }
-          if (faceSearchRanked) {
-            faceSearchRanked.value = {
-              characterId: character.id,
-              matches: ranked,
-              rowsById,
-            };
-          }
+          if (isSortedFetch && options?.showProgress === true)
+            completeSmartScoreProgress(loadId, 0, false);
+          return;
         }
         const rowsById = faceSearchRanked?.value?.rowsById ?? {};
         images = cutFaceSuggestions(
           ranked,
           faceSearchThreshold?.value ?? 0,
           faceSearchMinRefs?.value ?? 1,
+        )
+          .map((r) => rowsById[r.picture_id])
+          .filter(Boolean);
+      } else if (_hasSetSuggestSearch) {
+        fetchMode = "set-suggest-search";
+        // "Suggest more pictures for <set>" (#1489): the same cached-ranked-list
+        // shape as the person search above, so neither slider costs a round
+        // trip. Only a change of set (or an explicit force) refetches.
+        const ranked = await rankedWithRows(
+          setSuggestRanked,
+          "setId",
+          setSuggestSet.value.id,
+          setLikenessSearch,
+          "set-suggest-search-request",
+        );
+        if (!ranked) {
+          if (isSortedFetch && options?.showProgress === true)
+            completeSmartScoreProgress(loadId, 0, false);
+          return;
+        }
+        // Seat the strength slider at the set's own cohesion the first time
+        // the list arrives: no fixed default suits both a tight photoshoot
+        // and a loose theme. Floored, so the seat never lands above the
+        // set's own median. A one-picture set has no cohesion and takes the
+        // fixed fallback. A refetch keeps whatever the user dragged to.
+        if (
+          setSuggestThreshold &&
+          setSuggestThreshold.value == null &&
+          ranked.length
+        ) {
+          const cohesion = setCohesion(ranked);
+          setSuggestThreshold.value =
+            cohesion != null
+              ? Math.floor(cohesion * 100) / 100
+              : SET_SUGGEST_FALLBACK_THRESHOLD;
+        }
+        const rowsById = setSuggestRanked?.value?.rowsById ?? {};
+        images = cutSetSuggestions(
+          ranked,
+          setSuggestThreshold?.value ?? 0,
+          setSuggestMinTags?.value ?? 0,
         )
           .map((r) => rowsById[r.picture_id])
           .filter(Boolean);
@@ -742,9 +886,30 @@ export function useGridFetch(
         fetchMode = "text-search";
         // Use /pictures/search endpoint for text search
         const params = buildPictureIdsQueryParams();
-        images = await searchPictures(searchStore.searchQuery.trim(), {
-          query: params,
-        });
+        const searchText = searchStore.searchQuery.trim();
+        const cacheKey = `${searchText}\u0000${params}`;
+        // The "In text" switch narrows the response already on screen, so its
+        // re-cut reuses the rows instead of searching again. Only that re-cut
+        // does: any other fetch (a filter, an edit, a forced reload) re-searches.
+        const cached = textSearchResults?.value;
+        let rows =
+          options?.textMatchRecut === true && cached?.key === cacheKey
+            ? cached.rows
+            : null;
+        if (!rows) {
+          const body = await searchPictures(searchText, { query: params });
+          rows = Array.isArray(body) ? body : [];
+          if (
+            textSearchResults &&
+            fetchAllGridImages.lastRequestId === requestId
+          ) {
+            textSearchResults.value = { key: cacheKey, query: searchText, rows };
+          }
+        }
+        images =
+          searchStore.textMatchesOnly === true
+            ? rows.filter((row) => row?.text_match === true)
+            : rows;
       } else {
         fetchMode = "stream";
         // Overlay open: the streaming path rebuilds a placeholder grid and
@@ -900,9 +1065,9 @@ export function useGridFetch(
           }
         } else if (
           _selChar === ALL_PICTURES_ID &&
-          filterStore.unassignedOnlyFilter
+          _unassignedFilterOn()
         ) {
-          _charP.set("character_id", String(UNASSIGNED_PICTURES_ID));
+          _setUnassignedParams(_charP);
           if (projectStore.projectViewMode === "project") {
             _charP.set(
               "project_id",
@@ -968,6 +1133,10 @@ export function useGridFetch(
         );
         (filterStore.comfyuiLoraFilter || []).forEach((l) =>
           _filterP.append("comfyui_lora", l),
+        );
+        // Filter params: the ticked workflows' pictures (F7, #1797)
+        workflowFilterParams(filterStore.workflowFilter).forEach(
+          ([name, value]) => _filterP.append(name, value),
         );
         // Filter params: tag filters
         (filterStore.tagFilter || []).forEach((t) => _filterP.append("tag", t));
@@ -1392,7 +1561,6 @@ export function useGridFetch(
         fetchThumbnailsBatch(visibleStart.value, prefetchEnd);
       }
       await refreshExpandedStacksAfterFetch();
-      await maybeRefreshOverlayForComfyui();
       requestAnimationFrame(() => {
         if (initialRender.value) {
           initialRender.value = false;
@@ -1568,6 +1736,7 @@ export function useGridFetch(
     smartScoreLoadingVisible,
     buildGridFetchKey,
     buildPictureIdsQueryParams,
+    buildFilterCountBaseQuery,
     buildLikenessGroupQueryParams,
     fetchAllGridImages,
     fetchAllPicturesCount,

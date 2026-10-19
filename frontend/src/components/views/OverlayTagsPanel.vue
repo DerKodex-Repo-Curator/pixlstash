@@ -4,7 +4,7 @@
     :class="{ 'sidebar-section--collapsed': tagsCollapsed }"
   >
     <div
-      class="section-header section-header--collapsible"
+      class="section-header section-header--collapsible section-label section-label--on-dark"
       @click="tagsCollapsed = !tagsCollapsed"
     >
       <span>Tags</span>
@@ -13,10 +13,15 @@
           v-if="props.image && !readOnly"
           class="section-meta-btn"
           type="button"
-          title="Reset and regenerate tags - deletes all tags and predictions for this picture and requeues it for re-tagging"
+          aria-label="Reset and regenerate tags - deletes all tags and predictions for this picture and requeues it for re-tagging"
           :disabled="isTagsRefreshing"
           @click.stop="refreshPictureTags()"
         >
+          <Tooltip
+            text="Reset and regenerate tags - deletes all tags and predictions for this picture and requeues it for re-tagging"
+            activator="parent"
+            :describe="false"
+          />
           <v-icon size="16">mdi-refresh</v-icon>
         </button>
         <v-menu
@@ -29,39 +34,67 @@
             <button
               class="section-meta-btn section-meta-btn--with-chevron"
               type="button"
-              title="Regenerate tags with a specific tagger..."
+              aria-label="Regenerate tags with a specific tagger..."
               :disabled="isTagsRefreshing"
               v-bind="menuProps"
               @click.stop="fetchTagPlugins"
             >
+              <Tooltip
+                text="Regenerate tags with a specific tagger..."
+                activator="parent"
+                :describe="false"
+              />
               <v-icon size="14">mdi-refresh</v-icon>
               <v-icon size="10">mdi-chevron-down</v-icon>
             </button>
           </template>
-          <v-list density="compact" min-width="160">
-            <v-list-item v-if="tagPluginsLoading" disabled title="Loading..." />
-            <template v-if="!tagPluginsLoading">
-              <v-list-item
+          <div
+            class="ctx-menu ctx-menu--on-dark"
+            role="menu"
+            tabindex="-1"
+            style="min-width: 160px"
+            @keydown="onMenuKeydown"
+          >
+            <button
+              v-if="tagPluginsLoading"
+              type="button"
+              class="ctx-item"
+              role="menuitem"
+              disabled
+            >
+              Loading...
+            </button>
+            <template v-else>
+              <button
                 v-for="plugin in tagPlugins"
                 :key="plugin.name"
-                :title="plugin.display_name || plugin.name"
+                type="button"
+                class="ctx-item"
+                role="menuitem"
                 @click="refreshPictureTags(plugin.name)"
-              />
-              <v-list-item
+              >
+                {{ plugin.display_name || plugin.name }}
+              </button>
+              <button
                 v-if="!tagPlugins.length"
+                type="button"
+                class="ctx-item"
+                role="menuitem"
                 disabled
-                title="No taggers available"
-              />
+              >
+                No taggers available
+              </button>
             </template>
-          </v-list>
+          </div>
         </v-menu>
         <button
           v-if="props.image && !readOnly"
           class="section-meta-btn"
           type="button"
-          title="Add tag (T)"
+          aria-label="Add tag (T)"
           @click.stop="beginAddTag"
         >
+          <Tooltip text="Add tag (T)" activator="parent" :describe="false" />
           <v-icon size="16">mdi-plus</v-icon>
         </button>
         <v-icon size="16" style="opacity: 0.6">{{
@@ -74,8 +107,8 @@
         <div
           v-if="locked && lockNote"
           class="overlay-lock-note"
-          :title="lockNote"
         >
+          <Tooltip :text="lockNote" activator="parent" />
           <v-icon size="12">mdi-lock-outline</v-icon>
           <span>Locked - read-only. Unlock the set to edit.</span>
         </div>
@@ -108,20 +141,24 @@
                 predictionClassForTag(tagLabel(tag)),
               ]"
               :style="predictionStyleForTag(tagLabel(tag))"
-              :title="predictionTitleForTag(tagLabel(tag))"
               :draggable="!readOnly"
               @dragstart="
                 startTagDrag(tagLabel(tag), 'unassigned', null, $event)
               "
               @dragend="clearTagDrag"
             >
+              <Tooltip
+                :text="predictionTitleForTag(tagLabel(tag)) || ''"
+                activator="parent"
+              />
               {{ formatSentinelTag(tagLabel(tag)) }}
               <button
                 v-if="!readOnly"
                 class="tag-delete-btn"
                 @click.stop="removeAllTag(tag)"
-                title="Remove tag"
+                aria-label="Remove tag"
               >
+                <Tooltip text="Remove tag" activator="parent" :describe="false" />
                 <v-icon size="12">mdi-close</v-icon>
               </button>
             </span>
@@ -149,7 +186,7 @@
     class="sidebar-section sidebar-section--rejected-tags"
   >
     <div
-      class="section-header section-header--collapsible"
+      class="section-header section-header--collapsible section-label section-label--on-dark"
       @click="nearMissesCollapsed = !nearMissesCollapsed"
     >
       <span>Rejected Tags</span>
@@ -179,11 +216,11 @@
           'overlay-tag--prediction',
         ]"
         :style="{ '--pred-confidence': pred.confidence }"
-        :title="rejectedTagTitle(pred)"
         :draggable="!readOnly"
         @dragstart="startTagDrag(pred.tag, 'rejected', null, $event)"
         @dragend="clearTagDrag"
       >
+        <Tooltip :text="rejectedTagTitle(pred)" activator="parent" />
         {{ pred.tag }}
         <span class="tag-pred-confidence"
           >{{ (pred.confidence * 100).toFixed(0) }}%</span
@@ -191,9 +228,14 @@
         <button
           v-if="!readOnly"
           class="tag-pred-btn tag-pred-btn--confirm"
-          title="Confirm prediction (add as tag)"
+          aria-label="Confirm prediction (add as tag)"
           @click.stop="confirmPrediction(pred.tag)"
         >
+          <Tooltip
+            text="Confirm prediction (add as tag)"
+            activator="parent"
+            :describe="false"
+          />
           <v-icon size="11">mdi-check</v-icon>
         </button>
       </span>
@@ -267,9 +309,11 @@ import {
   rejectTagPrediction,
 } from "../../api/tags";
 import { resetPictureTags } from "../../api/pictures";
+import { confirmRetag } from "../../composables/confirmRetag";
 import { listTaggers } from "../../api/taggers";
 import { getUserConfig } from "../../api/config";
 import { getPenalisedTags } from "../../api/users";
+import Tooltip from "../widgets/Tooltip.vue";
 import {
   dedupeTagList,
   getTagLabel as tagLabel,
@@ -277,6 +321,7 @@ import {
   isSentinelTag,
   formatSentinelTag,
 } from "../../utils/tags.js";
+import { onMenuKeydown } from "../../utils/menuKeyboard.js";
 
 const props = defineProps({
   image: { type: Object, default: null },
@@ -966,6 +1011,7 @@ async function refreshPictureTags(model = null) {
   if (!props.image?.id || !props.backendUrl) return;
   if (isTagsRefreshing.value) return;
   const capturedImageId = props.image.id;
+  if (!(await confirmRetag(1))) return;
 
   isTagsRefreshing.value = true;
   try {
@@ -1005,10 +1051,6 @@ defineExpose({
    OverlayDescriptionPanel carries its own copy for the same reason. Without
    these, the sections are plain auto-height blocks and the `overflow-y: auto`
    below can never resolve into a scrollbar. */
-.sidebar-section {
-  margin-bottom: 6px;
-}
-
 /* A definite, shrinkable height is what gives `.tag-list` something to scroll
    within: the overlay sidebar is a fixed-height flex column, so this section
    yields down to `min-height` when the column runs out of room. */
@@ -1038,20 +1080,16 @@ defineExpose({
 }
 
 .section-header--collapsible:hover {
-  opacity: 0.85;
+  color: rgb(var(--v-theme-on-dark-surface));
 }
 
+/* Type and ink come from the shared `.section-label`; this is layout only. */
 .section-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: var(--text-2xs);
-  font-weight: var(--weight-semibold);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
   margin-bottom: var(--space-2);
   padding: var(--space-1) 0;
-  color: rgba(var(--v-theme-on-dark-surface), 0.6);
 }
 
 .section-meta-group {
@@ -1066,6 +1104,10 @@ defineExpose({
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+
+.section-meta-btn:hover:not(:disabled) {
+  color: rgb(var(--v-theme-on-dark-surface));
 }
 
 .section-meta-btn:disabled {
@@ -1092,9 +1134,9 @@ defineExpose({
 }
 
 /* The overlay sidebar is a `dark-surface`, so the scrollbar keys off
-   `on-dark-surface`. The global `.is-desktop` treatment in style.css keys off
-   `on-surface` (the light-chrome pair) and does not apply in a plain browser at
-   all, which left an OS-default bar on a translucent dark panel. The bar is
+   `on-dark-surface`. The global `.is-desktop` treatment in style.css (an amber
+   thumb for the light chrome) does not apply in a plain browser at all, which
+   left an OS-default bar on a translucent dark panel. The bar is
    also the whole "there is more below" affordance here, so it stays visible
    rather than hiding until hover. Track is transparent: the drop zone's dashed
    border already draws the edge and a second line would compete. */
@@ -1132,14 +1174,14 @@ defineExpose({
   background: rgba(var(--v-theme-on-dark-surface), 0.1);
   color: rgb(var(--v-theme-on-dark-surface));
   border-radius: 6px; /* no clean token: 6px is equidistant between --radius-sm(4px) and --radius-md(8px) */
-  padding: 1px 2px 1px 6px; /* no clean token: 1px and 6px are optical nudges */
+  padding: 1px var(--space-1) 1px 6px; /* no clean token: 1px and 6px are optical nudges */
   font-size: var(--text-2xs);
   line-height: 1.2;
   justify-content: center;
   vertical-align: middle;
   cursor: pointer;
   /* Flex items floor at min-content, so a single long tag would otherwise force
-     the row wider than the 320px sidebar and get clipped by `overflow-x`. */
+     the row wider than the sidebar and get clipped by `overflow-x`. */
   min-width: 0;
   overflow-wrap: anywhere;
 }
@@ -1208,7 +1250,7 @@ defineExpose({
 }
 
 .tag-pred-confidence {
-  font-size: 0.65rem; /* no token: ~9.1px, below --text-2xs=11px */
+  font-size: var(--text-2xs);
   opacity: 0.7;
   margin-left: var(--space-1);
 }
@@ -1248,7 +1290,7 @@ defineExpose({
 
 .tag-drop-zone--active {
   border-color: rgba(var(--v-theme-on-dark-surface), 0.6);
-  background: rgba(var(--v-theme-on-dark-surface), 0.08);
+  background: rgba(var(--v-theme-on-dark-surface), 0.16);
 }
 
 /* Secondary list: cap it so a long rejection set cannot push Metadata out of
@@ -1266,21 +1308,21 @@ defineExpose({
 }
 
 .tag-drop-placeholder {
-  font-size: 0.68rem; /* no token: ~9.5px, below --text-2xs=11px */
+  font-size: var(--text-2xs);
   color: rgba(var(--v-theme-on-dark-surface), 0.45);
 }
 
 .tag-delete-btn {
   margin: 0;
   padding: var(--space-1);
-  color: rgb(var(--v-theme-primary));
+  color: rgba(var(--v-theme-on-dark-surface), 0.7);
   font-size: 0.8em; /* relative em scale, not absolute px; no token */
   line-height: 1;
   vertical-align: middle;
 }
 
 .tag-delete-btn:hover {
-  color: rgb(var(--v-theme-accent));
+  color: rgb(var(--v-theme-on-dark-surface));
 }
 
 .tag-add-input {
@@ -1289,16 +1331,16 @@ defineExpose({
   color: rgb(var(--v-theme-on-dark-surface));
   border-radius: var(--radius-pill);
   padding: 1px 6px; /* no clean token: 1px and 6px are optical nudges */
-  font-size: 0.7rem; /* no token: ~9.8px, below --text-2xs=11px */
+  font-size: var(--text-2xs);
 }
 
 .tag-autocomplete-dropdown {
   position: fixed;
-  z-index: 9999;
+  z-index: var(--z-dropdown);
   background: color-mix(in srgb, rgb(var(--v-theme-shadow)) 85%, transparent);
   backdrop-filter: blur(6px);
   border: 1px solid rgba(var(--v-theme-on-dark-surface), 0.15);
-  border-radius: 6px; /* no clean token: 6px equidistant between --radius-sm(4px) and --radius-md(8px) */
+  border-radius: var(--radius-md);
   box-shadow: var(--elevation-3);
   overflow: hidden;
   display: flex;
@@ -1317,9 +1359,14 @@ defineExpose({
   text-overflow: ellipsis;
 }
 
-.tag-autocomplete-dropdown--hover-enabled .tag-autocomplete-item:hover,
+/* The dropdown is dark in both themes: hover is the dark-surface ink wash, the
+   highlighted suggestion the dark-surface olive. */
+.tag-autocomplete-dropdown--hover-enabled .tag-autocomplete-item:hover {
+  background: rgba(var(--v-theme-on-dark-surface), 0.16);
+}
+
 .tag-autocomplete-item--active {
-  background: rgba(var(--v-theme-primary), 0.22);
+  background: rgba(var(--v-theme-dark-surface-primary), 0.2);
   color: rgb(var(--v-theme-on-dark-surface));
 }
 
@@ -1327,7 +1374,7 @@ defineExpose({
   display: inline-block;
   margin-left: var(--space-3);
   padding: 0 var(--space-2);
-  font-size: 0.55rem; /* no token: ~7.7px, well below --text-2xs=11px */
+  font-size: var(--text-2xs);
   font-weight: var(--weight-semibold);
   letter-spacing: 0.04em;
   border-radius: var(--radius-sm);

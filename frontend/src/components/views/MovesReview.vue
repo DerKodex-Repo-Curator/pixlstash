@@ -20,6 +20,10 @@
         >
           Look again
         </AppButton>
+        <!-- The app-wide tail, minus undo: this view replaces the grid and its
+             toolbar, so without it neither Settings nor the right rail has a
+             control on the screen (#1415). -->
+        <TbGlobalActions separator @open-settings="emit('open-settings')" />
       </div>
     </div>
 
@@ -74,9 +78,11 @@
                 loading="lazy"
                 @error="$event.target.style.visibility = 'hidden'"
               />
-              <span class="mv-path" :title="item.new_path">{{
-                shortFolder(item.new_path)
-              }}</span>
+              <span class="mv-path"
+                ><Tooltip :text="item.new_path" activator="parent" />{{
+                  shortFolder(item.new_path)
+                }}</span
+              >
               <span class="mv-change">
                 <template v-if="changeShape(item).swap">
                   <span class="mv-etag mv-etag--out">
@@ -148,9 +154,11 @@
                 @error="$event.target.style.visibility = 'hidden'"
               />
               <div class="mv-ambiguous-body">
-                <span class="mv-path" :title="item.new_path">{{
-                  shortFolder(item.new_path)
-                }}</span>
+                <span class="mv-path"
+                  ><Tooltip :text="item.new_path" activator="parent" />{{
+                    shortFolder(item.new_path)
+                  }}</span
+                >
                 <span class="mv-current">{{ currentSummary(item) }}</span>
               </div>
               <AppButton
@@ -193,8 +201,9 @@
               v-for="item in store.offLayout"
               :key="item.review_id"
               class="mv-chip"
-              :title="item.new_path"
-              >{{ shortFolder(item.new_path) }}</span
+              ><Tooltip :text="item.new_path" activator="parent" />{{
+                shortFolder(item.new_path)
+              }}</span
             >
           </div>
           <p class="mv-note">
@@ -226,9 +235,14 @@
 <script setup>
 import { computed, onMounted, ref } from "vue";
 import AppButton from "../widgets/AppButton.vue";
+import TbGlobalActions from "../panels/TbGlobalActions.vue";
+import Tooltip from "../widgets/Tooltip.vue";
 import { pictureThumbnailUrl } from "../../api/pictures";
 import { useMovesStore } from "../../stores/useMovesStore";
 import { errorDetail } from "../../utils/apiError";
+
+// Settings is App.vue's dialog; TbGlobalActions flips the sidebar store itself.
+const emit = defineEmits(["open-settings"]);
 
 const store = useMovesStore();
 const loading = computed(() => store.loading);
@@ -467,7 +481,7 @@ onMounted(() => {
 }
 
 .mv-state--error {
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
 }
 
 .mv-lede {
@@ -488,11 +502,11 @@ onMounted(() => {
 }
 
 .mv-card--clear {
-  border-left: 3px solid rgb(var(--v-theme-success));
+  border-left: 3px solid rgb(var(--v-theme-surface-success));
 }
 
 .mv-card--warn {
-  border-left: 3px solid rgb(var(--v-theme-warning));
+  border-left: 3px solid rgb(var(--v-theme-surface-warning));
 }
 
 .mv-card-head {
@@ -595,12 +609,12 @@ onMounted(() => {
 
 .mv-etag--out {
   background: rgba(var(--v-theme-error), 0.12);
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
 }
 
 .mv-etag--in {
   background: rgba(var(--v-theme-success), 0.14);
-  color: rgb(var(--v-theme-success));
+  color: rgb(var(--v-theme-surface-success));
 }
 
 .mv-etag-facet {
@@ -614,7 +628,9 @@ onMounted(() => {
   padding: var(--space-2) var(--space-4);
   border-left: 3px solid rgb(var(--v-theme-accent));
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-  background: var(--hover-wash);
+  /* A resting callout tint, not a hover: it borrowed the hover token back when
+     that was amber at 0.14, and keeps that look. */
+  background: rgba(var(--v-theme-accent), 0.14);
   font-size: var(--text-sm);
   color: rgba(var(--v-theme-on-background), 0.7);
 }
@@ -627,7 +643,7 @@ onMounted(() => {
 }
 
 .mv-chip {
-  padding: 2px var(--space-3);
+  padding: var(--space-1) var(--space-3);
   border-radius: var(--radius-sm);
   background: rgba(var(--v-theme-on-background), 0.06);
   border: 1px solid rgb(var(--v-theme-border));

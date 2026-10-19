@@ -21,7 +21,9 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from "vue";
 import { VMenu } from "vuetify/components";
 
 import { ALL_KINDS, JUST_A_FOLDER_KIND, kindByDigit, kindByValue, kindStyle } from "../../utils/folderMappingKinds";
+import { onMenuKeydown } from "../../utils/menuKeyboard.js";
 import AppButton from "../widgets/AppButton.vue";
+import Tooltip from "../widgets/Tooltip.vue";
 
 const props = defineProps({
   result: { type: Object, required: true },
@@ -190,7 +192,7 @@ function toggleRow(level, folder) {
 }
 
 function onRowClick(level, folder, event) {
-  if (event.target.closest(".map-tree__kdd, .map-tree__menu")) return;
+  if (event.target.closest(".map-tree__kdd, .ctx-menu")) return;
   ensureLevel(level);
   if (event.shiftKey && anchorId !== null) {
     const rows = visibleFolders(level);
@@ -319,7 +321,7 @@ onUnmounted(() => window.removeEventListener("resize", measureSb));
         :class="{ 'map-tree__chip--folder': kind.value === JUST_A_FOLDER_KIND.value }"
         :style="kindStyle(kind.value)"
       >
-        <v-icon size="15">{{ kind.icon }}</v-icon>
+        <v-icon size="16">{{ kind.icon }}</v-icon>
         {{ kind.plural }}
         <span v-if="kind.value !== JUST_A_FOLDER_KIND.value && tally.get(kind.value)" class="map-tree__chip-count">
           {{ tally.get(kind.value) }}
@@ -369,11 +371,11 @@ onUnmounted(() => window.removeEventListener("resize", measureSb));
                 :style="bandKind(level) === 'mixed' ? mixedStyle(level) : kindStyle(bandKind(level))"
                 aria-haspopup="menu"
                 :aria-label="`${bandLabel(level)}, ${bandKind(level) === 'mixed' ? 'Mixed: ' + levelKinds(level).map((k) => k.label).join(', ') : kindByValue(bandKind(level))?.label ?? 'choose'}`"
-                :title="level.proposal?.evidence?.[0]?.text"
                 v-bind="menuProps"
                 @mouseenter="selectionCount(level) && (hoverLinked = true)"
                 @mouseleave="hoverLinked = false"
               >
+                <Tooltip :text="level.proposal?.evidence?.[0]?.text ?? ''" activator="parent" />
                 <v-icon v-if="bandKind(level) === 'mixed'" size="13">mdi-shuffle-variant</v-icon>
                 <v-icon v-else-if="bandKind(level)" size="13">{{ kindByValue(bandKind(level)).icon }}</v-icon>
                 <span class="map-tree__kdd-label">
@@ -382,22 +384,25 @@ onUnmounted(() => window.removeEventListener("resize", measureSb));
                 <v-icon size="12">mdi-chevron-down</v-icon>
               </button>
             </template>
-            <div class="map-tree__menu" role="menu">
+            <div class="ctx-menu" role="menu" style="min-width: 180px"
+              tabindex="-1"
+              @keydown="onMenuKeydown"
+            >
               <template v-for="(group, gi) in menuGroups(level.proposal?.candidates)" :key="gi">
-                <div v-if="gi" class="map-tree__menu-divider" />
+                <div v-if="gi" class="ctx-sep" role="separator" />
                 <button
                   v-for="kind in group"
                   :key="kind.value"
                   type="button"
                   role="menuitem"
-                  class="map-tree__menu-item"
+                  class="ctx-item"
                   :data-kind="kind.value"
                   :style="kindStyle(kind.value)"
                   @click="applyToLevel(level, kind.value)"
                 >
-                  <v-icon size="14">{{ kind.icon }}</v-icon>
+                  <v-icon class="ctx-icon map-tree__kind-icon">{{ kind.icon }}</v-icon>
                   {{ kind.label }}
-                  <kbd class="map-tree__menu-digit">{{ kind.digit }}</kbd>
+                  <kbd class="ctx-shortcut">{{ kind.digit }}</kbd>
                 </button>
               </template>
             </div>
@@ -425,7 +430,7 @@ onUnmounted(() => window.removeEventListener("resize", measureSb));
             @keydown="onRowKeydown(level, folder, $event)"
             @focusin="focusedRowId.set(level.depth, folder.id)"
           >
-            <v-icon class="map-tree__lead" size="15">mdi-folder-outline</v-icon>
+            <v-icon class="map-tree__lead" size="16">mdi-folder-outline</v-icon>
             <span class="map-tree__name">{{ folder.name }}</span>
             <span class="map-tree__count">{{ folder.picture_count.toLocaleString() }}</span>
             <v-menu :close-on-content-click="true">
@@ -444,32 +449,35 @@ onUnmounted(() => window.removeEventListener("resize", measureSb));
                   aria-haspopup="menu"
                   :aria-label="`Kind, ${kindByValue(resolvedKind(folder))?.label ?? 'choose'}`"
                   :aria-description="isSelected(folder) ? `applies to the ${selectedIds.size} selected folders` : undefined"
-                  :title="folder.proposal?.evidence?.[0]?.text"
                   v-bind="menuProps"
                   @mouseenter="isSelected(folder) && (hoverLinked = true)"
                   @mouseleave="hoverLinked = false"
                 >
+                  <Tooltip :text="folder.proposal?.evidence?.[0]?.text ?? ''" activator="parent" />
                   <v-icon v-if="resolvedKind(folder)" size="13">{{ kindByValue(resolvedKind(folder)).icon }}</v-icon>
                   <span class="map-tree__kdd-label">{{ kindByValue(resolvedKind(folder))?.label ?? "choose…" }}</span>
                   <v-icon size="12">mdi-chevron-down</v-icon>
                 </button>
               </template>
-              <div class="map-tree__menu" role="menu">
+              <div class="ctx-menu" role="menu" style="min-width: 180px"
+                tabindex="-1"
+                @keydown="onMenuKeydown"
+              >
                 <template v-for="(group, gi) in menuGroups(folder.proposal?.candidates)" :key="gi">
-                  <div v-if="gi" class="map-tree__menu-divider" />
+                  <div v-if="gi" class="ctx-sep" role="separator" />
                   <button
                     v-for="kind in group"
                     :key="kind.value"
                     type="button"
                     role="menuitem"
-                    class="map-tree__menu-item"
+                    class="ctx-item"
                     :data-kind="kind.value"
                     :style="kindStyle(kind.value)"
                     @click="applyToRow(level, folder, kind.value)"
                   >
-                    <v-icon size="14">{{ kind.icon }}</v-icon>
+                    <v-icon class="ctx-icon map-tree__kind-icon">{{ kind.icon }}</v-icon>
                     {{ kind.label }}
-                    <kbd class="map-tree__menu-digit">{{ kind.digit }}</kbd>
+                    <kbd class="ctx-shortcut">{{ kind.digit }}</kbd>
                   </button>
                 </template>
               </div>
@@ -652,16 +660,19 @@ onUnmounted(() => window.removeEventListener("resize", measureSb));
   color: var(--active-text);
 }
 
+/* Flush in its list, so the ring cannot take the gap: the inset form. */
 .map-tree__row:focus-visible {
-  box-shadow: inset var(--focus-ring);
+  box-shadow: var(--focus-ring-inset);
+  outline: none;
 }
 
 .map-tree__lead {
   color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
 }
 
+/* No olive glyph on the olive wash: the selected row's icon takes its ink. */
 .map-tree__row--sel .map-tree__lead {
-  color: var(--active-bar);
+  color: var(--active-text);
 }
 
 .map-tree__name {
@@ -775,54 +786,10 @@ onUnmounted(() => window.removeEventListener("resize", measureSb));
   border-left: 0;
 }
 
-.map-tree__menu {
-  display: flex;
-  flex-direction: column;
-  min-width: 180px;
-  padding: var(--space-2);
-  border-radius: var(--radius-md);
-  background: rgb(var(--v-theme-panel));
-  box-shadow: var(--elevation-3);
-}
-
-.map-tree__menu-divider {
-  margin: var(--space-2) 0;
-  border-top: 1px solid rgb(var(--v-theme-divider));
-}
-
-.map-tree__menu-item {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2);
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: inherit;
-  font-size: var(--text-sm);
-  text-align: left;
-  cursor: pointer;
-}
-
-.map-tree__menu-item .v-icon {
+/* The kind's own colour is the legend; it rides the menu glyph at full ink. */
+.map-tree__kind-icon {
   color: rgb(var(--kind));
-}
-
-.map-tree__menu-item:hover {
-  background: var(--hover-wash);
-}
-
-.map-tree__menu-digit {
-  margin-left: auto;
-  min-width: 18px;
-  padding: var(--space-1) var(--space-2);
-  border: 1px solid currentColor;
-  border-radius: var(--radius-sm);
-  font-family: var(--font-mono);
-  font-size: var(--text-2xs);
-  line-height: 1;
-  text-align: center;
-  opacity: var(--opacity-text-secondary);
+  opacity: 1;
 }
 
 .map-tree__footer {

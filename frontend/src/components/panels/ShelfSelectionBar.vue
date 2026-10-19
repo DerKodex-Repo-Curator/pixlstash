@@ -7,7 +7,7 @@
        is the only one that destroys bytes, which is why it is the only one in
        the error colour (#933). -->
   <div
-    v-if="store.selectedRows.length"
+    v-if="!rail && !store.railSelection && store.selectedRows.length"
     class="selbar"
     role="toolbar"
     aria-label="Selected models"
@@ -27,31 +27,36 @@
           type="button"
           aria-haspopup="menu"
           :aria-expanded="countMenuOpen"
-          :title="countTitle"
         >
-          <v-icon size="17">mdi-cube-outline</v-icon>
+          <Tooltip :text="countTitle" activator="parent" />
+          <v-icon size="16">mdi-cube-outline</v-icon>
           <span>{{ store.selectedRows.length.toLocaleString() }}</span>
           <span v-if="selectedSize" class="selbar-size"
             >· {{ selectedSize }}</span
           >
-          <v-icon size="15" class="selbar-chevron">mdi-menu-down</v-icon>
+          <v-icon size="16" class="selbar-chevron">mdi-menu-down</v-icon>
         </button>
       </template>
-      <div class="shelf-menu" role="menu">
+      <div
+        class="ctx-menu shelf-menu"
+        role="menu"
+        tabindex="-1"
+        @keydown="onMenuKeydown"
+      >
         <button
-          class="shelf-mi"
+          class="ctx-item"
           type="button"
           role="menuitem"
           @click="store.selectVisible()"
         >
-          <v-icon size="16">mdi-select-all</v-icon>
-          <span>Select all shown</span>
-          <span class="shelf-mi-kbd">{{ selectAllHint }}</span>
+          <v-icon class="ctx-icon">mdi-select-all</v-icon>
+          <span class="ctx-label-text">Select all shown</span>
+          <span class="ctx-shortcut">{{ selectAllHint }}</span>
         </button>
-        <button class="shelf-mi" type="button" role="menuitem" @click="clear">
-          <v-icon size="16">mdi-close</v-icon>
-          <span>Clear selection</span>
-          <span class="shelf-mi-kbd">Esc</span>
+        <button class="ctx-item" type="button" role="menuitem" @click="clear">
+          <v-icon class="ctx-icon">mdi-close</v-icon>
+          <span class="ctx-label-text">Clear selection</span>
+          <span class="ctx-shortcut">Esc</span>
         </button>
       </div>
     </v-menu>
@@ -63,13 +68,12 @@
          inside it are the shared `AddToEntityControl` the grid uses, so the
          search, the tri-state and the keyboard model are learned once.
 
-         Every verb below carries BOTH `aria-label` and `title`, and they say
+         Every verb below carries BOTH `aria-label` and a tooltip, and they say
          different things on purpose. The label is the verb and never changes,
          so a screen reader hears a stable name and voice control has something
          to say; the tooltip is the REFUSAL - "Only files that are actually on
-         this machine can be moved" - and changes with the selection. `title`
-         alone is not an accessible name a reader can rely on, and it does not
-         exist at all on touch. -->
+         this machine can be moved" - and changes with the selection. A tooltip
+         alone is not an accessible name a reader can rely on. -->
     <v-menu
       v-model="assignMenuOpen"
       :close-on-content-click="false"
@@ -78,141 +82,132 @@
       :offset="8"
     >
       <template #activator="{ props: menuProps }">
-        <button
+        <AppBarButton
+          shape="round"
+          icon="account-plus-outline"
           v-bind="menuProps"
-          class="selbar-btn"
-          type="button"
           data-verb="assign"
           aria-label="Assign to person or set"
           :disabled="!assignable.length"
-          :title="assignTitle || 'Assign to person or set'"
-        >
-          <v-icon size="19">mdi-account-plus-outline</v-icon>
-        </button>
+          :tooltip="assignTitle || 'Assign to person or set'"
+        />
       </template>
-      <div class="shelf-menu shelf-menu--assign">
-        <AddToEntityControl
-          type="character"
-          label="Assign to person"
-          float-menu
-          :subject-ids="assignableIds"
-          :membership="membership.character"
-          :disabled="!assignable.length"
-          :title="assignTitle"
-          @attach="onAttach($event, true)"
-          @detach="onAttach($event, false)"
-        />
-        <AddToEntityControl
-          type="set"
-          label="Assign to set"
-          float-menu
-          :subject-ids="assignableIds"
-          :membership="membership.set"
-          :disabled="!assignable.length"
-          :title="assignTitle"
-          @attach="onAttach($event, true)"
-          @detach="onAttach($event, false)"
-        />
+      <div class="ctx-menu shelf-menu shelf-menu--assign">
+        <Tooltip :text="assignTitle || ''">
+          <template #activator="{ props: tipProps }">
+            <AddToEntityControl
+              v-bind="tipProps"
+              type="character"
+              label="Assign to person"
+              float-menu
+              :subject-ids="assignableIds"
+              :membership="membership.character"
+              :disabled="!assignable.length"
+              @attach="onAttach($event, true)"
+              @detach="onAttach($event, false)"
+            />
+          </template>
+        </Tooltip>
+        <Tooltip :text="assignTitle || ''">
+          <template #activator="{ props: tipProps }">
+            <AddToEntityControl
+              v-bind="tipProps"
+              type="set"
+              label="Assign to set"
+              float-menu
+              :subject-ids="assignableIds"
+              :membership="membership.set"
+              :disabled="!assignable.length"
+              @attach="onAttach($event, true)"
+              @detach="onAttach($event, false)"
+            />
+          </template>
+        </Tooltip>
       </div>
     </v-menu>
 
-    <button
-      class="selbar-btn"
-      type="button"
+    <AppBarButton
+      shape="round"
+      icon="layers-outline"
       data-verb="stack"
       :aria-label="
         stackFuses ? 'Fuse these into one stack' : 'Stack these into one stack'
       "
       :disabled="!stackable"
-      :title="stackTitle"
+      :tooltip="stackTitle"
       @click="emit('stack')"
-    >
-      <v-icon size="19">mdi-layers-outline</v-icon>
-    </button>
+    />
 
-    <button
-      class="selbar-btn"
-      type="button"
+    <AppBarButton
+      shape="round"
+      icon="layers-off-outline"
       data-verb="unstack"
       aria-label="Break this stack up"
       :disabled="!unstackable"
-      :title="unstackTitle"
+      :tooltip="unstackTitle"
       @click="emit('unstack')"
-    >
-      <v-icon size="19">mdi-layers-off-outline</v-icon>
-    </button>
+    />
 
-    <button
-      class="selbar-btn"
-      type="button"
+    <AppBarButton
+      shape="round"
+      icon="folder-move-outline"
       data-verb="move"
       aria-label="Move to another folder"
       :disabled="!movable.length || moves.busy"
-      :title="moveTitle"
+      :tooltip="moveTitle"
       @click="emit('move')"
-    >
-      <v-icon size="19">mdi-folder-move-outline</v-icon>
-    </button>
+    />
 
     <!-- Rename rides along DISABLED rather than disappearing: a row of buttons
          that reflows as the selection grows is a row you have to re-read, and a
          disabled button with its reason in the tooltip teaches where the verb
          lives. -->
-    <button
-      class="selbar-btn"
-      type="button"
+    <AppBarButton
+      shape="round"
+      icon="pencil-outline"
       data-verb="rename"
       aria-label="Rename"
       :disabled="!single"
-      :title="renameTitle"
+      :tooltip="renameTitle"
       @click="emit('rename')"
-    >
-      <v-icon size="19">mdi-pencil-outline</v-icon>
-    </button>
+    />
 
-    <button
-      class="selbar-btn"
-      type="button"
+    <AppBarButton
+      shape="round"
+      icon="image-outline"
       data-verb="set-icon"
       aria-label="Set thumbnail"
-      :title="iconTitle"
+      :tooltip="iconTitle"
       @click="emit('set-icon')"
-    >
-      <v-icon size="19">mdi-image-outline</v-icon>
-    </button>
+    />
 
     <span class="selbar-sep"></span>
 
-    <button
-      class="selbar-btn"
-      type="button"
+    <AppBarButton
+      shape="round"
+      icon="playlist-remove"
       data-verb="forget"
       aria-label="Remove from shelf"
       :disabled="!forgettable.length"
-      :title="forgetTitle"
+      :tooltip="forgetTitle"
       @click="emit('forget')"
-    >
-      <v-icon size="19">mdi-playlist-remove</v-icon>
-    </button>
+    />
 
     <!-- The one verb that destroys bytes, so it is the one verb drawn in the
          error colour. `aria-label` follows the modifier rather than staying
          fixed like the others': a screen-reader user holding Shift is being
          offered a different, unrecoverable operation, and a stable name would
          be the one place that did not say so. -->
-    <button
-      class="selbar-btn selbar-btn--danger"
-      type="button"
+    <AppBarButton
+      shape="round"
+      danger
+      :icon="shiftHeld ? 'delete-forever-outline' : 'delete-outline'"
       data-verb="delete"
       :aria-label="deleteLabel"
       :disabled="!deletable.length"
-      :title="deleteTitle"
+      :tooltip="deleteTitle"
       @click="emit('delete', $event.shiftKey)"
-    >
-      <v-icon size="19">{{
-        shiftHeld ? "mdi-delete-forever-outline" : "mdi-delete-outline"
-      }}</v-icon>
-    </button>
+    />
 
     <v-menu
       v-model="moreMenuOpen"
@@ -222,18 +217,16 @@
       :offset="8"
     >
       <template #activator="{ props: menuProps }">
-        <button
+        <AppBarButton
+          shape="round"
+          icon="dots-horizontal"
           v-bind="menuProps"
-          class="selbar-btn"
-          type="button"
           data-verb="more"
           aria-label="More actions"
           aria-haspopup="menu"
           :aria-expanded="moreMenuOpen"
-          title="More…"
-        >
-          <v-icon size="19">mdi-dots-horizontal</v-icon>
-        </button>
+          tooltip="More…"
+        />
       </template>
       <VerbMenu :single="false" v-bind="verbHandlers" />
     </v-menu>
@@ -244,6 +237,7 @@
        row, which is what a context menu is; the view opens it through
        `openContextMenu` after it has made the row the selection. -->
   <v-menu
+    v-if="!rail"
     v-model="contextOpen"
     :target="contextAt"
     :close-on-content-click="false"
@@ -272,12 +266,14 @@
 // **Three surfaces, one set of gates.** The pill, its `⋯` menu and the row
 // context menu all offer the same verbs under the same refusals, so they are
 // one component rather than three that have to be kept in step. That is the
-// whole reason the context menu lives here and not in the view: every `title`
+// whole reason the context menu lives here and not in the view: every tooltip
 // below is a refusal sentence, and a second copy of them would drift.
 
 import { computed, h, onMounted, onUnmounted, ref } from "vue";
 
 import AddToEntityControl from "../widgets/AddToEntityControl.vue";
+import AppBarButton from "../widgets/AppBarButton.vue";
+import Tooltip from "../widgets/Tooltip.vue";
 import { useModelFoldersStore } from "../../stores/useModelFoldersStore";
 import { useModelMovesStore } from "../../stores/useModelMovesStore";
 import { useModelShelfStore } from "../../stores/useModelShelfStore";
@@ -286,14 +282,34 @@ import { formatKeyHint, selectAllKeyHint } from "../../utils/shortcutHints";
 import {
   deletableModels,
   formatModelSize,
+  hideModelsVerb,
   movableCopies,
   trashName,
 } from "../../utils/modelShelf";
+import { onMenuKeydown } from "../../utils/menuKeyboard.js";
+import { hideSetsVerb } from "../../utils/workflowSets";
+
+const props = defineProps({
+  /**
+   * The sets from pictures whose cards are selected, on the set grid: what
+   * Hide acts on, missing-checkpoint cards included. Empty on the row list,
+   * which draws no sets.
+   */
+  sets: { type: Array, default: () => [] },
+  /**
+   * Mounted by the Models rail, which has a menu and a selection of its own:
+   * no pill and no menu here, only the verb rows (`RailVerbs`) under the same
+   * gates. A verb goes to the shelf through `store.requestVerb`, since the
+   * rail is not the shelf's child, and `picked` tells the rail to close.
+   */
+  rail: { type: Boolean, default: false },
+});
 
 const emit = defineEmits([
   "rename",
   "set-base-model",
   "set-kind",
+  "set-trigger-words",
   "stack",
   "unstack",
   "make-cover",
@@ -301,9 +317,17 @@ const emit = defineEmits([
   "set-icon",
   "clear-icons",
   "move",
+  "merge-copies",
   "open-location",
+  "works-with",
   "forget",
   "delete",
+  "new-set",
+  "clone-set",
+  "remove-from-set",
+  "hide-sets",
+  "hide-models",
+  "picked",
 ]);
 
 const store = useModelShelfStore();
@@ -319,6 +343,8 @@ const countMenuOpen = ref(false);
 const assignMenuOpen = ref(false);
 const moreMenuOpen = ref(false);
 const contextOpen = ref(false);
+/** The set-grid card the context menu was opened on, by group key, or "". */
+const contextSetKey = ref("");
 /** `[x, y]` in client coordinates - what v-menu's `target` takes. */
 const contextAt = ref([0, 0]);
 
@@ -332,12 +358,63 @@ const contextAt = ref([0, 0]);
  * @param {number} x - clientX.
  * @param {number} y - clientY.
  */
-function openContextMenu(x, y) {
+function openContextMenu(x, y, setKey = "") {
+  contextSetKey.value = setKey;
   contextAt.value = [x, y];
   contextOpen.value = true;
 }
 
 const single = computed(() => store.selectedRows.length === 1);
+
+// ── Hand-made workflow sets (#1520) ─────────────────────────────────────────
+
+/**
+ * "New workflow set with this checkpoint": one base model, hashed, since a set
+ * keeps its members by hash. A checkpoint still being hashed is refused with
+ * that reason rather than failing on the server.
+ */
+const newSetTitle = computed(() => {
+  const row = store.selectedRows[0];
+  if (!row || !["checkpoint", "unknown"].includes(row.file_kind)) {
+    return "Only a checkpoint starts a set this way. The New workflow set tile on the set grid makes an empty one.";
+  }
+  if (!row.sha256) {
+    // No hash and none on its way (a cached Hugging Face repo is a directory):
+    // "try again in a moment" would be said of it for good.
+    return row.hash_pending
+      ? "This checkpoint is still being hashed, and a set keeps its models by hash. Try again in a moment."
+      : "A set keeps its models by file hash, and this one has none.";
+  }
+  return "";
+});
+
+/**
+ * "Clone set to edit": the set from pictures whose CARD the context menu was
+ * opened on. Keyed by the card and not by the selected file, because the same
+ * file is drawn in other trays too, where "this set" would be another one.
+ * A set from pictures cannot be edited; its clone is the owner's and can.
+ */
+const clonableSet = computed(
+  () =>
+    (contextOpen.value &&
+      store.setGroups?.find(
+        (group) => group.key === contextSetKey.value && !group.head?.missing,
+      )) ||
+    null,
+);
+
+/**
+ * Remove from set: offered while every selected file is a member of the OPEN
+ * hand-made set's tray - the one place a reader can see which set they mean.
+ */
+const removableFromSet = computed(() => {
+  const open = store.handMadeGroups?.find((g) => g.key === store.openSetKey);
+  if (!open || !store.selectedRows.length) return false;
+  const members = new Set(
+    (open.set.members ?? []).filter((m) => m.on_shelf).map((m) => m.id),
+  );
+  return store.selectedModelIds.every((id) => members.has(id));
+});
 
 /**
  * What the selection weighs, stack members included.
@@ -508,9 +585,13 @@ const forgetTitle = computed(() => {
  * subset it can act on, and the tooltip says how many that is. Passing the
  * whole selection instead would compute the tri-state across rows that can
  * never be attached, so a fully-assigned person would still read as partial.
+ *
+ * Per MODEL, a ticked stack expanded into its members: the stack row carries
+ * only the cover's id, hash and attachments, so assigning it off the row
+ * reached the cover and left every other member unassigned.
  */
 const assignable = computed(() =>
-  store.selectedRows.filter(
+  store.selectedModels.filter(
     (row) => row.file_kind !== "checkpoint" && row.sha256,
   ),
 );
@@ -539,8 +620,22 @@ const membership = computed(() => {
   return byType;
 });
 
+/**
+ * Whether the selection can be given trigger words: every model in it has to be
+ * something a prompt calls up. `unknown` counts, as it does for assigning - an
+ * unclassified file is as likely a LoRA as anything else. The item stays listed
+ * and says why when it cannot, like the run verbs below it.
+ */
+const triggerable = computed(
+  () =>
+    store.selectedModels.length > 0 &&
+    store.selectedModels.every(
+      (row) => row.file_kind === "adapter" || row.file_kind === "unknown",
+    ),
+);
+
 const assignTitle = computed(() => {
-  const total = store.selectedRows.length;
+  const total = store.selectedModels.length;
   if (!assignable.value.length) {
     return total
       ? "Checkpoints cannot be assigned, and an unhashed file has no hash to assign by"
@@ -562,6 +657,35 @@ const assignTitle = computed(() => {
 const movable = computed(
   () => movableCopies(store.selectedRows, foldersById.value).items,
 );
+
+/**
+ * Whether the selection is one model with the same bytes on the disk twice.
+ *
+ * `copies` is the row's own count of `present` locations, carried by the store
+ * because the folder axis narrows a draw to one of them. One row only: the keeper
+ * is a per-model choice, and a batch would be a table of radio groups rather than
+ * a dialog.
+ */
+const mergeable = computed(() => {
+  const row = store.selectedRows[0];
+  // A collapsed run satisfies `single` - it is one row - and carries the COVER's
+  // `copies`, so without the `members` check the verb would be offered on a
+  // whole run and act on one file of it while the pill counted several. `move`
+  // has the same shape and may be settled convention there; this one deletes
+  // bytes, so it asks for a model.
+  return single.value && !row?.members && (row?.copies ?? 0) > 1;
+});
+
+const mergeTitle = computed(() => {
+  const row = store.selectedRows[0];
+  if (!single.value) return "Choose one model to merge the copies of";
+  if (row?.members) return "Open the run and choose one of its models";
+  const copies = row?.copies ?? 0;
+  if (copies < 2) {
+    return "There is only one copy of this model on the disk";
+  }
+  return `Keep one of the ${copies} copies on the disk and remove the rest`;
+});
 
 const moveTitle = computed(() => {
   if (moves.busy) return "A move is already running. One at a time, one disk.";
@@ -791,28 +915,44 @@ const openTitle = computed(() =>
 );
 
 /**
- * Put the selection's filenames on the clipboard.
+ * The hashes the selection has, for Copy SHA-256.
  *
- * The other verb in the design's context menu the shelf can answer without a
- * new route: the names are already on the rows. It is also the answer to "I need
- * this in a ComfyUI node", which is why it is worth a line at all.
+ * The hash is what sets and recipes are matched by, and the file line's
+ * tooltip shows it - but a tooltip is never a fact's only home, and nobody can
+ * select text out of one. A checkpoint not hashed yet has none to give.
+ */
+const selectedHashes = computed(() =>
+  store.selectedRows.map((row) => row.sha256).filter(Boolean),
+);
+
+/**
+ * Put one line per selected model on the clipboard: its filename, or its hash.
+ *
+ * Filenames are the other verb in the design's context menu the shelf can
+ * answer without a new route: the names are already on the rows. It is also the
+ * answer to "I need this in a ComfyUI node", which is why it is worth a line.
  *
  * A notice rather than silence, because a clipboard write has no visible
  * result: pressing it twice because nothing happened is how a reader ends up
  * unsure whether it worked at all.
  */
-async function copyFilenames() {
-  const names = store.selectedRows.map((row) => row.filename).filter(Boolean);
+async function copyLines(names, plural) {
   const notices = useNoticeStore();
   if (!names.length) return;
+  // A row with nothing to give (a checkpoint not hashed yet) is left out, and
+  // the notice says so: a paste of two lines from three models must not read
+  // as the whole selection.
+  const total = store.selectedRows.length;
+  const skipped = total - names.length;
   try {
     await navigator.clipboard.writeText(names.join("\n"));
     notices.push({
       level: "success",
       text:
-        names.length === 1
+        (names.length === 1
           ? `Copied ${names[0]}.`
-          : `Copied ${names.length} filenames.`,
+          : `Copied ${names.length} ${plural}.`) +
+        (skipped > 0 ? ` ${skipped} of ${total} selected had none.` : ""),
     });
   } catch (err) {
     // Denied permission, an insecure origin, or a browser that has no
@@ -845,6 +985,17 @@ function onAttach(payload, attach) {
  */
 const verbHandlers = computed(() => ({
   rows: store.selectedRows,
+  hideSets: hideSetsVerb(props.sets),
+  // The rail's menu has its own Hide row, above these.
+  hideModels: props.rail
+    ? null
+    : hideModelsVerb(
+        store.selectedModels.map((model) => model.id),
+        store.hiddenModelIds,
+      ),
+  newSetTitle: newSetTitle.value,
+  removableFromSet: removableFromSet.value,
+  clonable: Boolean(clonableSet.value),
   renameTitle: renameTitle.value,
   iconTitle: iconTitle.value,
   clearIconTitle: clearIconTitle.value,
@@ -853,6 +1004,10 @@ const verbHandlers = computed(() => ({
   assignableIds: assignableIds.value,
   assignable: assignable.value.length > 0,
   membership: membership.value,
+  triggerable: triggerable.value,
+  triggerTitle: triggerable.value
+    ? ""
+    : "Only LoRAs and other adapters have trigger words",
   stackable: stackable.value,
   stackTitle: stackTitle.value,
   unstackable: unstackable.value,
@@ -867,22 +1022,38 @@ const verbHandlers = computed(() => ({
       : "Take out of this run",
   movable: movable.value.length > 0 && !moves.busy,
   moveTitle: moveTitle.value,
+  mergeable: mergeable.value,
+  mergeTitle: mergeTitle.value,
   openable: openable.value,
   openTitle: openTitle.value,
+  hashed: selectedHashes.value.length > 0,
+  hashPending: store.selectedRows.some((row) => row.hash_pending),
   forgettable: forgettable.value.length > 0,
   forgetTitle: forgetTitle.value,
   deletable: deletable.value.length > 0,
   deleteLabel: deleteLabel.value,
   deleteTitle: deleteTitle.value,
+  rail: props.rail,
   onVerb: (verb, event) => {
+    // Read before the menu closes: it is the open menu's card.
+    const cloned = clonableSet.value;
     contextOpen.value = false;
     moreMenuOpen.value = false;
-    if (verb === "copy-filenames") copyFilenames();
+    const send = props.rail ? store.requestVerb : emit;
+    if (props.rail) emit("picked");
+    if (verb === "copy-filenames")
+      copyLines(
+        store.selectedRows.map((row) => row.filename).filter(Boolean),
+        "filenames",
+      );
+    else if (verb === "copy-sha256")
+      copyLines(selectedHashes.value, "SHA-256 hashes");
     // The gesture decides, not the tracked key state: `shiftHeld` drives the
     // label and nothing else, so a stale one can never turn a trash into an
     // unlink.
-    else if (verb === "delete") emit("delete", Boolean(event?.shiftKey));
-    else emit(verb);
+    else if (verb === "delete") send("delete", Boolean(event?.shiftKey));
+    else if (verb === "clone-set") send("clone-set", cloned);
+    else send(verb);
   },
   onAttach,
 }));
@@ -896,45 +1067,85 @@ const verbHandlers = computed(() => ({
  * move files, then removal. A separate component would need every gate above
  * threaded through it as props anyway, which is exactly what `verbHandlers` is.
  */
-const VerbMenu = (props) => {
+const VerbItems = (props) => {
   const item = (icon, label, { on, disabled, title, kbd, danger } = {}) =>
     h(
       "button",
       {
         class: [
-          "shelf-mi",
-          disabled && "shelf-mi--disabled",
-          danger && "shelf-mi--danger",
+          "ctx-item",
+          disabled && "ctx-item--disabled",
+          danger && "ctx-item--danger",
         ],
         type: "button",
         role: "menuitem",
         disabled,
-        title,
         onClick: on,
       },
       [
-        h("i", { class: `v-icon mdi ${icon}`, "aria-hidden": "true" }),
-        h("span", label),
-        kbd ? h("span", { class: "shelf-mi-kbd" }, kbd) : null,
+        title ? h(Tooltip, { text: title, activator: "parent" }) : null,
+        h("i", {
+          class: `v-icon mdi ${icon} ctx-icon`,
+          "aria-hidden": "true",
+        }),
+        h("span", { class: "ctx-label-text" }, label),
+        kbd ? h("span", { class: "ctx-shortcut" }, kbd) : null,
       ],
     );
-  const sep = () => h("span", { class: "shelf-mi-sep" });
+  const sep = () => h("div", { class: "ctx-sep" });
   // No `floatMenu`: it teleports the panel below the row, which a flyout cannot
   // use, and the picker now refuses the pair anyway.
   const assign = (type, label) =>
-    h(AddToEntityControl, {
-      type,
-      label,
-      placement: "right",
-      subjectIds: props.assignableIds,
-      membership: props.membership[type],
-      disabled: !props.assignable,
-      title: props.assignTitle,
-      onAttach: (entity) => props.onAttach(entity, true),
-      onDetach: (entity) => props.onAttach(entity, false),
-    });
+    h(
+      Tooltip,
+      { text: props.assignTitle || "" },
+      {
+        activator: ({ props: tipProps }) =>
+          h(AddToEntityControl, {
+            ...tipProps,
+            type,
+            label,
+            placement: "right",
+            subjectIds: props.assignableIds,
+            membership: props.membership[type],
+            disabled: !props.assignable,
+            onAttach: (entity) => props.onAttach(entity, true),
+            onDetach: (entity) => props.onAttach(entity, false),
+          }),
+      },
+    );
 
-  return h("div", { class: "shelf-menu", role: "menu" }, [
+  return [
+    // Inside an open hand-made set's tray the set's own verb leads: it is what
+    // the reader is working on, and it never touches a file.
+    props.removableFromSet
+      ? item("mdi-minus-circle-outline", "Remove from set", {
+          on: () => props.onVerb("remove-from-set"),
+          title: "Takes it off this set only. The file stays on the shelf.",
+        })
+      : null,
+    props.removableFromSet ? sep() : null,
+    // Hide leads for the same reason, and to sit as far from the two removal
+    // verbs at the foot as the menu allows: this one takes a card off the grid
+    // and those take a row off the shelf or a file off the disk.
+    props.hideSets
+      ? item(props.hideSets.icon, props.hideSets.label, {
+          on: () => props.onVerb("hide-sets"),
+          title: props.hideSets.hide
+            ? "No file is touched. Show them, under the grid, brings hidden sets back."
+            : "",
+        })
+      : null,
+    // The model's own Hide, worded apart from the set's just above. Beside it
+    // for the reason that one leads: it touches no file, and the verbs that do
+    // are at the foot.
+    props.hideModels
+      ? item(props.hideModels.icon, props.hideModels.label, {
+          on: () => props.onVerb("hide-models"),
+          title: props.hideModels.title,
+        })
+      : null,
+    props.hideSets || props.hideModels ? sep() : null,
     props.single
       ? item("mdi-pencil-outline", "Rename", {
           on: () => props.onVerb("rename"),
@@ -958,6 +1169,11 @@ const VerbMenu = (props) => {
     }),
     item("mdi-shape-outline", "Set kind…", {
       on: () => props.onVerb("set-kind"),
+    }),
+    item("mdi-format-quote-close-outline", "Set trigger words…", {
+      on: () => props.onVerb("set-trigger-words"),
+      disabled: !props.triggerable,
+      title: props.triggerTitle,
     }),
     assign("character", "Assign to person"),
     assign("set", "Assign to set"),
@@ -994,6 +1210,16 @@ const VerbMenu = (props) => {
       disabled: !props.movable,
       title: props.moveTitle,
     }),
+    // Listed always and disabled with its reason, like the two run verbs above:
+    // a reader whose shelf has no duplicates on screen is the one who most needs
+    // to learn that the verb exists and what it acts on. NOT the danger
+    // treatment - it removes a redundant copy and keeps the model, which is the
+    // opposite of what the red below is for.
+    item("mdi-call-merge", "Keep one copy…", {
+      on: () => props.onVerb("merge-copies"),
+      disabled: !props.mergeable,
+      title: props.mergeTitle,
+    }),
     sep(),
     // The two verbs that answer "where is this file, actually" - the first
     // asks the server's own desktop, the second answers on this machine.
@@ -1005,11 +1231,46 @@ const VerbMenu = (props) => {
           title: props.openTitle,
         })
       : null,
+    // One model at a time, because the answer is about one file: "what has THIS
+    // run with" has no reading across a selection of forty. The evidence is
+    // co-occurrence, so the dialog it opens also has to say that a companion
+    // missing from its list is untested rather than incompatible (#1438).
+    props.single
+      ? item("mdi-connection", "Works with…", {
+          on: () => props.onVerb("works-with"),
+        })
+      : null,
+    // The rail leads its menu with its own New workflow set, for any model.
+    props.single && !props.rail
+      ? item("mdi-layers-plus", "New workflow set with this checkpoint", {
+          on: () => props.onVerb("new-set"),
+          disabled: Boolean(props.newSetTitle),
+          title: props.newSetTitle,
+        })
+      : null,
+    props.clonable
+      ? item("mdi-content-duplicate", "Clone set to edit", {
+          on: () => props.onVerb("clone-set"),
+          title:
+            'A "Grouped by you" copy of this set, which you can edit. No file is touched.',
+        })
+      : null,
     item(
       "mdi-content-copy",
       props.single ? "Copy filename" : "Copy filenames",
       { on: () => props.onVerb("copy-filenames") },
     ),
+    item("mdi-fingerprint", "Copy SHA-256", {
+      on: () => props.onVerb("copy-sha256"),
+      disabled: !props.hashed,
+      // "Yet" only where a hash is on its way: an engine or a cached Hugging
+      // Face repo never gets one.
+      title: props.hashed
+        ? ""
+        : props.hashPending
+          ? "Not hashed yet"
+          : "No file hash",
+    }),
     sep(),
     // NOT the danger treatment: removing a model whose file is already gone
     // destroys a row, not bytes. The one below it does destroy bytes, which is
@@ -1036,19 +1297,28 @@ const VerbMenu = (props) => {
         danger: true,
       },
     ),
-  ]);
+  ];
 };
+
+const VerbMenu = (props) =>
+  h("div", { class: "ctx-menu shelf-menu", role: "menu" }, VerbItems(props));
+
+/** The verb rows alone, for the Models rail to draw inside its own menu. */
+const RailVerbs = () =>
+  VerbItems({ ...verbHandlers.value, single: single.value });
 
 // The opener the view calls, and the gates the suite asserts directly rather
 // than through seven `title` strings. Last in the file because `defineExpose`
 // evaluates its argument where it stands.
 defineExpose({
   openContextMenu,
+  RailVerbs,
   deletable,
   forgettable,
   assignable,
   membership,
   movable,
+  mergeable,
   openable,
   selectedBytes,
   stackable,
@@ -1062,134 +1332,37 @@ defineExpose({
 });
 </script>
 
-<style scoped>
-/* ── The verb menu ─────────────────────────────────────────────────────────
-   The same panel vocabulary as the toolbar popovers and the undo receipt:
-   surface, hairline, `--elevation-4`. Global rather than scoped because the
-   items are built in a render function, which scoped CSS cannot reach. */
-</style>
-
 <style>
+/* The rows are the global `.ctx-*` menu (styles/context-menu.css). What is left
+   here is sizing, and it is global because the verb menu is a render function,
+   which scoped CSS cannot reach. */
 .shelf-menu {
   min-width: 210px;
-  padding: var(--space-2);
-  background: rgb(var(--v-theme-surface));
-  border: 1px solid rgb(var(--v-theme-divider));
-  border-radius: var(--radius-md);
-  box-shadow: var(--elevation-4);
-  font-size: var(--text-sm);
 }
 
-.shelf-menu--assign {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  min-width: 0;
-}
-
-.shelf-mi {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
+/* The Assign popover's two pickers float their listbox (`float-menu`), so they
+   are not in flyout mode and keep their toolbar-button skin; drawn here as the
+   menu's rows. `.ate` is repeated past the scoped `.ate-btn[data-v-…]`. */
+.shelf-menu--assign .ate {
   width: 100%;
-  padding: var(--space-2) var(--space-3);
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: rgb(var(--v-theme-on-surface));
-  font: inherit;
-  font-size: var(--text-sm);
-  text-align: left;
-  white-space: nowrap;
-  cursor: pointer;
 }
 
-.shelf-mi:hover:not(:disabled) {
+.shelf-menu--assign .ate .ate-btn {
+  width: 100%;
+  min-height: var(--control-h-bar);
+  gap: var(--space-3);
+  padding: 0 var(--space-4);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.shelf-menu--assign .ate .ate-btn:hover:not(:disabled) {
   background: var(--hover-wash);
 }
 
-.shelf-mi > .v-icon {
-  width: 18px;
-  flex: none;
-  font-size: 16px;
-  color: rgba(var(--v-theme-on-surface), 0.7);
-}
-
-/* The destructive row. Both the label and its glyph take the error colour: the
-   menu is a list of neutral verbs and this is the one that cannot be undone. */
-.shelf-mi--danger,
-.shelf-mi--danger > .v-icon {
-  color: rgb(var(--v-theme-error));
-}
-
-.shelf-mi--danger:hover:not(:disabled) {
-  background: rgba(var(--v-theme-error), 0.08);
-}
-
-.shelf-mi--disabled,
-.shelf-mi:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-
-.shelf-mi-kbd {
-  margin-left: auto;
-  padding-left: var(--space-5);
-  font-family: var(--font-mono);
-  font-size: var(--text-2xs);
-  color: rgba(var(--v-theme-on-surface), 0.7);
-}
-
-.shelf-mi-sep {
-  display: block;
-  height: 1px;
-  margin: var(--space-2);
-  background: rgb(var(--v-theme-divider));
-}
-
-/* The two pickers inside the verb menu are full-width rows in it, not the
-   bordered buttons they are in a toolbar. */
-.shelf-menu .ate {
-  width: 100%;
-}
-
-.shelf-menu .ate-btn {
-  width: 100%;
-  justify-content: flex-start;
-  gap: var(--space-3);
-  padding: var(--space-2) var(--space-3);
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  font-size: var(--text-sm);
-}
-
-/* The flyout skin is drawn for the grid's context menu, whose rows are
-   `.ctx-item`: 14px inset, square full-bleed hover, an 18px glyph at full
-   strength. Every one of those is wrong beside a `.shelf-mi`, and the indent is
-   only the one that is obvious - the two Assign rows also drew a square hover
-   wash in a menu of rounded ones, in neutral grey where every neighbour uses
-   the accent `--hover-wash`.
-
-   `.ate` is repeated to reach (0,4,0). The rule being overridden is SCOPED, so
-   it compiles to `.ate--flyout .ate-btn[data-v-…]` and counts three - which is
-   also why the plain `.shelf-menu .ate-btn` above it has never applied to a
-   flyout. */
-.shelf-menu .ate.ate--flyout .ate-btn {
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-sm);
-}
-
-.shelf-menu .ate.ate--flyout .ate-btn:hover:not(:disabled) {
-  background: var(--hover-wash);
-}
-
-/* The trigger's own glyph, not the trailing chevron, which the flyout skin
-   already dims. Colour only: a `v-icon` with a numeric `size` writes `font-size`
-   as an INLINE style, so the 18px glyph cannot be brought down to the 16px the
-   `.shelf-mi` rows use without `!important`. Its box is 18px either way, so the
-   labels still line up - the glyph is a shade larger and that is all. */
-.shelf-menu .ate--flyout .ate-btn > .v-icon:not(.ate-chevron) {
-  color: rgba(var(--v-theme-on-surface), 0.7);
+.shelf-menu--assign .ate .ate-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring-inset);
 }
 </style>

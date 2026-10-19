@@ -14,6 +14,14 @@ vi.mock("vuetify/components", () => ({
   VDialog: { name: "v-dialog", template: "<div><slot /></div>" },
   VIcon: { name: "v-icon", template: "<i><slot /></i>" },
   VProgressCircular: { name: "v-progress-circular", template: "<i />" },
+  // Tooltip.vue wraps VTooltip: render the activator only, as a closed tip does.
+  VTooltip: {
+    name: "VTooltip",
+    setup:
+      (_p, { slots }) =>
+      () =>
+        slots.activator?.({ props: {} }),
+  },
 }));
 
 import FolderMappingWizard from "./FolderMappingWizard.vue";
@@ -22,6 +30,7 @@ import FolderMappingPreviewStep from "./FolderMappingPreviewStep.vue";
 import AppDialog from "../widgets/AppDialog.vue";
 import {
   addLibrary,
+  discardLibrary,
   inspectLibraryPath,
   listLibraries,
   setActiveLibrary,
@@ -42,6 +51,7 @@ vi.mock("../../api/libraries", () => ({
   addLibrary: vi.fn(),
   setActiveLibrary: vi.fn(),
   listLibraries: vi.fn(),
+  discardLibrary: vi.fn(),
 }));
 
 vi.mock("../../api/folderStructure", () => ({
@@ -322,7 +332,9 @@ describe("building the library", () => {
       total: 2,
       result: {
         ...READ_RESULT,
-        captions: [{ suffix: ".txt", kind: "tags", files: 3, folders: 1, sample: "a" }],
+        captions: [
+          { suffix: ".txt", kind: "tags", files: 3, folders: 1, sample: "a" },
+        ],
       },
     });
     await bringThemIn(wrapper);
@@ -337,9 +349,9 @@ describe("building the library", () => {
     await wrapper.find(".tree-stub .emit-next").trigger("click");
     await settle();
 
-    expect(wrapper.find('select[aria-label="Read *.txt as"]').element.value).toBe(
-      "ignore",
-    );
+    expect(
+      wrapper.find('select[aria-label="Read *.txt as"]').element.value,
+    ).toBe("ignore");
     await button(wrapper, "Yes, build this library").trigger("click");
     await settle();
     expect(useFolderMappingStore().pending).toMatchObject({
@@ -397,8 +409,10 @@ describe("resuming after the switch", () => {
     expect(addLibrary).not.toHaveBeenCalled();
     expect(startFolderStructureRead).not.toHaveBeenCalled();
     // From here a reopen reattaches to the read; it must never commit twice.
+    // The commit's id rides along so a reload can ask whether it finished.
     expect(useFolderMappingStore().pending).toEqual({
       taskId: "read-1",
+      commitTaskId: "commit-1",
       path: PATH,
       label: "Generations",
       mode: "local_import",
@@ -682,6 +696,33 @@ describe("the branches nobody walks on purpose", () => {
     wrapper.unmount();
   });
 
+  it("records the commit on a plain entry the wizard's own read saved", async () => {
+    // A first run with no GPU step reads nothing at start-up, so the wizard
+    // reads the folder itself and saves a plain entry. The promotion then
+    // reloads before `completed` is seen; without the commit's id the reload
+    // reopened the wizard over the finished library.
+    const plain = { taskId: "read-1", path: PATH, label: "", mode: "local_import" };
+    useFolderMappingStore().save(plain);
+    const wrapper = mountWizard({
+      resume: { path: PATH, result: READ_RESULT, mode: "local_import" },
+    });
+    await settle();
+
+    await wrapper.find(".tree-stub .emit-next").trigger("click");
+    await settle();
+    wrapper
+      .findComponent(FolderMappingPreviewStep)
+      .vm.$emit("commit-started", "commit-9");
+    await settle();
+
+    expect(useFolderMappingStore().pending).toEqual({
+      ...plain,
+      commitTaskId: "commit-9",
+    });
+
+    wrapper.unmount();
+  });
+
   it("commits a parked read by its result, because its task no longer exists", async () => {
     // The failure this replaces: the desktop's first run read the folder on
     // one server process and restarted onto the GPU runtime before the owner
@@ -764,5 +805,40 @@ describe("reopening", () => {
     expect(
       wrapper.find(".choose-step__field .app-input__field").element.value,
     ).toBe("");
+  });
+});
+
+// A folder waiting on the import question holds no vault.db yet, so every way
+// out of this dialog is an answer - see
+// business/plans/pixlstash-temp-vault-first-import-plan.md.
+describe("a folder still waiting on the question", () => {
+  function pending(uuid = "pending-uuid") {
+    const libraries = useLibrariesStore();
+    libraries.importingUuid = uuid;
+    libraries.importingName = "Generations";
+    return libraries;
+  }
+
+  it("gives the folder back when the dialog is closed", async () => {
+    pending();
+    discardLibrary.mockResolvedValue({ uuid: "scratch", name: "PixlStash" });
+    const wrapper = mountWizard();
+
+    await wrapper.findComponent(AppDialog).vm.$emit("close");
+    await settle();
+
+    expect(discardLibrary).toHaveBeenCalledWith("pending-uuid");
+    expect(reloadPage).toHaveBeenCalled();
+  });
+
+  it("leaves a real library alone when the dialog is closed", async () => {
+    const libraries = useLibrariesStore();
+    libraries.importingUuid = "";
+    const wrapper = mountWizard();
+
+    await wrapper.findComponent(AppDialog).vm.$emit("close");
+    await settle();
+
+    expect(discardLibrary).not.toHaveBeenCalled();
   });
 });

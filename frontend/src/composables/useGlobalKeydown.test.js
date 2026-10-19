@@ -45,9 +45,9 @@ function press(key, init = {}) {
 }
 
 /** Mount the shelf's root signal - the class `ModelShelf.vue` renders. */
-function mountShelfMarker() {
+function mountShelfMarker(className = "shelf") {
   const el = document.createElement("div");
-  el.className = "shelf";
+  el.className = className;
   document.body.appendChild(el);
   return el;
 }
@@ -88,6 +88,27 @@ describe("the undo chord", () => {
     expect(store.redo).not.toHaveBeenCalled();
   });
 
+  it("takes a live local receipt's action on the shelf instead of declining", async () => {
+    mountShelfMarker();
+    const undo = vi.fn().mockResolvedValue(true);
+    const redo = vi.fn().mockResolvedValue({});
+    store.setLocalReceiptHost(true);
+    store.showLocalReceipt({ summary: "Added", icon: "mdi-plus", undo, redo });
+    press("y");
+    expect(undo).not.toHaveBeenCalled();
+    // The wrong direction says which way works, never "not undoable".
+    expect(notices.notices.at(-1).text).toContain(
+      "Undo takes that change back",
+    );
+    press("z");
+    await vi.waitFor(() => expect(store.receipt?.mode).toBe("undone"));
+    expect(undo).toHaveBeenCalledTimes(1);
+    press("y");
+    await vi.waitFor(() => expect(redo).toHaveBeenCalledTimes(1));
+    expect(store.undo).not.toHaveBeenCalled();
+    expect(store.redo).not.toHaveBeenCalled();
+  });
+
   it("says why, once, however many times the chord is pressed", () => {
     mountShelfMarker();
     press("z");
@@ -98,6 +119,22 @@ describe("the undo chord", () => {
     expect(notices.notices).toHaveLength(1);
     expect(notices.notices[0].key).toBe(SHELF_NO_UNDO_KEY);
     expect(notices.notices[0].text).toContain("aren't undoable");
+  });
+
+  // #1415: the shelf was guarded alone, and the three other grid-replacing
+  // destinations that mount neither a receipt nor an UndoControl were not - so
+  // the chord reverted a library action there with nothing on screen to say so.
+  it.each([
+    ["the Workflows grid", "wfv"],
+    ["Moves", "mv"],
+    ["Insights", "ins"],
+  ])("declines on %s too, for the shelf's reason", (_name, className) => {
+    mountShelfMarker(className);
+    press("z");
+    press("z", { shiftKey: true });
+    expect(store.undo).not.toHaveBeenCalled();
+    expect(store.redo).not.toHaveBeenCalled();
+    expect(notices.notices[0].key).toBe(SHELF_NO_UNDO_KEY);
   });
 
   it("acts again once the shelf unmounts", () => {

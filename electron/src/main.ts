@@ -6,6 +6,7 @@ import {
   ipcMain,
   Menu,
   nativeImage,
+  screen,
   shell,
   session,
   dialog,
@@ -22,14 +23,22 @@ import { randomUUID } from 'node:crypto';
 import { detectHardware, gpuUpgrades, Hardware } from './backend/HardwareDetector';
 import { BackendManager, OVERLAY_ACCELS, launchWithOverlayFallback } from './backend/BackendManager';
 import { uniqueDownloadPath } from './downloads';
+import { restoredWindowSize } from './windowState';
 import { ipcBytes, pngClipboardPayload, safeMediaFilename } from './mediaIpc';
 import {
+  comfyuiOpenTarget,
   isAllowedNavigation,
   isBackendOrigin,
   isBundledRendererPage,
   redactUrl,
 } from './urlPolicy';
-import { ServerProcess, StartupRecovery, devInterpreter } from './backend/ServerProcess';
+import {
+  ServerProcess,
+  StartupRecovery,
+  devInterpreter,
+  devPythonPath,
+  devRepoRoot,
+} from './backend/ServerProcess';
 import {
   isPermissionRepairRequired,
   mkdirPrivateIfMissing,
@@ -65,16 +74,18 @@ import {
 } from './config';
 import { inspectFolder } from './setup/InspectFolder';
 import { readLibraryFolder } from './setup/ReadLibraryFolder';
-import { runFirstRunSetup } from './setup/RunSetup';
+import { overlayStateFor, runFirstRunSetup } from './setup/RunSetup';
 import { prepareLegacyIdentity } from './setup/LegacyIdentityPreparation';
 import {
+  argsAfter,
   cliCommandHint,
   launcherPath,
-  parseCliArgs,
   shimBlocked,
   shimInstalled,
   shimPath,
   syncShim,
+  syncMcpShim,
+  mcpShimPath,
   syncUserPath,
 } from './cliShim';
 
@@ -220,10 +231,36 @@ function bundledAccel(): Accel {
   return runtime?.accel ?? 'cpu';
 }
 
+/** Where the main window's last size is kept between launches. */
+function windowStatePath(): string {
+  return join(app.getPath('userData'), 'window-state.json');
+}
+
+/** Remember the window's size so the next launch reopens at it. */
+function saveWindowState(win: BrowserWindow): void {
+  // Normal bounds, so a maximized window still remembers the size it restores to.
+  const { width, height } = win.getNormalBounds();
+  try {
+    mkdirSync(dirname(windowStatePath()), { recursive: true });
+    writeFileSync(
+      windowStatePath(),
+      JSON.stringify({ width, height, maximized: win.isMaximized() }, null, 2),
+    );
+  } catch (e) {
+    console.warn(`[window-state] could not save the window size to ${windowStatePath()}:`, e);
+  }
+}
+
 function createMainWindow(): void {
+  const size = restoredWindowSize(
+    existsSync(windowStatePath()) ? readJsonFile(windowStatePath()) : null,
+    screen.getPrimaryDisplay().workAreaSize,
+    { width: 800, height: 600 },
+    { width: 1280, height: 860 },
+  );
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 860,
+    width: size.width,
+    height: size.height,
     minWidth: 800,
     minHeight: 600,
     backgroundColor: '#1b1f24',
@@ -247,11 +284,13 @@ function createMainWindow(): void {
   if (process.platform !== 'darwin' && !APP_ICON.isEmpty()) {
     mainWindow.setIcon(APP_ICON);
   }
+  if (size.maximized) mainWindow.maximize();
   mainWindow.loadFile(join(__dirname, 'renderer', 'index.html'));
   // With a tray available, closing the window hides it instead of quitting so
   // the backend (and any remote server) keeps running. A real quit goes through
   // `quitting` (tray Quit / app before-quit), which lets the close proceed.
   mainWindow.on('close', (e) => {
+    if (mainWindow) saveWindowState(mainWindow);
     if (!quitting && tray && hideToTrayOnClose) {
       e.preventDefault();
       mainWindow?.hide();
@@ -536,6 +575,19 @@ function shimForwardsTo(): { launcher: string; windowsHub?: string } {
 }
 
 /**
+ * What the MCP shim forwards to: the same split, for the same reason.
+ *
+ * The MCP server takes no hub - it is an HTTP client of the running backend
+ * and finds its port in `server-config.json` - so Windows only needs the
+ * interpreter.
+ */
+function mcpShimForwardsTo(): { launcher: string; windowsPython?: string } {
+  return process.platform === 'win32'
+    ? { launcher: bundledInterpreter(), windowsPython: bundledInterpreter() }
+    : { launcher: launcherPath() };
+}
+
+/**
  * The command that reaches this CLI, or undefined when we cannot name one.
  *
  * Only a packaged install has a launcher a shell can run: unpackaged,
@@ -573,9 +625,27 @@ function applyShellCommand(): void {
   if (shimSupported()) {
     const { launcher, windowsHub } = shimForwardsTo();
     const installed = syncShim(shellCommand, launcher, shimPath(), windowsHub);
-    // Follows the shim rather than the preference, so a refused shim never
-    // leaves a directory on PATH that holds nothing.
-    const onPath = syncUserPath(installed, dirname(shimPath()));
+    // The MCP shim rides the same preference and the same directory. Its own
+    // success is deliberately not folded into `shimReachable`, which is about
+    // the CLI hint shown in Settings.
+    const mcp = mcpShimForwardsTo();
+    // Its own config path, not the platform default: the desktop keeps a
+    // separate server-config.json, and reading the wrong one gets the wrong
+    // port and the wrong scheme.
+    const mcpInstalled = syncMcpShim(
+      shellCommand,
+      mcp.launcher,
+      serverConfigPath(),
+      mcpShimPath(),
+      mcp.windowsPython,
+    );
+    // Follows the shims rather than the preference, so a refused shim never
+    // leaves a directory on PATH that holds nothing. Either of them is reason
+    // enough to keep the directory: `shimBlocked` is per file, so a user who
+    // already has their own `pixlstash` gets the CLI shim refused while the
+    // MCP one is written, and taking only the CLI's answer would strip the
+    // PATH entry for a file that had just landed in it.
+    const onPath = syncUserPath(installed || mcpInstalled, dirname(shimPath()));
     // Elsewhere the directory is on PATH by convention, so the file is the whole
     // answer; on Windows we put it there ourselves and have to have succeeded.
     shimReachable = installed && (process.platform !== 'win32' || onPath);
@@ -1080,6 +1150,12 @@ async function boot(): Promise<void> {
     hardware = await detectHardware(forcedBackend);
 
     if (isDevBackend()) {
+      // Dev skips the bundled runtime and GPU overlays, not first-run setup:
+      // with no config there is still a library folder and privacy to ask.
+      if (!existsSync(serverConfigPath())) {
+        await mainWindow?.loadFile(join(__dirname, 'renderer', 'setup.html'));
+        return;
+      }
       await startAndLoad(null);
       return;
     }
@@ -1158,7 +1234,7 @@ async function retryLaunch(recovery: StartupRecovery): Promise<void> {
 async function standaloneConfigPath(): Promise<string | null> {
   try {
     const { stdout } = await execFileP(
-      bundledInterpreter(),
+      backendInterpreter(),
       [
         '-c',
         "from platformdirs import user_config_dir; import os; " +
@@ -1183,11 +1259,43 @@ function readJsonFile(path: string): Record<string, unknown> | null {
 
 /** The discrete-GPU overlay (if any) we'd offer to install on this machine. */
 function gpuUpgrade(): Accel | undefined {
+  // A dev run uses the developer's own env, which overlays never apply to.
+  if (isDevBackend()) return undefined;
   return hardware ? gpuUpgrades(hardware, bundledAccel())[0] : undefined;
+}
+
+/**
+ * Install, switch and remove act on GPU overlays a dev run never launches and
+ * the packaged app on this machine does: switching would change its saved
+ * choice and removing would delete its download.
+ */
+function refuseAccelChangeInDev(): void {
+  if (isDevBackend()) {
+    throw new Error(
+      'This is a development run: it uses the Python environment it was started from, and GPU add-ons belong to the installed app.',
+    );
+  }
+}
+
+/** The interpreter the backend runs on: the bundled one, or the dev checkout's. */
+function backendInterpreter(): string {
+  return isDevBackend() ? devInterpreter() : bundledInterpreter();
+}
+
+/** Environment for running `pixlstash` on {@link backendInterpreter}. */
+function backendEnv(): NodeJS.ProcessEnv {
+  if (!isDevBackend()) return process.env;
+  return { ...process.env, PYTHONPATH: devPythonPath(devRepoRoot(), process.env.PYTHONPATH) };
 }
 
 /** Describe the bundled accelerator + each installable/installed GPU overlay. */
 async function acceleratorState() {
+  // Dev runs on the checkout's interpreter and never on an overlay, so there is
+  // nothing to install or switch here - and the overlays on disk belong to the
+  // packaged app that shares this userData.
+  if (isDevBackend()) {
+    return { dev: true, bundled: { accel: null, label: 'Development environment', active: true }, items: [] };
+  }
   const active = await manager.getActiveAccel();
   const upgrades = hardware ? gpuUpgrades(hardware, bundledAccel()) : [];
   const installed = await manager.listInstalled();
@@ -1410,7 +1518,7 @@ function registerIpc(): void {
   // that renders content PixlStash did not author.
   ipcMain.handle('setup:inspect', async (event, path?: string) => {
     requireSetupRenderer(event, 'setup:inspect');
-    return inspectFolder(path || '', bundledInterpreter());
+    return inspectFolder(path || '', backendInterpreter());
   });
 
   ipcMain.handle('setup:pickFolder', async (event, current?: string) => {
@@ -1460,7 +1568,7 @@ function registerIpc(): void {
           : undefined,
       };
 
-      if (!runtime) throw new Error('No bundled runtime available');
+      if (!runtime && !isDevBackend()) throw new Error('No bundled runtime available');
 
       const configDir = dirname(serverConfigPath());
       // New credential directories are private even under umask 0002. Existing
@@ -1476,7 +1584,10 @@ function registerIpc(): void {
         setBackendsRoot: (location) =>
           setBackendsRoot(normalizeBackendsRoot(location, defaultBackendsRoot())),
         prepareLegacyIdentity: (source) =>
-          prepareLegacyIdentity(bundledInterpreter(), hubPath(), source),
+          prepareLegacyIdentity(backendInterpreter(), hubPath(), source, (file, args, options) =>
+            // pixlstash is not installed into the dev env; import it from the checkout.
+            execFileP(file, args, { ...options, env: backendEnv() }),
+          ),
         // Loopback HTTP; the active runtime drives the device (default_device
         // left as auto).
         writeConfig: (imageRoot) =>
@@ -1496,8 +1607,10 @@ function registerIpc(): void {
         clearConfig: () => rmSync(serverConfigPath(), { force: true }),
         parkTelemetry: writePendingTelemetry,
         parkMapping: writePendingMapping,
-        setActiveAccel: (accel) => manager.setActiveAccel(accel),
-        activeOverlayAccel,
+        ...overlayStateFor<Accel>(isDevBackend(), {
+          setActiveAccel: (accel) => manager.setActiveAccel(accel),
+          activeOverlayAccel,
+        }),
         startBackend: startFromSetup,
         installOverlay: (accel) =>
           manager.installOverlay(
@@ -1548,6 +1661,25 @@ function registerIpc(): void {
 
   ipcMain.handle('desktop:openLibraryFolder', () => openLibraryFolder());
   ipcMain.handle('desktop:showLogs', () => showServerLogs());
+  // The Workflow tab's and the Run popup's Open in ComfyUI. Its own channel
+  // because ComfyUI is plain http:, which openExternalSafely refuses for every
+  // other link; the app window only, and only a URL comfyuiOpenTarget accepts.
+  // One a second: a person clicks once, and a loop from a hostile page should
+  // not be able to fill the OS browser with tabs.
+  let lastComfyuiOpen = 0;
+  ipcMain.handle('desktop:openComfyui', async (event, target: unknown) => {
+    requireAppRenderer(event, 'desktop:openComfyui');
+    const now = Date.now();
+    if (now - lastComfyuiOpen < 1000) return false;
+    lastComfyuiOpen = now;
+    const url = comfyuiOpenTarget(target);
+    if (!url) {
+      console.warn('[external] refusing desktop:openComfyui for a URL that is not a ComfyUI workflow link');
+      return false;
+    }
+    await shell.openExternal(url);
+    return true;
+  });
 
   // The renderer fetches through its authenticated Axios/session path (also
   // preserving read-only share tokens), then hands opaque bytes to these two
@@ -1562,10 +1694,14 @@ function registerIpc(): void {
     // filename resolve against the process working directory (the home folder).
     const dir = downloadsDir();
     const options: Electron.SaveDialogOptions = {
-      title: 'Save media as',
+      title: 'Save as',
       defaultPath: dir ? join(dir, suggestedName) : suggestedName,
       ...(filterExtension
-        ? { filters: [{ name: 'Media', extensions: [filterExtension] }] }
+        ? {
+            filters: [
+              { name: `${filterExtension.toUpperCase()} file`, extensions: [filterExtension] },
+            ],
+          }
         : {}),
     };
     const result = mainWindow
@@ -1732,6 +1868,7 @@ function registerIpc(): void {
   // an `Accel` is a path segment (see requireAccel). Validate at the boundary,
   // before the value can reach a directory join.
   ipcMain.handle('accel:install', async (_e, raw: unknown) => {
+    refuseAccelChangeInDev();
     const accel = requireAccel(raw);
     if (!runtime) throw new Error('No bundled runtime available');
     // installOverlay wipes the target directory first, and a backend running on
@@ -1759,6 +1896,7 @@ function registerIpc(): void {
     // means "back to the bundled env". Anything else must be a known Accel.
     // Deactivating is the safe reading of a missing argument: it is the one
     // outcome that puts no renderer-supplied segment on a path or a PYTHONPATH.
+    refuseAccelChangeInDev();
     const accel = raw === null || raw === undefined ? null : requireAccel(raw);
     // setActiveAccel BEFORE the start is fine only because the fallback wrapper
     // guarantees a failed overlay start ends with the active state cleared
@@ -1771,6 +1909,7 @@ function registerIpc(): void {
   });
 
   ipcMain.handle('accel:remove', async (_e, raw: unknown) => {
+    refuseAccelChangeInDev();
     await manager.remove(requireAccel(raw));
     // Relaunch on whatever remains active (another overlay or null). A remaining
     // overlay that fails to start falls back to CPU; a null start failure
@@ -1796,43 +1935,77 @@ function registerIpc(): void {
  * on destructive verbs; piping would hang that prompt with nothing shown.
  */
 function runCli(args: string[]): void {
+  const declared = declaredCliCommand();
+  // So the CLI's own usage lines, errors and "add one with:" hints name the
+  // command the user actually typed instead of the `pixlstash-cli` console
+  // script, which no desktop install puts on PATH. Undefined in a dev run,
+  // where we have no runnable command to name (see declaredCliCommand).
+  runPython(
+    ['-m', 'pixlstash.cli', '--hub', hubPath(), ...args],
+    'CLI',
+    declared ? { PIXLSTASH_CLI_COMMAND: declared } : {},
+  );
+}
+
+/**
+ * Run the read-only MCP server inside the bundled runtime, as `pixlstash-mcp`.
+ *
+ * The client owns this process's stdin and stdout: the protocol is
+ * newline-delimited JSON-RPC over that pipe, so **nothing else may write to
+ * stdout**. Hardware acceleration goes off for the same reason `runCli` does it
+ * - Chromium's GPU process otherwise prints driver-probe noise - except that
+ * here such a line does not merely look untidy, it corrupts the session.
+ *
+ * No single-instance lock and no window: this runs alongside a normally
+ * launched app, and there may be several at once if the user has more than one
+ * MCP client. It is a client of the backend over HTTP, so it needs nothing of
+ * the app but its interpreter.
+ */
+function runMcp(args: string[]): void {
+  runPython(['-m', 'pixlstash.mcp_server', ...args], 'MCP server');
+}
+
+/**
+ * Run `argv` on the backend's interpreter in place of the app, windowless, and
+ * exit with its status. `label` names it in the one error this prints.
+ */
+function runPython(
+  argv: string[],
+  label: string,
+  extraEnv: NodeJS.ProcessEnv = {},
+): void {
   // No window is coming, so keep Chromium's GPU process out of it entirely. It
   // otherwise starts anyway and writes driver-probe noise ("MESA-LOADER: failed
-  // to open dri...") to the terminal *after* the CLI's own output.
+  // to open dri...") to the terminal *after* the child's own output.
   app.disableHardwareAcceleration();
   // Same reason, macOS side: drop the regular-app activation policy so this run
   // leaves no dock tile behind. Typed `Dock | undefined`, so the optional call
   // is the platform check - unlike app.setActivationPolicy, which the typings
   // declare unconditionally but which does not exist off macOS.
   app.dock?.hide();
-  const declared = declaredCliCommand();
-  // Same interpreter choice the backend makes, so a dev run drives the repo's
-  // .venv and the CLI branch is exercisable without building the bundled env.
-  const child = spawn(
-    isDevBackend() ? devInterpreter() : bundledInterpreter(),
-    ['-m', 'pixlstash.cli', '--hub', hubPath(), ...args],
-    {
-      stdio: 'inherit',
-      // So the CLI's own usage lines, errors and "add one with:" hints name the
-      // command the user actually typed instead of the `pixlstash-cli` console
-      // script, which no desktop install puts on PATH. Undefined in a dev run,
-      // where we have no runnable command to name (see declaredCliCommand).
-      env: declared ? { ...process.env, PIXLSTASH_CLI_COMMAND: declared } : process.env,
-    },
-  );
+  // Same interpreter and import path the backend gets, so a dev run drives this
+  // checkout's code and either branch is exercisable without the bundled env.
+  const child = spawn(backendInterpreter(), argv, {
+    stdio: 'inherit',
+    env: { ...backendEnv(), ...extraEnv },
+  });
   // 3 is the CLI's own "hub unavailable" code; a runtime we cannot even launch
-  // is the same class of failure from the caller's side.
+  // is the same class of failure from the caller's side. stderr, never stdout:
+  // an MCP client is parsing stdout as JSON-RPC.
   child.on('error', (e) => {
-    console.error(`Could not run the PixlStash CLI: ${e.message}`);
+    console.error(`Could not run the PixlStash ${label}: ${e.message}`);
     app.exit(3);
   });
   child.on('exit', (code, signal) => app.exit(signal ? 1 : (code ?? 1)));
 }
 
-const cliArgs = parseCliArgs(process.argv);
-const gotLock = cliArgs === null && app.requestSingleInstanceLock();
+const cliArgs = argsAfter('cli', process.argv);
+const mcpArgs = cliArgs === null ? argsAfter('mcp', process.argv) : null;
+const gotLock = cliArgs === null && mcpArgs === null && app.requestSingleInstanceLock();
 if (cliArgs !== null) {
   runCli(cliArgs);
+} else if (mcpArgs !== null) {
+  runMcp(mcpArgs);
 } else if (!gotLock) {
   app.quit();
 } else {

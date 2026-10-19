@@ -4,9 +4,21 @@
 // sample by construction, and 37% of real adapters carry no title, so the
 // generated mark is the common path rather than the fallback.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { defineComponent, ref } from "vue";
+
+vi.mock("vuetify/components", async (importOriginal) => ({
+  ...(await importOriginal()),
+  // Tooltip.vue wraps VTooltip: render the activator only, as a closed tip does.
+  VTooltip: {
+    name: "VTooltip",
+    setup:
+      (_p, { slots }) =>
+      () =>
+        slots.activator?.({ props: {} }),
+  },
+}));
 
 // The api modules are deliberately NOT mocked. A mock would hardcode the
 // prefixed string, which is exactly the shape that let the shelf ship with
@@ -44,6 +56,28 @@ describe("ModelMark", () => {
     const wrapper = mountMark();
     expect(wrapper.find("img").exists()).toBe(false);
     expect(wrapper.find(".mmark-initials").text()).toBe("CS");
+  });
+
+  it("takes no letter from a v-number", () => {
+    const wrapper = mountMark({ display_name: "Lightning 4steps V1.0" });
+    expect(wrapper.find(".mmark-initials").text()).toBe("LI");
+  });
+
+  it("hangs the version on a tab beside the initials", () => {
+    const wrapper = mountMark({ display_name: "Stable Diffusion 3.5 Large" });
+    expect(wrapper.find(".mmark-initials").text()).toBe("SD");
+    expect(wrapper.find(".mmark-version").text()).toBe("3.5");
+    // No number, no tab: an empty pill would read as a broken one.
+    expect(mountMark().find(".mmark-version").exists()).toBe(false);
+  });
+
+  it("draws no tab over a picture", () => {
+    // A picture says nothing about which version the file is.
+    const wrapper = mountMark({
+      display_name: "Stable Diffusion 3.5 Large",
+      icon_sha256: "a".repeat(64),
+    });
+    expect(wrapper.find(".mmark-version").exists()).toBe(false);
   });
 
   it("still marks a row with no name at all", () => {
@@ -283,5 +317,117 @@ describe("ModelMark", () => {
     // nothing" and belongs on a shelf row. A mark in a picker or a dialog is
     // not making a statement about assignment either way.
     expect(mountMark().find(".mmark").classes()).not.toContain("mmark--ring");
+  });
+});
+
+// The named tile (#1951): the server's name for a model of a known base
+// model, drawn only where the host asks (the workflow card).
+describe("ModelMark, named", () => {
+  const named = {
+    mark: ["SDXL", "1.0"],
+    mark_tab: "REFI",
+    mark_colors: ["#9d39ff", "#e80000"],
+    mark_icon: null,
+  };
+  const mountNamed = (overrides, props = {}) =>
+    mount(ModelMark, {
+      props: { row: row({ ...named, ...overrides }), named: true, ...props },
+    });
+
+  it("prints the name's lines and the role on the tab, not the initials", () => {
+    const wrapper = mountNamed();
+    const lines = wrapper.findAll(".mmark-name > span").map((s) => s.text());
+    expect(lines).toEqual(["SDXL", "1.0"]);
+    expect(wrapper.find(".mmark-initials").exists()).toBe(false);
+    expect(wrapper.find(".mmark-version").text()).toBe("REFI");
+    expect(wrapper.find(".mmark-named").attributes("style")).toContain(
+      "linear-gradient(135deg, rgb(157, 57, 255), rgb(232, 0, 0))",
+    );
+  });
+
+  it("is the shelf's generated mark where the host does not ask for it", () => {
+    const wrapper = mount(ModelMark, { props: { row: row(named) } });
+    expect(wrapper.find(".mmark-named").exists()).toBe(false);
+    expect(wrapper.find(".mmark-initials").text()).toBe("CS");
+  });
+
+  it("keeps the generated mark for a row the server named nothing for", () => {
+    const wrapper = mountNamed({ mark: null, mark_tab: null });
+    expect(wrapper.find(".mmark-named").exists()).toBe(false);
+    expect(wrapper.find(".mmark-initials").text()).toBe("CS");
+  });
+
+  it("draws a few-step tab as a bolt with the step count", () => {
+    const wrapper = mountNamed({ mark: ["Qwen", "LI"], mark_tab: "⚡4" });
+    const tab = wrapper.find(".mmark-version");
+    expect(tab.find(".mmark-bolt").text()).toBe("mdi-lightning-bolt");
+    expect(tab.text()).toBe("mdi-lightning-bolt4");
+  });
+
+  it("draws a release as its maker's glyph, a version pill and a role tab", () => {
+    const wrapper = mountNamed({
+      mark: ["Klein", "2"],
+      mark_tab: "⚡",
+      mark_colors: ["#484c53"],
+      mark_icon: "flux",
+      mark_band: true,
+    });
+    // The name is the card's to print: no band.
+    expect(wrapper.text()).not.toContain("Klein");
+    expect(wrapper.find(".mmark-glyph").attributes("src")).toContain("title%3eFlux");
+    expect(wrapper.find(".mmark-glyph").classes()).toContain(
+      "mmark-glyph--shadowed",
+    );
+    // Both pills are the tile's pair inverted, off the corners, outside the
+    // clipping face.
+    const version = wrapper.find(".mmark > .mmark-release-version");
+    expect(version.text()).toBe("2");
+    expect(version.attributes("style")).toContain("color: rgb(72, 76, 83)");
+    expect(wrapper.find(".mmark > .mmark-tab").exists()).toBe(true);
+    expect(wrapper.find(".mmark-name").exists()).toBe(false);
+    // The tab is a plain pill: no outline in the tile's own colour.
+    expect(wrapper.find(".mmark-tab").attributes("style")).not.toContain(
+      "border-color",
+    );
+  });
+
+  it("fills a Chroma release with its eye, and puts letters where no glyph is", () => {
+    const chroma = mountNamed({
+      mark: ["Chroma"],
+      mark_tab: "HD",
+      mark_colors: ["#7a3b12"],
+      mark_icon: "chroma",
+      mark_band: true,
+    });
+    expect(chroma.find(".mmark-named > .mmark-img").attributes("src")).toContain(
+      "chroma",
+    );
+    expect(chroma.text()).not.toContain("Chroma");
+    expect(chroma.find(".mmark-tab").text()).toBe("HD");
+    expect(chroma.find(".mmark-release-version").exists()).toBe(false);
+    const zit = mountNamed({
+      mark: ["ZIT"],
+      mark_tab: "⚡",
+      mark_colors: ["#dc5100"],
+      mark_icon: null,
+      mark_letters: "Z",
+      mark_band: true,
+    });
+    expect(zit.find(".mmark-letters").text()).toBe("Z");
+    expect(zit.find(".mmark-release-version").exists()).toBe(false);
+  });
+
+  it("lets the owner's own picture of the model win, tab and all", () => {
+    const wrapper = mountNamed({ icon_sha256: "a".repeat(64) });
+    expect(wrapper.find("img").attributes("src")).toBe(icon("a".repeat(64)));
+    expect(wrapper.find(".mmark-named").exists()).toBe(false);
+    expect(wrapper.find(".mmark-version").exists()).toBe(false);
+    const release = mountNamed({
+      icon_sha256: "a".repeat(64),
+      mark: ["Klein", "2"],
+      mark_icon: "flux",
+      mark_band: true,
+    });
+    expect(release.find(".mmark-release-version").exists()).toBe(false);
   });
 });

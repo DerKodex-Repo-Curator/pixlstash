@@ -2,7 +2,7 @@
   <AppDialog
     :open="open"
     :title="isExistingSet ? 'Edit picture set' : 'New picture set'"
-    :width="720"
+    size="lg"
     @close="emit('close')"
   >
     <!-- Two columns rather than one tall stack, so the form stops outgrowing
@@ -24,35 +24,48 @@
          icon columns. It spans instead. -->
     <div class="editor-body">
       <div class="editor-col">
-        <AppInput
-          ref="nameInputRef"
-          v-model="localSet.name"
-          label="Name *"
-          placeholder="Picture set name"
-          icon="layers-triple-outline"
-          :disabled="isLockedSet"
-          :title="isLockedSet ? LOCK_REASON : undefined"
-          @enter="save"
-        />
-        <AppTextarea
-          v-model="localSet.description"
-          label="Description"
-          placeholder="Optional description…"
-          :rows="2"
-          :disabled="isLockedSet"
-          :title="isLockedSet ? LOCK_REASON : undefined"
-        />
+        <Tooltip :text="isLockedSet ? LOCK_REASON : ''">
+          <template #activator="{ props: tipProps }">
+            <AppInput
+              v-bind="
+                withRef(tipProps, (el) => (nameInputRef = el))
+              "
+              v-model="localSet.name"
+              label="Name *"
+              placeholder="Picture set name"
+              icon="layers-triple-outline"
+              :disabled="isLockedSet"
+              @enter="save"
+            />
+          </template>
+        </Tooltip>
+        <Tooltip :text="isLockedSet ? LOCK_REASON : ''">
+          <template #activator="{ props: tipProps }">
+            <AppTextarea
+              v-bind="tipProps"
+              v-model="localSet.description"
+              label="Description"
+              placeholder="Optional description…"
+              :rows="2"
+              :disabled="isLockedSet"
+            />
+          </template>
+        </Tooltip>
       </div>
 
       <div class="editor-col">
-        <AppSelect
-          v-model="projectSelection"
-          label="Projects"
-          :options="projectOptions"
-          :multiple="true"
-          :disabled="isLockedSet"
-          :title="isLockedSet ? LOCK_REASON : undefined"
-        />
+        <Tooltip :text="isLockedSet ? LOCK_REASON : ''">
+          <template #activator="{ props: tipProps }">
+            <AppSelect
+              v-bind="tipProps"
+              v-model="projectSelection"
+              label="Projects"
+              :options="projectOptions"
+              :multiple="true"
+              :disabled="isLockedSet"
+            />
+          </template>
+        </Tooltip>
 
         <!-- Locked toggle: the only control that stays active while the set is
              locked, so unticking + Save is the unlock path. -->
@@ -77,8 +90,8 @@
       <div
         class="appearance-row editor-span"
         :class="{ 'appearance-row--locked': isLockedSet }"
-        :title="isLockedSet ? LOCK_REASON : undefined"
       >
+        <Tooltip :text="isLockedSet ? LOCK_REASON : ''" activator="parent" />
         <FieldLabel>Choose icon or thumbnail &amp; color</FieldLabel>
         <div class="appearance-sections">
           <div class="icon-thumb-box">
@@ -94,12 +107,17 @@
                     type="button"
                     class="icon-btn"
                     :class="{ selected: localSet.set_icon === ic.value }"
-                    :title="ic.label"
+                    :aria-label="ic.label"
                     :disabled="isLockedSet"
                     @click="localSet.set_icon = ic.value"
                   >
+                    <Tooltip
+                      :text="ic.label"
+                      activator="parent"
+                      :describe="false"
+                    />
                     <v-icon
-                      size="20"
+                      size="24"
                       :color="localSet.set_color || undefined"
                       >{{ ic.value }}</v-icon
                     >
@@ -120,10 +138,11 @@
                 type="button"
                 class="icon-btn--cards-large"
                 :class="{ selected: localSet.set_icon === ICON_CARDS }"
-                title="Thumbnail"
+                aria-label="Thumbnail"
                 :disabled="isLockedSet"
                 @click="localSet.set_icon = ICON_CARDS"
               >
+                <Tooltip text="Thumbnail" activator="parent" :describe="false" />
                 <img
                   v-if="props.thumbnailUrl && !thumbnailBroken"
                   :src="props.thumbnailUrl"
@@ -151,10 +170,16 @@
                 class="color-swatch"
                 :class="{ selected: localSet.set_color === col.value }"
                 :style="{ background: col.value }"
-                :title="col.label"
+                :aria-label="col.label"
                 :disabled="isLockedSet"
                 @click="localSet.set_color = col.value"
-              />
+              >
+                <Tooltip
+                  :text="col.label"
+                  activator="parent"
+                  :describe="false"
+                />
+              </button>
             </div>
           </div>
         </div>
@@ -191,6 +216,7 @@
 </template>
 
 <script setup>
+import { withRef } from "../../utils/withRef.js";
 import { computed, ref, watch, nextTick, onUnmounted } from "vue";
 import { VIcon } from "vuetify/components";
 import {
@@ -210,6 +236,7 @@ import AppButton from "../widgets/AppButton.vue";
 import AppInput from "../widgets/AppInput.vue";
 import AppTextarea from "../widgets/AppTextarea.vue";
 import AppSelect from "../widgets/AppSelect.vue";
+import Tooltip from "../widgets/Tooltip.vue";
 import FieldLabel from "../widgets/FieldLabel.vue";
 import AdapterTray from "../widgets/AdapterTray.vue";
 import { errorDetail } from "../../utils/apiError";
@@ -424,8 +451,8 @@ onUnmounted(() => document.removeEventListener("keydown", handleKeydown));
 }
 
 /* Vuetify caps the dialog at `calc(100% - 48px)`, so it stops being 720 wide
-   below a 768px viewport and each column falls under the ~300px the fields
-   want (299px at a 720px viewport). 720 is where that is unambiguous. Drop to
+   below a 768px viewport and each column closes in on the ~300px the fields
+   want (~307px at a 720px viewport). 720 is where that is unambiguous. Drop to
    the single column the editor has always had; the appearance row's own
    `flex-wrap` keeps handling the narrower cases from there. */
 @media (max-width: 720px) {
@@ -463,8 +490,8 @@ onUnmounted(() => document.removeEventListener("keydown", handleKeydown));
 }
 
 .lock-row__checkbox:checked {
-  background: rgb(var(--v-theme-accent));
-  border-color: rgb(var(--v-theme-accent));
+  background: rgb(var(--v-theme-primary));
+  border-color: rgb(var(--v-theme-primary));
 }
 
 .lock-row__checkbox:checked::after {
@@ -472,7 +499,7 @@ onUnmounted(() => document.removeEventListener("keydown", handleKeydown));
   width: 5px;
   height: 9px;
   margin-top: -2px;
-  border: solid rgb(var(--v-theme-on-accent));
+  border: solid rgb(var(--v-theme-on-primary));
   border-width: 0 2px 2px 0;
   transform: rotate(45deg);
 }
@@ -507,7 +534,7 @@ onUnmounted(() => document.removeEventListener("keydown", handleKeydown));
    already carry their own :disabled state (per the visual-language disabled
    rule), so this is a lighter wash on top of that - enough to read as inactive
    without dropping the block below legibility. Pointer events stay on the
-   container so its lock-reason title still shows on hover. */
+   container so its lock-reason tooltip still shows on hover. */
 .appearance-row--locked {
   opacity: 0.55;
 }
@@ -590,7 +617,7 @@ onUnmounted(() => document.removeEventListener("keydown", handleKeydown));
 }
 
 .icon-btn--cards-large.selected {
-  border-color: rgb(var(--v-theme-accent));
+  border-color: var(--active-bar);
   background: var(--active-wash);
 }
 
@@ -623,8 +650,8 @@ onUnmounted(() => document.removeEventListener("keydown", handleKeydown));
 }
 
 .icon-btn {
-  width: 32px;
-  height: 32px;
+  width: var(--control-h-bar);
+  height: var(--control-h-bar);
   border-radius: var(--radius-sm);
   border: 2px solid transparent;
   display: flex;
@@ -649,8 +676,15 @@ onUnmounted(() => document.removeEventListener("keydown", handleKeydown));
 }
 
 .icon-btn.selected {
-  border-color: rgb(var(--v-theme-accent));
+  border-color: var(--active-bar);
   background: var(--active-wash);
+}
+
+/* The grid scrolls and packs its cells 4px apart, so an outset ring would be
+   clipped at its edges. */
+.icon-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring-inset);
 }
 
 .color-grid {
@@ -673,7 +707,6 @@ onUnmounted(() => document.removeEventListener("keydown", handleKeydown));
   height: 30px;
   border-radius: var(--radius-sm);
   border: 2px solid transparent;
-  outline: none;
   padding: 0;
   box-sizing: border-box;
   aspect-ratio: 1 / 1;
@@ -685,12 +718,12 @@ onUnmounted(() => document.removeEventListener("keydown", handleKeydown));
 
 .color-swatch:hover {
   transform: scale(1.1);
-  z-index: 1;
+  z-index: var(--z-raised);
 }
 
 .color-swatch.selected {
   border-color: rgb(var(--v-theme-on-surface));
   transform: scale(1.1);
-  z-index: 1;
+  z-index: var(--z-raised);
 }
 </style>

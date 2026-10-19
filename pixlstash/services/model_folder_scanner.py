@@ -18,9 +18,10 @@ and only two things follow from it:
   then the row is identified by the location it was found at, which is exactly
   what ``model_file`` is.
 
-``unknown`` is stored as ``unknown`` and never promoted: a marker-free file too
-small to be a base model is most likely an adapter format we have not met yet,
-so it stays visible and correctable on the shelf. A correction the owner makes
+``unknown`` is stored as ``unknown`` and never promoted by a scan: a marker-free
+file too small to be a base model is most likely an adapter format we have not
+met yet, so it stays visible and correctable on the shelf. (The one-shot hub
+data backfills in :mod:`pixlstash.hub.schema` re-file from the folder once.) A correction the owner makes
 is never re-derived away - every column a person can edit is written with
 ``COALESCE`` on the *stored* value, and ``file_kind`` is not rewritten at all,
 because the row is keyed by content and the parser would only ever repeat the
@@ -38,7 +39,9 @@ must not read as a deletion the moment it drops.
 ``kind = 'source'`` folders are skipped entirely. They are ai-toolkit output
 roots, scanned for importable *runs* by :mod:`pixlstash.utils.aitoolkit_run` and
 never catalogued in place - the same distinction the product already makes
-between a reference folder and an import folder.
+between a reference folder and an import folder. ``kind = 'downloads'`` is
+skipped for the same reason: its models are moved out by
+:mod:`pixlstash.services.downloads_intake`, not listed where they landed.
 """
 
 from __future__ import annotations
@@ -58,22 +61,62 @@ from pixlstash.utils.adapter_header import (
     FILE_ADAPTER,
     FILE_CHECKPOINT,
     FILE_UNKNOWN,
+    AdapterInfo,
+    classify_model_file,
     describe_adapter,
 )
+from pixlstash.utils.known_base_models import SOURCE_RANK, identify, rank
+from pixlstash.utils.model_utils import quant_from_filename
 
 logger = get_logger(__name__)
 
-# The three states a ``model_file`` row can be in. ``missing`` is a fact ("the
-# folder was readable and the file was not in it"); ``unreachable`` is the
-# absence of one ("we could not look").
+# The states a ``model_file`` row can be in. ``missing`` is a fact ("the folder
+# was readable and the file was not in it"); ``unreachable`` is the absence of
+# one ("we could not look").
 STATE_PRESENT = "present"
 STATE_MISSING = "missing"
 STATE_UNREACHABLE = "unreachable"
 
-MODEL_SUFFIX = ".safetensors"
+# A copy the owner removed on purpose, to keep one of several (#1439). Not the
+# scanner's to write, and deliberately not ``missing``: a removed copy is a
+# different fact from one the scan could not find, and the row outlives its file
+# precisely so the model's identity outlives the delete - a recipe naming that
+# filename still reaches the model, and a loader resolves to a copy that is
+# still there. Which is why **every sweep below skips it**: the scan will keep
+# finding it absent, and letting that re-label the row ``missing`` would throw
+# the fact away on the next walk of the folder.
+STATE_REMOVED = "removed"
+
+# What the shelf catalogues. **A tuple, and every consumer asks this rather
+# than spelling an extension**: "is this a model file" is one question with one
+# answer, and the upload rule, the folder picker and the model-ghost judgement
+# all have to move together when it changes.
+#
+# ``.gguf`` carries no readable header here - only its FILENAME is parsed, for
+# the display name and the quant postfix - so a GGUF is registered with the
+# same fields a `.safetensors` with an unreadable header would have, plus the
+# one its name can answer. Parsing the GGUF header is a real subsystem and
+# deliberately not built: the name is enough to shelve and badge the file.
+#
+# ``.pth`` is the same: almost every image upscaler ships as one, and its kind
+# comes from the folder it sits in (``upscale_models/``). Its bytes are hashed,
+# never unpickled.
+SHELF_MODEL_SUFFIXES = (".safetensors", ".gguf", ".pth")
+
+# The one suffix a safetensors header can be read from. Everything else on the
+# shelf is described from its filename alone.
+HEADER_SUFFIX = ".safetensors"
 
 # ai-toolkit output roots are taken FROM, never catalogued in place.
 SOURCE_FOLDER_KIND = "source"
+
+# The Downloads folder the shelf watches. Taken from as well: a model that lands
+# there is moved into the default folder (`services/downloads_intake.py`), so
+# cataloguing it in place would register a copy that is about to leave.
+DOWNLOADS_FOLDER_KIND = "downloads"
+
+# Every kind that is taken from: never scanned, never a destination.
+TAKEN_FROM_KINDS = (SOURCE_FOLDER_KIND, DOWNLOADS_FOLDER_KIND)
 
 # Anything the scanner finds on disk was put there by something other than a
 # PixlStash-orchestrated training run; ``trained`` is reserved for the latter,
@@ -164,6 +207,11 @@ class _FileRecord(NamedTuple):
     trigger_words: Optional[str] = None
     training_step: Optional[int] = None
     param_count: Optional[int] = None
+    family: Optional[str] = None
+    quant: Optional[str] = None
+    weights_id: Optional[str] = None
+    base_model_canonical: Optional[str] = None
+    base_model_source: Optional[str] = None
 
 
 class _KnownFile(NamedTuple):
@@ -172,12 +220,20 @@ class _KnownFile(NamedTuple):
     ``file_kind`` comes off the joined ``model`` row and is only used to count
     the file into the right bucket: taking the fast path means nothing was
     parsed, so what the file is has to be read back rather than re-derived.
+
+    ``has_header_facts`` is false for a row registered before ``family``,
+    ``quant`` and ``weights_id`` existed, and for one whose base model nothing
+    has identified yet (``base_model_source`` NULL). Those need the header and
+    never the bytes, so the fast path re-reads the header for it and still
+    skips the hash. The second case is how a base model added to
+    ``known_base_models`` in a later release reaches a file scanned before it.
     """
 
     model_id: int
     file_kind: str
     file_size: Optional[int]
     file_mtime: Optional[int]
+    has_header_facts: bool = True
 
 
 def sha256_file(path: str) -> str:
@@ -192,6 +248,33 @@ def sha256_file(path: str) -> str:
         while chunk := handle.read(_HASH_CHUNK_BYTES):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _reads_a_header(path: str) -> bool:
+    """Whether this file's own bytes can be asked what it is.
+
+    The shelf catalogues more than one suffix and only one of them carries a
+    readable header, so this is the question both the fast path and the full
+    describe ask - never "is it a GGUF", which would need editing again the
+    next time a format is added.
+    """
+    return path.lower().endswith(HEADER_SUFFIX)
+
+
+def _identify(
+    abs_path: str, info: Optional[AdapterInfo] = None
+) -> tuple[Optional[str], Optional[str]]:
+    """The base model this file's evidence names, and which evidence said so.
+
+    The header's declarations when there is a header, then the file's own name
+    and the checkpoint name kohya recorded training against.
+    """
+    if info is None:
+        return identify([], [os.path.basename(abs_path)])
+    return identify(
+        [info.base_model, info.architecture],
+        [os.path.basename(abs_path), info.trained_on],
+    )
 
 
 def _utcnow() -> str:
@@ -346,7 +429,7 @@ class ModelFolderScanner:
         kind: str,
         progress: Optional[Callable[[int, int], None]] = None,
     ) -> FolderScanResult:
-        if kind == SOURCE_FOLDER_KIND:
+        if kind in TAKEN_FROM_KINDS:
             return FolderScanResult(
                 folder_id=folder_id, path=path, state=STATE_PRESENT, skipped=True
             )
@@ -440,7 +523,7 @@ class ModelFolderScanner:
 
         for directory, _dirs, files in os.walk(root, onerror=on_error):
             for name in sorted(files):
-                if not name.lower().endswith(MODEL_SUFFIX):
+                if not name.lower().endswith(SHELF_MODEL_SUFFIXES):
                     continue
                 abs_path = os.path.join(directory, name)
                 yield abs_path, os.path.relpath(abs_path, root)
@@ -499,22 +582,51 @@ class ModelFolderScanner:
                 result.checkpoints += 1
             else:
                 result.adapters += 1
-            return _FileRecord(
+            record = _FileRecord(
                 relpath=relpath,
                 size=size,
                 mtime_ns=mtime_ns,
                 model_id=previous.model_id,
             )
-
-        info = describe_adapter(abs_path)
-        if info is None:
-            logger.warning(
-                "Model scan could not read a safetensors header from %s; leaving "
-                "the file unregistered so it is retried rather than recorded wrong.",
-                abs_path,
+            if previous.has_header_facts:
+                return record
+            if not _reads_a_header(abs_path):
+                # A `.gguf`: its `weights_id` is null by construction, so it is
+                # here on every sweep, and only its name can be asked. No read.
+                canonical, source = _identify(abs_path)
+                return record._replace(
+                    base_model_canonical=canonical, base_model_source=source
+                )
+            # A header read, never a hash: this is how a shelf registered before
+            # the header facts existed gets them without re-reading its bytes.
+            # An unreadable header keeps the plain touch, and is retried next
+            # scan, which costs one small read.
+            info = describe_adapter(abs_path)
+            if info is None:
+                return record
+            canonical, source = _identify(abs_path, info)
+            return record._replace(
+                family=info.family,
+                quant=info.quant or quant_from_filename(abs_path),
+                weights_id=info.weights_id,
+                base_model_canonical=canonical,
+                base_model_source=source,
             )
-            result.unreadable += 1
-            return None
+
+        info = describe_adapter(abs_path) if _reads_a_header(abs_path) else None
+        if info is None:
+            if _reads_a_header(abs_path):
+                logger.warning(
+                    "Model scan could not read a safetensors header from %s; "
+                    "leaving the file unregistered so it is retried rather than "
+                    "recorded wrong.",
+                    abs_path,
+                )
+                result.unreadable += 1
+                return None
+            return self._describe_from_name(
+                abs_path, relpath, size, mtime_ns, result, known_digest
+            )
 
         record = _FileRecord(
             relpath=relpath,
@@ -533,6 +645,19 @@ class ModelFolderScanner:
             else None,
             training_step=info.training_step,
             param_count=info.param_count,
+            family=info.family,
+            # The header wins, and the filename fills the gap it leaves. A
+            # header answers for nearly every `.safetensors`, so this fallback
+            # is for the one whose tensors declare no usable dtype - and the
+            # column is stored in whichever source's own spelling, because
+            # `canonical_quant` folds the two on the way out and folding on the
+            # way in would leave every row written before today unfolded.
+            quant=info.quant or quant_from_filename(abs_path),
+            weights_id=info.weights_id,
+        )
+        canonical, source = _identify(abs_path, info)
+        record = record._replace(
+            base_model_canonical=canonical, base_model_source=source
         )
 
         # Hash now, or leave it for MissingCheckpointHashFinder.
@@ -579,6 +704,84 @@ class ModelFolderScanner:
             result.adapters += 1
         return record if digest is None else record._replace(digest=digest)
 
+    def _describe_from_name(
+        self,
+        abs_path: str,
+        relpath: str,
+        size: int,
+        mtime_ns: int,
+        result: FolderScanResult,
+        known_digest: Optional[str] = None,
+    ) -> Optional[_FileRecord]:
+        """Return the row for a model file whose header this build cannot read.
+
+        A ``.gguf`` or a ``.pth`` today, and any future suffix added to
+        ``SHELF_MODEL_SUFFIXES`` without a reader. Everything the header would have answered is left
+        NULL - which is the same thing a ``.safetensors`` carrying no metadata
+        records, and reads on the shelf as "the file did not say" rather than
+        as a value.
+
+        Two things the filename still answers, and they are the two this file
+        exists for: the **quant postfix** (``flux1-dev-Q4_K_M.gguf``), which is
+        the only source a GGUF has, and the **folder's declared role**, which
+        :func:`classify_model_file` already trusts above a parameter count
+        precisely because a VAE and a text encoder carry no marker to find. A
+        GGUF outside a role folder is ``unknown``, which the shelf shows and
+        the owner can correct.
+
+        **Hashing follows the same size rule as everything else** and is not
+        relaxed for this branch: `_DEFER_HASH_BYTES` leaves any file of 2 GiB
+        or more to ``MissingCheckpointHashFinder``, which is every GGUF
+        checkpoint, so turning the suffix on does not put tens of gigabytes of
+        reading into the scan itself.
+
+        ``known_digest`` is honoured here for the same reason :meth:`_describe`
+        honours it: ``register_file``'s caller has just written and verified
+        these bytes, so the read the deferral exists to avoid has already been
+        paid for. Dropping it would be worse than a second read - a row written
+        with no digest misses ``_upsert_model``'s ``ON CONFLICT(sha256)`` join,
+        so one file registered into two folders would be two shelf rows until
+        the hash finder got round to merging them.
+        """
+        file_kind = classify_model_file((), 0, abs_path)
+        record = _FileRecord(
+            relpath=relpath,
+            size=size,
+            mtime_ns=mtime_ns,
+            file_kind=file_kind,
+            # NULL: `kind` is an adapter algorithm read from tensor names, and
+            # there are no tensor names here to read it from.
+            kind=None,
+            filename=os.path.basename(abs_path),
+            quant=quant_from_filename(abs_path),
+        )
+        canonical, source = _identify(abs_path)
+        record = record._replace(
+            base_model_canonical=canonical, base_model_source=source
+        )
+        if known_digest is not None:
+            digest = known_digest
+        elif file_kind == FILE_CHECKPOINT or size >= _DEFER_HASH_BYTES:
+            digest = None
+        else:
+            try:
+                digest = sha256_file(abs_path)
+            except OSError as exc:
+                logger.warning(
+                    "Model scan could not hash %s (%d bytes): %s. Leaving it "
+                    "unregistered; a partial hash would be a wrong identity.",
+                    abs_path,
+                    size,
+                    exc,
+                )
+                result.unreadable += 1
+                return None
+        if file_kind == FILE_CHECKPOINT:
+            result.checkpoints += 1
+        else:
+            result.adapters += 1
+        return record if digest is None else record._replace(digest=digest)
+
     # -- hub reads --------------------------------------------------------
 
     def _known_files(self, folder_id: int) -> dict[str, _KnownFile]:
@@ -590,7 +793,9 @@ class ModelFolderScanner:
         evidence that its digest still names what is on disk.
         """
         rows = self._hub.fetchall(
-            "SELECT mf.relpath, mf.model_id, mf.file_mtime, m.file_kind, m.file_size "
+            "SELECT mf.relpath, mf.model_id, mf.file_mtime, m.file_kind, m.file_size, "
+            "(m.weights_id IS NOT NULL AND m.base_model_source IS NOT NULL) "
+            "AS has_header_facts "
             "FROM model_file mf JOIN model m ON m.id = mf.model_id "
             "WHERE mf.model_folder_id = ? AND mf.state = ?",
             (folder_id, STATE_PRESENT),
@@ -601,6 +806,7 @@ class ModelFolderScanner:
                 file_kind=row["file_kind"],
                 file_size=row["file_size"],
                 file_mtime=row["file_mtime"],
+                has_header_facts=bool(row["has_header_facts"]),
             )
             for row in rows
         }
@@ -615,7 +821,47 @@ class ModelFolderScanner:
                 model_id = record.model_id
                 if model_id is None:
                     model_id = self._upsert_model(conn, folder_id, record, scanned_at)
+                elif record.weights_id is not None:
+                    # The fast path's header read. The bytes did not change, so
+                    # these can only fill a blank.
+                    conn.execute(
+                        "UPDATE model SET family = COALESCE(family, ?), "
+                        "quant = COALESCE(quant, ?), "
+                        "weights_id = COALESCE(weights_id, ?) WHERE id = ?",
+                        (record.family, record.quant, record.weights_id, model_id),
+                    )
+                self._write_identification(conn, model_id, record)
                 self._upsert_model_file(conn, folder_id, model_id, record, scanned_at)
+
+    @staticmethod
+    def _write_identification(
+        conn: sqlite3.Connection, model_id: int, record: _FileRecord
+    ) -> None:
+        """Store the identified base model, only over a source it outranks.
+
+        Deliberately **not** the ``COALESCE`` the curatable columns use: that
+        fills a blank and can never upgrade. One content row can be reached
+        with better evidence than it was identified from - the same bytes
+        found again under a name that says more, or registered through another
+        folder - and that has to be able to replace a guess. An unchanged file
+        that already has an answer is not re-read at all (``has_header_facts``),
+        so its header's evidence is weighed once, when the row is first
+        identified. It must never replace ``user``, which nothing here
+        outranks. ``base_model`` itself is
+        still written with ``COALESCE`` by the upserts; this is only the pair
+        of identification columns. Nothing matched writes nothing, so the row
+        stays NULL and is looked at again next scan.
+        """
+        source = record.base_model_source
+        if source is None:
+            return
+        beaten = [s for s in SOURCE_RANK if rank(s) < rank(source)]
+        conn.execute(
+            "UPDATE model SET base_model_canonical = ?, base_model_source = ? "
+            "WHERE id = ? AND (base_model_source IS NULL OR base_model_source "
+            f"IN ({', '.join('?' * len(beaten)) or 'NULL'}))",
+            (record.base_model_canonical, source, model_id, *beaten),
+        )
 
     @staticmethod
     def _upsert_model(
@@ -643,7 +889,8 @@ class ModelFolderScanner:
         conn.execute(
             "INSERT INTO model (file_kind, kind, sha256, display_name, filename, "
             "base_model, trigger_words, provenance, training_step, param_count, "
-            "file_size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "file_size, created_at, family, quant, weights_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(sha256) DO UPDATE SET "
             "kind = COALESCE(model.kind, excluded.kind), "
             "display_name = COALESCE(model.display_name, excluded.display_name), "
@@ -652,6 +899,9 @@ class ModelFolderScanner:
             "trigger_words = COALESCE(model.trigger_words, excluded.trigger_words), "
             "training_step = COALESCE(model.training_step, excluded.training_step), "
             "param_count = COALESCE(model.param_count, excluded.param_count), "
+            "family = COALESCE(excluded.family, model.family), "
+            "quant = COALESCE(excluded.quant, model.quant), "
+            "weights_id = COALESCE(excluded.weights_id, model.weights_id), "
             "file_size = excluded.file_size",
             (
                 record.file_kind,
@@ -666,6 +916,9 @@ class ModelFolderScanner:
                 record.param_count,
                 record.size,
                 scanned_at,
+                record.family,
+                record.quant,
+                record.weights_id,
             ),
         )
         return int(
@@ -735,8 +988,8 @@ class ModelFolderScanner:
                 conn.execute(
                     "INSERT INTO model (file_kind, kind, display_name, filename, "
                     "base_model, trigger_words, provenance, training_step, "
-                    "param_count, file_size, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "param_count, file_size, created_at, family, quant, "
+                    "weights_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         record.file_kind,
                         record.kind,
@@ -749,6 +1002,9 @@ class ModelFolderScanner:
                         record.param_count,
                         record.size,
                         scanned_at,
+                        record.family,
+                        record.quant,
+                        record.weights_id,
                     ),
                 ).lastrowid
             )
@@ -756,12 +1012,16 @@ class ModelFolderScanner:
         model_id = int(existing["model_id"])
         conn.execute(
             "UPDATE model SET sha256 = NULL, hashed_at = NULL, file_size = ?, "
+            "family = ?, quant = ?, weights_id = ?, "
             "filename = COALESCE(filename, ?), "
             "display_name = COALESCE(display_name, ?), "
             "base_model = COALESCE(base_model, ?), "
             "param_count = COALESCE(param_count, ?) WHERE id = ?",
             (
                 record.size,
+                record.family,
+                record.quant,
+                record.weights_id,
                 record.filename,
                 record.display_name,
                 record.base_model,
@@ -813,15 +1073,22 @@ class ModelFolderScanner:
                     # it was seen, so the whole folder is what we could not read.
                     cursor = conn.execute(
                         "UPDATE model_file SET state = ?, seen_at = ? "
-                        "WHERE model_folder_id = ?",
-                        (STATE_UNREACHABLE, scanned_at, folder_id),
+                        "WHERE model_folder_id = ? AND state != ?",
+                        (STATE_UNREACHABLE, scanned_at, folder_id, STATE_REMOVED),
                     )
                 else:
                     prefix = (relative_dir + os.sep).translate(_LIKE_ESCAPE)
                     cursor = conn.execute(
                         "UPDATE model_file SET state = ?, seen_at = ? "
-                        "WHERE model_folder_id = ? AND relpath LIKE ? ESCAPE '\\'",
-                        (STATE_UNREACHABLE, scanned_at, folder_id, prefix + "%"),
+                        "WHERE model_folder_id = ? AND relpath LIKE ? ESCAPE '\\' "
+                        "AND state != ?",
+                        (
+                            STATE_UNREACHABLE,
+                            scanned_at,
+                            folder_id,
+                            prefix + "%",
+                            STATE_REMOVED,
+                        ),
                     )
                 touched += int(cursor.rowcount or 0)
         return touched
@@ -846,8 +1113,8 @@ class ModelFolderScanner:
         with self._hub.transaction() as conn:
             cursor = conn.execute(
                 "UPDATE model_file SET state = ? WHERE model_folder_id = ? "
-                "AND (seen_at IS NULL OR seen_at < ?) AND state != ?",
-                (STATE_MISSING, folder_id, scanned_at, STATE_MISSING),
+                "AND (seen_at IS NULL OR seen_at < ?) AND state NOT IN (?, ?)",
+                (STATE_MISSING, folder_id, scanned_at, STATE_MISSING, STATE_REMOVED),
             )
             return int(cursor.rowcount or 0)
 
@@ -868,8 +1135,8 @@ class ModelFolderScanner:
         with self._hub.transaction() as conn:
             cursor = conn.execute(
                 "UPDATE model_file SET state = ? WHERE model_folder_id = ? "
-                "AND state != ?",
-                (STATE_UNREACHABLE, folder_id, STATE_UNREACHABLE),
+                "AND state NOT IN (?, ?)",
+                (STATE_UNREACHABLE, folder_id, STATE_UNREACHABLE, STATE_REMOVED),
             )
         self._touch_folder(folder_id, scanned_at)
         return FolderScanResult(

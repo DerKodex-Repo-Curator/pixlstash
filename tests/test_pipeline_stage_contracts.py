@@ -35,6 +35,7 @@ from pixlstash.tasks.missing_tag_finder import MissingTagFinder
 from pixlstash.tasks.missing_tag_prediction_finder import MissingTagPredictionFinder
 from pixlstash.tasks.tag_task import TagTask
 from pixlstash.tasks.task_type import TaskType
+from pixlstash.utils.image_processing.video_utils import VideoUtils
 from pixlstash.vault import Vault
 
 PACKAGE = Path(__file__).resolve().parent.parent / "pixlstash"
@@ -101,11 +102,21 @@ def test_no_task_module_reaches_cuda_outside_the_insightface_init():
 
 
 def test_every_cuda_ort_session_site_is_built_from_the_budget():
-    """Lists the creation sites rather than trusting a grep: two CPU-only sites
-    need no cap, the OpenVINO site has no CUDA arena, and the two CUDA sites
-    must take their options from ``VramBudget.ort_cuda_provider_options``
-    (which `test_vram_batch_budget` proves carries ``gpu_mem_limit`` whenever
-    a budget is set)."""
+    """Lists the creation sites rather than trusting a grep: a CPU-only site
+    needs no cap, and every CUDA site must take its options from
+    ``VramBudget.ort_cuda_provider_options`` (which `test_vram_batch_budget`
+    proves carries ``gpu_mem_limit`` whenever a budget is set).
+
+    WD14 used to be three sites here - a CPU one, an OpenVINO one and a CUDA
+    one - written as an inline provider chain that knew about OpenVINO, CUDA
+    and ROCm and therefore fell through to the CPU on a host advertising
+    CoreML. It is now one site whose providers come from
+    ``accelerator.onnx_execution_providers``. The invariant did not move, but
+    the evidence for it did: the budget is no longer visible in the six lines
+    around the session, so it is checked where it now lives - the ladder is
+    what picks the providers, it is handed the budget's CUDA options, and it
+    puts them on the CUDA provider rather than losing them in the indirection.
+    """
     sites = []
     for path in sorted(PACKAGE.rglob("*.py")):
         lines = path.read_text().splitlines()
@@ -130,19 +141,43 @@ def test_every_cuda_ort_session_site_is_built_from_the_budget():
             return "cuda-budgeted"
         if "OpenVINO" in window:
             return "openvino"
+        if "providers=providers" in window:
+            # Handed a list the shared ladder built. Checked below, at the
+            # ladder, rather than guessed at from these six lines.
+            return "ladder"
         return "UNBOUNDED"
 
     kinds = {
         rel: sorted(classify(w) for _n, w in entries)
         for rel, entries in by_file.items()
     }
-    assert kinds["tagger_plugins/wd14.py"] == ["cpu", "cuda-budgeted", "openvino"], (
-        kinds
-    )
+    assert kinds["tagger_plugins/wd14.py"] == ["ladder"], kinds
     assert kinds["tasks/face_extraction_task.py"] == ["cpu", "cuda-budgeted"], kinds
     # And the CUDA FaceAnalysis site's options really come from the budget.
     face_source = (PACKAGE / "tasks" / "face_extraction_task.py").read_text()
     assert "engine.vram_budget.ort_cuda_provider_options(" in face_source
+
+    # WD14's one site, in three steps, because a shared ladder can drop the
+    # budget in a place no per-site window would show.
+    wd14_source = (PACKAGE / "tagger_plugins" / "wd14.py").read_text()
+    assert "providers = onnx_execution_providers(" in wd14_source, (
+        "WD14 must pick its providers through the shared ladder, not an inline "
+        "chain - an inline one has already fallen through to the CPU on a host "
+        "whose ONNX Runtime advertised a provider the chain did not name."
+    )
+    assert "cuda_options = self._vram_budget.ort_cuda_provider_options(" in wd14_source
+    assert "cuda_options=cuda_options" in wd14_source, (
+        "the budget's options have to reach the ladder, or WD14's arena is "
+        "unbounded with nothing at the session to show it"
+    )
+    # And the ladder puts them on the CUDA provider rather than swallowing them.
+    from pixlstash.utils.accelerator import onnx_execution_providers
+
+    built = onnx_execution_providers(
+        "cuda", ["CUDAExecutionProvider", "CPUExecutionProvider"], {"gpu_mem_limit": 7}
+    )
+    assert built[0][0] == "CUDAExecutionProvider"
+    assert built[0][1]["gpu_mem_limit"] == 7
 
 
 def test_the_wd14_session_says_so_when_it_did_not_get_the_accelerator(monkeypatch):
@@ -521,6 +556,97 @@ def test_a_full_card_on_a_video_is_never_recorded_as_no_faces(tmp_path, monkeypa
         task._extract_features([pic])
 
 
+# ── an animated GIF is sampled like a clip (#1487) ─────────────────────────
+
+
+_GIF_COLOURS = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
+
+
+def _write_gif(path, n_frames):
+    """A 64x64 GIF with one solid colour per frame, so every frame differs."""
+    frames = [Image.new("RGB", (64, 64), c) for c in _GIF_COLOURS[:n_frames]]
+    frames[0].save(path, save_all=True, append_images=frames[1:], duration=100)
+    return str(path)
+
+
+def test_only_a_gif_with_more_than_one_frame_is_animated(tmp_path, monkeypatch):
+    animated = _write_gif(tmp_path / "anim.gif", 3)
+    still = _write_gif(tmp_path / "still.gif", 1)
+
+    assert VideoUtils.is_animated_gif(animated)
+    assert not VideoUtils.is_animated_gif(still)
+    assert VideoUtils.is_multiframe_file(animated)
+    assert not VideoUtils.is_multiframe_file(still)
+
+    # A non-GIF is decided by its extension and never opened.
+    monkeypatch.setattr(
+        "pixlstash.utils.image_processing.video_utils.Image.open",
+        lambda *_a, **_k: pytest.fail("a .png was opened to ask if it is animated"),
+    )
+    assert not VideoUtils.is_animated_gif(str(tmp_path / "x.png"))
+
+
+def test_the_video_sampler_reads_distinct_frames_from_a_gif(tmp_path):
+    """The fact the routing rests on: cv2 opens a GIF and seeks it."""
+    frames = VideoUtils.extract_representative_video_frames(
+        _write_gif(tmp_path / "anim.gif", 3), count=3
+    )
+
+    assert len(frames) == 3
+    assert [f.convert("RGB").getpixel((32, 32)) for f in frames] == _GIF_COLOURS
+
+
+def test_an_animated_gif_takes_the_video_face_path(tmp_path):
+    """An animated GIF gets frame 0 plus later frames, as a clip does.
+
+    ``.gif`` is an image extension, so the multi-frame test must come before
+    the image branch; after it, every GIF reads as one still and the detector
+    sees one frame.
+    """
+    _write_gif(tmp_path / "anim.gif", 3)
+    pic = SimpleNamespace(id=5, file_path="anim.gif", description="animated gif")
+    detector = _RecordingDetector()
+    task = _clip_task(tmp_path, [], detector=detector)
+    task._pictures = [pic]
+    task._preload_cancel = threading.Event()
+    task._preload_lock = threading.Lock()
+    task._preload_started_at = None
+
+    task._preload_images()
+    frames, _inv_scale = task._preloaded_images[str(tmp_path / "anim.gif")]
+    assert [index for index, _frame in frames] == [0, 1, 2]
+    task._extract_features([pic])
+    assert detector.seen == [(64, 64, 3)] * 3
+
+    detector.seen.clear()
+    task._preloaded_images = {}  # the synchronous read, when preload missed it
+    task._extract_features([pic])
+    assert detector.seen == [(64, 64, 3)] * 3
+
+
+def test_face_export_crops_only_faces_measured_on_frame_0(tmp_path):
+    """Export crops from the decoded first frame, so a later frame's box is skipped.
+
+    Before #1487 every GIF face was on frame 0; now an animated GIF also has
+    faces on later frames, whose boxes would crop the wrong region.
+    """
+    import zipfile
+
+    from pixlstash.utils.service.export_utils import ExportUtils
+
+    faces = [
+        SimpleNamespace(id=1, face_index=0, frame_index=0, bbox=[0, 0, 8, 8]),
+        SimpleNamespace(id=2, face_index=1, frame_index=2, bbox=[8, 8, 16, 16]),
+    ]
+    with zipfile.ZipFile(tmp_path / "out.zip", "w") as zf:
+        ExportUtils._export_features_to_zip(
+            Image.new("RGB", (32, 32)), "image_00001", faces, {}, "face", zf
+        )
+        names = zf.namelist()
+
+    assert names == ["image_00001_face_001.png"]
+
+
 # ── the tag window ──────────────────────────────────────────────────────────
 
 
@@ -546,6 +672,9 @@ class _StubWorkflow:
 
     def active_model_version(self, engine_override=None):
         return "wd14:v3"
+
+    def whole_face_crop(self):
+        return True
 
     def pixlstash_tagger_image_size_quality_crop(self):
         return 32
@@ -737,6 +866,36 @@ def test_an_unreachable_picture_is_held_out_of_the_window_not_retired(tmp_path):
         assert set(ids[:-1]).isdisjoint(registry.active_suppressed_ids()), (
             "the hold did not lift when the directory came back"
         )
+
+
+def test_the_tag_finder_captures_the_reset_generation_before_its_read(
+    tmp_path, monkeypatch
+):
+    """#1361: a retag landing just after the finder's read must make the task
+    older than the reset. Captured after the read, the task would count as
+    newer and its output would overwrite the retag."""
+    with Vault(image_root=str(tmp_path)) as vault:
+        (pid,) = _seed_pending(vault, tmp_path, ["r.png"])
+
+        def add_face_row(session: Session):
+            session.add(Face(picture_id=pid, face_index=-1))
+            session.commit()
+
+        vault.db.run_task(add_face_row)
+        fetch = MissingTagFinder._fetch_missing_tags
+
+        def fetch_then_retag(session, *args):
+            pictures = fetch(session, *args)
+            vault.db.tag_resets.mark_reset([pid])
+            return pictures
+
+        monkeypatch.setattr(
+            MissingTagFinder, "_fetch_missing_tags", staticmethod(fetch_then_retag)
+        )
+        task = MissingTagFinder(vault.db, _TagEngine).find_task()
+
+        assert task is not None and task.params["picture_ids"] == [pid]
+        assert task._reset_since_capture([pid]) == {pid}
 
 
 def test_a_whole_batch_transient_failure_deletes_nothing(tmp_path):

@@ -25,6 +25,14 @@
         >
           Look again
         </AppButton>
+        <!-- The app-wide tail, minus undo: this view replaces the grid and its
+             toolbar, so without it neither Settings nor the right rail has a
+             control on the screen (#1415). Settings travels on the same `act`
+             channel the findings' own buttons use. -->
+        <TbGlobalActions
+          separator
+          @open-settings="emit('act', { kind: 'settings' })"
+        />
       </div>
     </div>
 
@@ -101,6 +109,7 @@ import { computed, onMounted, ref } from "vue";
 import { VIcon } from "vuetify/components";
 
 import AppButton from "../widgets/AppButton.vue";
+import TbGlobalActions from "../panels/TbGlobalActions.vue";
 import { getInsights } from "../../api/insights";
 
 const emit = defineEmits(["act"]);
@@ -268,7 +277,7 @@ onMounted(load);
 }
 
 .ins-state--error {
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
 }
 
 .ins-lede {
@@ -325,7 +334,9 @@ onMounted(load);
   align-items: center;
   justify-content: center;
   border-radius: var(--radius-md);
-  background: var(--hover-wash);
+  /* A resting callout tint, not a hover: it borrowed the hover token back when
+     that was amber at 0.14, and keeps that look. */
+  background: rgba(var(--v-theme-accent), 0.14);
   color: rgb(var(--v-theme-accent));
 }
 
@@ -386,7 +397,9 @@ onMounted(load);
   padding: var(--space-3) var(--space-5);
   border-left: 3px solid rgb(var(--v-theme-accent));
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-  background: var(--hover-wash);
+  /* A resting callout tint, not a hover: it borrowed the hover token back when
+     that was amber at 0.14, and keeps that look. */
+  background: rgba(var(--v-theme-accent), 0.14);
   font-size: var(--text-sm);
   line-height: var(--leading-body);
   color: rgba(var(--v-theme-on-background), 0.7);

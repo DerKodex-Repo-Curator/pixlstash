@@ -15,7 +15,16 @@ import { useExportStore } from "../../stores/useExportStore";
 function mountPanel() {
   return mount(TbExportPanel, {
     attachTo: document.body,
-    global: { stubs: { "v-icon": true, "v-checkbox": true } },
+    global: {
+      stubs: {
+        "v-icon": true,
+        "v-checkbox": true,
+        Tooltip: true,
+        // The picker's chrome is Vuetify's VDialog, which needs an installed
+        // Vuetify; the test is about the panel's wiring, not the dialog.
+        AppDialog: { template: '<div><slot /><slot name="footer" /></div>' },
+      },
+    },
   });
 }
 
@@ -67,7 +76,7 @@ describe("TbExportPanel export-to-folder (#291)", () => {
   it("the plain Export button still emits confirm-export, not confirm-export-folder", async () => {
     const wrapper = mountPanel();
 
-    await wrapper.get(".tbm-action--primary").trigger("click");
+    await wrapper.get(".app-btn--primary").trigger("click");
     await flushPromises();
 
     expect(wrapper.emitted("confirm-export")).toHaveLength(1);

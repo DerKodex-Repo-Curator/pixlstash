@@ -58,12 +58,30 @@
                            sidebar overrides it from its thumbnail slider. */
 
   /* ---------------------------------------------------------------------------
+     CONTROL HEIGHT - the two button dialects (buttons.md). A raised control
+     (`AppButton`, and the fields beside it) is --control-h, compact
+     --control-h-sm, which is also the WCAG 2.2 24px pointer floor. A flat bar
+     control (`AppBarButton`: toolbar, selection bar, close) is --control-h-bar,
+     2px inside the 36px toolbar band on either side.
+     --------------------------------------------------------------------------- */
+  --control-h: 28px;
+  --control-h-sm: 24px;
+  --control-h-bar: 32px;
+
+  /* SEGMENTED TRACK, stacked variant (buttons.md, "Pick one"): a media box
+     above the label, for a picker whose icon draws the shape of the outcome.
+     8 + 40 + 4 + 16 + 8 = 76, and the track adds --space-2 either side. The
+     flat track is --control-h-bar: 4 + --control-h-sm + 4. */
+  --seg-stacked-h: 76px;
+  --seg-media-h: 40px;
+
+  /* ---------------------------------------------------------------------------
      RADIUS - four steps and a pill. The audit found 14 distinct radii
      (2/3/4/5/6/8/9/10/12/14/16/18/999/9999). Collapse to these. 9999 was a typo
      for the pill; use `--radius-pill`.
      --------------------------------------------------------------------------- */
-  --radius-sm: 4px;     /* dense controls: chips, small buttons, inputs in tight UI */
-  --radius-md: 8px;     /* default: cards, inputs, menus, image tiles */
+  --radius-sm: 4px;     /* the control tier: buttons, inputs, selects, chips, kbd */
+  --radius-md: 8px;     /* the surface tier: cards, menus, image tiles */
   --radius-lg: 12px;    /* dialogs, panels, popovers */
   --radius-pill: 999px; /* fully-rounded: toggles, status pills, avatar ring */
 
@@ -74,6 +92,7 @@
      sizes mixing px, rem, AND em. `em` compounds with its parent and is the main
      reason nested labels drift; do not size body text in em.
      --------------------------------------------------------------------------- */
+  --text-3xs: 0.5rem;    /* 8px - a role word on a model tile's tab only */
   --text-2xs: 0.6875rem; /* 11px - uppercase section labels, badge counts */
   --text-xs:  0.75rem;   /* 12px - captions, metadata, dense secondary text */
   --text-sm:  0.8125rem; /* 13px - secondary body, toolbar labels */
@@ -114,26 +133,30 @@
   --elevation-3: 0 4px 16px rgba(var(--v-theme-shadow), 0.22); /* popovers, floating panels */
   --elevation-4: 0 8px 28px rgba(var(--v-theme-shadow), 0.30); /* dialogs, lightbox chrome */
 
-  /* Focus ring - one definition, used on every focusable element. A SOLID 3px accent
-     stroke. This is the keyboard-user's lifeline; never remove an outline without
-     replacing it with this.
-
-     It is solid on purpose. The previous `rgba(accent, 0.55)` blended toward the
-     canvas and measured 1.96:1 in the light theme and 3.01:1 in dark, against the
-     3:1 focus-indicator floor (WCAG 1.4.11 / 2.4.11) - i.e. it failed outright in the
-     default theme, and would have fallen to 1.90 – 1.95:1 once the accent deepened for the
-     white-label rule (visual-language.md §4). At full opacity the ring measures
-     dark 3.61 / 3.23 / 3.76 and light 4.51 / 4.75 / 4.07 on
-     `background` / `surface` / `dark-surface` (light: sidebar) respectively.
+  /* Focus is INK (owner decision, 2026-09-13): a 2px `--focus-stroke` (the
+     text colour, per theme in style.css) drawn as `outline` with a 2px gap, so
+     the ring only ever meets the ground and never has to contrast with a fill.
+     Amber is the action fill and olive the selection, so an amber ring measured
+     1.27:1 against the Save button it surrounds and read as a second mark on a
+     selection. Ink measures 10.24:1 dark and 13.74:1 light at worst (on
+     `panel`). The one rule lives in style.css; a component does not paint its
+     own. A control that cannot take a gap (a 32px menu row flush in its menu)
+     uses the inset form, `--focus-ring-inset`, as a box-shadow.
      A focus ring is the one place in this system where "subtle" is a defect. */
-  --focus-ring: 0 0 0 3px rgb(var(--v-theme-accent));
+  /* Declared here as well as per theme in style.css: a custom property holding
+     var() resolves where it is DECLARED, so `--focus-ring-inset` below needs a stroke
+     on :root, where Vuetify also writes the active theme's colours. */
+  --focus-stroke: rgb(var(--v-theme-on-surface));
+  --focus-width: 2px;
+  --focus-offset: 2px;
+  /* Restated beside every `--focus-stroke` override (the theme blocks in
+     style.css, the lightbox), for the same resolve-where-declared reason. */
+  --focus-ring-inset: inset 0 0 0 var(--focus-width) var(--focus-stroke);
 
-  /* The same accent as a GLOW rather than a stroke, for the one place a stroke
-     cannot sit: a Vuetify field, whose floating label rides ON the top border.
-     A 3px stroke there is a bar through the label. The 2px spread is still solid
-     accent, so the indicator keeps the contrast the ring was made solid for.
+  /* The ring as a GLOW rather than a stroke, for the one place a stroke cannot
+     sit: a Vuetify field, whose floating label rides ON the top border.
      `style.css` paints it beneath the label and clips it off the top edge. */
-  --focus-glow: 0 0 6px 2px rgb(var(--v-theme-accent));
+  --focus-glow: 0 0 6px 2px var(--focus-stroke);
 
   /* ---------------------------------------------------------------------------
      SCRIMS - translucent legibility backings for corner badges/chips that sit on
@@ -214,11 +237,17 @@
      --------------------------------------------------------------------------- */
   /* Badge - the count pill and the attention dot (sidebar task/upload badge,
      filter-count badge, folder counts). Count pills are pill-radius, `--text-2xs`
-     semibold, and MUST use a contrast-safe fill (`primary`/`on-primary`, 4.84:1);
-     the amber accent fails 4.5:1 behind small text, so accent is for the dot/glow
-     only. See visual-language.md §13. */
+     semibold, and use `primary`/`on-primary` (4.84:1). The dark theme's amber
+     fails 4.5:1 behind small text, and the split holds on meaning anyway: accent
+     is for the dot/glow only. See visual-language.md §13. */
   --badge-size: 16px;      /* min height / min-width of a count pill (on-grid; was an ad-hoc 15px) */
   --badge-size-dot: 8px;   /* the no-count activity dot (on-grid; was an ad-hoc 7px) */
+
+  /* The design system's Tag xs height (`components/core/Tag.jsx`: xs 18px, sm
+     --control-h-sm, md --control-h). It is the dense chip: the workflow card's
+     rows, and the overlay/filmstrip metadata the DS names. Named here rather
+     than spelled in each component so the three chip heights stay three. */
+  --tag-h-xs: 18px;
 
   /* The countdown drain hairline on a self-dismissing transient surface: the
      action receipt today, and the notice card is the obvious second consumer.
@@ -259,11 +288,41 @@
      fifth number. */
   --stats-panel-w: 288px;
 
+  /* The toolbar filter menu (FilterMenu) and each submenu beside it. Narrower
+     than a lone toolbar panel (the old filter panel was 376px) because two sit
+     side by side: 320 + 280 keeps the pair near 610px with Score open. The
+     submenus with long rows (the tag field, the checklists) take the menu's
+     own 320. */
+  --filter-menu-w: 320px;
+  --filter-submenu-w: 280px;
+
+  /* The toolbar band. The inspector's tab band is pinned to it so one bottom
+     rule runs across the window; the toolbar and the sidebar tabs still spell
+     36px and move onto it when next touched. The bar buttons inside it are
+     --control-h-bar. */
+  --toolbar-height: 36px;
+
   /* Notice surface (see notice-surface.md §11). `--notice-max-w` matches the
      de-facto width already used by LockedDeleteNoticeDialog and
      .plugin-menu-panel, so the surface does not introduce a fifth floating-card
      width. */
   --notice-max-w: 420px;
+
+  /* Dialog widths: four steps and nothing else (docs/design/buttons.md,
+     approved 2026-09-12). 44 dialogs had hand-typed 16 widths between 380 and
+     980; these are the clusters they formed. `md` is AppDialog's default. A
+     layout fixture, like --sidebar-width, so not off the spacing scale. */
+  --dialog-w-sm: 420px; /* a confirm, or one field and two verbs */
+  --dialog-w-md: 520px; /* the default: a short form */
+  --dialog-w-lg: 720px; /* a list, a tree, two columns */
+  --dialog-w-xl: 840px; /* the settings and picker shells */
+
+  /* Tooltip (buttons.md, "Tooltips"). The one surface is `Tooltip.vue`.
+     `--tooltip-delay` is a starting value, not a measurement: Vuetify's own
+     default is no delay at all, so a tip strobed open as the pointer crossed a
+     toolbar. Hover waits this long; keyboard focus opens at once. */
+  --tooltip-max-w: 280px;
+  --tooltip-delay: 700ms;
 
   /* ---------------------------------------------------------------------------
      LAYERS (`--z-*`) - the stacking ladder. See visual-language.md §14.
@@ -274,15 +333,21 @@
      NAME, not a number. Steps are 10× apart on purpose: there is always room to
      wedge one component between two strata without inventing a ninth stratum.
 
-     A raw z-index is now drift. Migrating the existing 40+ call sites is
-     opportunistic follow-up work - touch a rule, move it onto the ladder - not
-     a big-bang rewrite, because each move is pixel-visible in a different
-     screen and has to be eyeballed there.
+     A raw z-index is drift (buttons.md, "Off-token values").
+
+     THE LADDER STOPS AT --z-drawer. Vuetify stacks its overlays at runtime from
+     2000 upward, +10 per open overlay, so a hand-written number above 1000 is
+     betting against a number that moves. If it must clear a modal it must BE an
+     overlay (teleported, ordered by the stack), not a positioned element with a
+     bigger number. The rungs above stay for the few surfaces that remain in the
+     document; no fourth one gets added. And there is no "just above my own
+     layer": two elements that need +1 belong in one stacking context, ordered
+     by DOM order.
      --------------------------------------------------------------------------- */
   --z-base: 0;         /* in-flow content; the grid itself */
   --z-raised: 10;      /* lifted over an immediate sibling: a tile badge, a hover scrim */
   --z-sticky: 100;     /* sticky headers/toolbars inside a scroll container */
-  --z-floating: 200;   /* chrome anchored to the content area: selection pill, breadcrumb, range pill */
+  --z-floating: 200;   /* chrome anchored to the content area: selection pill, action receipt, progress pill */
   --z-dropdown: 300;   /* menus, popovers, tooltips anchored to a control */
   --z-drawer: 1000;    /* full-panel overlays inside the shell: the lightbox */
   --z-overlay: 2000;   /* app-level overlays and context menus */
@@ -318,6 +383,7 @@
   --dur-2: 200ms; /* panels, expand/collapse, default */
   --dur-3: 250ms; /* overlays, dialog enter/leave - routine ceiling */
   --dur-4: 420ms; /* expressive ONE-SHOT: FLIP flight, badge/sticker landing (delight only) */
+  --dur-attention: 500ms; /* closed-inspector nudge: edge-tab bounce + rail glyph flash, one-shot */
   --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
   --ease-decelerate: cubic-bezier(0, 0, 0.2, 1);   /* entering elements */
   --ease-accelerate: cubic-bezier(0.4, 0, 1, 1);   /* leaving elements */

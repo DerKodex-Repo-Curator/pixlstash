@@ -91,6 +91,10 @@ class WorkPlanner:
             ReferenceFolderScanFinder,
         )
         from pixlstash.tasks.missing_text_score_finder import MissingTextScoreFinder
+        from pixlstash.tasks.missing_prompt_match_finder import (
+            MissingPromptMatchFinder,
+        )
+        from pixlstash.tasks.missing_ocr_finder import MissingOcrFinder
         from pixlstash.tasks.missing_thumbnail_finder import MissingThumbnailFinder
         from pixlstash.tasks.missing_pixel_sha_finder import MissingPixelShaFinder
         from pixlstash.tasks.missing_orientation_finder import MissingOrientationFinder
@@ -171,6 +175,14 @@ class WorkPlanner:
             TaskType.REFERENCE_FOLDER_SCAN: reference_folder_scan_finder,
             TaskType.TEXT_SCORE: MissingTextScoreFinder(
                 database=database,
+            ),
+            TaskType.PROMPT_MATCH: MissingPromptMatchFinder(
+                database=database,
+                engine_getter=engine_getter,
+            ),
+            TaskType.OCR: MissingOcrFinder(
+                database=database,
+                engine_getter=engine_getter,
             ),
             TaskType.THUMBNAIL_GENERATION: MissingThumbnailFinder(
                 database=database,
@@ -675,11 +687,17 @@ class WorkPlanner:
                 )
             return
         try:
+            # CUDA-only on purpose: the sample is `torch.cuda.utilization()`,
+            # an NVML reading with no equivalent on any other backend. So this
+            # is a missing *metric*, not a missing GPU, and the message has to
+            # say which - the old wording quoted `torch.cuda.is_available()`,
+            # which on a machine whose GPU is working fine reads as a fault.
             if not torch.cuda.is_available():
                 self._gpu_util_unavailable = True
                 logger.info(
                     "[PIPELINE_PASS] GPU-busy sampling unavailable, reporting n/a: "
-                    "torch.cuda.is_available() is False in the planner thread"
+                    "utilisation sampling needs NVML and this host has no CUDA "
+                    "device (any other accelerator is unaffected and still used)"
                 )
                 return
             utilization = float(torch.cuda.utilization())

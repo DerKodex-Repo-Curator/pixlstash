@@ -17,10 +17,14 @@ import tempfile
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
-from sqlmodel import select
+from sqlmodel import Session, SQLModel, create_engine, select
 
+from pixlstash.db_models import Character, Picture
 from pixlstash.db_models.face import Face
-from pixlstash.scoring import compute_character_likeness_for_faces
+from pixlstash.scoring import (
+    compute_character_likeness_for_faces,
+    match_faces_to_characters,
+)
 from pixlstash.server import Server
 from pixlstash.services import operation_log_service
 from tests.test_server import random_images
@@ -496,3 +500,136 @@ def test_existing_reference_faces_still_drive_selection():
             )
             assert assigned[bystander_fid] is None
             assert body["face_ids"] == [target_fid]
+
+
+# --- a picture of several people (a run loading their LoRAs) ---------------
+
+
+def _vec(*values):
+    return np.asarray(values, dtype=np.float32).tobytes()
+
+
+@pytest.fixture
+def library():
+    """An in-memory vault: matching reads faces, no server needed."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        yield session
+
+
+def _person(session, name, *references):
+    """A person whose reference faces (one picture each) have *references*."""
+    character = Character(name=name)
+    session.add(character)
+    session.commit()
+    for features in references:
+        picture = Picture(file_path=f"{name}.png", deleted=False, score=5)
+        session.add(picture)
+        session.commit()
+        session.add(
+            Face(
+                picture_id=picture.id,
+                face_index=0,
+                character_id=character.id,
+                bbox=SMALL_BBOX,
+                features=features,
+            )
+        )
+    session.commit()
+    return character.id
+
+
+def _group(session, *faces):
+    """A picture with *faces*, each ``(features, bbox)`` or with a character."""
+    picture = Picture(file_path="group.png", deleted=False)
+    session.add(picture)
+    session.commit()
+    rows = []
+    for index, (features, bbox, *named) in enumerate(faces):
+        face = Face(
+            picture_id=picture.id,
+            face_index=index,
+            bbox=bbox,
+            features=features,
+            character_id=named[0] if named else None,
+        )
+        session.add(face)
+        rows.append(face)
+    session.commit()
+    return rows
+
+
+def test_two_peoples_faces_are_matched_by_likeness_not_size(library):
+    a = _person(library, "a", ALONG_X)
+    b = _person(library, "b", ALONG_Y)
+    like_b, like_a = _group(library, (ALONG_Y, LARGE_BBOX), (NEAR_X, SMALL_BBOX))
+    assert match_faces_to_characters(library, [like_b, like_a], [a, b]) == {
+        like_a.id: a,
+        like_b.id: b,
+    }
+
+
+def test_the_strongest_pair_is_taken_first(library):
+    """f1 is most like a (0.83), so a gets it, and b takes f2 though it is
+    unlike them (0.00): b is in the run, so b gets the face left."""
+    a = _person(library, "a", _vec(-0.293, 0.035, -0.956))
+    b = _person(library, "b", _vec(-0.174, -0.918, -0.356))
+    f1, f2 = _group(
+        library,
+        (_vec(-0.506, -0.452, -0.734), SMALL_BBOX),
+        (_vec(0.524, 0.219, -0.823), SMALL_BBOX),
+    )
+    likeness = compute_character_likeness_for_faces(
+        [library.exec(select(Face).where(Face.character_id == a)).one()], [f1, f2]
+    )
+    assert likeness[f1.id] > likeness[f2.id]
+    assert match_faces_to_characters(library, [f1, f2], [a, b]) == {
+        f1.id: a,
+        f2.id: b,
+    }
+
+
+def test_the_less_obvious_person_still_gets_the_face_left(library):
+    """b's face came out unlike b, but a takes the obvious one and b the rest."""
+    a = _person(library, "a", ALONG_X)
+    b = _person(library, "b", ALONG_Y)
+    like_a, stranger = _group(
+        library, (NEAR_X, SMALL_BBOX), (_vec(0, 0, 1, 0, 0, 0, 0, 0), LARGE_BBOX)
+    )
+    assert match_faces_to_characters(library, [like_a, stranger], [a, b]) == {
+        like_a.id: a,
+        stranger.id: b,
+    }
+
+
+def test_a_named_face_and_its_person_are_left_out(library):
+    a = _person(library, "a", ALONG_X)
+    b = _person(library, "b", ALONG_Y)
+    named, free = _group(library, (NEAR_X, SMALL_BBOX, b), (ALONG_X, SMALL_BBOX))
+    assert match_faces_to_characters(library, [named, free], [a, b]) == {free.id: a}
+
+
+def test_one_person_with_no_references_gets_the_largest_face_left(library):
+    a = _person(library, "a", ALONG_X)
+    newcomer = _person(library, "newcomer")
+    like_a, small, large = _group(
+        library,
+        (ALONG_X, LARGE_BBOX),
+        (ALONG_Y, SMALL_BBOX),
+        (ALONG_Y, [0, 0, 100, 100]),
+    )
+    assert match_faces_to_characters(
+        library, [like_a, small, large], [newcomer, a]
+    ) == {like_a.id: a, large.id: newcomer}
+
+
+def test_people_with_no_references_take_the_largest_faces_in_turn(library):
+    """Nothing to score them by, so in order, until the faces run out."""
+    first = _person(library, "first")
+    second = _person(library, "second")
+    third = _person(library, "third")
+    small, large = _group(library, (ALONG_X, SMALL_BBOX), (ALONG_Y, LARGE_BBOX))
+    assert match_faces_to_characters(
+        library, [small, large], [first, second, third]
+    ) == {large.id: first, small.id: second}

@@ -1,0 +1,632 @@
+<template>
+  <article
+    class="msc"
+    :class="{
+      'msc--open': expanded,
+      'msc--on': selected,
+      'msc--hand': card.handMade,
+      'msc--hidden': card.hidden,
+    }"
+    role="group"
+    :aria-label="accessibleName"
+    data-testid="model-set-card"
+  >
+    <div
+      v-if="card.covers.length"
+      class="msc__cover"
+      :class="`msc__cover--${card.covers.length}`"
+    >
+      <span
+        v-for="cover in card.covers"
+        :key="cover.picture_id"
+        class="msc__pic"
+      >
+        <img :src="coverSrc(cover)" alt="" loading="lazy" />
+      </span>
+      <!-- A hand-made card never states a recipe count as its own: the set is
+           the owner's claim, and the recipes are only what happens to fit it. -->
+      <span
+        v-if="card.handMade"
+        class="msc__badge msc__badge--start msc__badge--hand"
+        aria-hidden="true"
+        >Grouped by you</span
+      >
+      <span v-else class="msc__badge msc__badge--start" aria-hidden="true">
+        <v-icon size="12">mdi-layers</v-icon>{{ card.recipes }} recipes
+      </span>
+      <span class="msc__badge msc__badge--end" aria-hidden="true">
+        <v-icon size="12">mdi-image-multiple</v-icon
+        >{{ card.pictures.toLocaleString() }}
+      </span>
+    </div>
+    <!-- A hand-made set with no pictures yet: its checkpoint's own mark, or a
+         dashed empty cover while it has none. -->
+    <div
+      v-else-if="card.handMade"
+      class="msc__cover msc__cover--empty msc__cover--hand"
+      aria-hidden="true"
+    >
+      <span class="msc__badge msc__badge--start msc__badge--hand"
+        >Grouped by you</span
+      >
+      <ModelMark
+        v-if="card.markModel"
+        class="msc__mark"
+        :row="{
+          display_name: card.markModel.name,
+          filename: card.markModel.filename,
+          base_model: card.markModel.base_model,
+          icon_sha256: card.markIcon || null,
+        }"
+      />
+      <!-- Only a set with NO checkpoint says so. One whose checkpoint file has
+           left the shelf still has it, kept by hash: say that instead. -->
+      <span v-else-if="card.incomplete" class="msc__empty-line"
+        >No checkpoint yet</span
+      >
+      <span v-else class="msc__empty-line">Checkpoint not on shelf</span>
+    </div>
+    <div v-else class="msc__cover msc__cover--empty" aria-hidden="true">
+      <!-- On the grid only because ComfyUI ran it (#1565): say where the
+           evidence came from, with the run count where recipes would sit. -->
+      <template v-if="card.fromComfyUI">
+        <span class="msc__badge msc__badge--start">
+          <v-icon size="12">mdi-sitemap-outline</v-icon
+          >{{ card.historyRuns === 1 ? "1 run" : `${card.historyRuns} runs` }}
+        </span>
+        <span class="msc__empty-line">Ran in ComfyUI</span>
+      </template>
+      <span v-else class="msc__empty-line">No picture to show</span>
+    </div>
+    <!-- The lasting offer (#1523), asked as a question on the cover's foot
+         until the owner answers it. One model is answered here: Add to set is
+         the ordinary members add, with its receipt and Undo. Several open the
+         tray to review, since three files added blind is a bigger claim.
+         Mouse-only: the grid owns Tab, and the keyboard answers through the
+         tray and the set's menu, so the card's name carries the question.
+         Its clicks stop here: reading the question must not select the set. -->
+    <div
+      v-if="card.offer"
+      class="msc__ask"
+      aria-hidden="true"
+      data-testid="set-offer"
+      @click.stop
+      @dblclick.stop
+    >
+      <p class="msc__ask-q">
+        <strong>{{ card.offer.who }}</strong>{{ card.offer.rest
+        }}<template v-if="card.offer.model"> Add it?</template>
+      </p>
+      <span
+        v-if="card.offer.model"
+        class="msc__ask-model"
+        :title="offerChip"
+        ><v-icon size="12">mdi-cube-outline</v-icon
+        ><span class="msc__ask-name">{{ offerChip }}</span></span
+      >
+      <div class="msc__ask-acts">
+        <AppButton
+          v-if="card.offer.model"
+          variant="primary"
+          size="sm"
+          icon-left="plus"
+          on-dark
+          tabindex="-1"
+          data-testid="set-offer-add"
+          @click="emit('add')"
+          >Add to set</AppButton
+        >
+        <AppButton
+          v-else
+          variant="primary"
+          size="sm"
+          icon-left="plus"
+          on-dark
+          tabindex="-1"
+          data-testid="set-offer-review"
+          @click="emit('offer')"
+          >Review {{ card.offer.adds }}…</AppButton
+        >
+        <AppButton
+          variant="outline"
+          size="sm"
+          on-dark
+          tabindex="-1"
+          data-testid="set-offer-no"
+          :tooltip="
+            card.offer.model
+              ? 'Keeps this model out of the set. The set\'s menu can suggest it again.'
+              : 'Keeps these models out of the set. The set\'s menu can suggest them again.'
+          "
+          @click="emit('keep-separate')"
+        >
+          Stop asking
+        </AppButton>
+      </div>
+    </div>
+
+    <!-- The visible rows are hidden from assistive tech: the card's own label
+         already reads all of them, including what "+N" clipped. -->
+    <div class="msc__meta">
+      <div class="msc__row">
+        <AppButton
+          class="msc__toggle"
+          :class="{ 'msc__toggle--open': expanded }"
+          variant="ghost"
+          size="sm"
+          icon-left="menu-right"
+          icon-only
+          tabindex="-1"
+          :tooltip="
+            expanded
+              ? 'Hide the models in this set'
+              : 'Show the models in this set'
+          "
+          :aria-expanded="String(expanded)"
+          :aria-controls="panelId || undefined"
+          @click="emit('toggle')"
+        />
+        <span class="msc__name" aria-hidden="true">{{ card.name }}</span>
+        <span
+          v-if="card.kindLabel"
+          class="msc__kind"
+          :class="{ 'msc__kind--missing': card.missing }"
+          aria-hidden="true"
+          >{{
+          card.kindLabel
+        }}</span>
+        <span v-if="card.hidden" class="msc__kind" aria-hidden="true"
+          >Hidden</span
+        >
+        <!-- The owner's word on the set, never PixlStash's check. -->
+        <VerdictIcon
+          v-if="card.verdict"
+          :verdict="card.verdict"
+          :label="`Your verdict: ${setVerdictText(card.verdict)}`"
+        />
+        <!-- A set from pictures is read off the library, so it is hidden rather
+             than deleted (the next read would only draw it again). A hand-made
+             set is the owner's own and can be deleted, and hiding it is the
+             same view choice on top: out of the way in THIS library only.
+             Mouse-only, like the toggle: the grid owns Tab, and Delete on the
+             card deletes a hand-made set, hides a derived one. -->
+        <AppButton
+          class="msc__hide"
+          variant="ghost"
+          size="sm"
+          :icon-left="card.hidden ? 'eye-outline' : 'eye-off-outline'"
+          icon-only
+          tabindex="-1"
+          :tooltip="card.hidden ? 'Show this set again' : 'Hide this set'"
+          data-testid="set-hide"
+          @click.stop="emit(card.hidden ? 'unhide' : 'hide')"
+          @dblclick.stop
+        />
+      </div>
+      <!-- What SHAPE this set is - one VAE and two encoders, or none at all -
+           which is the question a grid is scanned for. -->
+      <div class="msc__row">
+        <ChipRow
+          v-if="kindChips.length"
+          :items="kindChips"
+          aria-hidden="true"
+        />
+        <span v-else class="msc__none" aria-hidden="true">{{
+          card.handMade
+            ? "Nothing else in it yet"
+            : "Nothing else has run with it"
+        }}</span>
+      </div>
+      <div class="msc__row msc__row--facts">
+        <!-- The one thing an incomplete set must say, in place of its facts:
+             what is missing, so the owner knows what to add. -->
+        <span
+          v-if="card.handMade && card.incomplete"
+          class="msc__warn"
+          aria-hidden="true"
+          ><v-icon size="14">mdi-alert-outline</v-icon>Incomplete: no
+          checkpoint</span
+        >
+        <span v-else class="msc__facts" aria-hidden="true">{{
+          card.facts.join(" · ")
+        }}</span>
+      </div>
+    </div>
+  </article>
+</template>
+
+<script setup>
+// One workflow set on the model shelf's set grid (#1438).
+//
+// **A card is one base model** - a checkpoint, or the diffusion file a Flux or
+// Wan graph loads instead - and ▸ opens the tray of models that have run with it.
+// Three meta rows: the name with its kind, the per-kind tally of everything else
+// in the set, and the facts.
+//
+// **Deliberately not `WorkflowCard`.** The shape is the same on purpose - the
+// 2fr/1fr cover mosaic, the scrim badges, the layered stack count, ▸, and four
+// single-line rows that clip to "+N" - because a reader should not have to learn
+// a second card. What is NOT shared is the vocabulary: that card's ⓘ panel says
+// "Stack of 3 workflows" and "Saved recipes", and its picture list is keyed on a
+// workflow. A set is neither, so borrowing the component would have put three
+// wrong words on every card to save this file. The tokens, the badge treatment
+// and the row rhythm are copied; nothing that says "workflow" is.
+//
+// There is no ⓘ here either: everything the card knows is already on it, and the
+// detail a reader wants next is the file list, which is one ▸ away.
+//
+// **On an evidence card, selected means its BASE MODEL is selected**, never the
+// set: the shelf's verbs write one file each and two of them destroy bytes, so a
+// card standing for its whole tray would put a shared VAE behind a Delete aimed
+// at a checkpoint. The other members are selected in the tray, one row each. One
+// exception to the drawing: while the open tray shows the base model picked from
+// its own row, the grid leaves the card unlit, so a tray pick does not read as
+// the whole set picked (`trayPicked` in `ModelSetGrid.vue`).
+//
+// A HAND-MADE card (`card.handMade`, #1520) is the owner's set rather than the
+// evidence for one: dashed, badged "Grouped by you", no recipe count, and
+// selected means the SET is selected - its verbs touch no file.
+
+import { computed } from "vue";
+import { VIcon } from "vuetify/components";
+
+import { pictureThumbnailUrl } from "../../api/pictures";
+import AppButton from "./AppButton.vue";
+import ChipRow from "./ChipRow.vue";
+import ModelMark from "./ModelMark.vue";
+import VerdictIcon from "./VerdictIcon.vue";
+import { setVerdictText } from "../../utils/setVerdicts";
+
+const props = defineProps({
+  /** One card from `setCard` (see `utils/workflowSets.js`). */
+  card: { type: Object, required: true },
+  /** This card's tray is open. */
+  expanded: { type: Boolean, default: false },
+  /** The id of the tray ▸ opens, for `aria-controls`. */
+  panelId: { type: String, default: "" },
+  /** This card's base model is in the shelf's selection. */
+  selected: { type: Boolean, default: false },
+});
+
+const emit = defineEmits([
+  "toggle",
+  "offer",
+  "add",
+  "keep-separate",
+  "hide",
+  "unhide",
+]);
+
+/**
+ * The URL a browser loads one cover from.
+ *
+ * **An `<img src>` never reaches the Axios interceptor**, so nothing prepends
+ * the API base and nothing appends the share token: the payload's
+ * `{picture_id, version}` has to go through the api layer's own builder, or the
+ * browser asks the PAGE origin for a path no route serves and every cover on
+ * this grid breaks. `pictureThumbnailUrl` is where that path is spelled - the
+ * same one the picture grid's tiles use, so a thumbnail the browser already
+ * holds is not fetched twice.
+ */
+function coverSrc(cover) {
+  return pictureThumbnailUrl(cover.picture_id, { version: cover.version });
+}
+
+/** Row 2: the per-kind tally of everything else in the set. */
+const kindChips = computed(() =>
+  props.card.kinds.map((entry, i) => ({
+    key: `kind-${i}`,
+    label: entry,
+    icon: "cube-outline",
+  })),
+);
+
+// The cover's question, read in full: its buttons are off the tab order, so
+// the name says where the keyboard answers it.
+/** The one offered model as the chip prints it; its title reveals it clipped. */
+const offerChip = computed(() => {
+  const model = props.card.offer?.model;
+  return model
+    ? [model.kind, model.name, model.quant].filter(Boolean).join(" · ")
+    : "";
+});
+
+const offerName = computed(() => {
+  const offer = props.card.offer;
+  if (!offer) return null;
+  const statement = `${offer.who}${offer.rest}`;
+  if (!offer.model) return `${statement} Answer in the set's tray or menu`;
+  const model = [offer.model.kind, offer.model.name, offer.model.quant]
+    .filter(Boolean)
+    .join(" ");
+  return `${statement} ${model}. Add it? Answer in the set's tray or menu`;
+});
+
+// "+N" is not a control, so this is the only place a screen reader hears the
+// chips a narrow card clipped - and the only place it hears the whole set.
+const accessibleName = computed(() => {
+  const { name, kindLabel, kinds, facts, handMade, incomplete } = props.card;
+  if (handMade) {
+    return [
+      name,
+      "grouped by you",
+      props.card.hidden ? "hidden" : null,
+      kindLabel,
+      incomplete
+        ? "incomplete: no checkpoint"
+        : props.card.checkpointOffShelf
+          ? "checkpoint not on shelf"
+          : null,
+      kinds.length ? `with ${kinds.join(", ")}` : "nothing else in it yet",
+      // What is drawn: an incomplete card shows its warning in place of facts.
+      incomplete ? null : facts.join(", "),
+      offerName.value,
+    ]
+      .filter(Boolean)
+      .join(", ");
+  }
+  return [
+    name,
+    props.card.missing ? "base model not on shelf" : kindLabel,
+    props.card.fromComfyUI ? "ran in ComfyUI" : null,
+    props.card.hidden ? "hidden" : null,
+    kinds.length ? `with ${kinds.join(", ")}` : "nothing else has run with it",
+    facts.join(", "),
+  ]
+    .filter(Boolean)
+    .join(", ");
+});
+</script>
+
+<style scoped src="./cardCover.css"></style>
+<style scoped>
+/* 92 = 8 + 3 × 24 + 2 × 2 + 8: the meta block, fixed whatever the card holds
+   and `flex: none` so a change to that sum shows as a wrong height rather than
+   being absorbed. Local on purpose, as `WorkflowCard`'s is; the `6 / 5` cover
+   the two cards share is in `cardCover.css`. */
+.msc {
+  --msc-meta-h: 92px;
+
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  overflow: hidden;
+  border: 1px solid rgb(var(--v-theme-border));
+  border-radius: var(--radius-md);
+  background: rgb(var(--v-theme-surface));
+  color: rgb(var(--v-theme-on-surface));
+}
+
+/* Open and selected are two states and they read differently on purpose: open is
+   a border in the active ink beside the rotated ▸, selected is the shell's own
+   wash and ring. A card can be both, and then it wears both. */
+.msc--open {
+  border-color: var(--active-bar);
+}
+
+/* The shell's selection mark (`style.css` rule 3): the wash, plus
+   `--selection-ring` because a card has no left edge to rail.
+
+   **An OVERLAY, not the card's own background and shadow**, for the reason
+   `WorkflowCard.vue` records at the same rule: an inset box-shadow paints over
+   an element's background but UNDER its children, and the top 55% of this card
+   is the cover's opaque `<img>`s. Put on the card itself the mark appears along
+   the meta rows and stops dead at the pictures. `pointer-events: none` so ▸
+   underneath still takes its click, and the radius is inherited so the ring
+   follows the card's own corners. */
+.msc--on::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-raised);
+  border-radius: inherit;
+  background: var(--active-wash);
+  box-shadow: var(--selection-ring);
+  pointer-events: none;
+}
+
+.msc__pic {
+  overflow: hidden;
+  background: rgb(var(--v-theme-input-background));
+}
+
+.msc__pic img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.msc__cover--empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4) var(--space-5);
+  background: rgb(var(--v-theme-input-background));
+}
+
+/* The owner's own set: a dashed edge, the design's "hand-made" mark, so it is
+   told from an evidence card before a word is read. Dashed rather than a
+   colour, because the difference is provenance, not state. */
+.msc--hand {
+  border-style: dashed;
+}
+
+/* Hidden, drawn only while the grid shows hidden sets: the cover fades, whether
+   it holds pictures or is the empty stand-in (a hand-made set with none, or a
+   picture set with no cover), and the card's own text does not, so the card
+   stays readable and the "Hidden" tag says why. */
+.msc--hidden .msc__pic,
+.msc--hidden .msc__cover--empty {
+  opacity: var(--opacity-disabled);
+}
+
+.msc__hide {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: rgb(var(--v-theme-on-surface));
+}
+
+.msc__cover--hand {
+  position: relative;
+  border-bottom: 1px dashed rgb(var(--v-theme-border));
+}
+
+/* The checkpoint's mark, drawn large as the cover. `ModelMark` sizes itself
+   from `--entity-thumb`, which the sidebar already overrides the same way; the
+   size is three of the largest spacing step rather than a new number. */
+.msc__mark {
+  --entity-thumb: calc(var(--space-6) * 3);
+}
+
+.msc__badge--hand {
+  border: 1px dashed currentColor;
+}
+
+.msc__warn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  overflow: hidden;
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  color: rgb(var(--v-theme-surface-warning));
+  text-overflow: ellipsis;
+}
+
+/* The offer's question panel: a dark band across the cover's foot, dark in
+   both themes like the scrim badges above it. Placed on the card rather than
+   inside the cover so both hand-made covers (pictures or the checkpoint's mark)
+   carry it from one element. */
+.msc__ask {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: var(--msc-meta-h);
+  z-index: var(--z-raised);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border-top: 1px solid rgba(var(--v-theme-on-dark-surface), 0.12);
+  background: rgba(var(--v-theme-dark-surface), 0.95);
+  color: rgb(var(--v-theme-on-dark-surface));
+  font-size: var(--text-xs);
+}
+
+.msc__ask-q {
+  margin: 0;
+  line-height: var(--leading-snug);
+}
+
+.msc__ask-q strong {
+  font-weight: var(--weight-bold);
+}
+
+/* The model itself, dashed like its ghost tile in the tray. */
+.msc__ask-model {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: var(--space-2);
+  max-width: 100%;
+  box-sizing: border-box;
+  height: var(--tag-h-xs);
+  padding: 0 var(--space-3);
+  border: 1px dashed rgb(var(--v-theme-dark-surface-accent));
+  border-radius: var(--radius-sm);
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+}
+
+.msc__ask-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.msc__ask-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.msc__badge--start {
+  left: var(--space-3);
+  z-index: var(--z-raised);
+}
+
+.msc__meta {
+  flex: none;
+  box-sizing: border-box;
+  height: var(--msc-meta-h);
+  display: grid;
+  grid-template-rows: repeat(4, var(--control-h-sm));
+  row-gap: var(--space-1);
+  padding: var(--space-3);
+}
+
+.msc__row--facts {
+  padding-right: var(--space-3);
+}
+
+.msc__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.msc__kind {
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  height: var(--tag-h-xs);
+  padding: 0 var(--space-2);
+  border: 1px solid rgb(var(--v-theme-border));
+  border-radius: var(--radius-sm);
+  background: rgb(var(--v-theme-input-background));
+  color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
+  font-size: var(--text-2xs);
+  line-height: var(--leading-snug);
+  white-space: nowrap;
+}
+
+.msc__kind--missing {
+  border-color: rgba(var(--v-theme-warning), 0.5);
+  background: rgba(var(--v-theme-warning), 0.16);
+  color: rgb(var(--v-theme-surface-warning));
+}
+
+.msc__facts {
+  overflow: hidden;
+  font-size: var(--text-2xs);
+  color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+}
+
+/* ▸ carries full ink: opening a stack is the card's own affordance. */
+.msc__toggle {
+  flex-shrink: 0;
+  color: rgb(var(--v-theme-on-surface));
+}
+
+.msc__toggle :deep(.app-btn__icon) {
+  transition: transform var(--dur-1) var(--ease-standard);
+}
+
+.msc__toggle--open :deep(.app-btn__icon) {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .msc__toggle :deep(.app-btn__icon) {
+    transition: none;
+  }
+}
+</style>

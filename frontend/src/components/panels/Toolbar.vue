@@ -2,17 +2,14 @@
   <div class="selection-bar-overlay">
     <div class="selection-bar-content">
       <div class="selection-bar-left">
-        <button
+        <AppBarButton
           v-if="sidebarStore.sidebarForcedHidden"
-          class="bar-btn bar-btn--icon tb-mobile-nav"
-          type="button"
+          class="tb-mobile-nav"
+          icon="menu"
           :aria-expanded="sidebarStore.sidebarVisible"
-          aria-label="Open library navigation"
-          title="Open library navigation"
+          tooltip="Open library navigation"
           @click="sidebarStore.revealSidebar()"
-        >
-          <v-icon size="20">mdi-menu</v-icon>
-        </button>
+        />
         <div
           v-if="sidebarStore.sidebarForcedHidden"
           class="bar-separator tb-mobile-nav-separator"
@@ -31,31 +28,28 @@
               class="bar-split-button"
               :class="{ 'bar-split-button--open': gbSortMenuOpen }"
             >
-              <button
-                class="bar-btn bar-split-toggle"
-                type="button"
-                :title="gbDescendingModel ? 'Descending' : 'Ascending'"
+              <AppBarButton
+                class="bar-split-toggle"
+                :icon="gbSortButtonIcon"
+                :tooltip="gbDescendingModel ? 'Descending' : 'Ascending'"
                 :disabled="gbSortModel === LIKENESS_GROUPS_SORT_KEY_GB"
                 @click.stop="gbToggleSortDirection"
-              >
-                <v-icon size="19">{{ gbSortButtonIcon }}</v-icon>
-              </button>
-              <button
+              />
+              <AppBarButton
                 v-bind="menuProps"
-                class="bar-btn bar-split-menu"
-                type="button"
-                :title="gbSortButtonLabel"
+                class="bar-split-menu"
+                prefix="Sort:"
+                :icon="gbSortTypeIcon"
+                chevron
+                :tooltip="gbSortButtonLabel"
               >
-                <span class="bar-btn-prefix">Sort:</span>
-                <v-icon size="19">{{ gbSortTypeIcon }}</v-icon>
                 <span class="bar-btn-sort-type">{{ gbSortTypeName }}</span>
                 <span
                   v-if="gbSortSecondaryLabel"
                   class="bar-btn-sort-secondary"
                   >{{ gbSortSecondaryLabel }}</span
                 >
-                <v-icon size="18" class="bar-btn-chevron">mdi-menu-down</v-icon>
-              </button>
+              </AppBarButton>
             </div>
           </template>
           <div class="tbm gb-sort-panel">
@@ -102,59 +96,46 @@
                 Looking for Likeness Groups? Duplicates now has its own place in
                 the sidebar, with a count and a one-key review queue.
               </span>
-              <button
-                type="button"
+              <AppButton
+                size="sm"
                 class="gb-sort-migration-open"
                 @click="openDuplicatesFromNotice"
               >
                 Open Duplicates
-              </button>
-              <button
-                type="button"
-                class="gb-sort-migration-dismiss"
+              </AppButton>
+              <AppBarButton
+                icon="close"
                 aria-label="Hide this notice"
                 @click="dedupMigrationNotice.dismiss()"
-              >
-                <v-icon size="16">mdi-close</v-icon>
-              </button>
+              />
             </div>
 
             <div class="tbm-section">
-              <div class="tbm-grid-2">
-                <button
-                  v-for="opt in filteredSortOptions"
-                  :key="opt.value"
-                  class="tbm-toggle"
-                  :class="{ 'tbm-toggle--on': gbSortMenuModel === opt.value }"
-                  type="button"
-                  :disabled="gbSearchActive"
-                  @click="gbHandleSortModelUpdate(opt.value)"
-                >
-                  <v-icon size="18" class="tbm-toggle-icon">{{
-                    gbGetSortIcon(opt.value)
-                  }}</v-icon>
-                  <span class="tbm-toggle-label">{{ opt.label }}</span>
+              <OptionRows
+                :options="sortRowOptions"
+                :model-value="gbSortMenuModel"
+                :columns="2"
+                :disabled="gbSearchActive"
+                aria-label="Sort order"
+                @update:model-value="gbHandleSortModelUpdate($event, false)"
+                @pick="gbCloseSortMenuOnPick"
+              >
+                <template #meta="{ option }">
                   <span
-                    v-if="opt.value === STACK_UPDATED_AT_SORT_KEY"
-                    class="tbm-toggle-filter-badge"
-                    title="Only available when viewing stacks"
+                    v-if="option.id === STACK_UPDATED_AT_SORT_KEY"
+                    class="gb-sort-filter-badge"
                     aria-label="Only available when viewing stacks"
                     role="img"
                   >
+                    <Tooltip
+                      text="Only available when viewing stacks"
+                      activator="parent"
+                      :describe="false"
+                    />
                     <v-icon size="14">mdi-filter-outline</v-icon>
                   </span>
-                  <span
-                    v-if="
-                      gbSortMenuModel === opt.value &&
-                      (opt.value === SIMILARITY_SORT_KEY_GB ||
-                        opt.value === LIKENESS_GROUPS_SORT_KEY_GB)
-                    "
-                    class="tbm-toggle-end"
-                  >
-                    <v-icon size="16">mdi-circle-medium</v-icon>
-                  </span>
-                </button>
-              </div>
+                </template>
+              </OptionRows>
             </div>
 
             <div
@@ -229,43 +210,31 @@
              position learned here holds in Duplicates too. (The model shelf
              writes none and carries no undo - amendment #4.) -->
         <!-- ── Filter button ──────────────────────────────────────── -->
+        <!-- No count badge: the filter strip under the toolbar shows every
+             active filter as a chip. The menu stays open through every choice
+             (close-on-content-click off); Esc, a click outside or the funnel
+             close it. -->
         <v-menu
           v-model="gbFilterMenuOpen"
           :close-on-content-click="false"
-          location="bottom end"
-          origin="top end"
+          location="bottom start"
+          origin="top start"
           :offset="8"
           transition="scale-transition"
         >
           <template #activator="{ props: menuProps }">
-            <button
+            <AppBarButton
               v-bind="menuProps"
-              class="bar-btn bar-btn--boxed"
-              :class="{
-                'bar-btn--active': filterStore.isActive && !gbFilterMenuOpen,
-                'bar-btn--open': gbFilterMenuOpen,
-              }"
-              type="button"
-              title="Filters"
-            >
-              <span class="bar-icon-badge-wrap">
-                <v-icon size="19">mdi-filter</v-icon>
-                <span
-                  v-if="filterStore.activeCount > 0"
-                  class="bar-filter-badge"
-                  >{{
-                    filterStore.activeCount > 99
-                      ? "99+"
-                      : filterStore.activeCount
-                  }}</span
-                >
-              </span>
-              <v-icon size="18" class="bar-btn-chevron">mdi-menu-down</v-icon>
-            </button>
+              icon="filter"
+              chevron
+              :active="filterChipCount > 0 && !gbFilterMenuOpen"
+              :open="gbFilterMenuOpen"
+              tooltip="Filters"
+            />
           </template>
-          <GbFilterPanel
-            :selected-character="props.selectedCharacter"
-            :all-pictures-id="props.allPicturesId"
+          <FilterMenu
+            :count-base-query="props.filterCountBaseQuery"
+            :all-pictures-view="isAllPicturesView"
             :open="gbFilterMenuOpen"
           />
         </v-menu>
@@ -279,16 +248,14 @@
           transition="scale-transition"
         >
           <template #activator="{ props: menuProps }">
-            <button
+            <AppBarButton
               v-bind="menuProps"
-              class="bar-btn bar-btn--boxed tb-fold-600"
-              :class="{ 'bar-btn--open': gbViewMenuOpen }"
-              type="button"
-              title="View options"
-            >
-              <v-icon size="19">mdi-view-grid</v-icon>
-              <v-icon size="18" class="bar-btn-chevron">mdi-menu-down</v-icon>
-            </button>
+              class="tb-fold-600"
+              icon="view-grid"
+              chevron
+              :open="gbViewMenuOpen"
+              tooltip="View options"
+            />
           </template>
           <div class="tbm gb-view-panel">
             <span class="tbm-caret tbm-caret--end"></span>
@@ -328,27 +295,23 @@
 
             <div class="tbm-section">
               <span class="tbm-label">Stacks</span>
-              <div class="tbm-btngroup">
-                <button
-                  class="tbm-action tbm-action--secondary"
-                  type="button"
-                  style="flex: 1"
+              <div class="gb-stacks-actions">
+                <AppButton
+                  icon-left="arrow-expand-vertical"
+                  block
                   :disabled="gbExpandAllStacksDisabled"
                   @click="emit('expand-all-stacks')"
                 >
-                  <v-icon size="16">mdi-arrow-expand-vertical</v-icon>
                   Expand all
-                </button>
-                <button
-                  class="tbm-action tbm-action--secondary"
-                  type="button"
-                  style="flex: 1"
+                </AppButton>
+                <AppButton
+                  icon-left="arrow-collapse-vertical"
+                  block
                   :disabled="gbCollapseAllStacksDisabled"
                   @click="emit('collapse-all-stacks')"
                 >
-                  <v-icon size="16">mdi-arrow-collapse-vertical</v-icon>
                   Collapse all
-                </button>
+                </AppButton>
               </div>
             </div>
 
@@ -391,19 +354,14 @@
           transition="scale-transition"
         >
           <template #activator="{ props: menuProps }">
-            <button
+            <AppBarButton
               v-bind="menuProps"
-              class="bar-btn bar-btn--icon"
-              :class="{
-                'bar-btn--active':
-                  searchStore.isSearchActive && !gbSearchMenuOpen,
-                'bar-btn--open': gbSearchMenuOpen,
-              }"
-              type="button"
-              title="Search (F)"
-            >
-              <v-icon size="20">mdi-magnify</v-icon>
-            </button>
+              icon="magnify"
+              :active="searchStore.isSearchActive && !gbSearchMenuOpen"
+              :open="gbSearchMenuOpen"
+              tooltip="Search (F)"
+              aria-label="Search"
+            />
           </template>
           <div class="tbm gb-search-panel">
             <span class="tbm-caret tbm-caret--icon-center-end"></span>
@@ -459,15 +417,13 @@
           transition="scale-transition"
         >
           <template #activator="{ props: menuProps }">
-            <button
+            <AppBarButton
               v-bind="menuProps"
-              class="bar-btn bar-btn--icon tb-export-btn tb-fold-700"
-              :class="{ 'bar-btn--open': exportStore.exportMenuOpen }"
-              type="button"
-              :title="exportActionLabel('Export current grid to zip')"
-            >
-              <v-icon size="20">mdi-tray-arrow-down</v-icon>
-            </button>
+              class="tb-export-btn tb-fold-700"
+              icon="tray-arrow-down"
+              :open="exportStore.exportMenuOpen"
+              :tooltip="exportActionLabel('Export current grid to zip')"
+            />
           </template>
           <TbExportPanel
             @confirm-export="emit('confirm-export-zip')"
@@ -485,15 +441,13 @@
           transition="scale-transition"
         >
           <template #activator="{ props: menuProps }">
-            <button
+            <AppBarButton
               v-bind="menuProps"
-              class="bar-btn bar-btn--icon tb-fold-700"
-              :class="{ 'bar-btn--open': tbImportMenuOpen }"
-              type="button"
-              title="Import photos"
-            >
-              <v-icon size="20">mdi-cloud-upload-outline</v-icon>
-            </button>
+              class="tb-fold-700"
+              icon="cloud-upload-outline"
+              :open="tbImportMenuOpen"
+              tooltip="Import photos"
+            />
           </template>
           <TbImportPanel
             :open="tbImportMenuOpen"
@@ -508,36 +462,22 @@
             "
           />
         </v-menu>
-        <!-- ── Toolbar: ComfyUI T2I ──────────────────────────────────── -->
-        <v-menu
+        <!-- ── Generate with no selection (v1.12 F5). The old button here
+             opened the rail run panel, which is gone; this opens the Run
+             popup with its workflow picker unset, which is the same popup
+             every other entry point opens and the one case it was already
+             built for (`kind: "card"`, its own "Results go to" set picker).
+             Without a door on the grid, starting a run from nothing meant
+             navigating to Workflows first. -->
+        <AppBarButton
           v-if="filterStore.comfyuiConfigured"
-          v-model="tbComfyuiMenuOpen"
-          :close-on-content-click="false"
-          location="bottom end"
-          origin="top end"
-          :offset="8"
-          transition="scale-transition"
-        >
-          <template #activator="{ props: menuProps }">
-            <button
-              v-bind="menuProps"
-              class="bar-btn bar-btn--icon tb-fold-700"
-              :class="{ 'bar-btn--open': tbComfyuiMenuOpen }"
-              type="button"
-              :disabled="isReadOnly"
-              title="Generate new image with ComfyUI from a text prompt"
-            >
-              <v-icon size="20">mdi-image-plus-outline</v-icon>
-            </button>
-          </template>
-          <TbComfyPanel
-            :open="tbComfyuiMenuOpen"
-            @run-grid="
-              emit('comfyui-run-grid', $event);
-              tbComfyuiMenuOpen = false;
-            "
-          />
-        </v-menu>
+          class="tb-fold-700"
+          icon="image-plus-outline"
+          :disabled="isReadOnly"
+          tooltip="Generate new pictures with a ComfyUI workflow"
+          aria-label="Generate new pictures with a ComfyUI workflow"
+          @click="generateFromNothing"
+        />
         <!-- ── The ⋯ overflow (amendment #2 in docs/design/
              toolbar-responsive-decisions.md): a burger may only collapse
              controls from its OWN visual group, and it stands where those
@@ -551,50 +491,54 @@
         <TbOverflowMenu class="tb-overflow">
           <template #default="{ close }">
             <button
+              v-if="filterStore.comfyuiConfigured"
               type="button"
-              class="tbm-action tb-row-700"
+              role="menuitem"
+              class="ctx-item tb-row-700"
+              :disabled="isReadOnly"
+              @click="
+                close();
+                generateFromNothing();
+              "
+            >
+              <v-icon class="ctx-icon">mdi-image-plus-outline</v-icon>
+              <span>Generate with ComfyUI…</span>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              class="ctx-item tb-row-700"
               @click="
                 emit('confirm-export-zip');
                 close();
               "
             >
-              <v-icon size="18">mdi-tray-arrow-down</v-icon>
+              <v-icon class="ctx-icon">mdi-tray-arrow-down</v-icon>
               <span>{{ exportActionLabel("Export grid to zip") }}</span>
             </button>
             <button
               v-if="!isReadOnly"
               type="button"
-              class="tbm-action tb-row-700"
+              role="menuitem"
+              class="ctx-item tb-row-700"
               @click="
                 emit('open-import');
                 close();
               "
             >
-              <v-icon size="18">mdi-cloud-upload-outline</v-icon>
+              <v-icon class="ctx-icon">mdi-cloud-upload-outline</v-icon>
               <span>Import photos…</span>
             </button>
             <button
-              v-if="filterStore.comfyuiConfigured"
               type="button"
-              class="tbm-action tb-row-700"
-              :disabled="isReadOnly"
-              @click="
-                close();
-                tbComfyuiMenuOpen = true;
-              "
-            >
-              <v-icon size="18">mdi-image-plus-outline</v-icon>
-              <span>Generate with ComfyUI…</span>
-            </button>
-            <button
-              type="button"
-              class="tbm-action tb-row-600"
+              role="menuitem"
+              class="ctx-item tb-row-600"
               @click="
                 close();
                 gbViewMenuOpen = true;
               "
             >
-              <v-icon size="18">mdi-view-grid</v-icon>
+              <v-icon class="ctx-icon">mdi-view-grid</v-icon>
               <span>View options…</span>
             </button>
           </template>
@@ -609,15 +553,12 @@
              Visible at ALL widths (amendment #2): it is the review overlay's
              only visible entry point, and folding it into the left group's
              burger would cross the group boundary. -->
-        <button
-          class="bar-btn bar-btn--icon"
-          type="button"
+        <AppBarButton
+          icon="tag-check-outline"
           :disabled="isReadOnly"
-          title="Review and fix tags"
+          tooltip="Review and fix tags"
           @click="reviewSessionsStore.overlayOpen = true"
-        >
-          <v-icon size="20">mdi-tag-check-outline</v-icon>
-        </button>
+        />
         <!-- ── Separator G-S4: view-local actions | app-wide chrome ─────
              The canonical toolbar tail, identical in every view that writes
              the operation log (not the model shelf, amendment #4):
@@ -631,9 +572,12 @@
         <UndoControl />
         <!-- ── Toolbar: Settings + stats toggle (shared with the duplicates
              queue, which is why they live in their own component). Never
-             folds (amendment #2); the activity dot stays first-class on the
+             folds (amendment #2); the activity light stays first-class on the
              Stats button at every width. -->
-        <TbGlobalActions @open-settings="emit('open-settings')" />
+        <TbGlobalActions
+          rail-name="Stats and tasks"
+          @open-settings="emit('open-settings')"
+        />
       </div>
     </div>
   </div>
@@ -655,13 +599,18 @@ import {
   DEFAULT_THUMBNAIL_SIZE_LEVEL,
   sizeLabelForLevel,
 } from "../../utils/thumbnailSizes";
-import GbFilterPanel from "./GbFilterPanel.vue";
+import FilterMenu from "./FilterMenu.vue";
+import { filterChips } from "../../utils/filterChips";
 import TbGlobalActions from "./TbGlobalActions.vue";
-import TbComfyPanel from "./TbComfyPanel.vue";
 import TbExportPanel from "./TbExportPanel.vue";
 import TbImportPanel from "./TbImportPanel.vue";
 import TbOverflowMenu from "./TbOverflowMenu.vue";
+import { useRunDialogStore } from "../../stores/useRunDialogStore";
 import UndoControl from "./UndoControl.vue";
+import AppBarButton from "../widgets/AppBarButton.vue";
+import AppButton from "../widgets/AppButton.vue";
+import Tooltip from "../widgets/Tooltip.vue";
+import OptionRows from "../widgets/OptionRows.vue";
 import { useOneTimeNotice } from "../../composables/useOneTimeNotice";
 const props = defineProps({
   selectedCount: Number,
@@ -670,10 +619,11 @@ const props = defineProps({
   allPicturesId: { type: String, required: true },
   backendUrl: { type: String, default: () => API_BASE_URL },
   comfyuiConfigured: { type: Boolean, default: false },
+  // The grid's view with no filters, for the filter menu's counts.
+  filterCountBaseQuery: { type: String, default: null },
 });
 
 const emit = defineEmits([
-  "comfyui-run-grid",
   "expand-all-stacks",
   "collapse-all-stacks",
   "confirm-export-zip",
@@ -683,6 +633,19 @@ const emit = defineEmits([
   "open-settings",
   "open-duplicates",
 ]);
+
+const runDialog = useRunDialogStore();
+
+/**
+ * Generate with nothing selected: the Run popup, picker unset.
+ *
+ * No pictures, so the card IS the run's source and the popup shows its own
+ * "Results go to" set picker rather than filing beside a source picture.
+ */
+function generateFromNothing() {
+  if (isReadOnly.value) return;
+  runDialog.openRun({ kind: "card", pickWorkflow: true, emptyPrompt: true });
+}
 
 const tbImportMenuOpen = ref(false);
 
@@ -763,7 +726,6 @@ function exportActionLabel(idle) {
   return `Export ${count} picture${count === 1 ? "" : "s"} to zip`;
 }
 
-const tbComfyuiMenuOpen = ref(false);
 // ── Grid Bar: Sort ─────────────────────────────────────────────────────────────
 const SIMILARITY_SORT_KEY_GB = "CHARACTER_LIKENESS";
 const LIKENESS_GROUPS_SORT_KEY_GB = "LIKENESS_GROUPS";
@@ -907,6 +869,13 @@ function gbGetSortIcon(value) {
   return GB_SORT_ICON_MAP[String(value).toUpperCase()] || "mdi-sort";
 }
 
+const sortRowOptions = computed(() =>
+  filteredSortOptions.value.map((opt) => ({
+    id: opt.value,
+    label: opt.label,
+  })),
+);
+
 function gbSortRequiresParameter(sortValue) {
   const key = String(sortValue || "").toUpperCase();
   return key === SIMILARITY_SORT_KEY_GB || key === LIKENESS_GROUPS_SORT_KEY_GB;
@@ -916,11 +885,19 @@ function gbCommitSortSelection(sortValue) {
   gbSortModel.value = sortValue != null ? String(sortValue) : "";
 }
 
-function gbHandleSortModelUpdate(sortValue) {
+function gbHandleSortModelUpdate(sortValue, closeMenu = true) {
   if (searchStore.searchQuery && searchStore.searchQuery.trim()) return;
   gbPendingSortSelection.value = sortValue != null ? String(sortValue) : "";
   if (!gbSortRequiresParameter(gbPendingSortSelection.value)) {
     gbCommitSortSelection(gbPendingSortSelection.value);
+    if (closeMenu) gbSortMenuOpen.value = false;
+  }
+}
+
+// A click closes the menu; an arrow applies the sort and leaves it open, so the
+// list can be browsed from the keyboard.
+function gbCloseSortMenuOnPick(sortValue) {
+  if (!gbSortRequiresParameter(String(sortValue ?? ""))) {
     gbSortMenuOpen.value = false;
   }
 }
@@ -1007,6 +984,17 @@ const gbSortTypeIcon = computed(() => {
 
 // ── Grid Bar: Filter ───────────────────────────────────────────────────────────
 const gbFilterMenuOpen = ref(false);
+// The funnel is lit exactly when the strip has a chip: the chips are the one
+// answer to "which filters are on", so the two cannot disagree.
+const isAllPicturesView = computed(
+  () =>
+    String(props.selectedCharacter ?? "") === String(props.allPicturesId ?? ""),
+);
+const filterChipCount = computed(
+  () =>
+    filterChips(filterStore, { allPicturesView: isAllPicturesView.value })
+      .length,
+);
 
 // ── Grid Bar: View ─────────────────────────────────────────────────────────────
 const gbViewMenuOpen = ref(false);
@@ -1115,7 +1103,7 @@ const gbCollapseAllStacksDisabled = computed(
   left: 0;
   top: 0;
   width: 100%;
-  z-index: 100;
+  z-index: var(--z-sticky);
   /* Paint from the `toolbar` token (not `background`) so the toolbar strip can be
      tuned independently of the grid canvas. Set `toolbar` == `background` in the
      theme to keep them identical. */
@@ -1191,11 +1179,6 @@ const gbCollapseAllStacksDisabled = computed(
 .gb-search-recent {
   padding-top: var(--space-4);
 }
-/* Icon-only triggers (e.g. Search) flag their open state in accent, matching the
-   design's IconTrigger; the labelled Sort/Filter/View triggers stay text-coloured. */
-.bar-btn--icon.bar-btn--open {
-  color: rgb(var(--v-theme-accent)) !important;
-}
 .gb-recent-list {
   display: flex;
   flex-direction: column;
@@ -1265,31 +1248,6 @@ const gbCollapseAllStacksDisabled = computed(
   min-width: 0;
 }
 
-.gb-sort-migration-open {
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-sm);
-  color: rgb(var(--v-theme-on-surface));
-  font-family: inherit;
-  font-size: var(--text-xs);
-  font-weight: var(--weight-semibold);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-.gb-sort-migration-dismiss {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-sm);
-  padding: var(--space-1);
-  color: rgba(var(--v-theme-on-surface), 0.7);
-}
-
-.gb-sort-migration-open:hover,
-.gb-sort-migration-dismiss:hover {
-  background: var(--hover-wash);
-}
-
 .gb-sort-search-note {
   font-size: var(--text-sm);
   color: rgba(var(--v-theme-on-panel), 0.7);
@@ -1327,14 +1285,17 @@ const gbCollapseAllStacksDisabled = computed(
   background: var(--hover-wash);
 }
 
+/* A chosen option: the olive selection wash, words in the surface's ink. Hover
+   layers the ink wash over it rather than replacing it. */
 .gb-sim-btn--on {
-  background: rgb(var(--v-theme-primary));
-  color: rgb(var(--v-theme-on-primary));
+  background: var(--active-wash);
+  color: var(--active-text);
   font-weight: var(--weight-semibold);
 }
 
 .gb-sim-btn--on:hover {
-  background: rgb(var(--v-theme-primary));
+  background:
+    linear-gradient(var(--hover-wash), var(--hover-wash)), var(--active-wash);
 }
 
 .gb-sim-avatar {
@@ -1361,6 +1322,13 @@ const gbCollapseAllStacksDisabled = computed(
 .gb-view-panel {
   width: 264px;
   max-width: 92vw;
+}
+
+/* Stacked, not side by side: at --control-h a pair of AppButtons with icons
+   needs ~270px of system font, wider than the panel's 238px section. */
+.gb-stacks-actions {
+  display: grid;
+  gap: var(--space-3);
 }
 
 .gb-size-section {
@@ -1400,11 +1368,7 @@ const gbCollapseAllStacksDisabled = computed(
     padding: 0 var(--space-2);
   }
 
-  .bar-btn,
-  .bar-split-menu,
-  .clear-btn,
-  .delete-btn,
-  .stack-btn {
+  .bar-btn {
     min-height: 46px;
   }
 
@@ -1416,7 +1380,7 @@ const gbCollapseAllStacksDisabled = computed(
   .bar-split-toggle,
   .bar-separator,
   .tb-export-btn,
-  .bar-btn-chevron {
+  :deep(.bar-btn-chevron) {
     display: none;
   }
 
@@ -1430,36 +1394,18 @@ const gbCollapseAllStacksDisabled = computed(
    that narrower availability visible without turning the row into warning
    copy; the native title gives mouse users the precise rule, while aria-label
    gives the same explanation to assistive technology. */
-.tbm-toggle-filter-badge {
+.gb-sort-filter-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  color: rgb(var(--v-theme-primary));
+  color: inherit;
 }
 
 /* ── Responsive: progressive label dropping via container queries ─────────── */
 @container selbar (max-width: 960px) {
-  .bar-btn-prefix,
+  :deep(.bar-btn-prefix),
   .bar-btn-sort-type {
-    display: none;
-  }
-}
-
-@container selbar (max-width: 840px) {
-  .bar-btn-label--filter {
-    display: none;
-  }
-}
-
-@container selbar (max-width: 740px) {
-  .bar-btn-label--view {
-    display: none;
-  }
-}
-
-@container selbar (max-width: 580px) {
-  .visible-range-pill {
     display: none;
   }
 }

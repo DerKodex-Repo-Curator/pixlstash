@@ -21,9 +21,10 @@
  * reload rather than a store refresh: picture ids do not mean the same thing in
  * another library, and every open view describes the old one.
  */
+import { withRef } from "../../utils/withRef.js";
 import { computed, nextTick, onUnmounted, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
-import { VCard, VDialog, VMenu, VProgressCircular } from "vuetify/components";
+import { VMenu, VProgressCircular } from "vuetify/components";
 
 import {
   LIBRARIES_DOCUMENTATION_URL,
@@ -45,6 +46,7 @@ import AppInput from "../widgets/AppInput.vue";
 import LibraryCaptionsDialog from "./LibraryCaptionsDialog.vue";
 import LibraryLayoutDialog from "./LibraryLayoutDialog.vue";
 import SettingsSection from "./SettingsSection.vue";
+import { onMenuKeydown } from "../../utils/menuKeyboard.js";
 
 const props = defineProps({
   // The dialog re-fetches whenever it opens, so a library attached from the
@@ -172,7 +174,7 @@ async function switchTo(library, event) {
   // from is no longer in the document and `.focus()` is a silent no-op that
   // drops the keyboard on <body>. The ⋯ button that opened the menu is where
   // focus belongs anyway, and it outlives the menu.
-  const trigger = invoker?.classList?.contains("library-menu__item")
+  const trigger = invoker?.classList?.contains("ctx-item")
     ? (moreButtons[library.uuid] ?? null)
     : invoker;
   const shareCount = Number(activeLibrary.value?.active_share_links ?? 0);
@@ -403,8 +405,9 @@ onUnmounted(() => window.clearTimeout(copyResetTimer));
             >
               <template #activator="{ props: menuProps }">
                 <button
-                  v-bind="menuProps"
-                  :ref="(el) => (moreButtons[library.uuid] = el)"
+                  v-bind="
+                    withRef(menuProps, (el) => (moreButtons[library.uuid] = el))
+                  "
                   type="button"
                   class="library-row__more"
                   :disabled="busyUuid === library.uuid"
@@ -415,74 +418,77 @@ onUnmounted(() => window.clearTimeout(copyResetTimer));
                   ⋯
                 </button>
               </template>
-              <ul class="library-menu" role="menu">
-                <li v-if="!library.is_active" role="none">
-                  <button
-                    type="button"
-                    role="menuitem"
-                    class="library-menu__item"
-                    :disabled="!library.is_reachable"
-                    @click="
-                      openMenuUuid = '';
-                      switchTo(library, $event);
-                    "
-                  >
-                    Open this library
-                  </button>
-                </li>
-                <li role="none">
-                  <button
-                    type="button"
-                    role="menuitem"
-                    class="library-menu__item"
-                    @click="startRename(library)"
-                  >
-                    Rename…
-                  </button>
-                </li>
+              <div class="ctx-menu" role="menu" style="min-width: 200px"
+                tabindex="-1"
+                @keydown="onMenuKeydown"
+              >
+                <button
+                  v-if="!library.is_active"
+                  type="button"
+                  role="menuitem"
+                  class="ctx-item"
+                  :disabled="!library.is_reachable"
+                  @click="
+                    openMenuUuid = '';
+                    switchTo(library, $event);
+                  "
+                >
+                  Open this library
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  class="ctx-item"
+                  @click="startRename(library)"
+                >
+                  Rename…
+                </button>
                 <!-- Only on the active library: the layout routes address the
                      open one, so offering this on a row that is not open would
                      silently edit a different library's folders. -->
-                <li v-if="library.is_active" role="none">
-                  <button
-                    type="button"
-                    role="menuitem"
-                    class="library-menu__item"
-                    @click="
-                      openMenuUuid = '';
-                      layoutDialogOpen = true;
-                    "
-                  >
-                    Choose a layout…
-                  </button>
-                </li>
-                <li v-if="library.is_active" role="none">
-                  <button
-                    type="button"
-                    role="menuitem"
-                    class="library-menu__item"
-                    @click="
-                      openMenuUuid = '';
-                      captionsDialogOpen = true;
-                    "
-                  >
-                    Caption files…
-                  </button>
-                </li>
+                <button
+                  v-if="library.is_active"
+                  type="button"
+                  role="menuitem"
+                  class="ctx-item"
+                  @click="
+                    openMenuUuid = '';
+                    layoutDialogOpen = true;
+                  "
+                >
+                  Choose a layout…
+                </button>
+                <button
+                  v-if="library.is_active"
+                  type="button"
+                  role="menuitem"
+                  class="ctx-item"
+                  @click="
+                    openMenuUuid = '';
+                    captionsDialogOpen = true;
+                  "
+                >
+                  Caption files…
+                </button>
                 <!-- Absent on the active library on purpose: detaching it is
                      refused by the registry, and an item that can only fail is
-                     worse than no item. -->
-                <li v-if="!library.is_active" role="none">
-                  <button
-                    type="button"
-                    role="menuitem"
-                    class="library-menu__item library-menu__item--separated"
-                    @click="stopUsing(library)"
-                  >
-                    Stop using this…
-                  </button>
-                </li>
-              </ul>
+                     worse than no item. The separator sets it apart: it is the
+                     only item whose consequence is not obvious from its name. -->
+                <div
+                  v-if="!library.is_active"
+                  class="ctx-sep"
+                  role="separator"
+                />
+                <button
+                  v-if="!library.is_active"
+                  type="button"
+                  role="menuitem"
+                  class="ctx-item"
+                  @click="stopUsing(library)"
+                >
+                  Stop using this…
+                </button>
+              </div>
             </v-menu>
           </div>
         </li>
@@ -549,42 +555,48 @@ onUnmounted(() => window.clearTimeout(copyResetTimer));
       </p>
     </SettingsSection>
 
-    <v-dialog v-model="commandsOpen" max-width="640">
-      <v-card class="libraries-cli-dialog">
-        <h3 class="libraries-cli-dialog__title">The same things from a terminal</h3>
-
-        <ul class="libraries-cli-list">
-          <li v-for="item in cliCommands" :key="item.verb" class="libraries-cli">
-            <div class="libraries-cli__text">
-              <code class="libraries-cli__command">{{ item.command }}</code>
-              <span>{{ item.description }}</span>
-            </div>
-            <AppButton
-              class="libraries-cli__copy"
-              size="sm"
-              variant="ghost"
-              icon-left="content-copy"
-              :title="`Copy ${item.syntax} command`"
-              @click="copyCommand(item.command)"
-            >
-              {{ copiedCommand === item.command ? "Copied" : "Copy" }}
-            </AppButton>
-          </li>
-        </ul>
-
-        <div class="libraries-cli-dialog__actions">
-          <AppButton size="sm" variant="secondary" @click="commandsOpen = false">
-            Close
+    <AppDialog
+      :open="commandsOpen"
+      title="The same things from a terminal"
+      size="lg"
+      @close="commandsOpen = false"
+      @accept="commandsOpen = false"
+    >
+      <ul class="libraries-cli-list">
+        <li v-for="item in cliCommands" :key="item.verb" class="libraries-cli">
+          <div class="libraries-cli__text">
+            <code class="libraries-cli__command">{{ item.command }}</code>
+            <span>{{ item.description }}</span>
+          </div>
+          <AppButton
+            class="libraries-cli__copy"
+            size="sm"
+            variant="ghost"
+            icon-left="content-copy"
+            :tooltip="`Copy ${item.syntax} command`"
+            @click="copyCommand(item.command)"
+          >
+            {{ copiedCommand === item.command ? "Copied" : "Copy" }}
           </AppButton>
-        </div>
-      </v-card>
-    </v-dialog>
+        </li>
+      </ul>
+      <template #footer>
+        <AppButton
+          class="libraries-cli-dialog__close"
+          size="sm"
+          variant="secondary"
+          @click="commandsOpen = false"
+        >
+          Close
+        </AppButton>
+      </template>
+    </AppDialog>
 
     <AppDialog
       :open="Boolean(renaming)"
       :title="`Rename ${renaming?.name ?? ''}`"
       subtitle="Changes the label only. Nothing on disk is renamed."
-      :width="440"
+      size="sm"
       @close="renaming = null"
       @accept="commitRename"
     >
@@ -664,8 +676,8 @@ onUnmounted(() => window.clearTimeout(copyResetTimer));
 }
 
 .library-row--active {
-  border-color: rgb(var(--v-theme-accent));
-  background: rgba(var(--v-theme-accent), 0.08);
+  border-color: var(--active-bar);
+  background: var(--active-wash);
 }
 
 .library-row__text {
@@ -729,14 +741,14 @@ onUnmounted(() => window.clearTimeout(copyResetTimer));
   font-size: var(--text-xs);
   font-weight: var(--weight-semibold);
   padding: 0 var(--space-2);
-  border: 1px solid rgb(var(--v-theme-accent));
+  border: 1px solid var(--active-bar);
   border-radius: var(--radius-sm);
-  background: rgba(var(--v-theme-accent), 0.12);
-  color: rgb(var(--v-theme-on-surface));
+  background: var(--active-wash);
+  color: var(--active-text);
 }
 
 .library-chip--warn {
-  border-color: rgb(var(--v-theme-warning));
+  border-color: rgb(var(--v-theme-surface-warning));
   background: rgba(var(--v-theme-warning), 0.12);
   color: rgb(var(--v-theme-on-surface));
 }
@@ -758,8 +770,8 @@ onUnmounted(() => window.clearTimeout(copyResetTimer));
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: var(--control-h);
+  height: var(--control-h);
   border: 1px solid rgb(var(--v-theme-border));
   border-radius: var(--radius-sm);
   background: transparent;
@@ -770,54 +782,12 @@ onUnmounted(() => window.clearTimeout(copyResetTimer));
 }
 
 .library-row__more:hover:not(:disabled) {
-  background: rgba(var(--v-theme-on-surface), 0.06);
+  background: var(--hover-wash);
 }
 
 .library-row__more:disabled {
   opacity: 0.5;
   cursor: default;
-}
-
-.library-menu {
-  list-style: none;
-  margin: 0;
-  padding: var(--space-2);
-  min-width: 200px;
-  border: 1px solid rgb(var(--v-theme-border));
-  border-radius: var(--radius-md);
-  background: rgb(var(--v-theme-surface));
-}
-
-.library-menu__item {
-  display: block;
-  width: 100%;
-  text-align: left;
-  padding: var(--space-2) var(--space-3);
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: rgb(var(--v-theme-on-surface));
-  font-size: var(--text-sm);
-  cursor: pointer;
-}
-
-.library-menu__item:hover:not(:disabled) {
-  background: rgba(var(--v-theme-on-surface), 0.08);
-}
-
-.library-menu__item:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-/* The destructive-sounding one is set apart, the way the artboard sets it
-   apart: it is the only item in this menu whose consequence is not obvious
-   from its name. */
-.library-menu__item--separated {
-  margin-top: var(--space-2);
-  padding-top: var(--space-3);
-  border-top: 1px solid rgb(var(--v-theme-border));
-  border-radius: 0;
 }
 
 .libraries-note {
@@ -841,29 +811,17 @@ onUnmounted(() => window.clearTimeout(copyResetTimer));
   border-radius: var(--radius-sm);
 }
 
-.libraries-cli-dialog {
-  padding: var(--space-6);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-}
-
-.libraries-cli-dialog__title {
+.libraries-rename__error {
   margin: 0;
-  font-size: var(--text-md);
-  font-weight: var(--weight-semibold);
-}
-
-.libraries-cli-dialog__actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: var(--space-3);
 }
 
 .libraries-cli-list {
   list-style: none;
-  margin: var(--space-3) 0 0;
+  margin: 0;
   padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
 }
 
 .libraries-cli {
@@ -871,7 +829,6 @@ onUnmounted(() => window.clearTimeout(copyResetTimer));
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
-  margin-bottom: var(--space-2);
 }
 
 .libraries-cli__text {

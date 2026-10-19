@@ -1,0 +1,532 @@
+// The Workflows Filters menu: the picture grid's cascade with this screen's
+// rows. Every filter, the three flags included, is a pick-one submenu.
+//
+// The thing that can silently invert here is WHICH SIDE applies a filter.
+// *One-offs* and *Hidden* are the server's, because it decides them per
+// workflow; the other five are the client's, because they only ever
+// remove a card. A menu that applied the first two in the browser would look
+// identical on screen and be wrong, so each of the two is
+// asserted as a REQUEST and the rest as a filtered list.
+//
+// The counts are the second: they label the rows, and a count computed over
+// the already-filtered cards goes to zero on the row you are reading.
+
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { flushPromises, mount } from "@vue/test-utils";
+import { setActivePinia, createPinia } from "pinia";
+
+const listWorkflowCards = vi.fn();
+vi.mock("../../api/workflows", () => ({
+  listWorkflowCards: (...args) => listWorkflowCards(...args),
+  getWorkflowCard: vi.fn(),
+  workflowCoverUrl: (cover) => cover?.url ?? "",
+}));
+
+import WorkflowFilterMenu from "./WorkflowFilterMenu.vue";
+import { useWorkflowsStore } from "../../stores/useWorkflowsStore";
+
+function card(overrides = {}) {
+  return {
+    id: "auto:" + "a".repeat(64),
+    name: "Cinematic portrait",
+    type: "txt2img",
+    type_label: "Text to Image",
+    imported: false,
+    models: [{ name: "realvisXL_v5.safetensors", kind: "checkpoint" }],
+    loras: [],
+    picture_count: 184,
+    rating: 4.8,
+    covers: [],
+    saved_recipe_count: 0,
+    defaults: [],
+    base_topology: "d".repeat(64),
+    topologies: ["d".repeat(64)],
+    variant_count: 1,
+    last_used: null,
+    rank: 4.5,
+    ghosts: 0,
+    model_ghosts: 0,
+    ...overrides,
+  };
+}
+
+const CARDS = [
+  card(),
+  card({
+    id: "auto:" + "b".repeat(64),
+    name: "Upscale 2×",
+    type: "upscale",
+    type_label: "Upscale",
+    imported: true,
+    models: [{ name: "4x-UltraSharp.safetensors", kind: "upscale" }],
+    rating: 2.5,
+    ghosts: 3,
+  }),
+  card({
+    id: "auto:" + "c".repeat(64),
+    name: "Sketch to image",
+    type: "img2img",
+    type_label: "Image to Image",
+    rating: null,
+    model_ghosts: 1,
+  }),
+];
+
+/** The menu over a grid that already holds `cards` and the two counts. */
+async function mountMenu({ cards = CARDS, oneOffs = 7, hidden = 4 } = {}) {
+  setActivePinia(createPinia());
+  const store = useWorkflowsStore();
+  store.cards = cards;
+  store.oneOffs = oneOffs;
+  store.hidden = hidden;
+  listWorkflowCards.mockResolvedValue({
+    cards: [...cards],
+    one_offs: oneOffs,
+    hidden,
+  });
+  const wrapper = mount(WorkflowFilterMenu, {
+    props: { open: true },
+    global: { stubs: { "v-icon": true } },
+    attachTo: document.body,
+  });
+  await flushPromises();
+  return { wrapper, store };
+}
+
+/** A root row, by its filter key. */
+const rootRow = (wrapper, kind) => wrapper.find(`[data-kind="${kind}"]`);
+
+/** What a root row says about its filter: "", "1" or "4★+". */
+const rowValue = (wrapper, kind) => rootRow(wrapper, kind).find(".fm-n").text();
+
+/** Open a root row's submenu and return it. */
+async function openSub(wrapper, kind) {
+  if (rootRow(wrapper, kind).attributes("aria-expanded") !== "true") {
+    await rootRow(wrapper, kind).trigger("click");
+    await flushPromises();
+  }
+  const sub = wrapper.find(`[data-testid="wff-sub-${kind}"]`);
+  if (!sub.exists()) throw new Error(`no submenu for ${kind}`);
+  return sub;
+}
+
+/** One submenu as `[label, count]` pairs, in the order drawn. */
+async function optionLabels(wrapper, kind) {
+  const sub = await openSub(wrapper, kind);
+  return sub
+    .findAll(".optrow")
+    .map((row) => [
+      row.attributes("aria-label") ?? row.find(".optrow__label").text(),
+      // A row with no count draws no count element at all.
+      row.find(".fm-n").exists() ? row.find(".fm-n").text() : null,
+    ]);
+}
+
+/** Click the radio labelled `label` in a submenu. */
+async function pick(wrapper, kind, label) {
+  const sub = await openSub(wrapper, kind);
+  const row = sub
+    .findAll(".optrow")
+    .find(
+      (r) =>
+        (r.attributes("aria-label") ?? r.find(".optrow__label").text()) ===
+        label,
+    );
+  if (!row) throw new Error(`no ${label} in ${kind}`);
+  await row.trigger("click");
+  await flushPromises();
+}
+
+/** The label of the checked radio in a submenu. */
+async function chosen(wrapper, kind) {
+  const sub = await openSub(wrapper, kind);
+  return sub.find('[aria-checked="true"] .optrow__label').text();
+}
+
+beforeEach(() => {
+  listWorkflowCards.mockReset();
+});
+
+describe("the Workflows filter menu", () => {
+  it("draws the grid's root: three sections, a row per filter, no checkbox", async () => {
+    const { wrapper } = await mountMenu();
+    expect(wrapper.findAll(".tbm-label").map((l) => l.text())).toEqual([
+      "Workflow",
+      "Quality",
+      "Show",
+    ]);
+    expect(
+      wrapper.findAll(".fm-row .fm-row-label").map((l) => l.text()),
+    ).toEqual([
+      "Type",
+      "Checkpoint",
+      "Source",
+      "Origin",
+      "Rating",
+      "One-offs",
+      "Hidden",
+      "Ghosts",
+    ]);
+    expect(wrapper.find('input[type="checkbox"]').exists()).toBe(false);
+    // Nothing open until a row is.
+    expect(wrapper.find(".fm-sub").exists()).toBe(false);
+  });
+
+  it("narrows the grid by name from the field at the top", async () => {
+    const { wrapper, store } = await mountMenu();
+    const field = wrapper.find('input[aria-label="Filter workflows by name"]');
+    await field.setValue("upscale");
+    expect(store.filters.name).toBe("upscale");
+    expect(store.filteredCards.map((c) => c.name)).toEqual(["Upscale 2×"]);
+    // Escape clears the text, and stops there rather than closing the menu.
+    const esc = new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true,
+    });
+    field.element.dispatchEvent(esc);
+    expect(store.filters.name).toBe("");
+    expect(esc.defaultPrevented).toBe(true);
+  });
+
+  it("says on the root row only whether its filter is on", async () => {
+    const { wrapper, store } = await mountMenu();
+    for (const kind of ["type", "hideOneOffs", "showHidden", "minRating"]) {
+      expect(rowValue(wrapper, kind)).toBe("");
+    }
+    store.setFilters({ type: "upscale", hideOneOffs: false, minRating: 4 });
+    await flushPromises();
+    expect(rowValue(wrapper, "type")).toBe("1");
+    // Hide is the default, so it is Show that turns the row on.
+    expect(rowValue(wrapper, "hideOneOffs")).toBe("1");
+    expect(rowValue(wrapper, "showHidden")).toBe("");
+    expect(rowValue(wrapper, "minRating")).toBe("4★+");
+  });
+
+  it("opens one submenu at a time, and closes it on a second click", async () => {
+    const { wrapper } = await mountMenu();
+    await openSub(wrapper, "type");
+    await openSub(wrapper, "source");
+    expect(wrapper.findAll(".fm-sub")).toHaveLength(1);
+    await rootRow(wrapper, "source").trigger("click");
+    expect(wrapper.find(".fm-sub").exists()).toBe(false);
+  });
+
+  it("drops the open submenu when the menu closes", async () => {
+    const { wrapper } = await mountMenu();
+    await openSub(wrapper, "type");
+    await wrapper.setProps({ open: false });
+    expect(wrapper.find(".fm-sub").exists()).toBe(false);
+  });
+
+  it("counts the one-offs the payload sent, and never the hidden workflows", async () => {
+    const { wrapper } = await mountMenu();
+    expect(await optionLabels(wrapper, "hideOneOffs")).toEqual([
+      ["Hide", "7"],
+      ["Show", "7"],
+    ]);
+    expect(await chosen(wrapper, "hideOneOffs")).toBe("Hide");
+    expect(await optionLabels(wrapper, "showHidden")).toEqual([
+      ["Hide", null],
+      ["Show", null],
+    ]);
+    expect(await chosen(wrapper, "showHidden")).toBe("Hide");
+  });
+
+  it("states the one-off rule the backend actually applies", async () => {
+    const { wrapper } = await mountMenu();
+    const sub = await openSub(wrapper, "hideOneOffs");
+    expect(sub.find(".tbm-footer").text().replace(/\s+/g, " ")).toContain(
+      "fewer than 3 pictures, no rating, no saved recipe, and was not imported",
+    );
+  });
+
+  it("asks the server for the one-offs rather than filtering them here", async () => {
+    const { wrapper } = await mountMenu();
+    await pick(wrapper, "hideOneOffs", "Show");
+    expect(listWorkflowCards).toHaveBeenCalledWith({
+      includeHidden: false,
+      includeOneOffs: true,
+    });
+  });
+
+  it("asks the server for the hidden cards rather than filtering them here", async () => {
+    const { wrapper } = await mountMenu();
+    await pick(wrapper, "showHidden", "Show");
+    expect(listWorkflowCards).toHaveBeenCalledWith({
+      includeHidden: true,
+      includeOneOffs: false,
+    });
+  });
+
+  // That the SERVER keeps the counts steady across the flags is
+  // `tests/test_workflows_api.py`'s to prove. What is left for this end is
+  // that a flag that is on goes on drawing the payload's number rather than
+  // counting what it can see.
+  it("keeps drawing the payload's count on a flag that is on", async () => {
+    const { wrapper, store } = await mountMenu();
+    await pick(wrapper, "hideOneOffs", "Show");
+    expect(await chosen(wrapper, "hideOneOffs")).toBe("Show");
+    expect((await optionLabels(wrapper, "hideOneOffs"))[1][1]).toBe(
+      String(store.oneOffs),
+    );
+    // Make the grid hold exactly `oneOffs` cards: the row must still read 7
+    // because it read the payload, not because 7 happened to differ from 3.
+    store.cards = Array.from({ length: store.oneOffs }, (_, i) => ({
+      ...CARDS[0],
+      key: `pad-${i}`,
+    }));
+    store.oneOffs = 5;
+    await flushPromises();
+    expect(await optionLabels(wrapper, "hideOneOffs")).toEqual([
+      ["Hide", "5"],
+      ["Show", "5"],
+    ]);
+  });
+
+  it("keeps a workflow that holds a ghost of either kind", async () => {
+    const { wrapper, store } = await mountMenu();
+    // Two of the three: one picture ghost, one model ghost.
+    expect(await optionLabels(wrapper, "ghosts")).toEqual([
+      ["Any", "3"],
+      ["Keeps something deleted", "2"],
+    ]);
+
+    await pick(wrapper, "ghosts", "Keeps something deleted");
+    expect(store.filteredCards.map((entry) => entry.name)).toEqual([
+      "Upscale 2×",
+      "Sketch to image",
+    ]);
+    // No request: this one only ever removes a card.
+    expect(listWorkflowCards).not.toHaveBeenCalled();
+  });
+
+  it("counts each pick-one option over the whole grid, not the filtered one", async () => {
+    const { wrapper, store } = await mountMenu();
+    expect(await optionLabels(wrapper, "type")).toEqual([
+      ["All", "3"],
+      ["Text to Image", "1"],
+      ["Upscale", "1"],
+      ["Image to Image", "1"],
+    ]);
+    const sources = [
+      ["Any", "3"],
+      ["Imported file", "1"],
+      ["Found in your pictures", "2"],
+    ];
+    expect(await optionLabels(wrapper, "source")).toEqual(sources);
+
+    store.setFilters({ source: "imported" });
+    await flushPromises();
+    // Still every type, still counted over all three cards.
+    expect(await optionLabels(wrapper, "type")).toHaveLength(4);
+    expect(await optionLabels(wrapper, "source")).toEqual(sources);
+  });
+
+  it("narrows the grid on a pick-one and puts one chip on the strip", async () => {
+    const { wrapper, store } = await mountMenu();
+    await pick(wrapper, "type", "Upscale");
+
+    expect(store.filters.type).toBe("upscale");
+    expect(store.filteredCards.map((entry) => entry.name)).toEqual([
+      "Upscale 2×",
+    ]);
+    expect(store.filterChips.map((chip) => [chip.kind, chip.value])).toEqual([
+      ["Type", "Upscale"],
+    ]);
+
+    store.filterChips[0].remove();
+    expect(store.filters.type).toBeNull();
+    expect(store.filteredCards).toHaveLength(3);
+  });
+
+  // `Boolean(card.imported) !== imported` is one character from being its own
+  // opposite, and nothing asserted which side of it a card landed on.
+  it("keeps the imported cards on Source, and the found ones on the other", async () => {
+    const { wrapper, store } = await mountMenu();
+    await pick(wrapper, "source", "Imported file");
+    expect(store.filteredCards.map((entry) => entry.name)).toEqual([
+      "Upscale 2×",
+    ]);
+
+    await pick(wrapper, "source", "Found in your pictures");
+    expect(store.filteredCards.map((entry) => entry.name)).toEqual([
+      "Cinematic portrait",
+      "Sketch to image",
+    ]);
+  });
+
+  // The checkpoint is picked by `checkpointModel`, which prefers the BASE
+  // model over document order — the exact preference that drifted in #1416.
+  // "Upscale 2×" carries an `upscale` slot and no base model, so an
+  // implementation reading `models[0]` would offer it here as a checkpoint.
+  it("offers the base models as checkpoints, and narrows to the one picked", async () => {
+    const { wrapper, store } = await mountMenu();
+    expect(await optionLabels(wrapper, "checkpoint")).toEqual([
+      ["Any", "3"],
+      ["realvisXL_v5.safetensors", "2"],
+    ]);
+
+    await pick(wrapper, "checkpoint", "realvisXL_v5.safetensors");
+    expect(store.filteredCards.map((entry) => entry.name)).toEqual([
+      "Cinematic portrait",
+      "Sketch to image",
+    ]);
+    expect(store.filterChips.map((chip) => [chip.kind, chip.value])).toEqual([
+      ["Checkpoint", "realvisXL_v5.safetensors"],
+    ]);
+  });
+
+  it("narrows the checkpoint list as the field is typed in", async () => {
+    const cards = [
+      ...CARDS,
+      card({
+        id: "auto:" + "e".repeat(64),
+        models: [{ name: "juggernaut.safetensors", kind: "checkpoint" }],
+      }),
+    ];
+    const { wrapper } = await mountMenu({ cards });
+    const sub = await openSub(wrapper, "checkpoint");
+    expect(sub.find(".tbm-footer").text()).toBe("2 checkpoints in this grid.");
+    // The field has focus on open, as the design's keyboard table says.
+    expect(document.activeElement).toBe(sub.find("input").element);
+
+    await sub.find("input").setValue("JUGG");
+    expect(await optionLabels(wrapper, "checkpoint")).toEqual([
+      ["Any", "4"],
+      ["juggernaut.safetensors", "1"],
+    ]);
+
+    await sub.find("input").setValue("nothing-like-it");
+    expect(await optionLabels(wrapper, "checkpoint")).toEqual([["Any", "4"]]);
+    expect(sub.text()).toContain("No checkpoint matches.");
+  });
+
+  // A radiogroup whose value is not among its rows puts its tab stop on Any,
+  // and the next arrow would clear a filter the reader never touched.
+  it("keeps the chosen checkpoint in the list whatever is typed", async () => {
+    const { wrapper, store } = await mountMenu();
+    store.setFilters({ checkpoint: "realvisXL_v5.safetensors" });
+    const sub = await openSub(wrapper, "checkpoint");
+    await sub.find("input").setValue("nothing-like-it");
+    expect(await optionLabels(wrapper, "checkpoint")).toEqual([
+      ["Any", "3"],
+      ["realvisXL_v5.safetensors", "2"],
+    ]);
+    await sub.find("input").trigger("keydown", { key: "ArrowDown" });
+    const radio = sub.find('[aria-checked="true"]');
+    expect(document.activeElement).toBe(radio.element);
+    // Focus lands on the chosen row, not on Any, and nothing has changed.
+    expect(radio.find(".optrow__label").text()).toBe(
+      "realvisXL_v5.safetensors",
+    );
+    expect(store.filters.checkpoint).toBe("realvisXL_v5.safetensors");
+  });
+
+  it("says checkpoint, not checkpoints, when the grid holds one", async () => {
+    const { wrapper } = await mountMenu({ cards: CARDS.slice(0, 1) });
+    const sub = await openSub(wrapper, "checkpoint");
+    expect(sub.find(".tbm-footer").text()).toBe("1 checkpoint in this grid.");
+  });
+
+  it("goes back from the Checkpoint field on ← only from the start of the text", async () => {
+    const { wrapper } = await mountMenu();
+    const sub = await openSub(wrapper, "checkpoint");
+    const field = sub.find("input");
+    await field.setValue("real");
+    field.element.setSelectionRange(4, 4);
+    await field.trigger("keydown", { key: "ArrowLeft" });
+    expect(wrapper.find(".fm-sub").exists()).toBe(true);
+
+    field.element.setSelectionRange(0, 0);
+    await field.trigger("keydown", { key: "ArrowLeft" });
+    expect(wrapper.find(".fm-sub").exists()).toBe(false);
+    expect(document.activeElement).toBe(rootRow(wrapper, "checkpoint").element);
+  });
+
+  it("keeps only the cards of the origin picked, All lifting it", async () => {
+    const origins = ["comfyui", "pictures", "own"];
+    const { wrapper, store } = await mountMenu({
+      cards: CARDS.map((entry, i) => ({
+        ...entry,
+        origin_category: origins[i],
+      })),
+    });
+    await pick(wrapper, "origin", "From pictures");
+    expect(store.filters.origin).toBe("pictures");
+    expect(store.filteredCards.map((entry) => entry.name)).toEqual([
+      "Upscale 2×",
+    ]);
+    await pick(wrapper, "origin", "All");
+    expect(store.filters.origin).toBeNull();
+    expect(store.filteredCards).toHaveLength(3);
+  });
+
+  it("keeps a card at or above the minimum rating, unrated ones included out", async () => {
+    const { wrapper, store } = await mountMenu();
+    await pick(wrapper, "minRating", "At least 4 stars");
+    expect(store.filters.minRating).toBe(4);
+    expect(store.filteredCards.map((entry) => entry.name)).toEqual([
+      "Cinematic portrait",
+    ]);
+  });
+
+  it("moves through the root rows with the arrows and in and out with → and ←", async () => {
+    const { wrapper, store } = await mountMenu();
+    rootRow(wrapper, "source").element.focus();
+    await rootRow(wrapper, "source").trigger("keydown", { key: "ArrowDown" });
+    expect(document.activeElement).toBe(rootRow(wrapper, "origin").element);
+    await rootRow(wrapper, "type").trigger("keydown", { key: "ArrowUp" });
+    expect(document.activeElement).toBe(rootRow(wrapper, "ghosts").element);
+
+    await rootRow(wrapper, "showHidden").trigger("keydown", {
+      key: "ArrowRight",
+    });
+    await flushPromises();
+    const radio = wrapper.find(
+      '[data-testid="wff-sub-showHidden"] [aria-checked="true"]',
+    );
+    expect(document.activeElement).toBe(radio.element);
+
+    await radio.trigger("keydown", { key: "ArrowLeft" });
+    expect(wrapper.find(".fm-sub").exists()).toBe(false);
+    // ← leaves the submenu; it does not also step the radio back.
+    expect(store.filters.showHidden).toBe(false);
+    expect(document.activeElement).toBe(rootRow(wrapper, "showHidden").element);
+  });
+
+  it("clears every filter at once, including the server's two", async () => {
+    const { wrapper, store } = await mountMenu();
+    store.setFilters({ showHidden: true, type: "upscale", ghosts: true });
+    await flushPromises();
+    expect(store.filterChips).toHaveLength(3);
+
+    listWorkflowCards.mockClear();
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "Clear all")
+      .trigger("click");
+    await flushPromises();
+
+    expect(store.filterChips).toHaveLength(0);
+    expect(listWorkflowCards).toHaveBeenCalledWith({
+      includeHidden: false,
+      includeOneOffs: false,
+    });
+  });
+});
+
+// The selection survives a filter only for the cards still on screen. The
+// selection bar and the rail's bulk verbs read `selectedKeys`, so a stale one
+// offers Hide and Merge on cards nobody can see — which #1460's
+// selection bar has no way to notice on its own.
+describe("the selection and the filters", () => {
+  it("drops selected cards the filter took off the screen", async () => {
+    const { store } = await mountMenu();
+    store.selectedKeys = [CARDS[0].id, CARDS[1].id, CARDS[2].id];
+
+    store.setFilters({ type: "upscale" });
+
+    expect(store.selectedKeys).toEqual([CARDS[1].id]);
+  });
+});

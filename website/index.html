@@ -7,7 +7,7 @@
     <title>PixlStash | Image Library for Creators</title>
     <meta
       name="description"
-      content="PixlStash is a local image library for photographers and AI creators. CLIP semantic search, face recognition, automatic tagging and captioning, quality and anomaly scoring, a label review queue, and two-way ComfyUI integration, all running on your own hardware."
+      content="PixlStash is a local image library for photographers and AI creators. CLIP semantic search, face recognition, automatic tagging and captioning, text search inside pictures, quality and anomaly scoring, a label review queue, and a ComfyUI workflow library you can run, all on your own hardware."
     />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -352,6 +352,151 @@
         object-position: top;
       }
 
+      .launch-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 14px;
+        padding: 5px 14px 5px 5px;
+        border-radius: 999px;
+        border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+        background: color-mix(in srgb, var(--accent) 10%, var(--panel));
+        color: var(--text);
+        font-size: 0.88rem;
+        font-weight: 600;
+        text-decoration: none;
+      }
+
+      .launch-pill span {
+        padding: 2px 9px;
+        border-radius: 999px;
+        background: var(--accent);
+        color: var(--on-accent);
+        font-size: 0.72rem;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      .launch-pill:hover {
+        border-color: var(--accent);
+      }
+
+      .launch {
+        margin: 8px auto 28px;
+        padding: 28px;
+        background:
+          radial-gradient(
+            circle at 12% 0%,
+            rgba(196, 122, 30, 0.22),
+            rgba(196, 122, 30, 0) 50%
+          ),
+          radial-gradient(
+            circle at 90% 100%,
+            rgba(187, 53, 102, 0.14),
+            rgba(187, 53, 102, 0) 50%
+          ),
+          var(--panel);
+        border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+        border-radius: var(--radius-lg);
+        box-shadow: 0 6px 24px var(--shadow);
+      }
+
+      .launch-head {
+        display: grid;
+        grid-template-columns: minmax(260px, 0.8fr) 1.2fr;
+        gap: 24px;
+        align-items: center;
+      }
+
+      .launch-kicker {
+        font-size: 0.78rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--accent-2);
+        font-weight: 700;
+      }
+
+      .launch h2 {
+        margin: 6px 0 10px;
+        font-family: var(--display);
+        font-size: clamp(1.8rem, 4vw, 2.8rem);
+        line-height: 1.1;
+      }
+
+      .launch-lead {
+        margin: 0;
+        color: var(--muted);
+        font-size: 1.05rem;
+        line-height: 1.5;
+      }
+
+      .nowrap {
+        white-space: nowrap;
+      }
+
+      .launch-video video {
+        display: block;
+        width: 100%;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--border);
+        background: #000;
+        cursor: zoom-in;
+      }
+
+      .launch-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 16px;
+        margin-top: 20px;
+      }
+
+      .launch-tile {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .launch-tile img,
+      .launch-tile video {
+        display: block;
+        width: 100%;
+        aspect-ratio: 4 / 3;
+        object-fit: cover;
+        object-position: top;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--border);
+        cursor: zoom-in;
+      }
+
+      .launch-tile h3 {
+        margin: 4px 0 0;
+        font-size: 1.05rem;
+      }
+
+      .launch-tile p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.9rem;
+        line-height: 1.45;
+      }
+
+      .launch-foot {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        margin-top: 24px;
+      }
+
+      .launch-foot p {
+        margin: 0;
+        max-width: 620px;
+        color: var(--muted);
+        font-size: 0.88rem;
+        line-height: 1.45;
+      }
+
       .cta-banner p {
         margin: 0;
         color: var(--muted);
@@ -399,6 +544,15 @@
         }
 
         .whatsnew-teaser-wrap {
+          grid-template-columns: 1fr;
+        }
+
+        .launch {
+          padding: 18px;
+        }
+
+        .launch-head,
+        .launch-grid {
           grid-template-columns: 1fr;
         }
 
@@ -501,8 +655,10 @@
           "Character likeness scoring",
           "Dataset export and ai-toolkit run tracking",
           "Two-way ComfyUI integration",
+          "ComfyUI workflow library built from your pictures, with a recipe on every picture",
+          "Text in images (OCR) search",
           "Tagger plugin API",
-          "NVIDIA CUDA, experimental AMD ROCm, or CPU inference",
+          "NVIDIA CUDA, experimental AMD ROCm, Apple Silicon, or CPU inference",
           "All inference runs locally, no cloud API"
         ]
       }
@@ -514,6 +670,9 @@
       <script src="nav.js"></script>
 
       <div class="page-hero">
+        <a class="launch-pill" href="whatsnew.html"
+          ><span>New</span> PixlStash 1.12: Workflows and Recipes →</a
+        >
         <h1>A desktop image manager for creators</h1>
         <p>
           Search thousands of images by content or face, tag and score them,
@@ -527,7 +686,7 @@
           <span class="badge">Runs locally</span>
           <span class="badge">On-device AI, no cloud API</span>
           <span class="badge">Headless server option</span>
-          <span class="badge">Supports NVIDIA and AMD GPUs</span>
+          <span class="badge">Supports NVIDIA, AMD and Apple Silicon GPUs</span>
           <span class="badge">ComfyUI nodes</span>
         </div>
 
@@ -542,6 +701,84 @@
           >
         </div>
       </div>
+
+      <section class="launch">
+        <div class="launch-head">
+          <div>
+            <span class="launch-kicker"
+              >PixlStash 1.12 · our biggest release yet</span
+            >
+            <h2>Pick a person,<br />type a prompt,<br />press Run</h2>
+            <p class="launch-lead">
+              PixlStash now makes pictures as well as keeping them. <span class="nowrap">Right-click</span>
+              a person, choose Create with LoRA, and type what you want to see.
+              PixlStash picks a workflow for their LoRA, runs it in your
+              ComfyUI, and files the new pictures back under that person.
+            </p>
+          </div>
+          <div class="launch-video">
+            <video
+              src="assets/WorkflowClementine.mp4"
+              autoplay
+              loop
+              muted
+              playsinline
+            ></video>
+          </div>
+        </div>
+        <div class="launch-grid">
+          <div class="launch-tile">
+            <video
+              src="assets/WorkflowsMultipleLoRAs.mp4"
+              autoplay
+              loop
+              muted
+              playsinline
+              preload="metadata"
+            ></video>
+            <h3>Two people, one picture</h3>
+            <p>
+              Pick two people in the Run window, describe them both, and get one
+              picture with both of them in it.
+            </p>
+          </div>
+          <div class="launch-tile">
+            <img
+              src="assets/Workflows.jpg"
+              alt="The Workflows screen: a grid of workflow cards, each covered with the pictures it made"
+              loading="lazy"
+            />
+            <h3>Your workflows are a library</h3>
+            <p>
+              Every workflow your pictures were made with becomes a card you can
+              run again, and every picture shows the recipe that made it.
+            </p>
+          </div>
+          <div class="launch-tile">
+            <img
+              src="assets/ConnectComfyUI.jpg"
+              alt="PixlStash's Connect ComfyUI dialog: ComfyUI reached, PixlStash nodes installed, the two apps linked"
+              loading="lazy"
+            />
+            <h3>One click installs our ComfyUI nodes</h3>
+            <p>
+              Settings › ComfyUI finds the ComfyUI on your computer, installs
+              the PixlStash nodes, restarts it and links the two apps. The nodes
+              are how ComfyUI reads your library and sends new pictures back.
+            </p>
+          </div>
+        </div>
+        <div class="launch-foot">
+          <p>
+            Workflows are brand new, so treat them as a preview and tell us what
+            breaks. Next up is 2.0: training a LoRA from your library, inside
+            PixlStash.
+          </p>
+          <a class="btn btn-primary" href="whatsnew.html"
+            >See everything in 1.12</a
+          >
+        </div>
+      </section>
 
       <div class="features">
         <div class="feature">
@@ -614,42 +851,17 @@
         </div>
       </div>
 
-      <a class="whatsnew-teaser" href="whatsnew.html">
-        <div class="whatsnew-teaser-wrap">
-          <div class="whatsnew-teaser-copy">
-            <span class="whatsnew-label">What's New</span>
-            <h2>PixlStash 1.11: get started much quicker</h2>
-            <p>
-              Import existing image folders: PixlStash reads a folder of
-              pictures where it sits, proposes what each level of it means, and
-              turns your folder names into projects, people and sets without
-              moving, renaming or copying a file.
-            </p>
-            <p>
-              Version 1.11 also keeps your library organised in the folder
-              structure of your choice, it handles analysis of big libraries
-              much quicker and lets you export directly to folders.
-            </p>
-            <span class="whatsnew-link">See the full update →</span>
-          </div>
-          <div class="whatsnew-teaser-media whatsnew-teaser-media--contain">
-            <img
-              src="assets/ScreenshotMapTree.jpg"
-              alt="PixlStash reading a folder of pictures, with each folder level labelled as a project, a person or a set"
-            />
-          </div>
-        </div>
-      </a>
-
       <a class="comfy-teaser" href="comfyui.html">
         <div class="comfy-teaser-wrap">
           <div class="comfy-teaser-copy">
             <span class="comfy-teaser-label">ComfyUI</span>
             <h2>Drive PixlStash from ComfyUI</h2>
             <p>
-              Custom nodes to load, search, gate by likeness, and save vault
-              images straight from your ComfyUI workflows, with ready-made
-              example graphs to get started.
+              One click in PixlStash's Settings installs our nodes into your
+              ComfyUI and links the two apps. Then load,
+              search, gate by likeness, and save library images straight from
+              your ComfyUI workflows, with ready-made example graphs to get
+              started.
             </p>
             <span class="comfy-teaser-link">Explore the nodes →</span>
           </div>
@@ -679,16 +891,15 @@
             <strong
               >It does both of the AI features Immich is known for.</strong
             >
-            CLIP semantic search, face detection and recognition, and duplicate
-            detection are all here too. Immich has OCR and mobile apps with
-            background sync, which PixlStash does not.
+            CLIP semantic search, face detection and recognition, text search
+            inside pictures, and duplicate detection are all here too. Immich
+            has mobile apps with background sync, which PixlStash does not.
           </p>
           <p class="immich-lead">On top of those, with PixlStash you get:</p>
           <ul class="immich-list">
             <li>
               Automatic tagging and captioning, with the engine selectable per
-              request: our own PixlStash Tagger, WD14, Florence-2 or
-              JoyCaption.
+              request: our own PixlStash Tagger, WD14, Florence-2 or JoyCaption.
             </li>
             <li>
               A tag review queue and a tag health board, so auto-tags are
@@ -707,6 +918,10 @@
               call PixlStash's nodes from your own workflows. Generated images
               return tagged, with People, Picture Set, and Project associations
               attached.
+            </li>
+            <li>
+              A library of your ComfyUI workflows, built from your own pictures,
+              and the recipe behind every picture you made.
             </li>
             <li>A model overview. Keep track of your diffusion models.</li>
             <li>
@@ -780,7 +995,9 @@
       }
 
       document
-        .querySelectorAll(".video-card img, .video-card video")
+        .querySelectorAll(
+          ".video-card img, .video-card video, .launch video, .launch img",
+        )
         .forEach((el) => {
           el.addEventListener("click", () => openLightbox(el));
         });

@@ -1,0 +1,877 @@
+<template>
+  <div class="fm-cascade" @keydown.left.capture="onLeft">
+    <div ref="rootRef" class="tbm fm-root" role="group" aria-label="Filters">
+      <span class="tbm-caret tbm-caret--start"></span>
+      <div class="tbm-header">
+        <v-icon size="18" class="tbm-header-icon">mdi-filter</v-icon>
+        <span class="tbm-title">Filters</span>
+        <span class="tbm-spacer"></span>
+        <span class="fm-of">{{ ofLabel }}</span>
+        <button
+          class="tbm-ghost"
+          type="button"
+          :disabled="!chips.length"
+          @click="clearAll"
+        >
+          Clear all
+        </button>
+      </div>
+
+      <div class="tbm-section">
+        <span class="tbm-label">Picture</span>
+        <template v-for="k in PICTURE_KINDS" :key="k.id">
+          <button
+            v-if="k.id !== 'sharing' || !isReadOnly"
+            :ref="(el) => (rowRefs[k.id] = el)"
+            class="fm-row"
+            type="button"
+            :aria-expanded="sub === k.id ? 'true' : 'false'"
+            :aria-controls="sub === k.id ? submenuId : undefined"
+            @click="toggle(k.id)"
+            @keydown.right.prevent="openKind(k.id)"
+          >
+            <v-icon size="16" class="fm-row-lead">{{ k.icon }}</v-icon>
+            <span class="fm-row-label">{{ k.label }}</span>
+            <span class="fm-n">{{ rowValue(k.id) }}</span>
+            <v-icon size="16" class="fm-row-trail">mdi-chevron-right</v-icon>
+          </button>
+        </template>
+      </div>
+      <div class="tbm-section">
+        <span class="tbm-label">Content</span>
+        <template v-for="k in CONTENT_KINDS" :key="k.id">
+          <!-- The Workflows grid is the owner's: a share token cannot read it. -->
+          <button
+            v-if="k.id !== 'workflow' || !isReadOnly"
+            :ref="(el) => (rowRefs[k.id] = el)"
+            class="fm-row"
+            type="button"
+            :aria-expanded="sub === k.id ? 'true' : 'false'"
+            :aria-controls="sub === k.id ? submenuId : undefined"
+            @click="toggle(k.id)"
+            @keydown.right.prevent="openKind(k.id)"
+          >
+            <v-icon size="16" class="fm-row-lead">{{ k.icon }}</v-icon>
+            <span class="fm-row-label">{{ k.label }}</span>
+            <span class="fm-n">{{ rowValue(k.id) }}</span>
+            <v-icon size="16" class="fm-row-trail">mdi-chevron-right</v-icon>
+          </button>
+        </template>
+      </div>
+      <div class="tbm-section">
+        <button
+          :ref="(el) => (rowRefs.problems = el)"
+          class="fm-row"
+          type="button"
+          :aria-expanded="sub === 'problems' ? 'true' : 'false'"
+          :aria-controls="sub === 'problems' ? submenuId : undefined"
+          @click="toggle('problems')"
+          @keydown.right.prevent="openKind('problems')"
+        >
+          <v-icon size="16" class="fm-row-lead">mdi-alert-outline</v-icon>
+          <span class="fm-row-label">Problems</span>
+          <span class="fm-n">{{ rowValue("problems") }}</span>
+          <v-icon size="16" class="fm-row-trail">mdi-chevron-right</v-icon>
+        </button>
+      </div>
+    </div>
+
+    <div
+      v-if="sub"
+      :id="submenuId"
+      ref="subRef"
+      class="fm-sub-slot"
+      :style="{ marginTop: `${subTop}px` }"
+    >
+      <!-- Media, Faces, Stacks, Sharing: pick one, led by the row that turns
+           the filter off ("All" or "Any"), so no filter is a choice too. -->
+      <div
+        v-if="PICK_ONE[sub]"
+        class="tbm fm-sub"
+        role="group"
+        :aria-label="PICK_ONE[sub].title"
+      >
+        <div class="tbm-header">
+          <span class="tbm-title">{{ PICK_ONE[sub].title }}</span>
+        </div>
+        <div class="tbm-section">
+          <OptionRows
+            :options="pickOptions(sub)"
+            :model-value="pickValue(sub)"
+            :aria-label="PICK_ONE[sub].title"
+            @update:model-value="(id) => setPick(sub, id)"
+            @pick="backToRow"
+          >
+            <template #meta="{ option }">
+              <span class="fm-n">{{ formatCount(option.count) }}</span>
+            </template>
+          </OptionRows>
+        </div>
+      </div>
+
+      <div
+        v-else-if="sub === 'score'"
+        class="tbm fm-sub"
+        role="group"
+        aria-label="Score"
+      >
+        <div class="tbm-header">
+          <span class="tbm-title">Score</span>
+        </div>
+        <div class="tbm-section">
+          <span class="tbm-label">At least</span>
+          <OptionRows
+            :options="starOptions('minScoreFilter')"
+            :model-value="starValue('minScoreFilter')"
+            aria-label="At least"
+            @update:model-value="(n) => setStar('minScoreFilter', n)"
+          >
+            <template #label="{ option }">
+              <span class="fm-stars" aria-hidden="true">
+                <v-icon
+                  v-for="i in 5"
+                  :key="i"
+                  size="14"
+                  :class="{ 'fm-star--off': i > option.id }"
+                  >mdi-star</v-icon
+                >
+              </span>
+            </template>
+          </OptionRows>
+        </div>
+        <div class="tbm-section">
+          <span class="tbm-label">At most</span>
+          <OptionRows
+            :options="starOptions('maxScoreFilter')"
+            :model-value="starValue('maxScoreFilter')"
+            aria-label="At most"
+            @update:model-value="(n) => setStar('maxScoreFilter', n)"
+          >
+            <template #label="{ option }">
+              <span class="fm-stars" aria-hidden="true">
+                <v-icon
+                  v-for="i in 5"
+                  :key="i"
+                  size="14"
+                  :class="{ 'fm-star--off': i > option.id }"
+                  >mdi-star</v-icon
+                >
+              </span>
+            </template>
+          </OptionRows>
+        </div>
+        <div class="tbm-footer">{{ scoreHint }}</div>
+      </div>
+
+      <div
+        v-else-if="sub === 'problems'"
+        class="tbm fm-sub"
+        role="group"
+        aria-label="Problems"
+      >
+        <div class="tbm-header">
+          <span class="tbm-title">Problems</span>
+          <span class="tbm-spacer"></span>
+          <button
+            class="tbm-ghost"
+            type="button"
+            :disabled="!problemsActive"
+            @click="clearProblems"
+          >
+            Clear
+          </button>
+        </div>
+        <div class="tbm-section">
+          <label
+            class="tbm-check fm-check"
+            :class="{ 'fm-check--off': !allPicturesView }"
+          >
+            <input
+              type="checkbox"
+              :disabled="!allPicturesView"
+              :checked="allPicturesView && store.noCharacterFilter"
+              @change="store.noCharacterFilter = $event.target.checked"
+            />
+            <span class="fm-check-label">No character</span>
+            <span v-if="allPicturesView" class="fm-n">{{
+              formatCount(
+                count("character_id=UNASSIGNED&unassigned_by=character"),
+              )
+            }}</span>
+          </label>
+          <label
+            class="tbm-check fm-check"
+            :class="{ 'fm-check--off': !allPicturesView }"
+          >
+            <input
+              type="checkbox"
+              :disabled="!allPicturesView"
+              :checked="allPicturesView && store.noSetFilter"
+              @change="store.noSetFilter = $event.target.checked"
+            />
+            <span class="fm-check-label">In no set</span>
+            <span v-if="allPicturesView" class="fm-n">{{
+              formatCount(count("character_id=UNASSIGNED&unassigned_by=set"))
+            }}</span>
+          </label>
+          <label class="tbm-check fm-check">
+            <input
+              type="checkbox"
+              :checked="impossibleAll"
+              :indeterminate="impossibleSome"
+              @change="setAllImpossible($event.target.checked)"
+            />
+            <span class="fm-check-label">Impossible combinations</span>
+            <span class="fm-n">{{
+              formatCount(count(impossibleAllParams))
+            }}</span>
+          </label>
+          <div class="fm-nest">
+            <label
+              v-for="opt in IMPOSSIBLE_OPTIONS"
+              :key="opt.id"
+              class="tbm-check fm-check"
+            >
+              <input
+                type="checkbox"
+                :checked="(store.impossibleSources || []).includes(opt.id)"
+                @change="toggleImpossible(opt.id, $event.target.checked)"
+              />
+              <span class="fm-check-label">{{ opt.label }}</span>
+              <span class="fm-n">{{
+                formatCount(count(`impossible_tag_source=${opt.id}`))
+              }}</span>
+            </label>
+          </div>
+        </div>
+        <div v-if="!allPicturesView" class="tbm-footer">
+          No character and In no set work in All Pictures.
+        </div>
+      </div>
+
+      <FilterTagField
+        v-else-if="sub === 'tags'"
+        title="Tags"
+        :tags="tagRows"
+        :rows="tagFieldRows"
+        footer="Click a chip to flip it between has and lacks."
+        @add="setTag"
+        @flip="
+          (chip, from) => setTag(chip.tag, from === 'has' ? 'lacks' : 'has')
+        "
+        @remove="(chip, rule) => toggleIn(TAG_FIELDS[rule], chip.tag, false)"
+        @clear="clearTags"
+      />
+
+      <FilterTagField
+        v-else-if="sub === 'confidence'"
+        title="Tag confidence"
+        :tags="tagRows"
+        :rows="confidenceFieldRows"
+        footer="Click a chip to flip it between missing and doubtful; its % is its own menu."
+        @add="setConfidence"
+        @flip="
+          (chip, from) =>
+            setConfidence(chip.tag, from === 'missing' ? 'doubtful' : 'missing')
+        "
+        @threshold="setThreshold"
+        @remove="removeConfidence"
+        @clear="clearConfidence"
+      />
+
+      <FilterChecklistMenu
+        v-else-if="sub === 'model'"
+        title="Checkpoint"
+        placeholder="Filter checkpoints…"
+        :items="modelItems"
+        :checked="store.comfyuiModelFilter"
+        :count-for="
+          (item) => count(filterParams([['comfyui_model', item.value]]))
+        "
+        :clearable="store.comfyuiModelFilter.length > 0"
+        empty-text="No pictures record a checkpoint."
+        @toggle="(v, on) => toggleIn('comfyuiModelFilter', v, on)"
+        @clear="store.comfyuiModelFilter = []"
+      />
+
+      <FilterChecklistMenu
+        v-else-if="sub === 'lora'"
+        title="LoRA"
+        placeholder="Filter LoRAs…"
+        :items="loraItems"
+        :checked="store.comfyuiLoraFilter"
+        :count-for="
+          (item) => count(filterParams([['comfyui_lora', item.value]]))
+        "
+        :clearable="store.comfyuiLoraFilter.length > 0"
+        empty-text="No pictures record a LoRA."
+        @toggle="(v, on) => toggleIn('comfyuiLoraFilter', v, on)"
+        @clear="store.comfyuiLoraFilter = []"
+      />
+
+      <FilterChecklistMenu
+        v-else-if="sub === 'workflow'"
+        title="Workflow"
+        placeholder="Find a workflow…"
+        :items="workflowItems"
+        :checked="store.workflowFilter.map((w) => w.id)"
+        :clearable="store.workflowFilter.length > 0"
+        :footer="workflowFooter"
+        empty-text="No workflow matches."
+        @toggle="toggleWorkflow"
+        @clear="clearWorkflows"
+      />
+    </div>
+  </div>
+</template>
+
+<script setup>
+/**
+ * The toolbar funnel's menu. Its only job is to add filters to the strip under
+ * the toolbar: a root menu of filter kinds, each opening its own menu beside it.
+ * Nothing here closes the menu - every change lands on the strip at once - so
+ * the way out is Esc, a click outside, or the funnel (the v-menu owns those).
+ */
+import { computed, ref, watch } from "vue";
+import OptionRows from "../widgets/OptionRows.vue";
+import FilterChecklistMenu from "./FilterChecklistMenu.vue";
+import FilterTagField from "./FilterTagField.vue";
+import { isReadOnly } from "../../utils/apiClient";
+import { listTags } from "../../api/tags";
+import { listComfyuiLoras, listComfyuiModels } from "../../api/pictures";
+import { listWorkflowCards, workflowCoverUrl } from "../../api/workflows";
+import { useFilterStore } from "../../stores/useFilterStore";
+import { useGridStore } from "../../stores/useGridStore";
+import { PIL_IMAGE_EXTENSIONS, VIDEO_EXTENSIONS } from "../../utils/media.js";
+import { useCascadeMenu } from "../../composables/useCascadeMenu";
+import {
+  filterParams,
+  useFilterCounts,
+} from "../../composables/useFilterCounts";
+import {
+  CONFIDENCE_THRESHOLDS,
+  DOUBTFUL_THRESHOLDS,
+  FACE_OPTIONS,
+  IMPOSSIBLE_OPTIONS,
+  MEDIA_OPTIONS,
+  STACK_OPTIONS,
+  confidenceEntry,
+  filterChips,
+  modelLabel,
+  parseConfidenceEntry,
+  scoreChipValue,
+} from "../../utils/filterChips";
+import { shortTypeLabel } from "../../utils/workflowCard";
+
+const props = defineProps({
+  // The grid's view with no filters, pre-encoded (buildFilterCountBaseQuery).
+  countBaseQuery: { type: String, default: null },
+  allPicturesView: { type: Boolean, default: true },
+  open: { type: Boolean, default: false },
+});
+
+const store = useFilterStore();
+const gridStore = useGridStore();
+
+const PICTURE_KINDS = [
+  { id: "media", label: "Media", icon: "mdi-image-multiple-outline" },
+  { id: "faces", label: "Faces", icon: "mdi-face-recognition" },
+  { id: "stacks", label: "Stacks", icon: "mdi-layers-outline" },
+  { id: "sharing", label: "Sharing", icon: "mdi-share-variant-outline" },
+];
+const CONTENT_KINDS = [
+  { id: "score", label: "Score", icon: "mdi-star-outline" },
+  { id: "tags", label: "Tags", icon: "mdi-tag-outline" },
+  { id: "confidence", label: "Tag confidence", icon: "mdi-tag-search-outline" },
+  // The checkpoint glyph is the model shelf's (CAPABILITY_ICONS).
+  { id: "model", label: "Checkpoint", icon: "mdi-package-variant-closed" },
+  { id: "lora", label: "LoRA", icon: "mdi-puzzle-outline" },
+  // The Workflows screen's own glyph for a workflow.
+  { id: "workflow", label: "Workflow", icon: "mdi-sitemap-outline" },
+];
+
+const formatParams = (exts) =>
+  filterParams(exts.map((e) => ["format", e.toUpperCase()]));
+
+// Each pick-one kind: its store field, its "off" value and that row's label,
+// and the one query parameter a choice adds for its count.
+const PICK_ONE = {
+  media: {
+    title: "Media",
+    anyLabel: "All",
+    field: "mediaTypeFilter",
+    off: "all",
+    options: MEDIA_OPTIONS,
+    params: (id) =>
+      formatParams(id === "images" ? PIL_IMAGE_EXTENSIONS : VIDEO_EXTENSIONS),
+  },
+  faces: {
+    title: "Faces",
+    anyLabel: "Any",
+    field: "faceBboxFilter",
+    off: null,
+    options: FACE_OPTIONS,
+    params: (id) => filterParams([["face_filter", id]]),
+  },
+  stacks: {
+    title: "Stacks",
+    anyLabel: "All",
+    field: "stackStateFilter",
+    off: "all",
+    options: STACK_OPTIONS,
+    params: (id) => filterParams([["stack_state", id]]),
+  },
+  // Only "Shared": the backend can list what an owner has shared, not the
+  // complement, so "Not shared" waits on that.
+  sharing: {
+    title: "Sharing",
+    anyLabel: "All",
+    field: "sharedOnlyFilter",
+    off: false,
+    options: [
+      {
+        id: true,
+        label: "Shared",
+        chip: "shared",
+        icon: "mdi-share-variant-outline",
+      },
+    ],
+    params: () => "shared_only=true",
+  },
+};
+
+const STAR_ROWS = [0, 1, 2, 3, 4, 5];
+
+// `backToRow` is also a deliberate pick in a pick-one submenu (not an arrow
+// browsing it): that is done with the submenu. Score keeps its menu: it has
+// two groups to set.
+const {
+  sub,
+  subTop,
+  rootRef,
+  subRef,
+  rowRefs,
+  openKind,
+  toggle,
+  backToRow,
+  onLeft,
+} = useCascadeMenu(
+  () => props.open,
+  // Into the body, never the header's Clear. The checklist and confidence
+  // menus focus their own search field once they mount.
+  (submenu) => {
+    const body = submenu?.querySelector(".tbm-section");
+    const target =
+      body?.querySelector('[role="radio"][tabindex="0"]') ??
+      body?.querySelector("input:not([disabled]), button:not([disabled])");
+    target?.focus();
+  },
+);
+const submenuId = "filter-submenu";
+
+const { count, reset } = useFilterCounts(() => props.countBaseQuery);
+
+const chips = computed(() =>
+  filterChips(store, { allPicturesView: props.allPicturesView }),
+);
+
+const total = computed(() => count(""));
+const ofLabel = computed(() => {
+  const n = Number(gridStore.matchCount || 0).toLocaleString();
+  return total.value == null ? n : `${n} of ${total.value.toLocaleString()}`;
+});
+
+function formatCount(n) {
+  return n == null ? "" : Number(n).toLocaleString();
+}
+
+// ── Root rows ────────────────────────────────────────────────────────────────
+const KIND_OF_CHIP = {
+  Media: "media",
+  Faces: "faces",
+  Stacks: "stacks",
+  Sharing: "sharing",
+  "Has tag": "tags",
+  "Lacks tag": "tags",
+  "Missing tag": "confidence",
+  "Doubtful tag": "confidence",
+  Checkpoint: "model",
+  LoRA: "lora",
+  Workflow: "workflow",
+  Problem: "problems",
+};
+
+function rowValue(kind) {
+  if (kind === "score") {
+    return scoreChipValue(
+      store.minScoreFilter,
+      store.maxScoreFilter,
+      store.unscoredOnlyFilter,
+    );
+  }
+  const n = chips.value.filter((c) => KIND_OF_CHIP[c.kind] === kind).length;
+  return n || "";
+}
+
+function clearAll() {
+  for (const chip of chips.value) chip.remove();
+}
+
+watch(
+  () => props.open,
+  (isOpen) => {
+    if (!isOpen) return;
+    reset();
+    loadLists();
+  },
+  { immediate: true },
+);
+
+// ── Pick-one kinds ───────────────────────────────────────────────────────────
+// The off row carries the unfiltered count.
+function pickOptions(kind) {
+  const def = PICK_ONE[kind];
+  return [
+    { id: null, label: def.anyLabel, count: total.value },
+    ...def.options.map((o) => ({ ...o, count: count(def.params(o.id)) })),
+  ];
+}
+
+function pickValue(kind) {
+  const def = PICK_ONE[kind];
+  const v = store[def.field];
+  return v === def.off ? null : v;
+}
+
+function setPick(kind, id) {
+  const def = PICK_ONE[kind];
+  store[def.field] = id == null ? def.off : id;
+}
+
+// ── Score ────────────────────────────────────────────────────────────────────
+// 0 stars is unrated (score empty or 0), so At least 0 and At most 5 are the
+// whole library and there is no separate "Any" or "Include unscored": a range
+// from 0 takes the unrated with it, and At most 0 is the unrated alone. The
+// store keeps its three fields; `unscoredOnlyFilter` is derived from the two.
+const scoreHint = computed(() => {
+  const min = store.minScoreFilter;
+  if (min === 1) return "0 is dimmed under At most: it is below the minimum.";
+  if (min > 1) {
+    return `0–${min - 1} are dimmed under At most: they are below the minimum.`;
+  }
+  return "0 stars is unrated.";
+});
+
+function starValue(field) {
+  if (field === "minScoreFilter") return store.minScoreFilter ?? 0;
+  if (store.maxScoreFilter != null) return store.maxScoreFilter;
+  // Unrated alone, as the stats sidebar sets it, reads as At most 0.
+  return store.unscoredOnlyFilter && store.minScoreFilter == null ? 0 : 5;
+}
+
+// At most rows below the minimum are disabled, which the radiogroup's arrows
+// skip. The rows draw stars, so each names itself for a screen reader.
+function starOptions(field) {
+  const min = store.minScoreFilter ?? 0;
+  const word = field === "minScoreFilter" ? "At least" : "At most";
+  return STAR_ROWS.map((id) => ({
+    id,
+    ariaLabel: `${word} ${id} stars`,
+    disabled: field === "maxScoreFilter" && id < min,
+  }));
+}
+
+// Starts from the range the menu SHOWS, not the raw fields: the stats sidebar's
+// unrated-only filter leaves both fields null and reads as At most 0, so
+// deriving from the raw fields would drop it on a click that changes nothing.
+function setStar(field, n) {
+  let min = starValue("minScoreFilter");
+  let max = starValue("maxScoreFilter");
+  if (field === "minScoreFilter") {
+    min = n;
+    max = Math.max(max, n);
+  } else {
+    max = n;
+  }
+  store.minScoreFilter = min || null;
+  store.maxScoreFilter = max === 5 ? null : max;
+  store.unscoredOnlyFilter =
+    store.minScoreFilter == null && store.maxScoreFilter != null;
+}
+
+// ── Problems ─────────────────────────────────────────────────────────────────
+const impossibleCount = computed(() => (store.impossibleSources || []).length);
+const impossibleAll = computed(
+  () => impossibleCount.value === IMPOSSIBLE_OPTIONS.length,
+);
+const impossibleSome = computed(
+  () => impossibleCount.value > 0 && !impossibleAll.value,
+);
+const impossibleAllParams = filterParams(
+  IMPOSSIBLE_OPTIONS.map((o) => ["impossible_tag_source", o.id]),
+);
+const problemsActive = computed(
+  () =>
+    impossibleCount.value > 0 ||
+    (props.allPicturesView && (store.noCharacterFilter || store.noSetFilter)),
+);
+
+function setAllImpossible(on) {
+  store.impossibleSources = on ? IMPOSSIBLE_OPTIONS.map((o) => o.id) : [];
+}
+
+function toggleImpossible(id, on) {
+  toggleIn("impossibleSources", id, on);
+}
+
+function clearProblems() {
+  store.impossibleSources = [];
+  store.noCharacterFilter = false;
+  store.noSetFilter = false;
+}
+
+// ── Lists: tags, models, LoRAs ───────────────────────────────────────────────
+const tagRows = ref([]);
+const modelNames = ref([]);
+const loraNames = ref([]);
+
+// /tags counts span the pictures this session may see, not the current view:
+// one request for the whole vocabulary rather than one per tag.
+const asItems = (names) =>
+  names.map((m) => ({ value: m.value, label: m.name || modelLabel(m.value) }));
+const modelItems = computed(() => asItems(modelNames.value));
+const loraItems = computed(() => asItems(loraNames.value));
+
+async function loadLists() {
+  try {
+    const [tags, models, loras] = await Promise.all([
+      listTags(),
+      listComfyuiModels(),
+      listComfyuiLoras(),
+    ]);
+    tagRows.value = Array.isArray(tags) ? tags : [];
+    modelNames.value = Array.isArray(models) ? models : [];
+    loraNames.value = Array.isArray(loras) ? loras : [];
+  } catch (err) {
+    // The lists stay as they were; the other filters still work.
+    console.warn("Failed to load filter menu lists", err);
+  }
+  if (isReadOnly.value) return;
+  try {
+    // Hidden and one-off workflows too: their pictures are still here.
+    const body = await listWorkflowCards({
+      includeHidden: true,
+      includeOneOffs: true,
+    });
+    workflowCards.value = body.cards;
+  } catch (err) {
+    console.warn("Failed to load the workflows for the filter menu", err);
+  }
+}
+
+// ── Workflow (#1797): ticked workflows are OR'd, one chip each ──────────────
+const workflowCards = ref([]);
+
+// Most pictures first, as the Workflows screen opens; hidden ones after the
+// rest. A ticked row stays where it is, so it does not move from the pointer.
+const workflowItems = computed(() =>
+  [...workflowCards.value]
+    .sort(
+      (a, b) =>
+        Number(Boolean(a.hidden)) - Number(Boolean(b.hidden)) ||
+        (b.picture_count ?? 0) - (a.picture_count ?? 0),
+    )
+    .map((card) => ({
+      value: card.id,
+      label: card.name || "Unnamed workflow",
+      count: card.picture_count ?? 0,
+      covers: (card.covers ?? [])
+        .filter((cover) => cover?.url)
+        .slice(0, 3)
+        .map(workflowCoverUrl),
+      tag: shortTypeLabel(card),
+      hidden: Boolean(card.hidden),
+    })),
+);
+
+const workflowFooter = computed(() => {
+  const n = workflowCards.value.length;
+  return `Pictures made by any ticked workflow. ${n.toLocaleString()} in this library; type to narrow.`;
+});
+
+function toggleWorkflow(id, on) {
+  const current = store.workflowFilter || [];
+  if (!on) {
+    // Through its chip, so a value the Workflow tab opened beside it goes
+    // too, as the chip's × takes it.
+    chips.value.find((c) => c.key === `workflow:${id}`)?.remove();
+    return;
+  }
+  if (current.some((w) => w.id === id)) return;
+  const card = workflowCards.value.find((c) => c.id === id);
+  const next = [...current, { id, name: card?.name || "Unnamed workflow" }];
+  // A LoRA narrows exactly one workflow (`workflowFilterParams`): with a
+  // second ticked it is dropped, chip and all, rather than left to linger.
+  store.workflowFilter = next.map(
+    ({ lora: _lora, loraName: _loraName, ...rest }) => rest,
+  );
+}
+
+// Through the chips, so a value the Workflow tab opened beside a workflow
+// goes with it, as its chip's × takes it.
+function clearWorkflows() {
+  for (const chip of chips.value.filter((c) => c.kind === "Workflow")) {
+    chip.remove();
+  }
+}
+
+function toggleIn(field, value, on) {
+  const current = store[field] || [];
+  store[field] = on
+    ? current.includes(value)
+      ? current
+      : [...current, value]
+    : current.filter((v) => v !== value);
+}
+
+// ── Tags and Tag confidence: a field that adds chips ─────────────────────────
+const TAG_FIELDS = { has: "tagFilter", lacks: "tagRejectedFilter" };
+
+const tagFieldRows = computed(() => [
+  {
+    id: "has",
+    label: "Has tag",
+    short: "has",
+    tone: "has",
+    icon: "mdi-check",
+    chips: store.tagFilter.map((tag) => ({ tag })),
+  },
+  {
+    id: "lacks",
+    label: "Lacks tag",
+    short: "lacks",
+    tone: "lacks",
+    icon: "mdi-cancel",
+    chips: store.tagRejectedFilter.map((tag) => ({ tag })),
+  },
+]);
+
+// A tag is either required or excluded, never both.
+function setTag(tag, rule) {
+  toggleIn(TAG_FIELDS[rule], tag, true);
+  toggleIn(TAG_FIELDS[rule === "has" ? "lacks" : "has"], tag, false);
+}
+
+function clearTags() {
+  store.tagFilter = [];
+  store.tagRejectedFilter = [];
+}
+
+// Missing asks for a confident tagger, doubtful for an unsure one, so each
+// kind has its own thresholds and its own default.
+const CONFIDENCE_KINDS = {
+  missing: {
+    field: "tagConfidenceAboveFilter",
+    thresholds: CONFIDENCE_THRESHOLDS,
+    initial: 0.8,
+  },
+  doubtful: {
+    field: "tagConfidenceBelowFilter",
+    thresholds: DOUBTFUL_THRESHOLDS,
+    initial: 0.4,
+  },
+};
+
+const confidenceFieldRows = computed(() => [
+  {
+    id: "missing",
+    label: "Missing — tagger sees it, tag not applied",
+    short: "missing",
+    sign: "≥",
+    thresholds: CONFIDENCE_KINDS.missing.thresholds,
+    chips: (store.tagConfidenceAboveFilter || []).map(parseConfidenceEntry),
+  },
+  {
+    id: "doubtful",
+    label: "Doubtful — applied, tagger unsure",
+    short: "doubtful",
+    sign: "<",
+    thresholds: CONFIDENCE_KINDS.doubtful.thresholds,
+    chips: (store.tagConfidenceBelowFilter || []).map(parseConfidenceEntry),
+  },
+]);
+
+function withoutTag(entries, tag) {
+  return (entries || []).filter((e) => parseConfidenceEntry(e).tag !== tag);
+}
+
+// Adding a tag gives it one rule: it leaves the other kind, and a tag already
+// in this kind keeps its threshold. Missing and doubtful cannot both hold for
+// one picture, so the two together would only ever match nothing.
+function setConfidence(tag, kind) {
+  const def = CONFIDENCE_KINDS[kind];
+  const other = CONFIDENCE_KINDS[kind === "missing" ? "doubtful" : "missing"];
+  store[other.field] = withoutTag(store[other.field], tag);
+  const mine = store[def.field] || [];
+  if (mine.some((e) => parseConfidenceEntry(e).tag === tag)) return;
+  store[def.field] = [...mine, confidenceEntry(tag, def.initial)];
+}
+
+// The threshold menu and the × act on the one chip, never on every entry for
+// its tag: the stats sidebar can hold several (one per histogram bucket).
+function setThreshold(chip, kind, threshold) {
+  const field = CONFIDENCE_KINDS[kind].field;
+  const was = confidenceEntry(chip.tag, chip.threshold);
+  const now = confidenceEntry(chip.tag, threshold);
+  store[field] = (store[field] || [])
+    .filter((e) => e !== now)
+    .map((e) => (e === was ? now : e));
+}
+
+function removeConfidence(chip, kind) {
+  const field = CONFIDENCE_KINDS[kind].field;
+  const entry = confidenceEntry(chip.tag, chip.threshold);
+  store[field] = (store[field] || []).filter((e) => e !== entry);
+}
+
+function clearConfidence() {
+  store.tagConfidenceAboveFilter = [];
+  store.tagConfidenceBelowFilter = [];
+}
+</script>
+
+<style scoped>
+.fm-cascade {
+  display: flex;
+  /* A phone has no room for two menus side by side: the submenu wraps below. */
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+.fm-root {
+  width: var(--filter-menu-w);
+  max-width: 94vw;
+}
+.fm-of {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: rgba(var(--v-theme-on-panel), var(--opacity-text-secondary));
+  white-space: nowrap;
+}
+.fm-sub-slot {
+  max-height: min(80vh, 760px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.fm-stars {
+  display: inline-flex;
+  color: rgb(var(--v-theme-surface-warning));
+}
+.fm-star--off {
+  color: rgba(var(--v-theme-on-panel), var(--opacity-text-secondary));
+  opacity: 0.6;
+}
+.fm-check--off {
+  opacity: var(--opacity-disabled);
+}
+</style>

@@ -1,4 +1,5 @@
-from datetime import datetime
+from datetime import datetime, timezone
+import logging
 import shutil
 import pytest
 
@@ -349,7 +350,10 @@ def test_picture_embedding_storage_and_retrieval():
         with Session(engine) as session:
             # Always provide a valid string id
             pic = Picture(
-                id=0, description="Test", text_embedding=arr, imported_at=datetime.now()
+                id=0,
+                description="Test",
+                text_embedding=arr,
+                imported_at=datetime.now(timezone.utc),
             )
             assert pic.id == 0, f"Picture.id should be a non-None integer, got {pic.id}"
             session.add(pic)
@@ -388,7 +392,7 @@ def test_server():
         torch.cuda.empty_cache()
 
 
-def test_picture_semantic_search_returns_relevant_result(test_server):
+def test_picture_semantic_search_returns_relevant_result(test_server, caplog):
     # Dummy embedding function: returns fixed vectors for known descriptions
     def dummy_text_to_embedding(text):
         if "assault rifle" in text:
@@ -407,19 +411,19 @@ def test_picture_semantic_search_returns_relevant_result(test_server):
             id=0,
             description="Clementine holding a black assault rifle",
             text_embedding=dummy_text_to_embedding("assault rifle"),
-            imported_at=datetime.now(),
+            imported_at=datetime.now(timezone.utc),
         )
         pic2 = Picture(
             id=1,
             description="A young woman named Clementine is sitting on a bench, reading a book.",
             text_embedding=dummy_text_to_embedding("reading a book"),
-            imported_at=datetime.now(),
+            imported_at=datetime.now(timezone.utc),
         )
         pic3 = Picture(
             id=2,
             description="Clementine is running through a field of flowers, wearing a white dress.",
             text_embedding=dummy_text_to_embedding("other"),
-            imported_at=datetime.now(),
+            imported_at=datetime.now(timezone.utc),
         )
         session.add(pic1)
         session.add(pic2)
@@ -427,17 +431,25 @@ def test_picture_semantic_search_returns_relevant_result(test_server):
         session.commit()
 
         # Query for "Clementine holding a black assault rifle"
-        results = Picture.semantic_search(
-            session,
-            query="Clementine holding a black assault rifle",
-            query_words=["Clementine", "holding", "black", "assault", "rifle"],
-            text_to_embedding=dummy_text_to_embedding,
-            fuzzy_weight=0.0,  # Only embedding similarity
-            embedding_weight=1.0,
-            threshold=0.0,
-            limit=3,
-        )
+        query = "Clementine holding a black assault rifle"
+        with caplog.at_level(logging.DEBUG, logger="pixlstash.db_models.picture"):
+            results = Picture.semantic_search(
+                session,
+                query=query,
+                query_words=["Clementine", "holding", "black", "assault", "rifle"],
+                query_embedding=dummy_text_to_embedding(query),
+                fuzzy_weight=0.0,  # Only embedding similarity
+                embedding_weight=1.0,
+                threshold=0.0,
+                limit=3,
+            )
         assert results, "semantic_search returned no results"
+        # Search text is logged only at DEBUG, never at the default level.
+        logged = [r for r in caplog.records if query in r.getMessage()]
+        assert logged, "the search logged nothing at DEBUG either"
+        assert all(r.levelno < logging.INFO for r in logged), [
+            (r.levelname, r.getMessage()[:80]) for r in logged
+        ]
         top_result, score = results[0]
         print(f"Top result description: {top_result.description} with score {score}")
         assert "assault rifle" in top_result.description.lower(), (
@@ -475,19 +487,19 @@ def test_picture_semantic_search_with_tags_and_weights(
             id=0,
             description="Clementine holding a black assault rifle",
             text_embedding=dummy_text_to_embedding("assault rifle"),
-            imported_at=datetime.now(),
+            imported_at=datetime.now(timezone.utc),
         )
         pic2 = Picture(
             id=1,
             description="A young woman named Clementine is sitting on a bench, reading a book.",
             text_embedding=dummy_text_to_embedding("reading a book"),
-            imported_at=datetime.now(),
+            imported_at=datetime.now(timezone.utc),
         )
         pic3 = Picture(
             id=2,
             description="Clementine is running through a field of flowers, wearing a white dress.",
             text_embedding=dummy_text_to_embedding("other"),
-            imported_at=datetime.now(),
+            imported_at=datetime.now(timezone.utc),
         )
         session.add(pic1)
         session.add(pic2)
@@ -506,7 +518,7 @@ def test_picture_semantic_search_with_tags_and_weights(
             session,
             query="assault rifle",
             query_words=["assault", "rifle"],
-            text_to_embedding=dummy_text_to_embedding,
+            query_embedding=dummy_text_to_embedding("assault rifle"),
             fuzzy_weight=fuzzy_weight,
             embedding_weight=embedding_weight,
             threshold=threshold,
@@ -553,17 +565,17 @@ def test_picture_semantic_search_without_embeddings(
         pic1 = Picture(
             id=0,
             description="Clementine holding a black assault rifle",
-            imported_at=datetime.now(),
+            imported_at=datetime.now(timezone.utc),
         )
         pic2 = Picture(
             id=1,
             description="A young woman named Clementine is sitting on a bench, reading a book.",
-            imported_at=datetime.now(),
+            imported_at=datetime.now(timezone.utc),
         )
         pic3 = Picture(
             id=2,
             description="Clementine is running through a field of flowers, wearing a white dress.",
-            imported_at=datetime.now(),
+            imported_at=datetime.now(timezone.utc),
         )
         session.add(pic1)
         session.add(pic2)
@@ -582,7 +594,7 @@ def test_picture_semantic_search_without_embeddings(
             session,
             query="assault rifle",
             query_words=["assault", "rifle"],
-            text_to_embedding=dummy_text_to_embedding,
+            query_embedding=dummy_text_to_embedding("assault rifle"),
             fuzzy_weight=fuzzy_weight,
             embedding_weight=embedding_weight,
             threshold=threshold,
@@ -630,19 +642,19 @@ def test_picture_semantic_search_without_tags(
             id=0,
             description="Clementine holding a black assault rifle",
             text_embedding=dummy_text_to_embedding("assault rifle"),
-            imported_at=datetime.now(),
+            imported_at=datetime.now(timezone.utc),
         )
         pic2 = Picture(
             id=1,
             description="A young woman named Clementine is sitting on a bench, reading a book.",
             text_embedding=dummy_text_to_embedding("reading a book"),
-            imported_at=datetime.now(),
+            imported_at=datetime.now(timezone.utc),
         )
         pic3 = Picture(
             id=2,
             description="Clementine is running through a field of flowers, wearing a white dress.",
             text_embedding=dummy_text_to_embedding("other"),
-            imported_at=datetime.now(),
+            imported_at=datetime.now(timezone.utc),
         )
         session.add(pic1)
         session.add(pic2)
@@ -655,7 +667,7 @@ def test_picture_semantic_search_without_tags(
             session,
             query="assault rifle",
             query_words=preprocessed_query_words,
-            text_to_embedding=dummy_text_to_embedding,
+            query_embedding=dummy_text_to_embedding("assault rifle"),
             fuzzy_weight=fuzzy_weight,
             embedding_weight=embedding_weight,
             threshold=threshold,

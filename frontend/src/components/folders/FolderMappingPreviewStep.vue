@@ -2,7 +2,7 @@
 /**
  * Wizard step 3 ("Preview") - the accepted mapping, before anything is
  * written. Commits nothing until "Yes, build this library" is pressed; see
- * integration_architecture.md §22. Moves, renames and copies zero files
+ * integration_architecture.md §20.2. Moves, renames and copies zero files
  * either way - committing registers the folder for in-place indexing and
  * writes database rows only.
  */
@@ -40,7 +40,7 @@ const props = defineProps({
   // "reference" registers the scanned root as an external reference folder;
   // "local_import" imports its pictures as ordinary managed pictures of the
   // active library instead (v1.11 Phase 3, "Bring them in" on a freshly
-  // created library - integration_architecture.md §22).
+  // created library - integration_architecture.md §20.2).
   mode: { type: String, default: "reference" },
   // Whether the library this commit writes into exists yet. "Add a library"
   // shows this step BEFORE building the library: then "Yes, build this
@@ -67,8 +67,8 @@ const emit = defineEmits([
 const committing = ref(false);
 // The wizard makes its dialog undismissable while this is true: a commit,
 // once started, runs to completion server-side regardless of what this
-// screen does next (§22), so Escape or a backdrop click must not be able to
-// quietly abandon the UI while it keeps running - that is what let the same
+// screen does next (integration §20.2), so Escape or a backdrop click must
+// not be able to quietly abandon the UI while it keeps running - that is what let the same
 // read's task id come back through the sidebar's resume flow and get
 // committed a second time.
 watch(committing, (value) => emit("update:committing", value));
@@ -293,7 +293,14 @@ async function organiseLater() {
   }
 }
 
-/** Give up on the import. What was indexed before now stays indexed. */
+/**
+ * Give up on the import: the folder goes back to being the owner's.
+ *
+ * The server discards the whole first import when this is the folder's first
+ * one - its temporary database and the folders PixlStash made - and not one
+ * picture file is touched. The session lands on an empty library, which is
+ * where the folder question is asked again.
+ */
 async function abort() {
   try {
     await stopFolderStructureCommit(commitTaskId.value, "abort");
@@ -340,7 +347,7 @@ onUnmounted(() => {
       >
         <template v-if="grouped.get(kind.value)?.size">
           <div class="preview-step__group-title">
-            <v-icon size="15">{{ kind.icon }}</v-icon>
+            <v-icon size="16">{{ kind.icon }}</v-icon>
             {{ grouped.get(kind.value).size }}
             {{ grouped.get(kind.value).size === 1 ? kind.label : kind.plural }}
           </div>
@@ -363,17 +370,16 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <div
-      v-if="patterns.length && !committing"
-      class="preview-step__card"
-    >
-      <div class="preview-step__card-title">Caption files beside your pictures</div>
+    <div v-if="patterns.length && !committing" class="preview-step__card">
+      <div class="preview-step__card-title">
+        Caption files beside your pictures
+      </div>
       <p class="preview-step__card-lead">
         Text files named after a picture are read as its tags or description,
         and stay in step with your edits from then on. Confirming a pattern
-        turns caption files on for this library's whole picture folder, not
-        only the one you are importing, and writes a file beside every picture
-        that already has tags or a description. Check each pattern.
+        turns caption files on for this library's whole picture folder, not only
+        the one you are importing, and writes a file beside every picture that
+        already has tags or a description. Check each pattern.
       </p>
       <ul class="preview-step__captions">
         <li
@@ -435,7 +441,9 @@ onUnmounted(() => {
           >
           {{ captionFilesAsTags.toLocaleString() }} caption
           {{ captionFilesAsTags === 1 ? "file is" : "files are" }} read as tags;
-          {{ captionFilesAsTags === 1 ? "that picture is" : "those pictures are" }}
+          {{
+            captionFilesAsTags === 1 ? "that picture is" : "those pictures are"
+          }}
           not tagged from scratch
         </div>
         <div v-if="captionFilesAsDescriptions" class="preview-step__fact">
@@ -520,8 +528,9 @@ onUnmounted(() => {
     <p class="preview-step__actions-note">
       <template v-if="committing">
         Organise later keeps every picture indexed so far and leaves the folder
-        mapping for another day. Abort gives up on the import - nothing already
-        indexed is removed, and no file is touched either way.
+        mapping for another day. Abort gives the folder back: PixlStash removes
+        what it put there and leaves your pictures untouched, exactly as it
+        found them.
       </template>
       <template v-else>
         Organise later brings the pictures in now and leaves naming the folders
@@ -587,7 +596,7 @@ onUnmounted(() => {
 
 .preview-step__chip {
   padding: var(--space-1) var(--space-3);
-  border-radius: var(--radius-pill, 999px);
+  border-radius: var(--radius-pill);
   background: rgb(var(--v-theme-panel));
   box-shadow: inset 3px 0 0 rgb(var(--kind));
   font-size: var(--text-xs);
@@ -688,7 +697,7 @@ onUnmounted(() => {
 }
 
 .preview-step__fact-mark--yes {
-  color: rgb(var(--v-theme-success));
+  color: rgb(var(--v-theme-surface-success));
 }
 
 .preview-step__actions-note {

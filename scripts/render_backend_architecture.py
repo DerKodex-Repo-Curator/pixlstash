@@ -136,7 +136,6 @@ def _generate_route_table() -> str:
 
     # WebSocket routes don't appear in OpenAPI - add manually from schema info comment.
     rows.append(("WS", "/api/v1/ws/updates", "config", "Real-time event stream"))
-    rows.append(("WS", "/api/v1/ws/comfyui", "comfyui", "ComfyUI workflow progress"))
 
     col_w = [
         max(len("Method"), max(len(r[0]) for r in rows)),

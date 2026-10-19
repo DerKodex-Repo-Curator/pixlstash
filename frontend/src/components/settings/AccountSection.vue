@@ -9,6 +9,7 @@ import {
   createToken,
   patchToken,
   deleteToken,
+  setTokenLibraries,
   uploadWatermark,
   deleteWatermark,
 } from "../../api/users";
@@ -21,8 +22,11 @@ import AppDialog from "../widgets/AppDialog.vue";
 import AppButton from "../widgets/AppButton.vue";
 import AppInput from "../widgets/AppInput.vue";
 import AppSelect from "../widgets/AppSelect.vue";
+import Tooltip from "../widgets/Tooltip.vue";
 import SettingsSection from "./SettingsSection.vue";
+import ConnectAgentDialog from "./ConnectAgentDialog.vue";
 import { errorDetail } from "../../utils/apiError";
+import { useLibrariesStore } from "../../stores/useLibrariesStore";
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -53,6 +57,7 @@ const tokenDeleteDialogOpen = ref(false);
 // The create-token logic (createUserToken) is unchanged; this ref just controls
 // whether the form is shown in a dialog instead of inline.
 const createTokenDialogOpen = ref(false);
+const connectAgentDialogOpen = ref(false);
 const tokenToDelete = ref(null);
 const tokenScope = ref("ALL");
 const tokenResourceType = ref(null);
@@ -86,6 +91,7 @@ function resetForm() {
   tokenDialogOpen.value = false;
   tokenDeleteDialogOpen.value = false;
   createTokenDialogOpen.value = false;
+  connectAgentDialogOpen.value = false;
   tokenToDelete.value = null;
   tokenScope.value = "ALL";
   tokenResourceType.value = null;
@@ -340,6 +346,42 @@ async function updateTokenWatermark(token, value) {
   }
 }
 
+// A token works in the library it was made in. With one library that is not
+// worth a column; with several, the owner on the local network may let a token work
+// in whichever is open (`can_manage`, the answer the Libraries tab is given).
+const librariesStore = useLibrariesStore();
+const severalLibraries = computed(() => librariesStore.libraries.length > 1);
+const librariesUpdating = reactive(new Set());
+
+// Why a row's switch cannot be used, said on hover: a greyed-out switch with
+// no reason reads as broken.
+function librariesLockedReason(token) {
+  if (token.resource_type)
+    return "A share link stays with the library it was made in";
+  // A link key from before the ComfyUI scope: full access, so not widened.
+  if (token.source_bound && token.scope !== "COMFYUI")
+    return "Link ComfyUI again to change which libraries its key works in";
+  if (!librariesStore.canManage)
+    return "Sign in from the local network to change this";
+  return "";
+}
+
+async function updateTokenLibraries(token, value) {
+  if (librariesUpdating.has(token.id)) return;
+
+  const previousValue = token.all_libraries;
+  token.all_libraries = value;
+  librariesUpdating.add(token.id);
+  try {
+    await setTokenLibraries(token.id, value);
+  } catch (e) {
+    tokensError.value = errorDetail(e) || "Failed to update token.";
+    token.all_libraries = previousValue;
+  } finally {
+    librariesUpdating.delete(token.id);
+  }
+}
+
 function confirmDeleteToken(token) {
   tokenToDelete.value = token;
   tokenDeleteDialogOpen.value = true;
@@ -469,7 +511,7 @@ watch(
           @enter="submitPasswordChange"
         />
         <AppButton
-          variant="primary_green"
+          variant="primary"
           :disabled="settingsLoading"
           @click="submitPasswordChange"
         >
@@ -537,10 +579,15 @@ watch(
                   ? { backgroundImage: `url(${watermarkPreviewUrl})` }
                   : null
               "
-              title="Upload watermark"
+              aria-label="Upload watermark"
               :disabled="watermarkUploading"
               @click="watermarkInputRef?.click()"
             >
+              <Tooltip
+                text="Upload watermark"
+                activator="parent"
+                :describe="false"
+              />
               <template v-if="!watermarkPreviewUrl">
                 <v-icon size="26">mdi-image-plus-outline</v-icon>
                 <span class="wm-drop__hint">Click or drop an image</span>
@@ -550,10 +597,15 @@ watch(
               v-if="watermarkPreviewUrl"
               type="button"
               class="wm-drop__reset"
-              title="Reset to default watermark"
+              aria-label="Reset to default watermark"
               :disabled="watermarkUploading"
               @click="clearWatermark"
             >
+              <Tooltip
+                text="Reset to default watermark"
+                activator="parent"
+                :describe="false"
+              />
               <v-icon size="15">mdi-close</v-icon>
             </button>
             <input
@@ -575,7 +627,16 @@ watch(
     <SettingsSection title="API Tokens" class="account-tokens-section">
       <template #action>
         <AppButton
-          variant="primary_green"
+          variant="secondary"
+          size="sm"
+          icon-left="robot-outline"
+          :disabled="tokensLoading"
+          @click="connectAgentDialogOpen = true"
+        >
+          Connect AI agent
+        </AppButton>
+        <AppButton
+          variant="primary"
           size="sm"
           icon-left="plus"
           :disabled="tokensLoading"
@@ -598,6 +659,9 @@ watch(
               <th>Created</th>
               <th>Used</th>
               <th>Expires</th>
+              <th v-if="severalLibraries" class="account-token-th-wm">
+                Every library
+              </th>
               <th class="account-token-th-wm">Mark</th>
               <th class="account-token-th-actions"></th>
             </tr>
@@ -633,6 +697,9 @@ watch(
                     <v-icon size="11">mdi-image-multiple-outline</v-icon>
                     {{ token.resource_name ?? `Set #${token.resource_id}` }}
                   </template>
+                  <template v-else-if="token.scope === 'COMFYUI'"
+                    >ComfyUI nodes</template
+                  >
                   <template v-else>Read-only</template>
                 </span>
               </td>
@@ -648,10 +715,34 @@ watch(
               >
                 {{ formatTokenExpiry(token) }}
               </td>
+              <td v-if="severalLibraries" class="account-token-wm">
+                <!-- Off: the token works only in the library it was made in.
+                     A share link stays off for good, because its set,
+                     character or project is a different one in every other
+                     library. -->
+                <Tooltip
+                  :text="librariesLockedReason(token)"
+                  activator="parent"
+                />
+                <v-switch
+                  :model-value="token.all_libraries"
+                  color="primary"
+                  density="compact"
+                  hide-details
+                  class="account-token-wm-switch"
+                  :aria-label="`${token.description || 'Token'} works in every library`"
+                  :disabled="
+                    tokensLoading ||
+                    librariesUpdating.has(token.id) ||
+                    Boolean(librariesLockedReason(token))
+                  "
+                  @update:model-value="updateTokenLibraries(token, $event)"
+                />
+              </td>
               <td class="account-token-wm">
                 <v-switch
                   :model-value="token.watermark"
-                  color="accent"
+                  color="primary"
                   density="compact"
                   hide-details
                   class="account-token-wm-switch"
@@ -669,7 +760,7 @@ watch(
                   size="sm"
                   icon-left="delete"
                   icon-only
-                  title="Revoke"
+                  tooltip="Revoke"
                   :disabled="tokensLoading"
                   @click="confirmDeleteToken(token)"
                 />
@@ -684,11 +775,18 @@ watch(
     </SettingsSection>
   </div>
 
+  <!-- ── Connect an AI agent (MCP) ───────────────────────────────────── -->
+  <ConnectAgentDialog
+    :open="connectAgentDialogOpen"
+    :offer-every-library="severalLibraries && librariesStore.canManage"
+    @close="connectAgentDialogOpen = false"
+    @created="fetchUserTokens"
+  />
+
   <!-- ── New API token dialog (create form) ──────────────────────────── -->
   <AppDialog
     :open="createTokenDialogOpen"
     title="New API token"
-    :width="460"
     @close="createTokenDialogOpen = false"
   >
     <div class="account-token-form">
@@ -760,7 +858,7 @@ watch(
       <v-switch
         v-if="tokenScope === 'READ'"
         v-model="tokenWatermark"
-        color="accent"
+        color="primary"
         density="compact"
         hide-details
         label="Apply watermark"
@@ -777,7 +875,7 @@ watch(
         Cancel
       </AppButton>
       <AppButton
-        variant="primary_green"
+        variant="primary"
         icon-left="key-plus"
         :disabled="tokensLoading"
         @click="createUserToken"
@@ -791,7 +889,6 @@ watch(
   <AppDialog
     :open="tokenDialogOpen"
     title="New API token"
-    :width="520"
     @close="tokenDialogOpen = false"
   >
     <div class="account-token-reveal">
@@ -805,7 +902,7 @@ watch(
           size="sm"
           :icon-left="tokenCopied ? 'check' : 'content-copy'"
           icon-only
-          :title="tokenCopied ? 'Copied!' : 'Copy token'"
+          :tooltip="tokenCopied ? 'Copied!' : 'Copy token'"
           @click="copyToken"
         />
       </div>
@@ -823,14 +920,14 @@ watch(
             size="sm"
             :icon-left="shareLinkCopied ? 'check' : 'link'"
             icon-only
-            :title="shareLinkCopied ? 'Copied!' : 'Copy share link'"
+            :tooltip="shareLinkCopied ? 'Copied!' : 'Copy share link'"
             @click="copyShareLink"
           />
         </div>
       </template>
     </div>
     <template #footer>
-      <AppButton variant="primary_green" @click="tokenDialogOpen = false">
+      <AppButton variant="secondary" @click="tokenDialogOpen = false">
         Close
       </AppButton>
     </template>
@@ -840,7 +937,7 @@ watch(
   <AppDialog
     :open="tokenDeleteDialogOpen"
     title="Delete token?"
-    :width="420"
+    size="sm"
     @close="tokenDeleteDialogOpen = false"
   >
     <div class="account-token-confirm">
@@ -913,12 +1010,12 @@ watch(
 
 .account-error {
   font-size: var(--text-xs);
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
 }
 
 .account-success {
   font-size: var(--text-xs);
-  color: rgb(var(--v-theme-accent));
+  color: rgb(var(--v-theme-on-surface));
 }
 
 /* ── Sharing + Watermark ──────────────────────────────────────────────── */
@@ -1008,9 +1105,11 @@ watch(
     background var(--dur-1) var(--ease-standard);
 }
 
+/* `background-color`, not the shorthand: the shorthand would reset the
+   watermark preview's `background-size` while hovered. */
 .wm-drop__target:hover:not(:disabled) {
-  border-color: rgb(var(--v-theme-accent));
-  background: var(--hover-wash);
+  color: rgb(var(--v-theme-on-surface));
+  background-color: var(--hover-wash);
 }
 
 .wm-drop__target:disabled {
@@ -1099,7 +1198,7 @@ watch(
   /* Stay visible while the list scrolls under it. */
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: var(--z-raised);
 }
 
 .account-token-th-actions {
@@ -1136,7 +1235,7 @@ watch(
   align-items: center;
   gap: var(--space-1);
   font-size: var(--text-2xs);
-  padding: 2px var(--space-2);
+  padding: var(--space-1) var(--space-2);
   border-radius: var(--radius-pill);
   background: rgb(var(--v-theme-input-background));
   border: 1px solid rgb(var(--v-theme-border));
@@ -1145,7 +1244,7 @@ watch(
 }
 
 .account-token-pill--read {
-  color: rgb(var(--v-theme-info));
+  color: rgb(var(--v-theme-surface-info));
 }
 
 .account-token-sub {
@@ -1154,7 +1253,7 @@ watch(
 }
 
 .account-token-expired {
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
   font-weight: var(--weight-semibold);
 }
 

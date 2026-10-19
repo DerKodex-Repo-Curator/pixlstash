@@ -6,11 +6,25 @@ import os
 from typing import TYPE_CHECKING
 
 from pixlstash.inference.vram_budget import (
-    MAX_CONCURRENT_GPU_IMAGES,
+    PIXLSTASH_TAGGER_CUDA_BASE_MB,
+    PIXLSTASH_TAGGER_CUDA_PER_ITEM_MB,
+    PIXLSTASH_TAGGER_MPS_BASE_MB,
+    PIXLSTASH_TAGGER_MPS_PER_ITEM_FP16_MB,
+    PIXLSTASH_TAGGER_MPS_PER_ITEM_MB,
     WD14_BASE_MB,
     WD14_PER_ITEM_MB,
 )
 from pixlstash.pixl_logging import get_logger
+from pixlstash.tagger_plugins.pixlstash_tagger import (
+    PIXLSTASH_TAGGER_IMAGE_SIZE_FIXED_QUALITY_CROP,
+    PIXLSTASH_TAGGER_IMAGE_SIZE_QUALITY_CROP,
+)
+from pixlstash.utils.accelerator import (
+    MPS,
+    is_accelerated,
+    normalise_device,
+    supports_fp16,
+)
 from pixlstash.utils.image_processing.video_utils import VideoUtils
 from pixlstash.utils.service.caption_utils import merge_video_frame_tags
 
@@ -63,9 +77,20 @@ class TaggingWorkflow:
         """Whether the PixlStash tagger is active for this workflow instance."""
         return self._use_pixlstash_tagger
 
+    def whole_face_crop(self) -> bool:
+        """Whether the quality crop covers the whole face (the user setting)."""
+        params = (
+            self._tagger_settings.get("plugins", {})
+            .get("pixlstash_tagger", {})
+            .get("params", {})
+        )
+        return bool(params.get("whole_face_crop", False))
+
     def pixlstash_tagger_image_size_quality_crop(self) -> int:
         """Return the quality-crop image size expected by the PixlStash tagger."""
-        return int(self._engine.pixlstash_tagger_service._image_size_quality_crop)
+        if self.whole_face_crop():
+            return PIXLSTASH_TAGGER_IMAGE_SIZE_QUALITY_CROP
+        return PIXLSTASH_TAGGER_IMAGE_SIZE_FIXED_QUALITY_CROP
 
     def active_plugin_name(self, engine_override: str | None = None) -> str:
         """The plugin :meth:`tag_images` runs for the full-image pass.
@@ -261,6 +286,7 @@ class TaggingWorkflow:
             stop_event=stop_event,
             threshold_offset=self._threshold_offset,
             out_raw_scores=out_raw_scores,
+            image_size=self.pixlstash_tagger_image_size_quality_crop(),
         )
 
     def score_images_custom(
@@ -295,7 +321,7 @@ class TaggingWorkflow:
         for image_path in image_paths:
             path = str(image_path)
             ext = os.path.splitext(path)[1].lower()
-            if ext in _VIDEO_EXTS:
+            if ext in _VIDEO_EXTS or VideoUtils.is_animated_gif(path):
                 frames = VideoUtils.extract_representative_video_frames(path, count=1)
                 if not frames:
                     continue
@@ -346,7 +372,7 @@ class TaggingWorkflow:
             items,
             stop_event=stop_event,
             min_confidence=min_confidence,
-            image_size=self._engine.pixlstash_tagger_service._image_size_quality_crop,
+            image_size=self.pixlstash_tagger_image_size_quality_crop(),
         )
 
     def ensure_active_plugin_ready(self, engine_override: str | None = None) -> None:
@@ -532,7 +558,7 @@ class TaggingWorkflow:
                 break
             path = str(image_path)
             ext = os.path.splitext(path)[1].lower()
-            if ext in _VIDEO_EXTS:
+            if ext in _VIDEO_EXTS or VideoUtils.is_animated_gif(path):
                 if path in preloaded_map:
                     items.append((f"{path}#frame0", preloaded_map[path]))
                     continue
@@ -588,10 +614,15 @@ class TaggingWorkflow:
     # ──── VRAM / batch-sizing ────────────────────────────────────────────────
 
     def _max_concurrent_images(self) -> int:
-        """Maximum image concurrency determined by device type."""
-        if self._engine.device == "cuda":
-            return MAX_CONCURRENT_GPU_IMAGES
-        return _MAX_CONCURRENT_CPU
+        """Maximum image concurrency for this engine's device.
+
+        Delegates rather than deciding. This was a second ``== "cuda"`` ladder
+        with the opposite polarity to the engine's ``== "cpu"`` one, so the two
+        disagreed about every device neither of them named - the engine handed
+        a non-CUDA accelerator the 64-image GPU branch while this handed it the
+        8-image CPU one.
+        """
+        return self._engine.max_concurrent_images()
 
     def _vram_limited_batch_cap(self, base_mb: int, per_item_mb: int) -> int:
         """Delegate VRAM-based batch cap to the engine's budget."""
@@ -602,7 +633,7 @@ class TaggingWorkflow:
         max_concurrent = max(1, int(self._max_concurrent_images()))
         onnx_cap = self._engine.wd14_service.batch_capacity()
         wd14_batch = min(max_concurrent, onnx_cap)
-        if self._engine.device == "cuda":
+        if is_accelerated(self._engine.device):
             wd14_batch = min(
                 wd14_batch,
                 self._vram_limited_batch_cap(
@@ -615,6 +646,31 @@ class TaggingWorkflow:
         # WD14 is the conservative bound; both taggers share the same limit.
         return self.effective_wd14_batch_size()
 
+    def _pixlstash_tagger_memory_model(self) -> tuple[int, int]:
+        """Return ``(base_mb, per_item_mb)`` for the tagger on this device.
+
+        Two measurements, not one scaled guess. The CUDA pair is the figure the
+        tagger has always used; the MPS pair was measured on Apple Silicon as
+        fresh-process peak device memory at batch 8, and differs enough
+        (450 + 240n against 700 + 90n) that reusing either for the other would
+        misprice the batch in opposite directions.
+
+        The MPS per-item figure also follows the dtype, because the tagger runs
+        fp16 there and that halves the per-image cost - which is most of why
+        fp16 was adopted on MPS at all.
+
+        Returns:
+            Base footprint and per-image cost in MiB.
+        """
+        if normalise_device(self._engine.device) == MPS:
+            per_item = (
+                PIXLSTASH_TAGGER_MPS_PER_ITEM_FP16_MB
+                if supports_fp16(self._engine.device)
+                else PIXLSTASH_TAGGER_MPS_PER_ITEM_MB
+            )
+            return PIXLSTASH_TAGGER_MPS_BASE_MB, per_item
+        return PIXLSTASH_TAGGER_CUDA_BASE_MB, PIXLSTASH_TAGGER_CUDA_PER_ITEM_MB
+
     def suggested_task_size(self) -> int:
         """VRAM-budget-aware batch size for a TagTask run.
 
@@ -625,7 +681,10 @@ class TaggingWorkflow:
         shows incremental progress instead of a single jump at task completion.
         """
         max_concurrent = max(1, int(self._max_concurrent_images()))
-        if self._engine.device == "cuda":
+        # Any accelerator, not CUDA alone: on unified memory the budget is the
+        # only thing standing between a batch estimate and the machine's RAM,
+        # and this gate used to switch it off there entirely.
+        if is_accelerated(self._engine.device):
             if self._use_wd14:
                 max_concurrent = min(
                     max_concurrent,
@@ -634,9 +693,12 @@ class TaggingWorkflow:
                     ),
                 )
             if self._use_pixlstash_tagger:
+                base_mb, per_item_mb = self._pixlstash_tagger_memory_model()
                 max_concurrent = min(
                     max_concurrent,
-                    self._vram_limited_batch_cap(base_mb=700, per_item_mb=90),
+                    self._vram_limited_batch_cap(
+                        base_mb=base_mb, per_item_mb=per_item_mb
+                    ),
                 )
         # Cap by any extra plugin's preferred batch size so each TagTask covers
         # exactly one inference batch, giving fine-grained progress updates.

@@ -6,15 +6,18 @@
       open: menuOpen,
       disabled,
       'ate--readonly': readonly,
-      'ate--flyout': placement === 'right',
+      'ate--flyout': flyout,
       'ate--flip': flyoutFlipped,
       'ate--force-dark': forceDark,
     }"
     @mouseenter="onFlyoutMouseenter"
     @mouseleave="onFlyoutMouseleave"
   >
+    <!-- In flyout mode the trigger is a row of the menu it sits in, so it takes
+         the shared row and its two glyph slots (styles/context-menu.css). -->
     <button
       class="ate-btn"
+      :class="{ 'ctx-item': flyout }"
       type="button"
       :disabled="disabled"
       :aria-expanded="menuOpen"
@@ -23,22 +26,28 @@
       :aria-label="config.ariaLabel"
       @click.stop="toggleMenu"
     >
-      <v-icon size="18">{{ config.icon }}</v-icon>
-      <span class="ate-label">{{ effectiveLabel }}</span>
-      <v-icon size="16" class="ate-chevron">{{
-        placement === "right" ? "mdi-chevron-right" : "mdi-chevron-down"
+      <v-icon :size="flyout ? undefined : 18" :class="{ 'ctx-icon': flyout }">{{
+        config.icon
       }}</v-icon>
+      <span class="ate-label">{{ effectiveLabel }}</span>
+      <v-icon
+        :size="flyout ? undefined : 16"
+        class="ate-chevron"
+        :class="{ 'ctx-arrow': flyout }"
+        >{{ flyout ? "mdi-chevron-right" : "mdi-chevron-down" }}</v-icon
+      >
     </button>
 
     <Teleport :disabled="!floating" to="body">
       <div
         ref="menuRef"
-        class="ate-menu"
+        class="ate-menu ctx-menu"
         :style="menuStyle"
         :class="{
           open: menuOpen,
-          flyout: placement === 'right',
+          flyout,
           'force-dark': forceDark,
+          'ctx-menu--on-dark': forceDark,
           'ate-menu--floating': floating,
         }"
         @keydown="onMenuKeydown"
@@ -68,15 +77,18 @@
             v-else-if="showEmptyCreateRow"
             :class="[
               'ate-item',
+              'ctx-item',
               'ate-item--create',
-              { 'ate-item--disabled': createDisabled },
+              { 'ate-item--disabled ctx-item--disabled': createDisabled },
             ]"
             type="button"
             :disabled="createDisabled"
             @click.stop="requestCreate"
           >
-            <v-icon size="16" class="ate-item-check">mdi-account-plus</v-icon>
-            <span class="ate-item-name">Create "{{ trimmedQuery }}"…</span>
+            <v-icon class="ate-item-check ctx-icon">mdi-account-plus</v-icon>
+            <span class="ate-item-name ctx-label-text"
+              >Create "{{ trimmedQuery }}"…</span
+            >
           </button>
           <div v-else-if="filteredItems.length === 0" class="ate-empty">
             {{ config.emptyText }}
@@ -95,8 +107,9 @@
               :key="item.key"
               :class="[
                 'ate-item',
+                'ctx-item',
                 {
-                  'ate-item--disabled': isItemDisabled(item),
+                  'ate-item--disabled ctx-item--disabled': isItemDisabled(item),
                   'ate-item--checked':
                     !isFace && getItemState(item) === 'checked',
                 },
@@ -105,13 +118,17 @@
               role="option"
               :aria-selected="getAriaSelected(item)"
               :disabled="isItemDisabled(item)"
-              :title="isItemLocked(item) ? 'This set is locked' : undefined"
               @click.stop="toggleItem(item)"
             >
-              <v-icon size="16" class="ate-item-check">
+              <Tooltip
+                v-if="isItemLocked(item)"
+                text="This set is locked"
+                activator="parent"
+              />
+              <v-icon class="ate-item-check ctx-icon">
                 {{ getItemGlyph(item) }}
               </v-icon>
-              <span class="ate-item-name">{{ item.name }}</span>
+              <span class="ate-item-name ctx-label-text">{{ item.name }}</span>
               <!-- Partial membership is carried as text folded into the
                    accessible name ("Vacation 2024, partially applied"), which
                    is announced far more reliably than aria-checked="mixed" on
@@ -128,11 +145,11 @@
                   class="ate-item-lock"
                   >mdi-lock-outline</v-icon
                 >
-                <span
-                  v-else-if="isLastUsedItem(item)"
-                  class="ate-item-shortcut"
-                  title="Press A to add to this set"
-                  >A</span
+                <span v-else-if="isLastUsedItem(item)" class="ate-item-shortcut"
+                  ><Tooltip
+                    text="Press A to add to this set"
+                    activator="parent"
+                  />A</span
                 >
               </span>
             </button>
@@ -147,15 +164,16 @@
           <button
             :class="[
               'ate-item',
+              'ctx-item',
               'ate-item--create',
-              { 'ate-item--disabled': createDisabled },
+              { 'ate-item--disabled ctx-item--disabled': createDisabled },
             ]"
             type="button"
             :disabled="createDisabled"
             @click.stop="requestCreate"
           >
-            <v-icon size="16" class="ate-item-check">mdi-account-plus</v-icon>
-            <span class="ate-item-name">New person…</span>
+            <v-icon class="ate-item-check ctx-icon">mdi-account-plus</v-icon>
+            <span class="ate-item-name ctx-label-text">New person…</span>
           </button>
         </div>
 
@@ -197,6 +215,7 @@ import {
 import { useEntityListsStore } from "../../stores/useEntityListsStore";
 import { errorDetail } from "../../utils/apiError";
 import { API_BASE_URL } from "../../utils/apiClient";
+import Tooltip from "./Tooltip.vue";
 const props = defineProps({
   // 'set' | 'project' | 'character' | 'face'.
   //
@@ -430,7 +449,8 @@ const flyoutClickedOpen = ref(false);
  * of them route through, and a combination that is documented as meaningless
  * should not be representable.
  */
-const floating = computed(() => props.floatMenu && props.placement !== "right");
+const flyout = computed(() => props.placement === "right");
+const floating = computed(() => props.floatMenu && !flyout.value);
 
 // Dynamic max-height so the menu never runs off the bottom of the screen: measure
 // the menu's top in the viewport and cap its height to what's left below it. The
@@ -1208,7 +1228,6 @@ async function toggleCharacter(item) {
       statusMessage.value = `Removed from ${item.name}`;
       emit("removed", { characterId: item.id, pictureIds: ids });
       applyOptimisticMembership(item.key, "removed", ids);
-      closeMenu();
     } catch (e) {
       statusMessage.value = reportToggleFailure(e, "Failed to remove");
     }
@@ -1230,7 +1249,6 @@ async function toggleCharacter(item) {
         "added",
         idsToAdd.filter((id) => picturesWithFaces.value.has(String(id))),
       );
-      closeMenu();
     } catch (e) {
       statusMessage.value = reportToggleFailure(e, "Failed to assign");
     }
@@ -1307,12 +1325,18 @@ defineExpose({
 </script>
 
 <style scoped>
+/* The menu surface and its rows are the shared `.ctx-menu` / `.ctx-item`
+   (styles/context-menu.css). What stays here is placement, the pinned search /
+   create / status parts around the list, and the stand-alone trigger. */
 .ate {
   position: relative;
   display: inline-flex;
 }
 
-.ate-btn {
+/* The stand-alone trigger. In flyout mode `.ate-btn` is a `.ctx-item` row, so
+   none of these reach it: `:where` keeps the specificity the host overrides
+   (ImageOverlay's face row, the shelf menu) were written against. */
+:where(.ate:not(.ate--flyout)) .ate-btn {
   background-color: rgba(var(--v-theme-surface), 0.85);
   color: rgb(var(--v-theme-on-surface));
   padding: var(--space-1) var(--space-3);
@@ -1324,12 +1348,12 @@ defineExpose({
   line-height: 1.4;
 }
 
-.ate--force-dark .ate-btn {
+:where(.ate--force-dark:not(.ate--flyout)) .ate-btn {
   background-color: rgba(var(--v-theme-dark-surface), 0.6);
   color: rgba(var(--v-theme-on-dark-surface), 1);
 }
 
-.ate-btn:disabled {
+:where(.ate:not(.ate--flyout)) .ate-btn:disabled {
   opacity: 0.5;
   cursor: default;
 }
@@ -1338,8 +1362,30 @@ defineExpose({
   opacity: 0.5;
 }
 
-.ate-btn:hover {
-  filter: brightness(1.75);
+/* A read-only row still opens its list, so it is not `:disabled`, but it reads
+   as its disabled neighbours in the menu do. */
+.ate--flyout.ate--readonly .ate-btn {
+  opacity: var(--opacity-disabled);
+}
+
+/* A translucent fill, so a filled control's hover: the neutral step, never a
+   brightness filter. On the force-dark skin the theme's neutral would darken a
+   dark fill in the light theme, so it takes the on-dark wash instead. */
+:where(.ate:not(.ate--flyout)) .ate-btn:hover:not(:disabled) {
+  background-image: var(--hover-neutral);
+}
+
+:where(.ate--force-dark:not(.ate--flyout)) .ate-btn:hover:not(:disabled) {
+  background-image: linear-gradient(
+    rgba(var(--v-theme-on-dark-surface), 0.16),
+    rgba(var(--v-theme-on-dark-surface), 0.16)
+  );
+}
+
+/* The force-dark skin stays dark in both themes, so its focus ring is the
+   on-dark ink rather than the theme's. */
+.ate--force-dark .ate-btn:focus-visible {
+  outline-color: rgb(var(--v-theme-on-dark-surface));
 }
 
 .ate-label {
@@ -1358,11 +1404,6 @@ defineExpose({
   flex-direction: column;
   max-height: 72vh;
   overflow: hidden;
-  padding: var(--space-3);
-  border-radius: var(--radius-md);
-  background-color: rgb(var(--v-theme-surface));
-  color: rgb(var(--v-theme-on-surface));
-  box-shadow: var(--elevation-2);
   opacity: 0;
   transform: translateY(-6px);
   pointer-events: none;
@@ -1382,7 +1423,7 @@ defineExpose({
 /* Floating mode (opt-in, see the `floatMenu` prop): the node has been teleported
    to <body>, so it is positioned against the viewport by sizeMenu() and needs
    its own stacking level. `--z-overlay` is the same token the grid context menu
-   uses, and it clears the lightbox (z-index 1000) and its sidebar (4).
+   uses, and it clears the lightbox (`--z-drawer`) and everything inside it.
    Declared after `.ate-menu` so it wins at equal specificity. */
 .ate-menu--floating {
   position: fixed;
@@ -1400,14 +1441,6 @@ defineExpose({
   overscroll-behavior: contain;
 }
 
-/* Opaque, not 0.9: the menu teleports to body and can sit over the lightbox
-   photo. At 0.9 over a white image region the panel composites to #3a3c3e and
-   the create row falls to 4.01:1. */
-.ate-menu.force-dark {
-  background-color: rgb(var(--v-theme-dark-surface));
-  color: rgba(var(--v-theme-on-dark-surface), 1);
-}
-
 .ate-menu.force-dark .ate-search {
   color: rgba(var(--v-theme-on-dark-surface), 0.55);
   background: rgba(var(--v-theme-on-dark-surface), 0.06);
@@ -1415,18 +1448,6 @@ defineExpose({
 
 .ate-menu.force-dark .ate-search input {
   color: rgb(var(--v-theme-on-dark-surface));
-}
-
-.ate-menu.force-dark .ate-item {
-  color: rgba(var(--v-theme-on-dark-surface), 1);
-}
-
-.ate-menu.force-dark .ate-item:hover {
-  background: rgba(var(--v-theme-on-dark-surface), 0.08);
-}
-
-.ate-menu.force-dark .ate-item-count {
-  color: rgba(var(--v-theme-on-dark-surface), 0.6);
 }
 
 .ate-menu.force-dark .ate-item-shortcut {
@@ -1450,6 +1471,8 @@ defineExpose({
   pointer-events: auto;
 }
 
+/* The search field is the menu's one header part: inset from the full-bleed
+   rows, which start below it. */
 .ate-search {
   flex: 0 0 auto;
   display: flex;
@@ -1457,10 +1480,20 @@ defineExpose({
   gap: var(--space-2);
   font-size: var(--text-xs);
   color: rgba(var(--v-theme-on-surface), 0.6);
+  margin: var(--space-2);
   padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sm);
   background: rgba(var(--v-theme-on-surface), 0.06);
-  margin-bottom: var(--space-3);
+}
+
+/* The input draws no ring of its own; the search box it fills does. */
+.ate-search:focus-within {
+  outline: var(--focus-width) solid var(--focus-stroke);
+  outline-offset: var(--focus-offset);
+}
+
+.ate-menu.force-dark .ate-search:focus-within {
+  outline-color: rgb(var(--v-theme-on-dark-surface));
 }
 
 .ate-search input {
@@ -1472,33 +1505,21 @@ defineExpose({
   outline: none;
 }
 
-.ate-item {
-  width: 100%;
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-sm);
-  font-size: var(--text-xs);
-  color: rgb(var(--v-theme-on-surface));
-  text-align: left;
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  transition:
-    background var(--dur-1) var(--ease-standard),
-    color var(--dur-1) var(--ease-standard);
-}
-
-.ate-item-check {
-  color: rgba(var(--v-theme-on-surface), 0.7);
-  flex-shrink: 0;
+/* Current value: the shared row's treatment, keyed on the option's own state
+   (a listbox option carries `aria-selected`, not `aria-checked`). */
+.ate-item--checked {
+  font-weight: var(--weight-medium);
 }
 
 .ate-item--checked .ate-item-check {
-  color: rgb(var(--v-theme-primary));
+  opacity: 1;
+  color: var(--selected-ink);
 }
 
-.ate-item-name {
-  flex: 1;
-  min-width: 0;
+/* Set as a colour: the `v-icon` redeclares `--selected-ink` from its own theme
+   class, so the dark ground's lifted olive cannot arrive through the variable. */
+.ate-menu.force-dark .ate-item--checked .ate-item-check {
+  color: rgb(var(--v-theme-dark-surface-primary));
 }
 
 .ate-item-meta {
@@ -1508,72 +1529,27 @@ defineExpose({
   gap: var(--space-2);
 }
 
-.ate-item:hover {
-  background: rgba(var(--v-theme-on-surface), 0.08);
-}
-
 .ate-item--disabled {
-  opacity: 0.5;
-  cursor: default;
   pointer-events: none;
-}
-
-.ate-item-count {
-  font-size: var(--text-2xs);
-  color: rgba(var(--v-theme-on-surface), 0.6);
 }
 
 .ate-item-lock {
   color: rgba(var(--v-theme-on-surface), 0.5);
 }
 
-/* The create row. Colour is one of THREE redundant channels (WCAG 1.4.1), the
-   others being the mdi-account-plus icon and the pinned position below the
-   hairline; the trailing ellipsis stays for the same reason.
-
-   Weight 500 is load-bearing, not decoration: any colour highlight is darker
-   than its near-white neighbours in greyscale, and without the extra weight the
-   row reads as disabled. Not 600.
-
-   On the dark panel plain `primary` (#567309) is only 2.79:1 and unusable at
-   this text size, so the force-dark skin switches to `dark-surface-primary`
-   (#8EA604): 5.50:1 over the light theme's #242628 and 6.25:1 over the dark
-   theme's #181b20. The 0.12 hover alpha is a ceiling, not taste: the family's
-   neutral 0.08 hover drops the olive to 4.45:1, and 0.14 of the tint drops it
-   to 4.40:1. */
+/* The create row is an action, not a chosen value, so it takes no olive
+   (olive selects). It is told apart by the mdi-account-plus icon, the pinned
+   position below the hairline, the trailing ellipsis and weight 500, and its
+   words stay ink, which keeps them legible on the hover wash. */
 .ate-item--create {
-  color: rgb(var(--v-theme-primary));
   font-weight: var(--weight-medium);
 }
 
-.ate-item--create .ate-item-check {
-  color: currentColor;
-}
-
-.ate-item--create:hover:not(.ate-item--disabled) {
-  background: rgba(var(--v-theme-primary), 0.1);
-}
-
-.ate-menu.force-dark .ate-item--create {
-  color: rgb(var(--v-theme-dark-surface-primary));
-}
-
-.ate-menu.force-dark .ate-item--create:hover:not(.ate-item--disabled) {
-  background: rgba(var(--v-theme-dark-surface-primary), 0.12);
-}
-
 /* `on-surface` flips with the theme but `dark-surface` does not, so without
-   these overrides the glyphs render warm near-black on the dark panel in the
+   this override the lock renders warm near-black on the dark panel in the
    light theme (about 1.05:1, effectively invisible). */
-.ate-menu.force-dark .ate-item-check,
 .ate-menu.force-dark .ate-item-lock {
   color: rgba(var(--v-theme-on-dark-surface), 0.7);
-}
-
-/* `primary` is 2.79:1 on the dark panel, under even the 3:1 UI floor for an
-   icon, so the checked glyph takes the lighter olive there. */
-.ate-menu.force-dark .ate-item--checked .ate-item-check {
-  color: rgb(var(--v-theme-dark-surface-primary));
 }
 
 .ate-item-shortcut {
@@ -1587,8 +1563,8 @@ defineExpose({
 }
 
 .ate-empty {
-  padding: var(--space-2) var(--space-3);
-  font-size: var(--text-xs);
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--text-sm);
   color: rgba(var(--v-theme-on-surface), 0.6);
 }
 
@@ -1608,8 +1584,8 @@ defineExpose({
 .ate-status {
   flex: 0 0 auto;
   margin-top: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  font-size: var(--text-xs);
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--text-sm);
   color: rgba(var(--v-theme-on-surface), 0.7);
 }
 
@@ -1625,10 +1601,9 @@ defineExpose({
   box-shadow: var(--elevation-3);
   font-size: var(--text-xs);
   line-height: 1.2;
-  /* Above the menu it belongs to, which just moved to `--z-dropdown`. Kept as
-     a relative expression rather than a second bare number so the two cannot
-     drift apart again. */
-  z-index: calc(var(--z-dropdown) + 1);
+  /* Above the menu it belongs to: the same rung, and after the menu in the
+     template, so it wins on DOM order (visual-language.md §14). Keep it there. */
+  z-index: var(--z-dropdown);
   pointer-events: none;
 }
 
@@ -1643,25 +1618,6 @@ defineExpose({
   display: flex;
 }
 
-.ate--flyout .ate-btn {
-  width: 100%;
-  background: transparent;
-  color: rgb(var(--v-theme-on-surface));
-  padding: var(--space-2) var(--space-5);
-  border-radius: 0;
-  font-size: var(--text-sm);
-  gap: var(--space-3);
-}
-
-.ate--flyout .ate-btn:hover:not(:disabled) {
-  background: rgba(var(--v-theme-on-surface), 0.08);
-}
-
-.ate--flyout .ate-chevron {
-  margin-left: auto;
-  opacity: 0.7;
-}
-
 .ate--flyout .ate-menu,
 .ate-menu.flyout {
   position: absolute;
@@ -1669,12 +1625,13 @@ defineExpose({
   top: 0;
   min-width: 185px;
   max-width: 185px;
-  padding: var(--space-2) 0;
-  border-radius: var(--radius-md);
-  border: 1px solid rgba(var(--v-theme-on-surface), 0.14);
-  box-shadow: var(--elevation-3);
   transform: translateX(-4px);
-  z-index: 2500;
+  /* The submenu rung `styles/context-menu.css` gives a menu's own submenus.
+     The flyout is never teleported: it lives inside the host menu's stacking
+     context, so it only has to clear that menu's rows. A rung higher would also
+     put it over the tips its own rows open, which the grid context menu renders
+     inside itself (`data-tooltip-layer`). */
+  z-index: var(--z-dropdown);
 }
 
 /* Flip flyout menu leftward when near the right screen edge */
@@ -1695,29 +1652,5 @@ defineExpose({
 .ate--flyout .ate-menu.open,
 .ate-menu.flyout.open {
   transform: translateX(0);
-}
-
-.ate--flyout .ate-item {
-  border-radius: 0;
-  padding: var(--space-2) var(--space-5);
-  font-size: var(--text-sm);
-}
-
-.ate--flyout .ate-item-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ate--flyout .ate-search {
-  margin: var(--space-2) var(--space-2) var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-sm);
-}
-
-.ate--flyout .ate-empty,
-.ate--flyout .ate-status {
-  padding: var(--space-2) var(--space-5);
-  font-size: var(--text-sm);
 }
 </style>

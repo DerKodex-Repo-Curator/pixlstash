@@ -20,8 +20,16 @@ from sqlmodel import Session, delete, select
 
 from pixlstash.db_models import Picture, User, UserToken
 from pixlstash.server import Server
-from pixlstash.hub.registry import VAULT_FILENAME, LibraryExistsError
-from pixlstash.utils.media_files import count_media_files, is_supported_media_file
+from pixlstash.hub.registry import (
+    TEMP_VAULT_FILENAME,
+    VAULT_FILENAME,
+    LibraryExistsError,
+)
+from pixlstash.utils.media_files import (
+    count_media_files,
+    has_media_files,
+    is_supported_media_file,
+)
 
 API = "/api/v1"
 
@@ -231,6 +239,36 @@ class TestListing:
         assert entry["uuid"]
         assert "is_active" in entry
 
+    def test_a_library_being_imported_is_named_but_not_listed(self, server, tmp_path):
+        """It cannot be switched to, so it is not in the list; the shell still
+        has to be able to say what the machine is busy with."""
+        registry = server.library_registry
+        original = registry.active_library()
+        folder = tmp_path / "holiday-snaps"
+        folder.mkdir()
+        pending = registry.create(
+            str(folder), f"Holiday {tmp_path.name}", pending_import=True
+        )
+        try:
+            registry.set_active(pending.id)
+            body = _owner(server).get(f"{API}/libraries").json()
+
+            assert body["importing_name"] == pending.name
+            assert body["importing_path"] == pending.path, (
+                "the client finds its saved first import by this folder"
+            )
+            remote = _owner(server, REMOTE_IP).get(f"{API}/libraries").json()
+            assert remote["importing_path"] is None
+            assert pending.uuid not in [entry["uuid"] for entry in body["libraries"]], (
+                "a library that does not exist yet must not be offered"
+            )
+        finally:
+            if original:
+                registry.set_active(original.id)
+
+    def test_nothing_is_named_as_importing_when_nothing_is(self, server):
+        assert _owner(server).get(f"{API}/libraries").json()["importing_name"] is None
+
     def test_the_response_names_libraries_by_uuid_not_row_id(self, server):
         entry = _owner(server).get(f"{API}/libraries").json()["libraries"][0]
         assert "id" not in entry, "a row id must never be the client's handle"
@@ -395,15 +433,19 @@ class TestSwitching:
 
         switch_thread = threading.Thread(target=do_switch)
         switch_thread.start()
-        deadline = time.monotonic() + 5
-        while server.library_coordinator.state.value != "switching":
-            assert time.monotonic() < deadline
-            time.sleep(0.01)
-        assert not switched.is_set()
-
-        release.set()
-        switch_thread.join(timeout=20)
         try:
+            try:
+                deadline = time.monotonic() + 5
+                while server.library_coordinator.state.value != "switching":
+                    assert time.monotonic() < deadline
+                    time.sleep(0.01)
+                assert not switched.is_set()
+            finally:
+                # Inside the try, so an assertion that fires still releases and
+                # joins the paused import instead of leaving it parked on
+                # release.wait(10) holding the import lease.
+                release.set()
+                switch_thread.join(timeout=20)
             assert not errors
             assert switched.is_set()
             assert server.library_registry.active_library().uuid == spare_library.uuid
@@ -516,16 +558,18 @@ class TestSwitching:
         )
         first_thread.start()
         try:
-            assert build_entered.wait(timeout=10)
-            second_thread.start()
-            second_thread.join(timeout=5)
-            assert not second_thread.is_alive(), "second switch must fail promptly"
-        finally:
-            release_build.set()
-        first_thread.join(timeout=20)
-        second_thread.join(timeout=20)
-
-        try:
+            try:
+                assert build_entered.wait(timeout=10)
+                second_thread.start()
+                second_thread.join(timeout=5)
+                assert not second_thread.is_alive(), "second switch must fail promptly"
+            finally:
+                # The joins belong in here too: released but unjoined, the switch
+                # is still running when the next test starts.
+                release_build.set()
+                first_thread.join(timeout=20)
+                if second_thread.ident is not None:  # unstarted if the pause failed
+                    second_thread.join(timeout=20)
             assert not first_thread.is_alive()
             assert not second_thread.is_alive()
             assert responses["first"].status_code == 200
@@ -849,6 +893,38 @@ class TestAdding:
                 server.library_registry.by_uuid(library["uuid"]).path, "vault.db"
             )
         )
+
+    def test_a_folder_of_pictures_gets_no_vault_db_until_its_import_finishes(
+        self, server, added_libraries, tmp_path
+    ):
+        """The owner has not answered the import question yet.
+
+        Until they do, the folder is theirs and unchanged: a `vault.db` here
+        would make it read as "an existing library" the next time they added
+        it, for an import they may be about to abort.
+        """
+        folder = tmp_path / "holiday-snaps"
+        folder.mkdir()
+        _write_picture(folder / "beach.jpg")
+
+        library = added_libraries(_add(_owner(server), folder))
+
+        registered = server.library_registry.by_uuid(library["uuid"])
+        assert registered.pending_import_at is not None
+        assert not os.path.exists(os.path.join(registered.path, VAULT_FILENAME))
+        assert os.path.isfile(os.path.join(registered.path, TEMP_VAULT_FILENAME))
+        # Still openable: the import that promotes it runs against this vault.
+        assert registered.is_reachable is True
+
+    def test_an_empty_folder_is_an_answer_and_gets_its_vault_db_at_once(
+        self, server, added_libraries, tmp_path
+    ):
+        """ "Start a library here" is itself the answer, so nothing is pending."""
+        library = added_libraries(_add(_owner(server), tmp_path / "brand-new"))
+
+        registered = server.library_registry.by_uuid(library["uuid"])
+        assert registered.pending_import_at is None
+        assert os.path.isfile(os.path.join(registered.path, VAULT_FILENAME))
 
     def test_attaching_moves_renames_and_copies_no_file(
         self, server, added_libraries, tmp_path
@@ -1285,6 +1361,31 @@ class TestCountingMediaFiles:
 
         assert count_media_files(str(tmp_path)) == (3, False)
 
+    def test_holding_pictures_is_answered_without_counting_them(self, tmp_path):
+        """What `POST /libraries` asks before it decides on a temporary vault.
+
+        A cap cannot answer this: `count_media_files`'s cap bounds entries
+        *visited*, so a small one on a folder of documents returns zero and
+        reads as empty. This one stops at the first picture instead.
+        """
+        deep = tmp_path / "2024" / "mira"
+        deep.mkdir(parents=True)
+        for index in range(40):
+            (tmp_path / f"note-{index}.txt").write_text("not a picture")
+        _write_picture(deep / "01.jpg")
+
+        assert has_media_files(str(tmp_path)) is True
+        assert count_media_files(str(tmp_path), entry_cap=4) == (0, True), (
+            "the sibling a cap would have answered wrongly"
+        )
+
+    def test_a_folder_of_documents_holds_no_pictures(self, tmp_path):
+        (tmp_path / "notes.txt").write_text("not a picture")
+        (tmp_path / ".hidden").mkdir()
+        _write_picture(tmp_path / ".hidden" / "cached.jpg")
+
+        assert has_media_files(str(tmp_path)) is False
+
     def test_our_own_thumbnails_are_never_counted_as_pictures(self, tmp_path):
         """One indexed thumbnail earns a thumbnail, and that one earns another.
 
@@ -1301,6 +1402,22 @@ class TestCountingMediaFiles:
         assert not is_supported_media_file("IMG_1231_thumb.webp")
         assert not is_supported_media_file("a/b/IMG_1231_THUMB.WEBP")
         assert count_media_files(str(tmp_path)) == (2, False)
+
+    def test_a_librarys_own_root_folders_are_not_its_pictures(self, tmp_path):
+        """`tmp/` holds face and set thumbnails; the import never indexes them,
+        so neither count nor the "does it hold pictures" question may."""
+        (tmp_path / "tmp" / "face_thumbnails").mkdir(parents=True)
+        _write_picture(tmp_path / "tmp" / "face_thumbnails" / "character_1.png")
+        (tmp_path / "snapshots").mkdir()
+        _write_picture(tmp_path / "snapshots" / "x.png")
+
+        assert has_media_files(str(tmp_path)) is False
+        assert count_media_files(str(tmp_path)) == (0, False)
+
+        # Only the root's: a `tmp` deeper down is the owner's own folder.
+        (tmp_path / "2014" / "tmp").mkdir(parents=True)
+        _write_picture(tmp_path / "2014" / "tmp" / "kept.jpg")
+        assert count_media_files(str(tmp_path)) == (1, False)
 
 
 class TestTheRequestContract:

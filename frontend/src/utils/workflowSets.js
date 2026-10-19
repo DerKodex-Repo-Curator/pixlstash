@@ -1,0 +1,1118 @@
+// The model shelf's Workflow set axis (#1438): turning the combinations
+// `GET /models/workflow-sets` serves into the groups the grid draws.
+//
+// **A card is one base model, and its tray holds the MODELS that have run with
+// it.** One card per checkpoint (or per diffusion file, where a graph loads one
+// instead), carrying the union of everything it has co-occurred with across all
+// of its recipes. So the grid is as long as the list of base models that have
+// made a picture and no longer, and a model appears in every group it has served
+// - a VAE shared by three checkpoints is in three trays, which is the overlap the
+// row list's sticky bands could not express.
+//
+// **What a union gives up, and why this file keeps the combinations anyway.** A
+// group is not reproducible: two VAEs can both be in one tray having never run
+// together, and the union cannot say which. That is a real cost of grouping this
+// way, and the tray says so in words rather than letting a reader assume
+// otherwise. The per-combination evidence is therefore NOT discarded on the way
+// in - `worksWith` reads it to answer pairwise questions exactly, and a member's
+// own recipe and picture counts come from the combinations that name it. Union
+// for the card, combinations for every claim.
+//
+// **Co-occurrence is evidence; its absence is not.** Nothing here may hide a
+// model and nothing may infer a pairing: two models never seen together are not
+// drawn as a pair, and that is not a claim they cannot work. The models no recipe
+// names - or names only beside no base model - get no card; the Models rail
+// lists them under `In no set yet`.
+
+import { fileKindLabel, fileTime, modelName, quantBadge } from "./modelShelf";
+
+/** The kinds a set is named after, as the server's `_SET_BASE_KINDS`. */
+const BASE_KINDS = new Set(["checkpoint", "unknown"]);
+
+/**
+ * How many covers a card's mosaic draws.
+ *
+ * Three, the depth the server serves per combination (`SET_COVER_DEPTH`): a group
+ * pools its combinations' covers and then cuts back to this, so a group built
+ * from six recipes is not six bitmaps for three cells.
+ */
+const COVER_DEPTH = 3;
+
+/**
+ * The file a combination is named after: the head of the server's own order.
+ *
+ * The server sorts a combination's members checkpoint-first, then unclassified,
+ * then the support files, then the adapters, so the head is the checkpoint where
+ * there is one and the diffusion file where there is not (Flux, Wan).
+ *
+ * **A base model the shelf does not hold names the set instead of its VAE.** A
+ * recipe whose checkpoint is gone resolves to its support files alone, and the
+ * server lists the file it loaded under `missing`. The head is then that file,
+ * with no id, `missing: true` and the workflows where it can be replaced.
+ *
+ * **No base model at all is no head.** A combination of support files or LoRAs
+ * alone is served for *Works with* to read, but a VAE or a LoRA is not what a
+ * set is named after, so it gets null and no card.
+ */
+export function headModel(combination) {
+  const first = (combination.models ?? [])[0] ?? null;
+  if (BASE_KINDS.has(first?.kind)) return first;
+  const missing = combination.missing ?? [];
+  const gone = missing[0];
+  if (!gone) return null;
+  // Named after the first, like a two-checkpoint set after its first; the
+  // others still go in the note, with the workflows that load any of them.
+  return {
+    id: null,
+    name: gone.name,
+    filename: gone.name,
+    kind: "checkpoint",
+    missing: true,
+    names: missing.map((entry) => entry.name),
+    workflowIds: [
+      ...new Set(missing.flatMap((entry) => entry.workflow_ids ?? [])),
+    ].sort(),
+    // Per file, because a fix replaces one file in the workflows loading it.
+    workflowsByName: Object.fromEntries(
+      missing.map((entry) => [entry.name, [...(entry.workflow_ids ?? [])].sort()]),
+    ),
+  };
+}
+
+/**
+ * Sort by the weight of the evidence behind each entry, strongest first.
+ *
+ * The server already orders combinations this way; re-applied because a group's
+ * covers and its `sets` list are read in this order, so a caller that filtered or
+ * concatenated payloads must not be able to change what a card leads with.
+ */
+function byEvidence(entries) {
+  return [...entries].sort(
+    (a, b) =>
+      (b.picture_count ?? b.pictures ?? 0) -
+        (a.picture_count ?? a.pictures ?? 0) ||
+      (b.recipes ?? 0) - (a.recipes ?? 0) ||
+      (b.history_runs ?? b.historyRuns ?? 0) -
+        (a.history_runs ?? a.historyRuns ?? 0) ||
+      String(a.key).localeCompare(String(b.key)),
+  );
+}
+
+/**
+ * Group combinations by the file they are named after.
+ *
+ * One group per head model, holding the union of every member across its
+ * combinations. Keyed on the head's ID and never its name: two shelf rows can
+ * carry the same basename, and merging them would draw one card claiming both
+ * files' pictures.
+ *
+ * Each member carries the evidence for ITSELF rather than the group's totals -
+ * `recipes` and `pictures` counted over the combinations in this group that name
+ * that model, so a LoRA used once inside a group of forty pictures says "1 recipe"
+ * rather than inheriting the forty. `otherSets` is how many OTHER groups it
+ * appears in, which is what lets a tray mark a shared VAE as shared and a
+ * single-purpose one as its own.
+ *
+ * @param {Array<Object>} combinations - from `GET /models/workflow-sets`.
+ * @returns {Array<Object>} groups, strongest evidence first.
+ */
+export function setGroups(combinations) {
+  const byHead = new Map();
+  for (const combination of byEvidence(combinations ?? [])) {
+    const head = headModel(combination);
+    if (!head) continue;
+    const key = head.missing ? `missing:${head.name}` : `model:${head.id}`;
+    let group = byHead.get(key);
+    if (group?.head.missing) {
+      // Each combination names the files and workflows ITS recipes load.
+      group.head.names = [...new Set([...group.head.names, ...head.names])];
+      group.head.workflowIds = [
+        ...new Set([...group.head.workflowIds, ...head.workflowIds]),
+      ].sort();
+      for (const [name, ids] of Object.entries(head.workflowsByName)) {
+        group.head.workflowsByName[name] = [
+          ...new Set([...(group.head.workflowsByName[name] ?? []), ...ids]),
+        ].sort();
+      }
+    }
+    if (!group) {
+      group = {
+        key,
+        head,
+        combinations: [],
+        recipes: 0,
+        historyRuns: 0,
+        pictures: 0,
+      };
+      byHead.set(key, group);
+    }
+    group.combinations.push(combination);
+    group.recipes += combination.recipes ?? 0;
+    group.historyRuns += combination.history_runs ?? 0;
+    group.pictures += combination.picture_count ?? 0;
+  }
+
+  const groups = byEvidence([...byHead.values()]);
+  // How many groups each model is in, counted across all of them before any one
+  // group is shaped: `otherSets` is a fact about the whole grid.
+  const groupsPerModel = new Map();
+  for (const group of groups) {
+    for (const id of memberIds(group)) {
+      groupsPerModel.set(id, (groupsPerModel.get(id) ?? 0) + 1);
+    }
+  }
+
+  return groups.map((group) => ({
+    ...group,
+    models: members(group, groupsPerModel),
+    covers: pooledCovers(group.combinations),
+  }));
+}
+
+/** Every model id in a group, across its combinations. */
+function memberIds(group) {
+  const ids = new Set();
+  for (const combination of group.combinations) {
+    for (const model of combination.models ?? []) ids.add(model.id);
+  }
+  return ids;
+}
+
+/**
+ * A group's members, each with its own evidence and how widely it is shared.
+ *
+ * Ordered as the server orders a combination's members - the head first, then
+ * unclassified, the support files, the adapters - by reading the best position
+ * each model has taken in any of the group's combinations rather than re-deciding
+ * that ranking here.
+ */
+function members(group, groupsPerModel) {
+  const found = new Map();
+  for (const combination of group.combinations) {
+    (combination.models ?? []).forEach((model, position) => {
+      const seen = found.get(model.id) ?? {
+        ...model,
+        kindLabel: memberKindLabel(model),
+        recipes: 0,
+        historyRuns: 0,
+        pictures: 0,
+        ambiguous: false,
+        position,
+      };
+      seen.recipes += combination.recipes ?? 0;
+      seen.historyRuns += combination.history_runs ?? 0;
+      seen.pictures += combination.picture_count ?? 0;
+      // One witness that could not pin the file down is enough to say so; a
+      // cleaner second witness does not unmake the first.
+      seen.ambiguous = seen.ambiguous || Boolean(model.ambiguous);
+      seen.position = Math.min(seen.position, position);
+      found.set(model.id, seen);
+    });
+  }
+  return [...found.values()]
+    .map((model) => ({
+      ...model,
+      otherSets: Math.max((groupsPerModel.get(model.id) ?? 1) - 1, 0),
+    }))
+    .sort(
+      (a, b) =>
+        a.position - b.position ||
+        b.recipes - a.recipes ||
+        a.name.localeCompare(b.name),
+    );
+}
+
+/**
+ * A group's cover strip: its combinations' covers, best first, deduplicated.
+ *
+ * The RECORDS, not URLs. `{picture_id, version}` is what the payload sends and
+ * what the card turns into a `src` with `pictureThumbnailUrl` - this module stays
+ * free of the api layer, and that path stays spelled in one place. Deduplicated by
+ * picture, because two recipes in one group can nominate the same best one.
+ */
+function pooledCovers(combinations) {
+  return [
+    ...new Map(
+      combinations
+        .flatMap((combination) => combination.covers ?? [])
+        .map((cover) => [cover.picture_id, cover]),
+    ).values(),
+  ].slice(0, COVER_DEPTH);
+}
+
+/** "3 recipes", "1 recipe" - the evidence behind a group or one of its members. */
+export function recipeCount(recipes) {
+  const n = Number(recipes) || 0;
+  return n === 1 ? "1 recipe" : `${n} recipes`;
+}
+
+/**
+ * "3 ComfyUI runs", "1 ComfyUI run" - finished runs recorded earlier from
+ * ComfyUI's history (#1565), counted apart from recipes.
+ */
+export function runCount(runs) {
+  const n = Number(runs) || 0;
+  return n === 1 ? "1 ComfyUI run" : `${n} ComfyUI runs`;
+}
+
+/**
+ * One entry's evidence in words: "2 recipes · 5 pictures · 1 ComfyUI run".
+ *
+ * An entry only ComfyUI ran prints its runs alone rather than "0 recipes ·
+ * 0 pictures" beside them; otherwise runs are added only when there are some.
+ */
+export function evidenceLine({ recipes = 0, pictures = 0, historyRuns = 0 }) {
+  const onlyRuns = !recipes && !pictures && historyRuns > 0;
+  return [
+    onlyRuns ? null : recipeCount(recipes),
+    onlyRuns ? null : pictureCount(pictures),
+    historyRuns > 0 ? runCount(historyRuns) : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+/**
+ * The witnesses a companion is ranked by, in words: "1 recipe · 30 ComfyUI
+ * runs". Both halves, so a list sorted by their sum never reads mis-sorted.
+ */
+export function witnessCount({ recipes = 0, historyRuns = 0 }) {
+  return (
+    [
+      recipes > 0 ? recipeCount(recipes) : null,
+      historyRuns > 0 ? runCount(historyRuns) : null,
+    ]
+      .filter(Boolean)
+      .join(" · ") || recipeCount(0)
+  );
+}
+
+/** "3 pictures", "1 picture". */
+export function pictureCount(pictures) {
+  const n = Number(pictures) || 0;
+  return n === 1 ? "1 picture" : `${n} pictures`;
+}
+
+/**
+ * How widely a member is shared, in the words the tray uses.
+ *
+ * The count rather than the list: a VAE in seventeen groups reads as a number,
+ * and which seventeen is one click away in `Works with`.
+ */
+export function sharingLabel(otherSets) {
+  if (!otherSets) return "Only in this set";
+  return otherSets === 1
+    ? "Also in 1 other set"
+    : `Also in ${otherSets} other sets`;
+}
+
+/**
+ * One group as `ModelSetCard` draws it.
+ *
+ * Three meta rows, which is what the approved design gives this card: the name
+ * with its kind, the per-kind counts, and the facts. The per-kind row answers the
+ * question a grid is scanned for - what SHAPE is this set, one VAE and two
+ * encoders or none at all - without opening anything.
+ *
+ * @param {Object} group - one entry from {@link setGroups}.
+ * @returns {Object} a card for `ModelSetCard`.
+ */
+export function setCard(group) {
+  const models = group.models ?? [];
+  const historyRuns = group.historyRuns ?? 0;
+  // On the grid only because ComfyUI ran it: no picture here to show, so the
+  // cover says where the evidence came from instead of "0 pictures".
+  const fromComfyUI = group.pictures === 0 && historyRuns > 0;
+  return {
+    key: group.key,
+    // The head names the card, so a Flux or Wan group with no checkpoint row is
+    // named by its diffusion file without this file inventing a second rule -
+    // read as the shelf reads a name, so no card is called `….safetensors`.
+    name: headName(group.head) || "Unnamed set",
+    kindLabel: group.head?.missing ? "Missing" : memberKindLabel(group.head),
+    missing: Boolean(group.head?.missing),
+    kinds: kindCounts(models.filter((model) => model.id !== group.head?.id)),
+    facts: [
+      models.length === 1 ? "1 model" : `${models.length} models`,
+      fromComfyUI && !group.recipes ? null : recipeCount(group.recipes),
+      fromComfyUI ? null : pictureCount(group.pictures),
+      historyRuns > 0 ? runCount(historyRuns) : null,
+    ].filter(Boolean),
+    pictures: group.pictures,
+    recipes: group.recipes,
+    historyRuns,
+    fromComfyUI,
+    covers: group.covers ?? [],
+    size: models.length,
+  };
+}
+
+/**
+ * Hide, as a menu row over several selected sets from pictures.
+ *
+ * It hides the ones still shown and counts only those, as the receipt does; it
+ * turns into Show again only when every one is already hidden, which is the
+ * card's own eye button over a selection.
+ *
+ * @param {Array<Object>} groups - store `setGroups` entries, each with `hidden`.
+ * @returns {{hide: boolean, icon: string, label: string}|null} null for none.
+ */
+export function hideSetsVerb(groups) {
+  if (!groups?.length) return null;
+  const shown = groups.filter((group) => !group.hidden).length;
+  const n = shown || groups.length;
+  const sets = n === 1 ? "workflow set" : `${n} workflow sets`;
+  return shown
+    ? { hide: true, icon: "mdi-eye-off-outline", label: `Hide ${sets}` }
+    : { hide: false, icon: "mdi-eye-outline", label: `Show ${sets} again` };
+}
+
+/**
+ * What a card is called after its head: the name a person gave the file, else
+ * the shelf's readable reading of its filename.
+ *
+ * A member's `name` is its display name or, without one, its filename, so the
+ * two being equal means nobody named it.
+ */
+export function headName(head) {
+  if (!head) return "";
+  const named = head.name && head.name !== head.filename ? head.name : "";
+  return (
+    modelName({ display_name: named, filename: head.filename }).text ||
+    head.name ||
+    ""
+  );
+}
+
+/**
+ * The per-kind tally the card's second row draws: `VAE 2`, `Text enc 1`.
+ *
+ * In the members' own order rather than alphabetically, so the row reads in the
+ * sequence the tray does. A count of one is still written out, because `VAE`
+ * alone would read as a label rather than as a tally beside `LoRA 3`.
+ */
+export function kindCounts(models) {
+  const tally = new Map();
+  for (const model of models) {
+    const label = model.kindLabel || memberKindLabel(model) || "Other";
+    tally.set(label, (tally.get(label) ?? 0) + 1);
+  }
+  return [...tally.entries()].map(([label, count]) => `${label} ${count}`);
+}
+
+/**
+ * What a member's kind is called.
+ *
+ * `fileKindLabel` names every kind but the adapter, which it leaves blank because
+ * the row list names an adapter by its algorithm instead. A set has no algorithm
+ * column, so the word is supplied here rather than leaving the one kind a reader
+ * most wants to see unlabelled.
+ */
+export function memberKindLabel(model) {
+  return (
+    fileKindLabel(model?.kind) || (model?.kind === "adapter" ? "LoRA" : "")
+  );
+}
+
+/**
+ * The companions of one model: everything it has been seen beside, ranked.
+ *
+ * **Read from the COMBINATIONS, never from a group's union.** That is the whole
+ * reason this module keeps them: a union puts every model a checkpoint has ever
+ * loaded into one bag, so answering from it would report two VAEs as companions
+ * of each other on the strength of sharing a checkpoint. Ranked by how many
+ * witnesses back each pairing - recipes plus ComfyUI runs (#1565), which is the
+ * only thing co-occurrence can measure - so the bar the caller draws from
+ * `share` IS the ranking; recipes, then pictures, break ties. A run is one
+ * queued prompt and a recipe one distinct graph, so a seed queued many times
+ * weighs more than it would as recipes; the counts are shown apart so the
+ * reader can see which kind of witness a bar is made of.
+ *
+ * **A model missing from this list has not been ruled out.** It has simply never
+ * been in the same picture's recipe or ComfyUI run, which is a fact about what has been tried
+ * here and not about what works - so every caller says so beside the list.
+ *
+ * @param {Array<Object>} combinations
+ * @param {number} modelId
+ * @returns {{companions: Array<Object>, recipes: number, historyRuns: number,
+ *   sets: Array<Object>}}
+ *   `sets` is the combinations the model is in, strongest first.
+ */
+export function worksWith(combinations, modelId) {
+  const sets = byEvidence(
+    (combinations ?? []).filter((combination) =>
+      (combination.models ?? []).some((model) => model.id === modelId),
+    ),
+  );
+  const found = new Map();
+  let recipes = 0;
+  let historyRuns = 0;
+  for (const combination of sets) {
+    recipes += combination.recipes ?? 0;
+    historyRuns += combination.history_runs ?? 0;
+    for (const model of combination.models ?? []) {
+      if (model.id === modelId) continue;
+      const seen = found.get(model.id) ?? {
+        id: model.id,
+        name: model.name,
+        kind: model.kind,
+        kindLabel: memberKindLabel(model),
+        recipes: 0,
+        historyRuns: 0,
+        pictures: 0,
+        ambiguous: false,
+      };
+      seen.recipes += combination.recipes ?? 0;
+      seen.historyRuns += combination.history_runs ?? 0;
+      seen.pictures += combination.picture_count ?? 0;
+      seen.ambiguous = seen.ambiguous || Boolean(model.ambiguous);
+      found.set(model.id, seen);
+    }
+  }
+  // Recipes and runs are both witnesses of a pairing, so the rank and the bar
+  // both count them: a companion only ComfyUI ran must not draw an empty bar,
+  // and the bar must never disagree with the order it is drawn in.
+  const witnesses = (companion) => companion.recipes + companion.historyRuns;
+  const companions = [...found.values()].sort(
+    (a, b) =>
+      witnesses(b) - witnesses(a) ||
+      b.recipes - a.recipes ||
+      b.pictures - a.pictures ||
+      a.name.localeCompare(b.name),
+  );
+  const top = witnesses(companions[0] ?? { recipes: 0, historyRuns: 0 }) || 1;
+  return {
+    companions: companions.map((companion) => ({
+      ...companion,
+      share: Math.round((witnesses(companion) / top) * 100),
+    })),
+    recipes,
+    historyRuns,
+    sets,
+  };
+}
+
+/**
+ * The files that identify one combination, joined.
+ *
+ * Read by the `Works with` dialog's chips, which name the exact combinations a
+ * model is in - the one place a reader sees a reproducible set rather than a
+ * group's union.
+ */
+export function setName(combination) {
+  const named = (combination.models ?? [])
+    .filter((model) => model.kind !== "adapter")
+    .slice(0, 3)
+    .map((model) => model.name);
+  if (named.length) return named.join(" · ");
+  return (
+    (combination.models ?? [])
+      .slice(0, 3)
+      .map((model) => model.name)
+      .join(" · ") || "Unnamed set"
+  );
+}
+
+// ── Hand-made sets (#1520) ───────────────────────────────────────────────────
+//
+// **A hand-made set is a MENU, not a recipe.** The owner lists models that work
+// together, slot by slot, to seed new workflows; there is no order, no strength
+// and no graph. Evidence is kept apart from it on purpose: a hand-made card never
+// shows a recipe count as if it were its own, and an evidence card never changes
+// membership through a gesture. A picture belongs to a hand-made set only when
+// EVERY model it used is in the set - the server works that out and reports it
+// as the set's `picture_count` and the combinations' `covered_by`.
+
+/**
+ * The fixed slots every hand-made set has, in the order the tray draws them.
+ *
+ * `kinds` are the `file_kind`s a slot offers in its picker. Checkpoint also takes
+ * `unknown`, because a Flux or Wan diffusion file is often filed that way and is
+ * still the base model of its set.
+ */
+export const SET_SLOTS = [
+  {
+    id: "checkpoint",
+    label: "Checkpoint",
+    hint: "one or more",
+    add: "Add checkpoint",
+    noun: "checkpoints",
+    kinds: ["checkpoint", "unknown"],
+  },
+  {
+    id: "text_encoder",
+    label: "Text encoders",
+    hint: "any number",
+    add: "Add text encoder",
+    noun: "text encoders",
+    kinds: ["text_encoder"],
+  },
+  {
+    id: "vae",
+    label: "VAE",
+    hint: "any number",
+    add: "Add VAE",
+    noun: "VAEs",
+    kinds: ["vae"],
+  },
+  {
+    id: "lora",
+    label: "LoRAs",
+    hint: "any number",
+    add: "Add LoRA",
+    noun: "LoRAs",
+    kinds: ["adapter"],
+  },
+  {
+    id: "other",
+    label: "Other",
+    hint: "upscalers, ControlNets",
+    add: "Add",
+    noun: "other models",
+    kinds: [
+      "unknown",
+      "checkpoint",
+      "vae",
+      "text_encoder",
+      "controlnet",
+      "upscaler",
+      "adapter",
+    ],
+  },
+];
+
+/** The slot a file goes in when nobody says otherwise; the server's own rule. */
+export function defaultSlot(fileKind) {
+  return (
+    {
+      checkpoint: "checkpoint",
+      vae: "vae",
+      text_encoder: "text_encoder",
+      adapter: "lora",
+    }[fileKind] ?? "other"
+  );
+}
+
+/**
+ * The set's checkpoint members, in member order: two for a two-model workflow
+ * (a Wan 2.2 high/low pair, a base and its refiner).
+ */
+export function setCheckpoints(set) {
+  return (set?.members ?? []).filter((m) => m.slot === "checkpoint");
+}
+
+/** The set's first checkpoint member, the one it is named after, or null. */
+export function setCheckpoint(set) {
+  return setCheckpoints(set)[0] ?? null;
+}
+
+/** The set's on-shelf checkpoints: the ones evidence can be read for. */
+function onShelfCheckpoints(set) {
+  return setCheckpoints(set).filter((m) => m.on_shelf);
+}
+
+/**
+ * What recipes or ComfyUI runs used beside any of the set's on-shelf
+ * checkpoints, each model once, in `worksWith` order checkpoint by checkpoint.
+ */
+function checkpointCompanions(set, combinations) {
+  const seen = new Set();
+  return onShelfCheckpoints(set)
+    .flatMap((checkpoint) => worksWith(combinations, checkpoint.id).companions)
+    .filter((companion) => !seen.has(companion.id) && seen.add(companion.id));
+}
+
+/**
+ * What a set is called: its own name, else its checkpoint's, else "Untitled set".
+ */
+export function handMadeName(set) {
+  return set?.name || setCheckpoint(set)?.name || "Untitled set";
+}
+
+/** The base model a set's suggestions follow: its checkpoint's, or null. */
+export function handMadeBase(set) {
+  return setCheckpoint(set)?.base_model || null;
+}
+
+/**
+ * One hand-made set as `ModelSetCard` draws it.
+ *
+ * The same card shape as an evidence card, so the grid reads as one grid, with
+ * the words changed: "Grouped by you", a picture count only when pictures really
+ * belong to the set, and the incomplete warning when there is no checkpoint.
+ */
+export function handMadeCard(set) {
+  const members = set.members ?? [];
+  const checkpoint = setCheckpoint(set);
+  const pictures = Number(set.picture_count) || 0;
+  const offShelf = members.filter((m) => !m.on_shelf).length;
+  return {
+    key: `hand:${set.id}`,
+    handMade: true,
+    incomplete: Boolean(set.incomplete ?? !checkpoint),
+    name: handMadeName(set),
+    kindLabel: checkpoint?.base_model || "",
+    kinds: kindCounts(
+      members
+        .filter((m) => m.slot !== "checkpoint")
+        .map((m) => ({ ...m, kindLabel: memberKindLabel(m) })),
+    ),
+    facts: [
+      members.length === 1 ? "1 model" : `${members.length} models`,
+      pictures ? pictureCount(pictures) : "no pictures yet",
+      offShelf ? `${offShelf} not on shelf` : null,
+    ].filter(Boolean),
+    pictures,
+    recipes: Number(set.recipes) || 0,
+    covers: set.covers ?? [],
+    // What the cover draws when no picture belongs to the set yet: the
+    // checkpoint's own mark, or nothing (a dashed empty cover).
+    markModel: checkpoint?.on_shelf ? checkpoint : null,
+    // A checkpoint kept by hash whose file has left the shelf: the cover says
+    // so, and so must the card's accessible name.
+    checkpointOffShelf: Boolean(checkpoint && !checkpoint.on_shelf),
+    offer: offerQuestion(set),
+    size: members.length,
+  };
+}
+
+/**
+ * The offer (#1523) as the question the card asks: "1 recipe ran this with a
+ * model the set does not have. Add it?". The subject is the pictures, and the
+ * shortfall is the set's - the recipe needs nothing. Counted in recipes when
+ * none of those pictures is in this library, since the offer reads every
+ * library's recipes. With one model the card names it, so it can be answered
+ * in place; with several it says how many, and the tray reviews them.
+ *
+ * `who` and `rest` are the statement, for the card to embolden its subject and
+ * the tray to repeat; `text` is the whole question.
+ *
+ * @returns {{adds: number, who: string, rest: string, text: string,
+ *   model: {kind: string, name: string, quant?: string}|null}|null}
+ */
+export function offerQuestion(set) {
+  const offer = set?.offer;
+  if (!offer) return null;
+  const adds = offer.models.length;
+  const who = offer.picture_count
+    ? pictureCount(offer.picture_count)
+    : recipeCount(offer.recipes);
+  const one = adds === 1 ? offer.models[0] : null;
+  const rest = one
+    ? " ran this with a model the set does not have."
+    : ` used this with ${adds} models the set does not have.`;
+  return {
+    adds,
+    who,
+    rest,
+    text: `${who}${rest}${one ? " Add it?" : ""}`,
+    model: one
+      ? {
+          kind: memberKindLabel(one),
+          name: one.name,
+          // The name has lost its precision; the set may hold its other quant.
+          quant: quantBadge(one.quant)?.label,
+        }
+      : null,
+  };
+}
+
+/**
+ * Does this shelf row belong in this slot's picker? Engines never do: no slot
+ * lists `engine`. A row still waiting for its hash cannot be kept by hash yet.
+ */
+export function fitsSlot(row, slot) {
+  return Boolean(row?.sha256) && slot.kinds.includes(row?.file_kind);
+}
+
+/**
+ * A row's base model as the set picker compares it: the client's copy of the
+ * server's `known_base_model`, because the other side of every comparison is a
+ * set member's `base_model`, which the server fills with exactly that.
+ *
+ * The identified label unless it is a fuzzy guess, else the folded raw value,
+ * else the raw one. Not `baseModelKey` (the shelf's grouping key): that one
+ * takes a fuzzy guess too, so a guessed "SDXL" row never matched a set whose
+ * checkpoint the server reported by its folded raw label.
+ */
+export function rowBaseModel(row) {
+  const canonical = row?.base_model_canonical;
+  if (canonical && !String(row?.base_model_source ?? "").endsWith("_fuzzy")) {
+    return canonical;
+  }
+  return row?.base_model_folded || row?.base_model || null;
+}
+
+/**
+ * Does a shelf row match the picker's filter? The name the shelf shows, so
+ * typing what is on screen finds it, and the filename, for someone typing what
+ * is on disk (#1574).
+ *
+ * @param {Object} row - a shelf row.
+ * @param {string} needle - the trimmed, lowercased filter text.
+ */
+export function rowMatches(row, needle) {
+  if (!needle) return true;
+  return `${modelName(row).text}\n${row?.filename || ""}`
+    .toLowerCase()
+    .includes(needle);
+}
+
+/**
+ * The orders the Models rail and a slot's picker offer. Newest is by file
+ * date, so a checkpoint and the text encoder and VAE downloaded with it come
+ * up together at the top.
+ */
+export const PICK_ORDERS = [
+  { id: "name", label: "A–Z" },
+  { id: "newest", label: "Newest" },
+  { id: "oldest", label: "Oldest" },
+];
+
+/** How far apart two files' dates can be and still read as one download. */
+export const DOWNLOAD_GAP_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * Rows in a `PICK_ORDERS` order. By the name the shelf shows, or by file date
+ * (`fileTime`) with the name breaking ties; a row with no file date goes last
+ * in both directions, as the shelf's own sort puts it.
+ *
+ * @param {Array<Object>} rows - shelf rows; not changed.
+ * @param {string} order - a `PICK_ORDERS` id.
+ * @returns {Array<Object>}
+ */
+export function orderRows(rows, order) {
+  const byName = (a, b) => modelName(a).text.localeCompare(modelName(b).text);
+  if (order !== "newest" && order !== "oldest") return [...rows].sort(byName);
+  const sign = order === "newest" ? -1 : 1;
+  return [...rows].sort((a, b) => {
+    const left = fileTime(a);
+    const right = fileTime(b);
+    if (left === null) return right === null ? byName(a, b) : 1;
+    if (right === null) return -1;
+    return (left - right) * sign || byName(a, b);
+  });
+}
+
+/**
+ * Date-ordered rows cut into downloads: a new batch starts wherever two
+ * neighbours' file dates are more than `DOWNLOAD_GAP_MS` apart. The rows with
+ * no file date are one batch of their own, `at` null.
+ *
+ * @param {Array<Object>} rows - rows as `orderRows` returns them by date.
+ * @returns {Array<{at: number|null, rows: Array<Object>}>} `at` is the
+ *   batch's first row's file date, the one its heading names.
+ */
+export function downloadBatches(rows) {
+  const batches = [];
+  let last;
+  for (const row of rows) {
+    const at = fileTime(row);
+    const batch = batches.at(-1);
+    const joins =
+      batch &&
+      (at === null
+        ? last === null
+        : last !== null && Math.abs(at - last) <= DOWNLOAD_GAP_MS);
+    if (joins) batch.rows.push(row);
+    else batches.push({ at, rows: [row] });
+    last = at;
+  }
+  return batches;
+}
+
+/**
+ * The picker's sections for one slot of one set, ranked as the design ranks them.
+ *
+ * With a checkpoint chosen: your other sets with the same base model, then what
+ * recipes have run with this checkpoint, then the same base model, then the
+ * other base models - which the picker starts collapsed, since it is the group
+ * least often wanted. With none, one unfiltered list - suggestions follow the
+ * checkpoint, so there is nothing to rank by yet. A model appears once, in the
+ * first section it earns, and never when the set already holds it; under a
+ * filter, the matches the set already holds come back as a last `held` section,
+ * so the picker can say why they are not offered.
+ *
+ * Sorted by the name the shelf shows (`modelName`), so the list is alphabetical
+ * in the names it draws, or by file date under a date `order`.
+ *
+ * Ahead of all of it, whatever the order: the models whose file date is within
+ * `DOWNLOAD_GAP_MS` of a model the set already holds, since what was downloaded
+ * with a set's checkpoint is usually what belongs beside it.
+ *
+ * @param {Object} args
+ * @param {Object} args.set - the hand-made set being filled.
+ * @param {string} args.slotId
+ * @param {Array<Object>} args.rows - the shelf's rows.
+ * @param {Array<Object>} args.sets - every hand-made set.
+ * @param {Array<Object>} args.combinations - the evidence payload.
+ * @param {string} [args.query] - the type-to-filter text.
+ * @param {string} [args.order] - a `PICK_ORDERS` id.
+ * @returns {Array<{id: string, label: string, items: Array<Object>, total: number,
+ *   collapsed?: string, held?: boolean}>}
+ */
+export function slotSuggestions({
+  set,
+  slotId,
+  rows,
+  sets,
+  combinations,
+  query = "",
+  order = "name",
+}) {
+  const slot = SET_SLOTS.find((s) => s.id === slotId);
+  if (!slot) return [];
+  const held = new Set((set?.members ?? []).map((m) => m.sha256));
+  const needle = query.trim().toLowerCase();
+  const byId = new Map();
+  const heldMatches = [];
+  // The file dates of what the set holds, read off every row: a held
+  // checkpoint is not a row this slot's picker would list.
+  const heldTimes = [];
+  for (const row of rows ?? []) {
+    if (row.sha256 && held.has(row.sha256) && fileTime(row) !== null) {
+      heldTimes.push(fileTime(row));
+    }
+    if (!fitsSlot(row, slot) || !rowMatches(row, needle)) continue;
+    if (held.has(row.sha256)) heldMatches.push(row);
+    else byId.set(row.id, row);
+  }
+  const sorted = (items) => orderRows([...items], order);
+  const heldSection =
+    needle && heldMatches.length
+      ? [{ id: "held", label: "", items: sorted(heldMatches), held: true }]
+      : [];
+  const used = new Set();
+  const take = (ids) => {
+    const items = [];
+    for (const id of ids) {
+      if (used.has(id) || !byId.has(id)) continue;
+      used.add(id);
+      items.push(byId.get(id));
+    }
+    return items;
+  };
+  const together = take(
+    sorted(
+      [...byId.values()].filter((row) => {
+        const at = fileTime(row);
+        return (
+          at !== null &&
+          heldTimes.some((t) => Math.abs(at - t) <= DOWNLOAD_GAP_MS)
+        );
+      }),
+    ).map((row) => row.id),
+  );
+  // Only when it has rows: an empty one would be a section nobody sees.
+  const togetherSections = together.length
+    ? [
+        {
+          id: "together",
+          label: "Downloaded around the same time",
+          items: together,
+          total: together.length,
+        },
+      ]
+    : [];
+  const checkpoints = onShelfCheckpoints(set);
+  if (!checkpoints.length) {
+    const all = take(sorted(byId.values()).map((row) => row.id));
+    return [
+      ...togetherSections,
+      {
+        id: "all",
+        label: together.length ? `All other ${slot.noun}` : `All ${slot.noun}`,
+        items: all,
+        total: all.length,
+      },
+      ...heldSection,
+    ];
+  }
+  // The first checkpoint that has a base model: a pair shares one.
+  const base = checkpoints.find((m) => m.base_model)?.base_model ?? null;
+  const inSets = take(
+    (sets ?? [])
+      .filter(
+        (other) => other.id !== set.id && base && handMadeBase(other) === base,
+      )
+      .flatMap((other) =>
+        (other.members ?? [])
+          .filter((m) => m.slot === slotId && m.on_shelf)
+          .map((m) => m.id),
+      ),
+  );
+  const withCheckpoint = take(
+    checkpointCompanions(set, combinations).map((c) => c.id),
+  );
+  const sameBase = base
+    ? take(
+        sorted(
+          [...byId.values()].filter((row) => rowBaseModel(row) === base),
+        ).map((row) => row.id),
+      )
+    : [];
+  const rest = take(sorted(byId.values()).map((row) => row.id));
+  return [
+    ...togetherSections,
+    {
+      id: "sets",
+      label: base ? `In your ${base} sets` : "In your sets",
+      items: inSets,
+    },
+    {
+      id: "checkpoint",
+      label:
+        checkpoints.length === 1
+          ? "Used with this checkpoint"
+          : "Used with these checkpoints",
+      items: withCheckpoint,
+    },
+    base
+      ? { id: "base", label: `${base} ${slot.noun}`, items: sameBase }
+      : null,
+    base
+      ? {
+          id: "all",
+          label: "Other base models",
+          items: rest,
+          collapsed:
+            rest.length === 1
+              ? "1 more for another base model"
+              : `${rest.length} ${slot.noun} for other base models`,
+        }
+      : { id: "all", label: `All other ${slot.noun}`, items: rest },
+  ]
+    .filter(Boolean)
+    .map((section) => ({ ...section, total: section.items.length }))
+    .concat(heldSection);
+}
+
+/**
+ * Whether the Models rail lists a shelf row: any kind some slot takes, that a
+ * set can keep by hash now or once the hasher has read it. A row with no hash
+ * and none on its way (`hash_pending` false: a cached Hugging Face repo is a
+ * directory) can never be added, so it is not offered.
+ */
+export function railListed(row) {
+  return (
+    Boolean(row?.sha256 || row?.hash_pending) &&
+    SET_SLOTS.some((slot) => slot.kinds.includes(row?.file_kind))
+  );
+}
+
+/**
+ * What the Models rail's *Fits <set>* filter keeps, evidence first (design B).
+ *
+ * Every shelf model the set does not hold that some slot takes, narrowed to the
+ * set's base model once its checkpoint names one. A model pictures or ComfyUI
+ * runs used beside one of the set's checkpoints fits whatever its base model
+ * says, since that is the strongest evidence there is, and it carries the
+ * picture count the rail gives as the reason. With no checkpoint there is
+ * nothing to narrow by, so everything not held fits. A model still waiting for
+ * its hash is kept: the rail lists it, disabled, with the reason.
+ *
+ * @returns {{rows: Array<Object>, evidence: Map<number, Object>}} `rows` in
+ *   shelf order; `evidence` is `model.id` → its `worksWith` companion entry.
+ */
+export function setFits(set, rows, combinations) {
+  const held = new Set((set?.members ?? []).map((m) => m.sha256));
+  const base = handMadeBase(set);
+  const evidence = new Map(
+    checkpointCompanions(set, combinations).map((c) => [c.id, c]),
+  );
+  const fits = (rows ?? []).filter(
+    (row) =>
+      railListed(row) &&
+      !(row.sha256 && held.has(row.sha256)) &&
+      (!base || evidence.has(row.id) || rowBaseModel(row) === base),
+  );
+  return { rows: fits, evidence };
+}
+
+/**
+ * What "Fill from pictures" offers: every model recipes or ComfyUI runs have
+ * used with this set's checkpoints that the set does not hold, strongest evidence
+ * first. Another checkpoint is offered too: a set holds a two-model workflow's
+ * pair (Wan 2.2's other expert, a refiner).
+ *
+ * @returns {Array<{id, name, kindLabel, recipes, historyRuns, slot, sha256}>}
+ */
+export function fillFromPictures(set, combinations, rows) {
+  const held = new Set((set.members ?? []).map((m) => m.sha256));
+  const byId = new Map((rows ?? []).map((row) => [row.id, row]));
+  return (
+    checkpointCompanions(set, combinations)
+      .map((c) => ({ ...c, row: byId.get(c.id) }))
+      .filter(
+        (c) => c.row?.sha256 && !held.has(c.row.sha256) && c.kind !== "engine",
+      )
+      .map((c) => ({
+        id: c.id,
+        name: c.name,
+        kindLabel: c.kindLabel,
+        recipes: c.recipes,
+        historyRuns: c.historyRuns,
+        detail: `${c.kindLabel || "Model"} · ${witnessCount(c)}`,
+        slot: defaultSlot(c.kind),
+      }))
+  );
+}
+
+/**
+ * What "Fill from a set" offers: the members of your other sets with the same
+ * base model (every other set, while this one has no checkpoint), each once,
+ * labelled with the sets it comes from.
+ */
+export function fillFromSets(set, sets) {
+  const base = handMadeBase(set);
+  const held = new Set((set.members ?? []).map((m) => m.sha256));
+  const found = new Map();
+  for (const other of sets ?? []) {
+    if (other.id === set.id) continue;
+    if (base && handMadeBase(other) !== base) continue;
+    for (const member of other.members ?? []) {
+      if (!member.on_shelf || held.has(member.sha256)) continue;
+      // Another set's checkpoint is not offered: it is the base model of that
+      // set, not a file that goes with this one's.
+      if (member.slot === "checkpoint") continue;
+      const seen = found.get(member.sha256) ?? {
+        id: member.id,
+        name: member.name,
+        kindLabel: memberKindLabel(member),
+        slot: member.slot,
+        from: [],
+      };
+      seen.from.push(handMadeName(other));
+      found.set(member.sha256, seen);
+    }
+  }
+  return [...found.values()].map((entry) => ({
+    ...entry,
+    detail: `${entry.kindLabel || "Model"} · ${entry.from.join(", ")}`,
+  }));
+}
+
+/**
+ * A hand-made set's tray, slot by slot, in the order it is drawn and walked.
+ *
+ * Every member tile, then the merge offer's ghosts for that slot (#1523), then
+ * the slot's ＋ tile. The keys are what the tray and
+ * the grid's cursor agree on: `m:<sha256>` for a member, `g:<sha256>` for a
+ * ghost, `add:<slot>` for a ＋ tile.
+ *
+ * @returns {Array<{slot: Object, items: Array<{key, member: Object|null,
+ *   ghost?: Object}>}>}
+ */
+export function setSlots(set) {
+  const members = set?.members ?? [];
+  const ghosts = set?.offer?.models ?? [];
+  return SET_SLOTS.map((slot) => {
+    const held = members.filter((m) => m.slot === slot.id);
+    const items = held.map((member) => ({ key: `m:${member.sha256}`, member }));
+    for (const ghost of ghosts.filter((g) => g.slot === slot.id)) {
+      items.push({ key: `g:${ghost.sha256}`, member: null, ghost });
+    }
+    items.push({ key: `add:${slot.id}`, member: null });
+    return { slot, items };
+  });
+}

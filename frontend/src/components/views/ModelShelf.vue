@@ -18,12 +18,12 @@
       is named for the date it shows. Every column but Name begins with a handle
       that resizes it: Left and Right move the edge, Home and End take it to its
       widest and narrowest, Enter puts it back. The bar ends in the app-wide
-      controls: Settings and the stats sidebar toggle. Nothing on this screen
+      controls: Settings and the Models and tasks toggle. Nothing on this screen
       can be undone. A ring around a model's mark says who it is assigned to. A
       name in italics has not been given one. A row that stands for a training
       run says how many files it holds; Right and Left open and close it.
-      Right-click a row for everything that can be done to it. Escape clears the
-      selection.
+      Right-click a row for everything that can be done to it, or a folder's
+      header to scan or move that folder. Escape clears the selection.
     </p>
 
     <!-- One announcement for a resort, because the rows reorder silently: the
@@ -41,7 +41,7 @@
          on the press, and it has no selection to hang on. Every other verb
          lives on the row or in the selection pill (#904). -->
     <div class="shelf-toolbar">
-      <span class="shelf-title shelf-fold-1070">Models</span>
+      <span class="shelf-title shelf-fold-1262">Models</span>
 
       <!-- Two views of one destination, not two destinations. The runs are
            models too - still in ai-toolkit's output folder rather than on the
@@ -55,19 +55,20 @@
            on one segment against mdi line art on the other unbalances a control
            that has to read as symmetric.
 
-           The selected segment FILLS, in a wash rather than the solid accent
-           `.tbm-seg` uses inside a menu - this one sits in a toolbar beside the
-           bar's one accent button, and two solid fills in one strip is what
-           made this bar read louder than the other two. Never a bolder label: a
-           bolder label is a wider label, so the pair resized on every switch and
-           shoved the whole left group sideways. -->
-      <div class="shelf-viewswitch" role="tablist" aria-label="Model view">
+           Drawn in the popover's old `.tbm-seg` track, not `Segmented`: it
+           keeps `tablist`/`tab` because it switches which panel is on screen
+           rather than setting a value, and tabs are their own job. -->
+      <div
+        class="tbm-seg shelf-viewswitch"
+        role="tablist"
+        aria-label="Model view"
+      >
         <button
           id="shelf-tab-shelf"
           type="button"
           role="tab"
-          class="bar-btn shelf-viewseg"
-          :class="{ 'shelf-viewseg--on': isShelfTab }"
+          class="tbm-seg-btn shelf-viewseg"
+          :class="{ 'tbm-seg-btn--on shelf-viewseg--on': isShelfTab }"
           :aria-selected="isShelfTab"
           :aria-controls="isShelfTab ? 'shelf-panel-shelf' : undefined"
           :tabindex="isShelfTab ? 0 : -1"
@@ -80,8 +81,8 @@
           id="shelf-tab-runs"
           type="button"
           role="tab"
-          class="bar-btn shelf-viewseg"
-          :class="{ 'shelf-viewseg--on': !isShelfTab }"
+          class="tbm-seg-btn shelf-viewseg"
+          :class="{ 'tbm-seg-btn--on shelf-viewseg--on': !isShelfTab }"
           :aria-selected="!isShelfTab"
           :aria-controls="!isShelfTab ? 'shelf-panel-runs' : undefined"
           :tabindex="isShelfTab ? -1 : 0"
@@ -103,44 +104,48 @@
         transition="scale-transition"
       >
         <template #activator="{ props: menuProps }">
-          <button
-            ref="addBtnRef"
-            v-bind="menuProps"
-            class="bar-btn bar-btn--accent shelf-fold-680"
-            type="button"
+          <!-- A copy of a 6 GB checkpoint is not instant, and this button is
+               the only thing on screen that knows one is running, so the glyph
+               becomes the spinner. Not `loading`: that disables the button, and
+               the menu's other rows (Add folder, ai-toolkit) stay usable while
+               a file copies; only Add file refuses. -->
+          <AppBarButton
+            v-bind="withRef(menuProps, (el) => (addBtnRef = el))"
+            class="bar-btn--accent shelf-fold-680"
+            :icon="adding ? '' : 'plus'"
+            chevron
+            :aria-busy="adding || undefined"
             aria-haspopup="menu"
             :aria-expanded="addMenuOpen"
-            :aria-busy="adding || undefined"
-            title="Add models to the shelf"
-          >
-            <!-- A copy of a 6 GB checkpoint is not instant, and this button is
-                 the only thing on screen that knows one is running. -->
-            <v-icon v-if="adding" size="19" class="mdi-spin"
+            tooltip="Add models to the shelf"
+            ><v-icon v-if="adding" size="18" class="mdi-spin"
               >mdi-loading</v-icon
-            >
-            <v-icon v-else size="19">mdi-plus</v-icon>
-            <span>Add</span>
-            <v-icon size="18" class="bar-btn-chevron">mdi-menu-down</v-icon>
-          </button>
+            >Add</AppBarButton
+          >
         </template>
-        <div class="shelf-menu" role="menu">
+        <div
+          class="ctx-menu shelf-menu"
+          role="menu"
+          tabindex="-1"
+          @keydown="onMenuKeydown"
+        >
           <button
-            class="shelf-mi"
+            class="ctx-item"
             type="button"
             role="menuitem"
-            @click="openFolders(addBtnRef)"
+            @click="openFolders(addBtnRef?.el)"
           >
-            <v-icon size="16">mdi-folder-plus-outline</v-icon>
-            <span>Add folder…</span>
+            <v-icon class="ctx-icon">mdi-folder-plus-outline</v-icon>
+            <span class="ctx-label-text">Add folder…</span>
           </button>
           <button
-            class="shelf-mi"
+            class="ctx-item"
             type="button"
             role="menuitem"
-            @click="openAddFile(addBtnRef)"
+            @click="openAddFile(addBtnRef?.el)"
           >
-            <v-icon size="16">mdi-file-plus-outline</v-icon>
-            <span>Add file…</span>
+            <v-icon class="ctx-icon">mdi-file-plus-outline</v-icon>
+            <span class="ctx-label-text">Add file…</span>
           </button>
           <!-- Shown only while the output root is UNSET, because setting it is
                a once-ever act: ai-toolkit writes every run under one folder.
@@ -150,15 +155,15 @@
                are about a selection the reader just made and owe an
                explanation, and this is about a job already done. -->
           <template v-if="!hasSourceFolder">
-            <span class="shelf-mi-sep"></span>
+            <div class="ctx-sep"></div>
             <button
-              class="shelf-mi"
+              class="ctx-item"
               type="button"
               role="menuitem"
-              @click="openAddSource(addBtnRef)"
+              @click="openAddSource(addBtnRef?.el)"
             >
-              <AiToolkitIcon :size="16" />
-              <span>Set ai-toolkit output folder…</span>
+              <AiToolkitIcon class="ctx-icon" />
+              <span class="ctx-label-text">Set ai-toolkit output folder…</span>
             </button>
           </template>
         </div>
@@ -182,17 +187,15 @@
            `aria-haspopup="dialog"` on both, and `aria-expanded` on neither:
            focus moves into the dialog rather than into anything the button
            owns. -->
-      <button
+      <AppBarButton
         ref="foldersBtnRef"
-        class="bar-btn bar-btn--boxed shelf-fold-680"
-        type="button"
-        title="Model folders - add, rescan, move or forget a folder"
+        class="shelf-fold-680"
+        icon="folder-multiple-outline"
+        tooltip="Model folders - add, rescan, move or forget a folder"
         aria-label="Model folders"
         aria-haspopup="dialog"
-        @click="openFolders(foldersBtnRef)"
-      >
-        <v-icon size="19">mdi-folder-multiple-outline</v-icon>
-      </button>
+        @click="openFolders(foldersBtnRef?.el)"
+      />
 
       <!-- Where those two land when the bar runs out of width. Only the
            "opens something, writes nothing on the press" pair folds: the ⋯ is
@@ -201,12 +204,12 @@
            this bar would need three of them).
 
            `align="start"` because the trigger sits near the LEFT edge, and the
-           rows are the same `.shelf-mi` items the Add menu already draws - one
+           rows are the same `.ctx-item` rows the Add menu already draws - one
            recipe, so the folded form is the unfolded one moved. -->
       <TbOverflowMenu ref="overflowRef" class="shelf-overflow" align="start">
         <template #default="{ close }">
           <button
-            class="shelf-mi"
+            class="ctx-item"
             type="button"
             role="menuitem"
             @click="
@@ -214,11 +217,11 @@
               openFolders(overflowRef?.trigger?.());
             "
           >
-            <v-icon size="16">mdi-folder-plus-outline</v-icon>
-            <span>Add folder…</span>
+            <v-icon class="ctx-icon">mdi-folder-plus-outline</v-icon>
+            <span class="ctx-label-text">Add folder…</span>
           </button>
           <button
-            class="shelf-mi"
+            class="ctx-item"
             type="button"
             role="menuitem"
             @click="
@@ -226,12 +229,12 @@
               openAddFile(overflowRef?.trigger?.());
             "
           >
-            <v-icon size="16">mdi-file-plus-outline</v-icon>
-            <span>Add file…</span>
+            <v-icon class="ctx-icon">mdi-file-plus-outline</v-icon>
+            <span class="ctx-label-text">Add file…</span>
           </button>
           <template v-if="!hasSourceFolder">
             <button
-              class="shelf-mi"
+              class="ctx-item"
               type="button"
               role="menuitem"
               @click="
@@ -239,13 +242,13 @@
                 openAddSource(overflowRef?.trigger?.());
               "
             >
-              <AiToolkitIcon :size="16" />
-              <span>Set ai-toolkit output folder…</span>
+              <AiToolkitIcon class="ctx-icon" />
+              <span class="ctx-label-text">Set ai-toolkit output folder…</span>
             </button>
           </template>
-          <span class="shelf-mi-sep"></span>
+          <div class="ctx-sep"></div>
           <button
-            class="shelf-mi"
+            class="ctx-item"
             type="button"
             role="menuitem"
             @click="
@@ -253,8 +256,8 @@
               openFolders(overflowRef?.trigger?.());
             "
           >
-            <v-icon size="16">mdi-folder-multiple-outline</v-icon>
-            <span>Model folders…</span>
+            <v-icon class="ctx-icon">mdi-folder-multiple-outline</v-icon>
+            <span class="ctx-label-text">Model folders…</span>
           </button>
         </template>
       </TbOverflowMenu>
@@ -265,7 +268,7 @@
            "8 runs"), so anywhere to their left it shoves Add and Model
            folders sideways every time the tab changes. Here the spacer
            absorbs the difference and nothing moves. -->
-      <span class="shelf-sub shelf-sub--ingap shelf-fold-1070">{{
+      <span class="shelf-sub shelf-sub--ingap shelf-fold-1262">{{
         isShelfTab ? countLabel : runsCountLabel
       }}</span>
 
@@ -285,6 +288,17 @@
              about a selection the reader just made - they are about a list that
              is not in front of them. -->
         <template v-if="isShelfTab">
+          <!-- The name filter's toolbar copy, bound to the same text as the
+               field at the top of Show, which is always there when this one
+               folds (rung 1b). On the set grid it narrows the cards as Show
+               does, and the hand-made ones by their own name too. -->
+          <NameFilterField
+            ref="nameFieldRef"
+            class="shelf-name-bar"
+            :model-value="store.filters.name"
+            label="Filter models by name"
+            @update:model-value="(name) => store.setFilters({ name })"
+          />
           <v-menu
             v-model="groupMenuOpen"
             :close-on-content-click="false"
@@ -294,24 +308,32 @@
             transition="scale-transition"
           >
             <template #activator="{ props: menuProps }">
-              <button
-                v-bind="menuProps"
-                class="bar-btn bar-btn--boxed"
-                :class="{ 'bar-btn--open': groupMenuOpen }"
-                type="button"
+              <AppBarButton
+                v-bind="withRef(menuProps, (el) => (groupButtonRef = el))"
+                :icon="activeGroup.icon"
+                chevron
+                :open="groupMenuOpen"
                 aria-haspopup="dialog"
                 :aria-expanded="groupMenuOpen"
-                :title="groupButtonTitle"
+                :tooltip="groupButtonTitle"
               >
-                <v-icon size="19">{{ activeGroup.icon }}</v-icon>
                 <span class="bar-btn-value">{{ activeGroup.label }}</span>
-                <v-icon size="18" class="bar-btn-chevron">mdi-menu-down</v-icon>
-              </button>
+              </AppBarButton>
             </template>
-            <ShelfSortPanel section="group" />
+            <ShelfSortPanel
+              section="group"
+              @group-picked="closeGroupMenu"
+            />
           </v-menu>
 
+          <!-- Hidden on the set grid, not disabled, exactly as the whole
+               cluster is hidden on the training-runs tab and for the same
+               reason: the five sort keys order the ROW LIST, and that list is
+               not on screen. The grid orders itself by evidence. A control that
+               is live and does nothing is worse than one that is absent - it
+               reads "Sort: Added" over a grid it has no effect on. -->
           <v-menu
+            v-if="!isSetGrid"
             v-model="sortMenuOpen"
             :close-on-content-click="false"
             location="bottom end"
@@ -332,32 +354,26 @@
               >
                 <!-- The accessible name IS the current state and flips on press,
                  which is what a keyboard user hears when focus returns. -->
-                <button
-                  class="bar-btn bar-split-toggle"
-                  type="button"
-                  :title="directionLabel"
-                  :aria-label="directionLabel"
+                <AppBarButton
+                  class="bar-split-toggle"
+                  :icon="directionIcon"
+                  :tooltip="directionLabel"
                   @click.stop="toggleDirection"
-                >
-                  <v-icon size="19">{{ directionIcon }}</v-icon>
-                </button>
+                />
                 <!-- `aria-haspopup="dialog"`, not `menu`: the panel is a div of
                  grouped toggles, and claiming a menu would promise roving
                  arrow keys nothing implements. Matches SearchResultBar. -->
-                <button
+                <AppBarButton
                   v-bind="menuProps"
-                  class="bar-btn bar-split-menu"
-                  type="button"
+                  class="bar-split-menu"
+                  :icon="activeSort.icon"
+                  chevron
                   aria-haspopup="dialog"
                   :aria-expanded="sortMenuOpen"
-                  :title="sortButtonTitle"
+                  :tooltip="sortButtonTitle"
                 >
-                  <v-icon size="19">{{ activeSort.icon }}</v-icon>
                   <span class="bar-btn-value">{{ activeSort.label }}</span>
-                  <v-icon size="18" class="bar-btn-chevron"
-                    >mdi-menu-down</v-icon
-                  >
-                </button>
+                </AppBarButton>
               </div>
             </template>
             <ShelfSortPanel section="sort" />
@@ -380,26 +396,21 @@
              "why is this list short", and the result counts are already on the
              group headers. -->
             <template #activator="{ props: menuProps }">
-              <button
+              <AppBarButton
                 v-bind="menuProps"
-                class="bar-btn bar-btn--boxed"
-                :class="{
-                  'bar-btn--active': store.activeCount > 0 && !showMenuOpen,
-                  'bar-btn--open': showMenuOpen,
-                }"
-                type="button"
-                :title="showButtonTitle"
-              >
-                <span class="bar-icon-badge-wrap">
-                  <v-icon size="19">mdi-filter-outline</v-icon>
-                  <span v-if="store.activeCount > 0" class="bar-filter-badge">{{
-                    store.activeCount
-                  }}</span>
-                </span>
-                <v-icon size="18" class="bar-btn-chevron">mdi-menu-down</v-icon>
-              </button>
+                class="shelf-show-btn"
+                icon="filter-outline"
+                chevron
+                :badge="store.activeCount > 0 ? store.activeCount : null"
+                :active="store.activeCount > 0 && !showMenuOpen"
+                :open="showMenuOpen"
+                :tooltip="showButtonTitle"
+              />
             </template>
-            <ShelfShowPanel />
+            <ShelfShowPanel
+              :open="showMenuOpen"
+              :focus-name-request="nameFocusRequest"
+            />
           </v-menu>
         </template>
 
@@ -412,7 +423,11 @@
              alone cannot separate identical icon buttons into "this view's
              controls" and "the app's". -->
         <span class="bar-separator" aria-hidden="true"></span>
-        <TbGlobalActions @open-settings="emit('open-settings')" />
+        <TbGlobalActions
+          rail="models"
+          rail-name="Models and tasks"
+          @open-settings="emit('open-settings')"
+        />
       </div>
     </div>
 
@@ -438,11 +453,14 @@
     <PicturePicker
       :open="thumbnailPickerOpen"
       :subtitle="thumbnailSubject"
+      offer-videos
       @close="thumbnailPickerOpen = false"
       @pick="onThumbnailPicked"
     >
       <template #footer-start>
-        <AppButton variant="ghost" @click="pickIconFile">Choose a file…</AppButton>
+        <AppButton variant="ghost" @click="pickIconFile"
+          >Choose a file…</AppButton
+        >
       </template>
     </PicturePicker>
 
@@ -464,6 +482,24 @@
       <!-- The visible half of the same statement. `inert` on the wrapper is
            what actually stops the interaction; this is what says so. -->
       <div v-if="moves.running" class="shelf-dim" aria-hidden="true"></div>
+      <!-- The closed Models rail's handle, the one Workflows shows
+           (visual-language "Closed inspector"): it names the selection and
+           bounces on a new one. With nothing selected it says "All models",
+           without the selection stripe, and bounces when a card's tray
+           opens. -->
+      <InspectorEdgeTab
+        v-if="!sidebarStore.modelsRailOpen"
+        :label="railLabel || 'All models'"
+        :plain="!railLabel"
+        :name="
+          railLabel
+            ? `Show models: ${railLabel}`
+            : `Show all models (${railCount.toLocaleString()})`
+        "
+        :nudge="sidebarStore.inspectorNudge"
+        data-testid="models-rail-handle"
+        @open="openRailFromTab"
+      />
       <!-- An unplugged drive states its scope ONCE, here, rather than through
            300 rows each carrying the same mark. The rows still take the offline
            treatment - that is what tells one row from its neighbour - but the
@@ -473,25 +509,62 @@
            needs fixing, so the reader who has read it once gets to put it
            away. It comes back when the shelf is refetched, because a drive that
            is still unplugged is still worth saying once. -->
-      <p
-        v-if="offlineNote && !offlineDismissed"
-        class="shelf-banner"
-        :title="offlineMountPaths"
-      >
+      <p v-if="offlineNote && !offlineDismissed" class="shelf-banner">
+        <Tooltip :text="offlineMountPaths" activator="parent" />
         <v-icon size="16">mdi-power-plug-off-outline</v-icon>
         <span class="shelf-banner-text">{{ offlineNote }}</span>
         <span class="shelf-spacer"></span>
-        <button
-          class="shelf-banner-dismiss"
-          type="button"
-          title="Dismiss"
+        <AppBarButton
+          icon="close"
+          tooltip="Dismiss"
           aria-label="Dismiss the offline notice"
           @click="offlineDismissed = true"
-        >
-          <v-icon size="15">mdi-close</v-icon>
-        </button>
+        />
       </p>
-      <p v-if="store.loading" class="shelf-state">Reading the shelf…</p>
+      <!-- Sets whose checkpoint is gone, said once. A selection shortcut, not a
+           second verb: Replace lives on the pill and the card's menu, and
+           replacing one is the same operation as replacing twelve. -->
+      <p
+        v-if="isSetGrid && missingCount && !missingDismissed"
+        class="shelf-banner"
+        data-testid="shelf-missing-banner"
+      >
+        <v-icon size="16">mdi-file-alert-outline</v-icon>
+        <span class="shelf-banner-text"
+          ><b>{{
+            missingCount === 1
+              ? "1 set is missing its checkpoint"
+              : `${missingCount} sets are missing their checkpoint`
+          }}</b>
+          · not on your shelf; replace it in the workflows that load it</span
+        >
+        <AppButton size="sm" @click="store.selectAllMissing()">Select them</AppButton>
+        <span class="shelf-spacer"></span>
+        <AppBarButton
+          icon="close"
+          tooltip="Dismiss"
+          aria-label="Dismiss the missing checkpoint notice"
+          @click="dismissedMissing = new Set(store.missingSetKeys)"
+        />
+      </p>
+      <!-- The set grid, ahead of every row-list state: its groups OVERLAP, so
+           it is a different screen rather than a banded version of this one. It
+           still reads `visibleRows`, so Show and the filters keep applying. -->
+      <!-- `firstRead`, not `loading`: a refetch after an edit (assign, stack,
+           rename) must leave the list mounted. Swapping it for the state line
+           destroys the scrollport and drops the reader back at the top. -->
+      <ModelSetGrid
+        v-if="isSetGrid && !firstRead && !store.error"
+        ref="setGridRef"
+        @works-with="showWorksWith"
+        @menu="openGridMenu"
+        @rename="startRenameSelected"
+        @set-menu="({ x, y, el }) => setBarRef?.openContextMenu(x, y, el)"
+        @rename-set="startRenameSet"
+        @replace-missing="(heads) => (replacingHeads = heads)"
+        @missing-menu="({ x, y, el }) => missingBarRef?.openContextMenu(x, y, el)"
+      />
+      <p v-else-if="firstRead" class="shelf-state">Reading the shelf…</p>
       <p v-else-if="store.error" class="shelf-state" role="alert">
         {{ store.error }}
       </p>
@@ -501,13 +574,7 @@
            first two offer Reset. -->
       <div v-else-if="store.nothingSelected" class="shelf-state">
         <p>Nothing is selected in Show.</p>
-        <button
-          class="tbm-action tbm-action--secondary"
-          type="button"
-          @click="store.resetFilters()"
-        >
-          Reset filters
-        </button>
+        <AppButton @click="store.resetFilters()">Reset filters</AppButton>
       </div>
       <!-- Ahead of the terminal state, and gated on the selection rather than
            on `rows`: a narrowed selection only FETCHES the blocks it asks for,
@@ -521,13 +588,7 @@
         class="shelf-state"
       >
         <p>No models match these filters.</p>
-        <button
-          class="tbm-action tbm-action--secondary"
-          type="button"
-          @click="store.resetFilters()"
-        >
-          Reset filters
-        </button>
+        <AppButton @click="store.resetFilters()">Reset filters</AppButton>
       </div>
       <div v-else-if="!store.visibleRows.length" class="shelf-state">
         <p>No models found.</p>
@@ -535,15 +596,13 @@
           PixlStash lists what it finds in the model folders registered on this
           machine. Add the folder where you keep them.
         </p>
-        <button
-          ref="emptyFoldersBtnRef"
-          class="tbm-action tbm-action--primary"
-          type="button"
+        <AppButton
+          variant="primary"
           aria-haspopup="dialog"
-          @click="openFolders(emptyFoldersBtnRef)"
+          @click="openFolders()"
         >
           Add a model folder
-        </button>
+        </AppButton>
       </div>
 
       <!-- The row itself is not a focus stop unless it holds the roving one:
@@ -580,9 +639,13 @@
               }"
               type="button"
               :aria-label="columnSortLabel(NAME_COLUMN)"
-              :title="columnSortLabel(NAME_COLUMN)"
               @click="sortByColumn(NAME_COLUMN.sort)"
             >
+              <Tooltip
+                :text="columnSortLabel(NAME_COLUMN)"
+                activator="parent"
+                :describe="false"
+              />
               <span class="shelf-head-text">{{ NAME_COLUMN.label }}</span>
               <v-icon class="shelf-head-arrow" size="14" aria-hidden="true">{{
                 directionIcon
@@ -608,9 +671,13 @@
               }"
               type="button"
               :aria-label="columnSortLabel(col)"
-              :title="columnSortLabel(col)"
               @click="sortByColumn(col.sort)"
             >
+              <Tooltip
+                :text="columnSortLabel(col)"
+                activator="parent"
+                :describe="false"
+              />
               <span class="shelf-head-text">{{ col.label }}</span>
               <v-icon class="shelf-head-arrow" size="14" aria-hidden="true">{{
                 directionIcon
@@ -639,7 +706,6 @@
               :aria-valuemin="MIN_COLUMN_WIDTHS[col.key]"
               :aria-valuemax="widenable(col.key, MAX_COLUMN_WIDTH)"
               tabindex="0"
-              :title="`Drag to resize the ${col.label} column, double-click to reset it`"
               @pointerdown="startResize(col.key, $event)"
               @pointermove="onResizeMove"
               @pointerup="endResize"
@@ -647,7 +713,12 @@
               @lostpointercapture="endResize"
               @dblclick="resetColumn(col.key)"
               @keydown="onGripKeydown(col.key, $event)"
-            ></span>
+            >
+              <Tooltip
+                :text="`Drag to resize the ${col.label} column, double-click to reset it`"
+                activator="parent"
+              />
+            </span>
           </span>
         </div>
         <!-- The scrollport, and the reason the strip above it is a sibling
@@ -659,7 +730,14 @@
              It costs the strip nothing: it was sticky only to stay put, and a
              sibling above the scrollport is already put. The two stay aligned
              because both reserve the same scrollbar gutter. -->
-        <div class="shelf-scroll">
+        <div
+          class="shelf-scroll"
+          @pointerdown="
+            pressedBackground =
+              $event.button === 0 && isListBackground($event)
+          "
+          @click="onListBackgroundClick"
+        >
           <!-- The key to the meters, said ONCE for the view rather than once per
                band: it is the same three segments every time, and repeating it
                down the list would cost more room than the meters themselves.
@@ -723,14 +801,18 @@
                      `Managed` chips one level down. The word is in the title
                      for the reader who wants it, and null draws the plain
                      disk - never the word "Unknown". -->
-                <v-icon
-                  size="15"
-                  class="shelf-band-icon"
-                  :title="DRIVE_KINDS[group.band.kind]?.label"
-                  >{{
-                    DRIVE_KINDS[group.band.kind]?.icon || "mdi-harddisk"
-                  }}</v-icon
-                >
+                <Tooltip :text="DRIVE_KINDS[group.band.kind]?.label || ''">
+                  <template #activator="{ props: tipProps }">
+                    <v-icon
+                      v-bind="tipProps"
+                      size="16"
+                      class="shelf-band-icon"
+                      >{{
+                        DRIVE_KINDS[group.band.kind]?.icon || "mdi-harddisk"
+                      }}</v-icon
+                    >
+                  </template>
+                </Tooltip>
                 <span class="shelf-band-name">{{ group.band.label }}</span>
                 <!-- Only when it says something the name did not. With no
                      volume label the name IS the mount point, and drawing both
@@ -862,6 +944,8 @@
                 :aria-expanded="!store.isCollapsed(group.key)"
                 :aria-label="groupLabel(group)"
                 @click="store.toggleGroup(group.key)"
+                @contextmenu="openFolderMenu(group, $event)"
+                @keydown="onFolderHeaderKeydown(group, $event)"
                 @dragover="onGroupDragOver(group, $event)"
                 @dragleave="onGroupDragLeave(group)"
                 @drop="onGroupDrop(group, $event)"
@@ -1037,19 +1121,52 @@
                       :ring="ringFor(row)"
                       :style="ringStyle(row)"
                     />
+                    <!-- Which file the run is being drawn from, said in words
+                         rather than by position: once the strip is open the
+                         reader is looking at six rows and choosing between
+                         them, and "the top one" is not an answer a screen
+                         reader can hear. On the thumbnail's bottom-left corner,
+                         the grid's own cover chip in the grid's own place,
+                         rather than among the name's chips, where it pushed the
+                         line into the text around it. Only while the stack is
+                         OPEN - on a collapsed run the cover is the only row
+                         there is, so the chip would be noise on every stacked
+                         row of the shelf. And only on the REAL cover: a filter
+                         can hide position 0, and `collapseStacks` then draws
+                         the lowest surviving member at the top - which is the
+                         run's stand-in for the moment, not the file the owner
+                         chose. -->
+                    <span
+                      v-if="
+                        row.memberCount > 1 &&
+                        isStackOpen(row.stack_id) &&
+                        row.stack_position === 0
+                      "
+                      class="stack-cover-flag"
+                      ><Tooltip
+                        text="This file is what the shelf draws for the whole run."
+                        activator="parent"
+                      />Cover</span
+                    >
                   </span>
                   <span role="gridcell" class="shelf-row-label">
                     <!-- The absence glyph leads the line, because it changes what
                          everything after it means: the name is still true, the
                          file behind it is not there. -->
-                    <v-icon
+                    <Tooltip
                       v-if="row.locState !== 'present'"
-                      size="14"
-                      class="shelf-row-loc"
-                      :class="`shelf-row-loc--${row.locState}`"
-                      :title="LOC_TITLE[row.locState]"
-                      >{{ LOC_ICON[row.locState] }}</v-icon
+                      :text="LOC_TITLE[row.locState]"
                     >
+                      <template #activator="{ props: tipProps }">
+                        <v-icon
+                          v-bind="tipProps"
+                          size="14"
+                          class="shelf-row-loc"
+                          :class="`shelf-row-loc--${row.locState}`"
+                          >{{ LOC_ICON[row.locState] }}</v-icon
+                        >
+                      </template>
+                    </Tooltip>
                     <!-- The name is a FIELD, and it has four states, because
                          naming is the commonest fix on this shelf and the reader
                          has to be able to tell "somebody chose this" from "we
@@ -1077,11 +1194,18 @@
                         @dblclick.stop="startRename(row)"
                         >{{ row.name.text || "Name this model" }}</span
                       >
+                      <VerdictIcon
+                        v-if="rowVerdict(row)"
+                        :verdict="rowVerdict(row).verdict"
+                        :label="rowVerdict(row).tooltip"
+                      />
                       <span
                         v-if="row.name.state === 'from-file'"
                         class="shelf-name-tag"
-                        :title="FROM_FILE_TAG_TITLE"
-                        >from filename</span
+                        ><Tooltip
+                          :text="FROM_FILE_TAG_TITLE"
+                          activator="parent"
+                        />from filename</span
                       >
                     </template>
                     <!-- Beside the name rather than in a column of its own: the
@@ -1093,9 +1217,12 @@
                       class="shelf-stack-badge"
                       type="button"
                       :aria-expanded="isStackOpen(row.stack_id)"
-                      :title="`${row.memberCount} files in this run`"
                       @click.stop="toggleStack(row.stack_id)"
                     >
+                      <Tooltip
+                        :text="`${row.memberCount} files in this run`"
+                        activator="parent"
+                      />
                       {{ row.memberCount }}
                       <v-icon
                         size="13"
@@ -1107,27 +1234,23 @@
                         >mdi-chevron-right</v-icon
                       >
                     </button>
-                    <!-- Which file the run is being drawn from, said in words
-                         rather than by position: once the strip is open the
-                         reader is looking at six rows and choosing between
-                         them, and "the top one" is not an answer a screen
-                         reader can hear. Only while the stack is OPEN - on a
-                         collapsed run the cover is the only row there is, so
-                         the chip would be noise on every stacked row of the
-                         shelf. And only on the REAL cover: a filter can hide
-                         position 0, and `collapseStacks` then draws the lowest
-                         surviving member at the top - which is the run's
-                         stand-in for the moment, not the file the owner
-                         chose. -->
+                    <!-- The precision the file was stored at, which
+                         `deriveModelName` has just taken out of the name to
+                         its left. Two quant variants of one model are two rows
+                         reading the same name, and this chip is the whole of
+                         what tells them apart - so it is drawn on EVERY row
+                         that records one, never only where two of them meet: a
+                         name that changed when an unrelated file was
+                         downloaded would be worse than no badge at all.
+                         A row recording no precision gets no chip - not an
+                         empty one and not `UNKNOWN`. -->
                     <span
-                      v-if="
-                        row.memberCount > 1 &&
-                        isStackOpen(row.stack_id) &&
-                        row.stack_position === 0
-                      "
-                      class="shelf-chip"
-                      title="This file is what the shelf draws for the whole run."
-                      >Cover</span
+                      v-if="quantBadge(row.quant)"
+                      class="shelf-chip shelf-chip--quant"
+                      ><Tooltip
+                        :text="quantBadge(row.quant).title"
+                        activator="parent"
+                      />{{ quantBadge(row.quant).label }}</span
                     >
                     <!-- The step, on any row that is not a stack cover.
                          `deriveModelName` strips the trailing step from the
@@ -1143,12 +1266,34 @@
                       class="shelf-chip shelf-chip--step"
                       >{{ stepLabel(row) }}</span
                     >
+                    <!-- What to type in a prompt to call this model up. Mono
+                         when the word is on record, because it is typed
+                         character by character like the filename under it; the
+                         dashed "nothing here yet" chip when it is only the name
+                         of the person the model is assigned to. The prefix is
+                         for a screen reader, which otherwise reads a bare word
+                         after the step. -->
+                    <span
+                      v-if="triggerChip(row)"
+                      class="shelf-chip shelf-chip--trigger"
+                      :class="{ 'shelf-chip--none': triggerChip(row).isDefault }"
+                      ><Tooltip
+                        :text="triggerChip(row).title"
+                        activator="parent"
+                      /><span class="visually-hidden">Trigger word: </span
+                      >{{ triggerChip(row).label }}</span
+                    >
                     <!-- What the scan you just ran brought in. The SUCCESS
                          treatment, because an arrival is a good outcome - and
                          nothing else on a row is green, so it reads without a
                          key. Cleared by the next fetch, so it is never a stale
                          mark from three refreshes ago. -->
                     <span v-if="row.isNew" class="shelf-row-new">New</span>
+                    <!-- Drawn only while Show asks for the hidden models: this
+                         library leaves the row out otherwise. The neutral chip,
+                         because it is a state of the listing and not of the
+                         file. -->
+                    <span v-if="row.hidden" class="shelf-chip">Hidden</span>
                     <!-- The filename, on its own line under the name. It is what
                          the file is actually called, which the name above it may
                          well not be, and it is the string the reader pastes into
@@ -1156,11 +1301,13 @@
                          there rather than living in a tooltip. What IS in the
                          tooltip is the folder: the header names it only under
                          `groupBy: 'folder'`, so on every other axis this line is
-                         the one place left that can say where the file is. -->
-                    <span
-                      class="shelf-row-file"
-                      :title="copyPathsTitle(row.locations) || undefined"
-                    >
+                         the one place left that can say where the file is. The
+                         file's SHA-256 follows the paths (`modelFileTitle`). -->
+                    <span class="shelf-row-file">
+                      <Tooltip
+                        :text="modelFileTitle(row)"
+                        activator="parent"
+                      />
                       {{ row.filename
                       }}<template v-if="LOC_NOTE[row.locState]">
                         · {{ LOC_NOTE[row.locState] }}</template
@@ -1180,9 +1327,30 @@
                     </span>
                   </span>
                   <span role="gridcell" class="shelf-col shelf-col--kind">
-                    <span class="shelf-chip" :title="kindLabel(row)">{{
-                      kindLabel(row)
-                    }}</span>
+                    <!-- Set in place, like the name and the base model, with
+                         the kind the workflows that load it agree on under the
+                         chip (#1962). An engine is PixlStash's own and is not
+                         curated, so its chip stays a chip. -->
+                    <span
+                      v-if="row.file_kind === 'engine'"
+                      class="shelf-chip"
+                      :title="kindLabel(row)"
+                      >{{ kindLabel(row) }}</span
+                    >
+                    <KindMenu
+                      v-else
+                      :file-kind="row.file_kind"
+                      :kind-text="kindLabel(row)"
+                      :subject="row.name.text || row.filename || 'this model'"
+                      :suggested-kind="row.suggested_kind || ''"
+                      :suggested-by="row.suggested_by || 0"
+                      :suggested-fields="row.suggested_fields || []"
+                      :decided="Boolean(row.kind_decided)"
+                      :tabindex="row.rowKey === rovingRowKey ? 0 : -1"
+                      @pick="(kind) => setKindFromMenu(row, kind)"
+                      @adapter="setKindByDialog(row)"
+                      @suggest="(on) => setKindSuggestion(row, on)"
+                    />
                   </span>
                   <!-- Base is a COLUMN, not a phrase on a metadata line: it is
                        the field a reader scans a shelf for, and it can only be
@@ -1209,15 +1377,28 @@
                     />
                     <template v-else>
                       <span
-                        v-if="row.base_model"
+                        v-if="baseModelCell(row).text"
+                        class="shelf-base-text"
                         @dblclick.stop="startBaseModelEdit(row)"
-                        >{{ row.base_model }}</span
+                        >{{ baseModelCell(row).text }}</span
                       >
                       <span
                         v-else
                         class="shelf-chip shelf-chip--none"
                         @dblclick.stop="startBaseModelEdit(row)"
                         >not set</span
+                      >
+                      <!-- A value we inferred rather than one the file or a
+                           person stated. The same tag the name column uses for
+                           the file's own string, with its own word: "from
+                           filename" there already means "verbatim". -->
+                      <span
+                        v-if="baseModelCell(row).guess"
+                        class="shelf-name-tag"
+                        ><Tooltip
+                          :text="baseModelCell(row).guess"
+                          activator="parent"
+                        />guessed</span
                       >
                     </template>
                   </span>
@@ -1229,11 +1410,10 @@
                        title, which also names which of the two dates this is -
                        the column follows the sort, so the same cell holds
                        `Date added` on one shelf and `File date` on the next. -->
-                  <span
-                    role="gridcell"
-                    class="shelf-col shelf-col--date"
-                    :title="dateTitle(row)"
-                    >{{ dateCell(row) }}</span
+                  <span role="gridcell" class="shelf-col shelf-col--date"
+                    ><Tooltip :text="dateTitle(row)" activator="parent" />{{
+                      dateCell(row)
+                    }}</span
                   >
                 </li>
 
@@ -1276,10 +1456,11 @@
                       <span class="shelf-row-name">{{
                         memberLabel(member, row)
                       }}</span>
-                      <span
-                        class="shelf-row-file"
-                        :title="copyPathsTitle(member.locations) || undefined"
-                        >{{ member.filename }}</span
+                      <span class="shelf-row-file"
+                        ><Tooltip
+                          :text="modelFileTitle(member)"
+                          activator="parent"
+                        />{{ member.filename }}</span
                       >
                     </span>
                     <!-- A step of a run has no kind or base of its own - those
@@ -1301,11 +1482,11 @@
                          was saved is the one thing that differs from step to
                          step, and answering it with the run's would print the
                          same stamp down the whole strip. -->
-                    <span
-                      role="gridcell"
-                      class="shelf-col shelf-col--date"
-                      :title="dateTitle(member, true)"
-                      >{{ dateCell(member, true) }}</span
+                    <span role="gridcell" class="shelf-col shelf-col--date"
+                      ><Tooltip
+                        :text="dateTitle(member, true)"
+                        activator="parent"
+                      />{{ dateCell(member, true) }}</span
                     >
                   </li>
                 </template>
@@ -1335,26 +1516,64 @@
          a row was clicked. This wrapper is the float; the pill owns its own
          shape. `pointer-events` is off on the strip and back on for the pill,
          so the rows underneath it stay clickable. -->
-    <div v-if="isShelfTab" class="selbar-float">
+    <!-- Over the set grid as well as the row list. That was not always true: it
+         was held back while a card stood for a whole SET, because a Delete aimed
+         at one would have taken a shared VAE with it. A card stands for its BASE
+         MODEL now and a tray row for one file, so everything this bar can be
+         aimed at on that screen is exactly one model, which is what its verbs
+         write. One bar for both views, so the refusals cannot drift.
+         A hand-made set card (#1520) selects its SET instead, which takes the
+         second pill below: its verbs touch no file. The two selections can be
+         held together (Ctrl+click, Ctrl+A), and then both pills are up side by
+         side, each with its own verbs. -->
+    <div v-if="isShelfTab" ref="selFloatEl" class="selbar-float">
       <ShelfSelectionBar
         ref="selBarRef"
-        @rename="startRenameSelected"
-        @set-base-model="editVerb = 'base-model'"
-        @set-kind="editVerb = 'kind'"
-        @stack="confirmStack"
-        @unstack="confirmUnstack"
-        @make-cover="makeCover"
-        @remove-from-stack="confirmRemoveFromStack"
-        @move="openMove(store.selectedRows)"
-        @open-location="openLocation"
-        @set-icon="pickIcon"
-        @clear-icons="confirmClearIcons"
-        @forget="confirmForget"
-        @delete="confirmDelete"
+        :sets="hideableSets"
+        v-on="verbListeners"
+      />
+      <WorkflowSetSelectionBar
+        v-if="isSetGrid"
+        ref="setBarRef"
+        :sets="hideableSets"
+        @hide-sets="store.toggleHiddenSets(hideableSets)"
+        @rename="startRenameSet"
+        @duplicate="store.duplicateHandMadeSet(store.selectedSets[0])"
+        @delete="store.deleteHandMadeSets(store.selectedSets)"
+        @merge-offer="setGridRef?.openOffer(store.selectedSets[0]?.id)"
+        @keep-separate="store.keepOutOfHandMadeSet(store.selectedSets[0])"
+        @offer-again="store.offerMergeAgain(store.selectedSets[0])"
+      />
+      <MissingSetSelectionBar
+        v-if="isSetGrid"
+        ref="missingBarRef"
+        :sets="hideableSets"
+        @replace="replacingHeads = store.selectedMissing"
+        @hide-sets="store.toggleHiddenSets(hideableSets)"
       />
     </div>
+    <ReplaceMissingDialog
+      :open="replacingHeads.length > 0"
+      :heads="replacingHeads"
+      @close="replacingHeads = []"
+    />
+    <!-- The set receipts (#1573): the grid's own pill, lifted clear of the
+         selection pill when both are up. Local receipts only - a library
+         action's Undo would revert something this screen cannot show. -->
+    <ActionReceipt v-if="isShelfTab" local-only :lift-px="receiptLift" />
+    <WorkflowSetRenameDialog
+      :set="renamingSet"
+      @close="renamingSet = null"
+      @save="saveSetName"
+    />
 
+    <ModelWorksWithDialog :model="worksWithModel" @close="closeWorksWith" />
     <ShelfEditDialog :verb="editVerb" @close="editVerb = ''" />
+    <MergeCopiesDialog
+      :open="mergeRow !== null"
+      :row="mergeRow"
+      @close="mergeRow = null"
+    />
     <ShelfMoveDialog
       :open="moveOpen"
       :items="moveItems"
@@ -1362,15 +1581,55 @@
       :destination-folder-id="movePreselected"
       @close="closeMove"
     />
-    <!-- Setting the output root from the registry dialog lands on the runs for
-         the same reason doing it from the Add menu does: the owner set it
-         because they have runs to import, so showing them beats leaving a new
-         tab to be discovered. -->
-    <ModelFoldersDialog
-      :open="foldersOpen"
-      @close="closeFolders"
-      @source-added="showTab('runs')"
-    />
+
+    <!-- A folder header's own menu (#1270): the two registry verbs that are
+         about one folder and need no selection. Anchored to the pointer like
+         the row menu. The gates and their reasons are the ones Settings ›
+         Models uses (`useModelFolderGates`), so the two cannot disagree. -->
+    <v-menu
+      v-model="folderMenuOpen"
+      :target="folderMenuAt"
+      location="bottom end"
+      origin="top start"
+      :offset="2"
+    >
+      <div
+        v-if="folderMenuFolder"
+        class="ctx-menu shelf-menu"
+        role="menu"
+        tabindex="-1"
+        @keydown="onMenuKeydown"
+      >
+        <button
+          v-if="canScanFolder(folderMenuFolder)"
+          class="ctx-item"
+          :class="{ 'ctx-item--disabled': folderScanReason }"
+          type="button"
+          role="menuitem"
+          :disabled="Boolean(folderScanReason)"
+          @click="rescanFromMenu"
+        >
+          <Tooltip :text="folderScanReason || ''" activator="parent" />
+          <v-icon class="ctx-icon">mdi-refresh</v-icon>
+          <span class="ctx-label-text">{{
+            folderMenuFolder.last_checked ? "Rescan folder" : "Scan folder"
+          }}</span>
+        </button>
+        <button
+          v-if="folderMenuFolder.relocatable"
+          class="ctx-item"
+          :class="{ 'ctx-item--disabled': folderMoveReason }"
+          type="button"
+          role="menuitem"
+          :disabled="Boolean(folderMoveReason)"
+          @click="relocateFromMenu"
+        >
+          <Tooltip :text="folderMoveReason || ''" activator="parent" />
+          <v-icon class="ctx-icon">mdi-folder-move-outline</v-icon>
+          <span class="ctx-label-text">Move folder…</span>
+        </button>
+      </div>
+    </v-menu>
 
     <!-- The shipped host-path picker again, in its file mode. A server-side
          picker rather than an `<input type=file>`: the file is on the machine
@@ -1383,6 +1642,17 @@
       pick-model-file
       @select="onFilePicked"
       @close="closeAddFile"
+    />
+
+    <!-- The same picker in its directory mode, emptying a folder into what it
+         returns: the header menu's Move. `registeredPaths` for the same reason
+         as below - moving into a registered folder would swallow it. -->
+    <FolderBrowser
+      :open="Boolean(relocatingFolder)"
+      :registered-paths="foldersStore.registeredPaths"
+      already-registered-label="Already a model folder"
+      @select="onRelocatePicked"
+      @close="closeRelocate"
     />
 
     <!-- The same picker in its directory mode, registering what it returns as
@@ -1416,6 +1686,7 @@
 </template>
 
 <script setup>
+import { withRef } from "../../utils/withRef.js";
 import {
   computed,
   nextTick,
@@ -1427,12 +1698,24 @@ import {
 } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import ShelfShowPanel from "../panels/ShelfShowPanel.vue";
+import NameFilterField from "../widgets/NameFilterField.vue";
 import ShelfSortPanel from "../panels/ShelfSortPanel.vue";
 import ShelfSelectionBar from "../panels/ShelfSelectionBar.vue";
+import WorkflowSetRenameDialog from "../panels/WorkflowSetRenameDialog.vue";
+import { handMadeName, headName } from "../../utils/workflowSets";
+import WorkflowSetSelectionBar from "../panels/WorkflowSetSelectionBar.vue";
+import MissingSetSelectionBar from "../panels/MissingSetSelectionBar.vue";
+import ReplaceMissingDialog from "../io/ReplaceMissingDialog.vue";
 import BaseModelInput from "../widgets/BaseModelInput.vue";
+import KindMenu from "../widgets/KindMenu.vue";
 import ShelfEditDialog from "../panels/ShelfEditDialog.vue";
+import MergeCopiesDialog from "../panels/MergeCopiesDialog.vue";
 import ShelfMoveDialog from "../panels/ShelfMoveDialog.vue";
-import ModelFoldersDialog from "../panels/ModelFoldersDialog.vue";
+import ModelWorksWithDialog from "../panels/ModelWorksWithDialog.vue";
+import ModelSetGrid from "./ModelSetGrid.vue";
+import InspectorEdgeTab from "../widgets/InspectorEdgeTab.vue";
+import ActionReceipt from "../widgets/ActionReceipt.vue";
+import { FLOATING_BOTTOM_GAP_PX } from "../../utils/floatingBottom";
 import TbGlobalActions from "../panels/TbGlobalActions.vue";
 import TbOverflowMenu from "../panels/TbOverflowMenu.vue";
 import AiToolkitIcon from "../widgets/AiToolkitIcon.vue";
@@ -1440,14 +1723,18 @@ import TrainingRuns from "./TrainingRuns.vue";
 import { SOURCE_KIND } from "../../api/modelFolders";
 import FolderBrowser from "../editors/FolderBrowser.vue";
 import ModelMark from "../widgets/ModelMark.vue";
+import VerdictIcon from "../widgets/VerdictIcon.vue";
+import { modelVerdictMark } from "../../utils/setVerdicts";
 import PicturePicker from "../widgets/PicturePicker.vue";
 import AppButton from "../widgets/AppButton.vue";
+import AppBarButton from "../widgets/AppBarButton.vue";
+import Tooltip from "../widgets/Tooltip.vue";
 import ProgressOverlay from "../widgets/ProgressOverlay.vue";
 import StackEdgeTicks from "../widgets/StackEdgeTicks.vue";
 import { useConfirm } from "../../composables/useConfirm";
 import { addModelFile } from "../../api/modelFiles";
 import { getPictureThumbnailBlob } from "../../api/pictures";
-import { openModelLocation } from "../../api/modelShelf";
+import { fetchModelCompanions, openModelLocation } from "../../api/modelShelf";
 import {
   createStack,
   removeStackMember,
@@ -1457,14 +1744,18 @@ import {
 import { useEntityListsStore } from "../../stores/useEntityListsStore";
 import {
   DEFAULT_COLUMN_WIDTHS,
+  GRID_GROUP_BY,
   MAX_COLUMN_WIDTH,
   MIN_COLUMN_WIDTHS,
   useModelShelfStore,
 } from "../../stores/useModelShelfStore";
 import { useModelFoldersStore } from "../../stores/useModelFoldersStore";
 import { useModelMovesStore } from "../../stores/useModelMovesStore";
+import { useModelFolderGates } from "../../composables/useModelFolderGates";
 import { useNoticeStore } from "../../stores/useNoticeStore";
+import { useOperationStore } from "../../stores/useOperationStore";
 import { useReviewSessionsStore } from "../../stores/useReviewSessionsStore";
+import { useSearchStore } from "../../stores/useSearchStore";
 import { useSidebarStore } from "../../stores/useSidebarStore";
 import { useUserPrefsStore } from "../../stores/useUserPrefsStore";
 import { errorDetail } from "../../utils/apiError";
@@ -1479,20 +1770,25 @@ import {
   bandProjection,
   bandUsage,
   capabilityLabel,
-  copyPathsTitle,
+  companionsSentences,
+  modelFileTitle,
   dateColumnKey,
   defaultSortDirection,
   deletableModels,
   fileKindLabel,
   undeletableNotice,
+  baseModelCell,
   trashName,
   withEmptyFolders,
   withFolderSignals,
   formatModelSize,
   modelDate,
+  modelName,
   GROUP_BY_LABELS,
   modelVersion,
   movableCopies,
+  quantBadge,
+  triggerChip,
   releaseReceipt,
   SORT_LABELS,
   stackReceipt,
@@ -1500,6 +1796,7 @@ import {
   unstackReceipt,
   sortDirectionLabel,
 } from "../../utils/modelShelf";
+import { onMenuKeydown } from "../../utils/menuKeyboard.js";
 
 // Settings lives in App.vue's sidebar dialog, so the toolbar's Settings button
 // asks for it the way the duplicates queue does. The stats toggle needs no
@@ -1514,25 +1811,122 @@ const moves = useModelMovesStore();
 // owns the key before it clears anything. See `onShelfEscape`.
 const reviewSessionsStore = useReviewSessionsStore();
 const sidebarStore = useSidebarStore();
+
+/** Every model the Models rail can offer: the count in its closed handle's name. */
+const railCount = computed(() => store.railRows.length);
+
+// ── The closed Models rail (visual-language "Closed inspector") ───────────
+//
+// Everything selected on the shelf, as `{key, noun, name}`: models (rows,
+// cards and tray members), hand-made sets, and cards named after a missing
+// file.
+const railPicked = computed(() => [
+  ...store.selectedRows.map((row) => ({
+    key: `model:${row.id}`,
+    noun: "models",
+    name: modelName(row).text || row.filename || "",
+  })),
+  ...store.selectedSets.map((set) => ({
+    key: `set:${set.id}`,
+    noun: "sets",
+    name: handMadeName(set),
+  })),
+  ...store.selectedMissingGroups.map((group) => ({
+    key: group.key,
+    noun: "missing models",
+    name: headName(group.head),
+  })),
+]);
+
+/** What the closed handle names: one name, `N models`, or "" for none. */
+const railLabel = computed(() => {
+  const picked = railPicked.value;
+  if (picked.length < 2) return picked[0]?.name ?? "";
+  const nouns = new Set(picked.map((item) => item.noun));
+  return `${picked.length.toLocaleString()} ${
+    nouns.size === 1 ? picked[0].noun : "selected"
+  }`;
+});
+
+// The same act as the toolbar toggle, so it persists. The handle unmounts as
+// the rail opens, so focus is handed to the rail's active tab rather than
+// dropping to `body`.
+function openRailFromTab() {
+  sidebarStore.setModelsRailOpen(true);
+  nextTick(() => document.querySelector(".mrail .inspector-tab--active")?.focus());
+}
+
+// A NEW selection nudges the rail: the handle bounces and the toolbar's rail
+// glyph flashes, both only while the rail is closed. Keyed on the selection's
+// identity, so re-clicking what is selected is not news, and clearing it is
+// not either.
+watch(
+  () =>
+    railPicked.value
+      .map((item) => item.key)
+      .sort()
+      .join("\n"),
+  (identity) => {
+    if (identity) sidebarStore.inspectorNudge += 1;
+  },
+);
+// So does a card's tray opening, with or without a selection and however it
+// opened (the caret, or the store putting one back). Closing it is not news.
+watch(
+  () => store.openSetKey,
+  (key) => {
+    if (key) sidebarStore.inspectorNudge += 1;
+  },
+);
 // The date column is stamped in the reader's own format, through the same
 // `formatUserDate(iso, dateFormat)` pattern every other timestamp in the app
 // uses.
 const userPrefs = useUserPrefsStore();
 const rootEl = ref(null);
 const showMenuOpen = ref(false);
+const nameFocusRequest = ref(0);
+const nameFieldRef = ref(null);
+// The app's search key (F) finds by name here: the toolbar's field when the bar
+// has room for it, else the one at the top of Show.
+watch(
+  () => useSearchStore().searchFocusToken,
+  () => {
+    if (!isShelfTab.value) return;
+    if (nameFieldRef.value?.isShown()) {
+      nameFieldRef.value.focus();
+      return;
+    }
+    showMenuOpen.value = true;
+    nameFocusRequest.value += 1;
+  },
+);
 const sortMenuOpen = ref(false);
-const foldersOpen = ref(false);
+const folderMenuOpen = ref(false);
+const folderMenuAt = ref([0, 0]);
+const folderMenuFolder = ref(null);
+const folderMenuInvoker = ref(null);
 const addMenuOpen = ref(false);
 const groupMenuOpen = ref(false);
+const groupButtonRef = ref(null);
+// `v-menu` returns focus to its trigger on Escape only; a close written through
+// the model leaves it on <body>, so a keyboard pick hands it back here.
+function closeGroupMenu() {
+  groupMenuOpen.value = false;
+  groupButtonRef.value?.focus();
+}
+/** The model whose companions the Works with dialog is answering for, or null. */
+const worksWithModel = ref(null);
+// Held raw: a DOM node, not reactive state. `VDialog`
+// restores focus to its own `activatorEl` and this dialog has none - it opens
+// from a prop - so without this, closing it dropped focus to <body> (WCAG
+// 2.4.3). Both openers are transient: the context-menu item unmounts with the
+// menu, and the grid's file button can go with a re-render.
+const worksWithInvoker = shallowRef(null);
 // The toolbar buttons behind the dialogs its left half opens, so focus has a
 // place to come back to however the reader got there. A menu item cannot be
 // that place - it unmounts with the menu.
 const addBtnRef = ref(null);
 const foldersBtnRef = ref(null);
-// The empty state's own door. Unlike the two above it is NOT always mounted -
-// the first scan that finds a model replaces the empty state with the list -
-// which is the case `closeFolders`' fallback exists for.
-const emptyFoldersBtnRef = ref(null);
 /**
  * Hand focus to the first candidate that will actually take it, in order.
  * `addBtnRef` and `foldersBtnRef` both carry `shelf-fold-680`: below that
@@ -1582,6 +1976,34 @@ async function confirmForget() {
   if (ok) await store.forgetSelected();
 }
 
+// Set while the delete prompt is being prepared or shown. The companions read
+// sits before the prompt opens, and a second Delete press in that window would
+// otherwise open a second prompt over the first and strand its promise.
+/**
+ * The row whose copies are being merged, or null.
+ *
+ * Taken from `selectedRows`, which carries the model's WHOLE `locations` array.
+ * The folder-grouped draw narrows it to the one copy that folder holds, and a
+ * dialog offering one of two choices would be the one screen that cannot do its
+ * job (#1439).
+ */
+const mergeRow = ref(null);
+
+/**
+ * Open the keep-one-copy dialog for the single selected duplicate.
+ *
+ * One row, because the keeper is a per-model choice and a batch would be a table
+ * of radio groups. The backend already takes a list, so the batch is a later
+ * screen rather than a later route.
+ */
+function openMergeCopies() {
+  const rows = store.selectedRows;
+  if (rows.length !== 1) return;
+  mergeRow.value = rows[0];
+}
+
+let deletePromptOpen = false;
+
 /**
  * The third confirmation, and the only one standing in front of real bytes.
  *
@@ -1603,6 +2025,16 @@ async function confirmForget() {
  * @param {boolean} permanent - Shift was down: unlink rather than trash.
  */
 async function confirmDelete(permanent) {
+  if (deletePromptOpen) return;
+  deletePromptOpen = true;
+  try {
+    await askAndDelete(permanent);
+  } finally {
+    deletePromptOpen = false;
+  }
+}
+
+async function askAndDelete(permanent) {
   const rows = deletableModels(store.selectedRows, foldersById.value);
   // MODELS, not rows: a stack is one row and six checkpoints, and it is deleted
   // whole exactly as it is moved whole. Counting rows would have offered
@@ -1624,13 +2056,43 @@ async function confirmDelete(permanent) {
   const many = ids.length !== 1;
   const subject = many ? `${ids.length} models` : "this model";
   const trash = trashName();
+  // Asked before the prompt opens, so the reader decides with it in front of
+  // them (#1314). A failed read is said in the prompt rather than skipped:
+  // leaving the section out would read as "nothing else is affected".
+  let companions = null;
+  try {
+    companions = await fetchModelCompanions(ids);
+  } catch (err) {
+    console.warn("[ModelShelf] could not read what the delete leaves behind", {
+      ids,
+      err,
+    });
+  }
+  const leftBehind = companionsSentences(companions, ids.length);
+  // The owner's own sets keep a deleted member by its hash, marked "Not on
+  // shelf" (#1520), so the prompt says how far the delete reaches and names the
+  // safer verb rather than leaving the reader to find a greyed tile later.
+  // True on BOTH paths: set membership lives in its own table keyed by hash,
+  // which neither the trash nor a permanent delete touches - "kept by its file
+  // hash" is what squares it with a permanent delete's "everything recorded".
+  const holding = store.handMadeSetsHolding(ids);
+  const inSets = holding.length
+    ? ` ${many ? "They stay" : "It stays"} in ${
+        holding.length === 1
+          ? `your set "${handMadeName(holding[0])}"`
+          : `${holding.length} of your workflow sets`
+      }, kept by ${many ? "their" : "its"} file hash and marked Not on shelf. To take ${many ? "them" : "it"} off a set only, use Remove from set.`
+    : "";
   const ok = await confirm({
     title: permanent
       ? `Permanently delete ${many ? `${ids.length} models?` : "this model?"}`
       : `Move ${many ? `${ids.length} models` : "this model"} to the ${trash}?`,
-    message: permanent
-      ? `The files for ${subject} are deleted permanently from this machine, along with everything recorded about them.`
-      : `The files for ${subject} go to your ${trash}, where you can put them back. The shelf stops listing them.`,
+    message:
+      (permanent
+        ? `The files for ${subject} are deleted permanently from this machine, along with everything recorded about them.`
+        : `The files for ${subject} go to your ${trash}, where you can put them back. The shelf stops listing them.`) +
+      (leftBehind ? ` ${leftBehind}` : "") +
+      inSets,
     warning: permanent
       ? "There is no undo for this."
       : `A very large file may be too big for the ${trash} and be deleted outright.`,
@@ -2085,10 +2547,19 @@ function shelfOwnsTheKey(event) {
   // confirmation for rows the reader cannot see and `Escape` would silently
   // clear a selection they did not know they still had.
   if (!isShelfTab.value) return false;
+  // The Models rail sits beside the shelf with a list and keys of its own:
+  // it asks for Delete and F2 itself (`store.requestVerb`), and its Escape
+  // and Ctrl+A are about its own rows.
+  if (event?.target?.closest?.(".mrail")) return false;
+  // The set grid is NOT excluded, and the reason it once was has gone with the
+  // card standing for a whole set: every selectable thing on that screen is one
+  // model, the bar floats over it, and `selectVisible` answers the grid's own
+  // idea of "shown". So Ctrl+A builds a selection the reader can see, and Delete
+  // opens the confirmation for rows they can point at.
   if (
     moveOpen.value ||
     addSourceOpen.value ||
-    foldersOpen.value ||
+    relocatingFolder.value ||
     addFileOpen.value ||
     thumbnailPickerOpen.value ||
     editVerb.value
@@ -2130,19 +2601,20 @@ function shelfOwnsTheKey(event) {
  * still leaves selectable everywhere else - which is what the reporter saw.
  * It runs the store action the selection pill's "Select all shown" already
  * runs, so the key and the button say the same thing: everything the current
- * `Show` selection DRAWS, runs taken whole. Cmd counts as Ctrl (`metaKey`),
+ * `Show` selection DRAWS, runs taken whole - and on the set grid every
+ * hand-made set too. Cmd counts as Ctrl (`metaKey`),
  * Shift and Alt do not - those are chords this list does not define and are
  * left to the browser, AltGr+A among them.
  *
- * **With nothing drawn the key is swallowed and the selection left alone.**
- * Two things are true at once there and only one of them is obvious: there is
+ * **With nothing drawn the key is swallowed and the selection left alone**, and
+ * `selectVisible` is where that is decided - see the note at the call. Two
+ * things are true at once there and only one of them is obvious: there is
  * nothing to select, and `selectedIds` may still be full, because it is pruned
  * against a FETCH (`pruneSelection`) and not against the `Show` narrowing that
- * emptied the list. Running `selectVisible()` would then replace a selection
- * the reader still holds with an empty one - a silent clear, from a key that
- * says "select", with no undo and (the pill being gated on `selectedRows`) no
- * control on screen to do it deliberately. The press is still claimed, or
- * declining would hand it back to the native select-all above.
+ * emptied the list. Replacing a selection the reader still holds with an empty
+ * one is a silent clear, from a key that says "select", with no undo and (the
+ * pill being gated on `selectedRows`) no control on screen to do it
+ * deliberately.
  *
  * `event.repeat` is refused for the same reason `useDedupQueueKeyboard` refuses
  * it: a held chord would rebuild a set over every drawn row, up to 1,800 of
@@ -2154,19 +2626,77 @@ function onShelfKeydown(event) {
     !event.altKey &&
     !event.shiftKey &&
     String(event.key).toLowerCase() === "a";
-  if (event.key !== "Escape" && event.key !== "Delete" && !wantsSelectAll) {
+  // F2 is let through for a selected hand-made set, whose pill and menu
+  // advertise it; a row's own F2 is handled on the row.
+  const renamesSet = event.key === "F2" && store.selectedSets.length > 0;
+  if (
+    event.key !== "Escape" &&
+    event.key !== "Delete" &&
+    !wantsSelectAll &&
+    !renamesSet
+  ) {
     return;
   }
   if (!shelfOwnsTheKey(event)) return;
   if (wantsSelectAll) {
     if (event.repeat) return;
     event.preventDefault();
-    if (store.visibleRows.length) store.selectVisible();
+    // The "nothing drawn, so leave the selection alone" refusal lives in
+    // `selectVisible` now, not here: this guard read `visibleRows`, which is the
+    // ROW LIST's list, and on the set grid that is a different screen - the key
+    // would have passed the guard and then cleared the selection to nothing. The
+    // pill's *Select all shown* never had the guard at all, so moving it into
+    // the store fixed a second caller as well. The press is still claimed either
+    // way, or declining would hand it to the native select-all. On the set grid
+    // it takes the hand-made "Grouped by you" sets as well as the models.
+    store.selectVisible();
     return;
   }
+  // Selected hand-made SETS (#1520) answer the same two keys with the set
+  // vocabulary: Escape clears, Delete deletes the sets - never a file. The
+  // early return above already admits only these two keys here; the check is
+  // restated so this block is correct read on its own.
+  //
+  // Sets and models can be held together (Ctrl+click, Ctrl+A). Escape clears
+  // both. Delete deletes the sets only when no model is selected: with both,
+  // it falls through to the FILE confirmation below, so one key never deletes
+  // sets unprompted while also arming a file delete. The sets' own pill still
+  // deletes them. (With the cursor on a set from pictures, the grid has
+  // already taken Delete to hide that set; it never arrives here.)
+  // Missing-base cards answer Escape only: they have no file for Delete.
+  if (
+    store.selectedMissing.length &&
+    isSetGrid.value &&
+    event.key === "Escape"
+  ) {
+    event.preventDefault();
+    store.clearMissingSelection();
+    store.clearSetSelection();
+    store.clearSelection();
+    return;
+  }
+  if (store.selectedSets.length && isSetGrid.value) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      store.clearSetSelection();
+      store.clearSelection();
+      return;
+    }
+    if (event.key === "Delete" && !ownSelection.value.length) {
+      event.preventDefault();
+      store.deleteHandMadeSets(store.selectedSets);
+      return;
+    }
+    if (event.key === "F2") {
+      event.preventDefault();
+      startRenameSet();
+      return;
+    }
+  }
+  if (renamesSet) return;
   // Escape and Delete are both about a selection, and the guard above no longer
   // asks for one.
-  if (!store.selectedRows.length) return;
+  if (!ownSelection.value.length) return;
   if (event.key === "Escape") {
     store.clearSelection();
     return;
@@ -2177,8 +2707,126 @@ function onShelfKeydown(event) {
   confirmDelete(event.shiftKey);
 }
 
+/**
+ * The rows the shelf's own keys act on. The Models rail's selection is not
+ * among them: the rail answers Delete and Escape on its own list, and a press
+ * made over here was aimed at something else.
+ */
+const ownSelection = computed(() =>
+  store.railSelection ? [] : store.selectedRows,
+);
+
 onMounted(() => window.addEventListener("keydown", onShelfKeydown));
 onUnmounted(() => window.removeEventListener("keydown", onShelfKeydown));
+
+// ── Hand-made workflow sets (#1520) ─────────────────────────────────────────
+
+const setGridRef = ref(null);
+
+/**
+ * The sets from pictures Hide acts on: every card the grid draws selected,
+ * whichever pill it is counted on, so the two pills' menus offer one row with
+ * one count and Ctrl+A then Hide leaves none of them behind. The model cards
+ * are the grid's answer rather than the store's, because only it knows a head
+ * picked in its open tray from one picked as its card. The selected hand-made
+ * sets come from the store's groups, the shape Hide reads (`hideSetsVerb`,
+ * `toggleHiddenSets`), so the set pill's row covers them as well.
+ */
+const hideableSets = computed(() =>
+  isSetGrid.value
+    ? [
+        ...(setGridRef.value?.selectedCardGroups ?? []),
+        ...store.selectedMissingGroups,
+        ...store.handMadeGroups.filter((group) =>
+          store.selectedSetIds.has(group.set.id),
+        ),
+      ]
+    : [],
+);
+
+/** The missing-base heads the Replace dialog is open on, `[]` while closed. */
+const replacingHeads = ref([]);
+const missingBarRef = ref(null);
+const missingCount = computed(() => store.missingSetKeys.length);
+// The sets it was dismissed over: a missing set not among them brings the
+// banner back, which a count would not (fix one, lose another).
+const dismissedMissing = ref(new Set());
+const missingDismissed = computed(() =>
+  store.missingSetKeys.every((key) => dismissedMissing.value.has(key)),
+);
+const setBarRef = ref(null);
+
+// The set receipt sits above whichever selection pill is up, lifted by its
+// MEASURED height the way the grid lifts its own (`actionReceiptLift`). Local
+// rather than through the bottom-anchor registry: the pills never registered
+// there, and doing so would move the notice stack as well.
+const selFloatEl = ref(null);
+const selFloatHeight = ref(0);
+let selFloatObserver = null;
+watch(
+  selFloatEl,
+  (el) => {
+    selFloatObserver?.disconnect();
+    selFloatObserver = null;
+    selFloatHeight.value = el?.offsetHeight || 0;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    selFloatObserver = new ResizeObserver(([entry]) => {
+      selFloatHeight.value =
+        entry.borderBoxSize?.[0]?.blockSize ?? entry.target.offsetHeight;
+    });
+    selFloatObserver.observe(el);
+  },
+  { flush: "post" },
+);
+onUnmounted(() => selFloatObserver?.disconnect());
+const receiptLift = computed(() =>
+  selFloatHeight.value > 0 ? selFloatHeight.value + FLOATING_BOTTOM_GAP_PX : 0,
+);
+/** The set the rename dialog is open on, or null. */
+const renamingSet = ref(null);
+
+function startRenameSet() {
+  if (store.selectedSets.length === 1)
+    renamingSet.value = store.selectedSets[0];
+}
+
+async function saveSetName(name) {
+  const set = renamingSet.value;
+  renamingSet.value = null;
+  if (set) await store.renameHandMadeSet(set, name);
+}
+
+/**
+ * "New workflow set with this checkpoint", from a checkpoint's menu.
+ *
+ * The set grid is where a set is filled, so the shelf goes there. Asked from an
+ * EVIDENCE card, the new set opens with Fill from pictures ready: that card is
+ * the pictures, and they are what the owner is most likely to want to keep.
+ */
+async function newSetWithCheckpoint() {
+  const row = store.selectedRows[0];
+  if (!row) return;
+  const fromEvidence = isSetGrid.value;
+  if (!isSetGrid.value) store.setView({ groupBy: "workflow_set" });
+  const created = await store.createHandMadeSet({
+    members: [{ model_id: row.id, slot: "checkpoint" }],
+  });
+  if (created && fromEvidence) {
+    await nextTick();
+    setGridRef.value?.openFill("pictures");
+  }
+}
+
+/** Remove from set: the selected members of the open hand-made tray. */
+function removeSelectedFromSet() {
+  const open = store.handMadeGroups.find((g) => g.key === store.openSetKey);
+  if (!open) return;
+  const ids = new Set(store.selectedModelIds);
+  const hashes = (open.set.members ?? [])
+    .filter((m) => m.on_shelf && ids.has(m.id))
+    .map((m) => m.sha256);
+  store.removeFromHandMadeSet(open.set, hashes);
+}
 
 // ── The thumbnail verb ──────────────────────────────────────────────────────
 
@@ -2563,6 +3211,11 @@ function memberLabel(member, row) {
   return `${modelVersion(member.filename ?? "") ?? "v1"} · ${label}`;
 }
 
+/** The check or cross the owner's set verdicts give this model, if any. */
+function rowVerdict(row) {
+  return modelVerdictMark(row.set_verdicts);
+}
+
 /**
  * The step to show beside a row's name, or "" when there is none to show.
  *
@@ -2588,6 +3241,15 @@ const route = useRoute();
 const router = useRouter();
 
 const isShelfTab = computed(() => route.name !== "models-runs");
+
+// Set receipts exist only while this tab shows them: their Undo means nothing
+// on the runs tab or another screen, and a write landing after the reader left
+// must not raise one there.
+const operationStore = useOperationStore();
+watch(isShelfTab, (on) => operationStore.setLocalReceiptHost(on), {
+  immediate: true,
+});
+onUnmounted(() => operationStore.setLocalReceiptHost(false));
 
 /** How many runs the other view is showing, for the count beside the tabs. */
 const runsCount = ref(null);
@@ -2635,7 +3297,7 @@ function onTabKeydown(event) {
 // output root exists there is nothing left here to add.
 
 const addSourceOpen = ref(false);
-// Held raw like `folderInvoker`: a DOM node, not reactive state.
+// Held raw: a DOM node, not reactive state.
 const addSourceInvoker = shallowRef(null);
 
 /** Whether the ai-toolkit output root has been set. */
@@ -2653,7 +3315,7 @@ async function closeAddSource() {
   await nextTick();
   restoreFocus(
     returnTo,
-    addBtnRef.value,
+    addBtnRef.value?.el,
     overflowRef.value?.trigger?.(),
     rootEl.value,
   );
@@ -2687,7 +3349,7 @@ async function onSourcePicked(path) {
 
 const addFileOpen = ref(false);
 const adding = ref(false);
-// Held raw like `folderInvoker`: a DOM node, not reactive state.
+// Held raw: a DOM node, not reactive state.
 const addFileInvoker = shallowRef(null);
 
 function openAddFile(invoker) {
@@ -2703,7 +3365,7 @@ async function closeAddFile() {
   await nextTick();
   restoreFocus(
     returnTo,
-    addBtnRef.value,
+    addBtnRef.value?.el,
     overflowRef.value?.trigger?.(),
     rootEl.value,
   );
@@ -2740,41 +3402,105 @@ async function onFilePicked(path) {
   }
 }
 
-// Two controls open the same dialog, so which one gets focus back is a fact
-// about the press rather than about the dialog. Held raw: it is a DOM node, and
-// making it reactive would deep-track an element tree for nothing.
-const folderInvoker = shallowRef(null);
+const {
+  canScan: canScanFolder,
+  scanReason: scanFolderReason,
+  relocateReason: relocateFolderReason,
+  scan: scanFolder,
+} = useModelFolderGates();
+// The folder the header menu's Move is emptying, while its picker is open.
+const relocatingFolder = ref(null);
 // The ⋯ the left group folds into below 690px; its rows open dialogs, so they
 // need its trigger to hand focus back to.
 const overflowRef = ref(null);
 
 /**
- * @param {HTMLElement} invoker Control to hand focus back to on close. Every
- *   door names one, and names the durable control rather than the pressed
- *   element: the `Add folder…` item is gone by the time the dialog closes, so
- *   it names the Add button it hangs off. The earlier version read
- *   `event.currentTarget` and was dead - no call site ever passed an event.
+ * The folder registry lives in Settings › Models; every shelf door opens it
+ * there. Settings gives focus back to whatever held it when it opened, and a
+ * menu item is gone by the time it closes, so a door names the durable control
+ * it hangs off and that takes focus first.
+ *
+ * @param {HTMLElement} [invoker] control to hand focus back to on close.
  */
 function openFolders(invoker) {
-  folderInvoker.value = invoker;
-  foldersOpen.value = true;
+  invoker?.focus?.();
+  emit("open-settings", "models");
 }
 
-async function closeFolders() {
-  const returnTo = folderInvoker.value;
-  foldersOpen.value = false;
-  folderInvoker.value = null;
-  await nextTick();
-  // The empty-state button unmounts the moment the first folder is scanned
-  // in, and `foldersBtnRef` itself folds away under `overflowRef` below
-  // 656px - `restoreFocus` tries both, then the ⋯ trigger, before giving up
-  // on the shelf root, rather than dropping focus to <body>.
-  restoreFocus(
-    returnTo,
-    foldersBtnRef.value,
-    overflowRef.value?.trigger?.(),
-    rootEl.value,
+/** Why the open folder menu's Rescan is refused, or "" when it is not. */
+const folderScanReason = computed(() =>
+  folderMenuFolder.value
+    ? scanFolderReason(folderMenuFolder.value)
+    : "",
+);
+
+/** Why the open folder menu's Move is refused, or "" when it is not. */
+const folderMoveReason = computed(() =>
+  folderMenuFolder.value
+    ? relocateFolderReason(folderMenuFolder.value)
+    : "",
+);
+
+/**
+ * Open a folder header's menu, when the header is a registered folder with
+ * something to offer. Anything else keeps the browser's own menu rather than
+ * swallowing the right button for an empty one.
+ */
+function openFolderMenu(group, event) {
+  if (!Number.isInteger(group.folderId)) return;
+  const folder = foldersStore.folders.find(
+    (row) => Number(row.id) === group.folderId,
   );
+  if (!folder || (!canScanFolder(folder) && !folder.relocatable)) {
+    return;
+  }
+  event.preventDefault();
+  folderMenuFolder.value = folder;
+  folderMenuInvoker.value = event.currentTarget;
+  folderMenuAt.value = [event.clientX, event.clientY];
+  folderMenuOpen.value = true;
+}
+
+/**
+ * The context-menu key on a header, which does not reliably fire `contextmenu`
+ * and carries no pointer position when it does. Opened over the header's own
+ * box, the way `openMenuAtRow` does it for a row.
+ */
+function onFolderHeaderKeydown(group, event) {
+  if (!isMenuKey(event)) return;
+  const box = event.currentTarget.getBoundingClientRect();
+  openFolderMenu(group, {
+    preventDefault: () => event.preventDefault(),
+    currentTarget: event.currentTarget,
+    clientX: box.left + 24,
+    clientY: box.bottom,
+  });
+}
+
+/** Rescan from the header menu. The menu has no activator, so focus goes back by hand. */
+function rescanFromMenu() {
+  scanFolder(folderMenuFolder.value);
+  folderMenuOpen.value = false;
+  folderMenuInvoker.value?.focus?.();
+}
+
+/** Move from the header menu: the shared picker, focus back to the header. */
+function relocateFromMenu() {
+  folderMenuOpen.value = false;
+  const folder = folderMenuFolder.value;
+  if (folder && !relocateFolderReason(folder)) relocatingFolder.value = folder;
+}
+
+async function onRelocatePicked(path) {
+  const folder = relocatingFolder.value;
+  closeRelocate();
+  if (!folder || relocateFolderReason(folder)) return;
+  await moves.relocate(folder.id, path);
+}
+
+function closeRelocate() {
+  relocatingFolder.value = null;
+  nextTick(() => restoreFocus(folderMenuInvoker.value, rootEl.value));
 }
 
 // `missing` is a fact (the folder was readable, the file was not in it);
@@ -2785,11 +3511,18 @@ async function closeFolders() {
 // `not_downloaded` is a fourth thing and wears no status colour either: it is
 // one of PixlStash's own engines that nothing has needed yet, which is the
 // normal state of about half of them. A download glyph, not a broken-file one.
+//
+// `removed` is a fifth, and the only absence that is not an absence to report: a
+// copy the reader deleted themselves to keep another (#1439). Its row is here on
+// purpose - it is what keeps a recipe naming that file resolving to the model -
+// so drawing it with the broken-file glyph would report a fault about the
+// tidy-up the reader just asked for. A merge glyph, and no status colour.
 const LOC_ICON = {
   present: "mdi-check",
   missing: "mdi-file-remove-outline",
   not_downloaded: "mdi-cloud-download-outline",
   unreachable: "mdi-help-circle-outline",
+  removed: "mdi-call-merge",
   forgotten: "mdi-folder-off-outline",
 };
 
@@ -2801,6 +3534,7 @@ const LOC_NOTE = {
   present: "",
   missing: "file is not where it was",
   unreachable: "out of reach",
+  removed: "removed as a duplicate",
   forgotten: "every registered copy forgotten",
 };
 
@@ -2813,6 +3547,7 @@ const LOC_TITLE = {
   // scan could not list lands here too, and naming a cause we did not observe
   // is the same overclaim the muted glyph exists to avoid.
   unreachable: "Out of reach: this location could not be read",
+  removed: "You removed this copy to keep another one",
   forgotten: "Every registered copy has been forgotten",
 };
 
@@ -2915,6 +3650,33 @@ function pickRow(row, event) {
 }
 
 /**
+ * A click on the list's background - below the last row, or the gap between
+ * groups - clears the selection, as on the picture grid.
+ *
+ * Decided by where the press STARTED, not by the click's target: a press that
+ * slips from one row to another, or a text drag out of the rename field, fires
+ * its click on a container here, and neither is a click on nothing.
+ * Primary button only, and a click with `detail` 0 (Enter or Space on a
+ * control inside, or a programmatic one) never counts: a press can end
+ * without a click, and its leftover flag must not arm a later keyboard one.
+ */
+let pressedBackground = false;
+
+function isListBackground(event) {
+  const target = event.target;
+  return (
+    target === event.currentTarget ||
+    target.classList.contains("shelf-group") ||
+    target.classList.contains("shelf-list")
+  );
+}
+
+function onListBackgroundClick(event) {
+  if (pressedBackground && event.detail > 0) store.clearSelection();
+  pressedBackground = false;
+}
+
+/**
  * The keyboard half of the same three gestures.
  *
  * Arrow keys move the tab stop without selecting, which is the roving-focus
@@ -2939,6 +3701,64 @@ function focusDrawnRow(key) {
     }
   }
 }
+
+// ── Arriving from a picture's Recipe section (#1313) ───────────────────────
+//
+// `?model=<id>` picks that model and puts the cursor on it, so a chip clicked
+// in the lightbox lands on the file the picture used rather than at the top of
+// a shelf of a couple of thousand rows. A model the shelf is not drawing - a
+// filter hides it, its group is collapsed, its stack is closed - is left alone
+// rather than forced into view: the row the link names is a fact, and what the
+// reader has filtered the shelf down to is a decision of theirs.
+//
+// Honoured once per value, because `drawnRows` recomputes on every filter,
+// sort and refresh while the query string stays put, and applying it twice
+// would take focus back off whatever the reader had moved to.
+let honouredModel = null;
+
+function honourModelQuery() {
+  const wanted = route?.query?.model;
+  if (!wanted) {
+    honouredModel = null;
+    return;
+  }
+  if (honouredModel === wanted) return;
+  const row = drawnRows.value.find(
+    (entry) => String(entry.id) === String(wanted),
+  );
+  if (!row) {
+    // The shelf has the model but is not drawing it: a filter excludes it, its
+    // group is collapsed, or it is a member of a closed stack. Say so instead
+    // of landing at the top of the list having visibly done nothing - and
+    // offer the one gesture that is certain to reveal it rather than guessing
+    // which of the three is in the way. The reader's filters are theirs; this
+    // does not clear them behind their back.
+    const known = store.rows.find(
+      (entry) => String(entry.id) === String(wanted),
+    );
+    if (!known) return; // not fetched yet, or not on this shelf at all
+    honouredModel = wanted;
+    useNoticeStore().push({
+      level: "info",
+      text: `${known.name || known.filename || "That model"} is on the shelf, but the current filters are hiding it.`,
+      action: { label: "Show everything", handler: () => store.resetFilters() },
+    });
+    return;
+  }
+  honouredModel = wanted;
+  focusedRowKey.value = row.key;
+  store.selectFromClick(row.id, {}, orderedRowIds.value);
+  nextTick(() => focusDrawnRow(row.key));
+}
+
+// Registered on mount rather than at setup. A watcher reads its source once
+// when it is created, and `drawnRows` reads `shownGroups`, which is declared
+// below this point - so a watcher created here would evaluate it inside its own
+// temporal dead zone. The rows are fetched asynchronously anyway, so nothing is
+// missed by waiting for the mount.
+onMounted(() => {
+  watch([() => route?.query?.model, drawnRows], honourModelQuery);
+});
 
 function onRowKeydown(row, event) {
   const drawn = drawnRows.value;
@@ -3050,6 +3870,19 @@ function startRename(row) {
 function startRenameSelected() {
   const id = store.selectedRows[0]?.id;
   if (id == null) return;
+  // The set grid has no row to open a field on, ever: a name lives on a card,
+  // and the dashed rule under a row is what makes an inline field honest. It
+  // takes `ShelfEditDialog`'s `rename`, which already owns that one string, so
+  // the verb is live there rather than being a menu item that does nothing.
+  // The Models rail's selection takes the dialog too: its row may not be drawn
+  // on the list at all.
+  // The row list is left exactly as it was, including its silent no-op when the
+  // selection is held but the row is not drawn - that is a separate question
+  // and not this change's to answer.
+  if (isSetGrid.value || store.railSelection) {
+    editVerb.value = "rename";
+    return;
+  }
   for (const group of shownGroups.value) {
     const row = group.rows.find((candidate) => candidate.id === id);
     if (row) {
@@ -3074,6 +3907,17 @@ function openRowMenu(row, event) {
     store.selectFromClick(row.id, {}, orderedRowIds.value);
   }
   selBarRef.value?.openContextMenu(event.clientX, event.clientY);
+}
+
+/**
+ * The set grid asked for the verb menu at a pointer.
+ *
+ * The grid has already made the card or tray row under it the selection, by the
+ * same file-manager rule {@link openRowMenu} follows; this is only the half that
+ * needs the bar's ref, which lives here because there is one bar for both views.
+ */
+function openGridMenu({ x, y, setKey }) {
+  selBarRef.value?.openContextMenu(x, y, setKey);
 }
 
 /**
@@ -3227,17 +4071,18 @@ const editingBase = ref("");
 let editingBaseRow = null;
 
 /**
- * Put the base-model field on a row, seeded with what is recorded.
+ * Put the base-model field on a row, seeded with what the cell shows.
  *
- * Seeded from the stored value and not from a guess - unlike the name field,
- * which opens empty on a derived row because the string it shows was inferred.
- * Nothing infers a base model: what the row shows is what the file said, so
- * editing it starts from that and a correction is one word, not a retype.
+ * That is the file's own string, or for a GUESSED row the label it was read
+ * as (`baseModelCell`), so a correction is one word rather than a retype and
+ * the commit below compares against the same value: leaving a guess as it is
+ * writes nothing, and emptying the field says "none of these", which then
+ * sticks across rescans.
  */
 function startBaseModelEdit(row) {
   editingBaseRow = row;
   editingBaseKey.value = row.rowKey;
-  editingBase.value = row.base_model || "";
+  editingBase.value = baseModelCell(row).text;
   nextTick(() => {
     const el = rootEl.value?.querySelector(".shelf-row-base-edit");
     el?.focus();
@@ -3278,11 +4123,75 @@ async function commitBaseModel(restoreFocus = false) {
   // somewhere the reader chose, and dragging it back to the row would undo
   // their click.
   if (restoreFocus) nextTick(() => focusDrawnRow(key));
-  if (next === String(row.base_model || "").trim()) return;
+  if (next === String(baseModelCell(row).text).trim()) return;
   // A cover stands for every file of the run, and one run was trained against
   // one base model.
   await store.editModelIds(row.memberIds ?? [row.id], {
     base_model: next || null,
+  });
+}
+
+/**
+ * File a row as the kind its Kind menu picked (#1962).
+ *
+ * Any pick is a person deciding what the file is, so the server stops the
+ * offer with it. The receipt names where the row went, because on the feature
+ * axis it leaves the group it was picked in; Undo puts back the kind and the
+ * offer both.
+ */
+async function setKindFromMenu(row, fileKind) {
+  const ids = row.memberIds ?? [row.id];
+  const label = fileKindLabel(fileKind);
+  const undo = { file_kind: row.file_kind, suggest_kind: !row.kind_decided };
+  await store.editModelIds(
+    ids,
+    { file_kind: fileKind },
+    {
+      text:
+        `Filed ${row.name.text || row.filename || "the model"} as ${label}.` +
+        (store.view.groupBy === "feature" ? ` It is now under ${label}.` : ""),
+      action: { label: "Undo", handler: () => store.editModelIds(ids, undo) },
+    },
+  );
+  // Whether or not the write landed: the menu has closed either way.
+  focusKindMenu(row.id);
+}
+
+/** "Adapter…": an adapter names its algorithm, which the Set kind dialog asks. */
+function setKindByDialog(row) {
+  store.selectFromClick(row.id, {}, orderedRowIds.value);
+  editVerb.value = "kind";
+}
+
+/** "Don't suggest a kind" (false) and "Suggest a kind again" (true). */
+async function setKindSuggestion(row, on) {
+  await store.editModelIds(
+    row.memberIds ?? [row.id],
+    { suggest_kind: on },
+    {
+      text: on
+        ? "The shelf will suggest a kind for it again."
+        : "The shelf will not suggest a kind for it.",
+    },
+  );
+  // Whether or not the write landed: the menu has closed either way.
+  focusKindMenu(row.id);
+}
+
+/**
+ * Back to the row's Kind menu once the shelf has redrawn: a refiled row moves
+ * group, and its row key carries the group, so it is found by its model id.
+ */
+function focusKindMenu(modelId) {
+  nextTick(() => {
+    const id = String(modelId);
+    for (const el of rootEl.value?.querySelectorAll("[data-row-key]") || []) {
+      const key = el.dataset.rowKey;
+      if (key === id || key.startsWith(`${id}:`)) {
+        el.querySelector("[data-testid='kind-menu']")?.focus();
+        return;
+      }
+    }
   });
 }
 
@@ -3589,6 +4498,18 @@ const offlineMountPaths = computed(() =>
  * other: `models` is distinct files on the shelf, `copies` is rows on screen.
  */
 const countLabel = computed(() => {
+  // On the set axis the row count is about a list that is not on screen. The two
+  // figures a reader needs are how many sets there are and how much evidence is
+  // behind them, which is the combination count rather than a second card count.
+  if (isSetGrid.value) {
+    const sets = store.setGroups.length;
+    const recipes = store.visibleCombinations.length;
+    const setsLabel = sets === 1 ? "1 set" : `${sets.toLocaleString()} sets`;
+    if (!recipes) return setsLabel;
+    return `${setsLabel} · ${recipes.toLocaleString()} ${
+      recipes === 1 ? "combination" : "combinations"
+    }`;
+  }
   const models = modelCount(store.visibleRows.length);
   const drawn = store.renderedCount;
   if (drawn === store.visibleRows.length) return models;
@@ -3597,6 +4518,98 @@ const countLabel = computed(() => {
 
 /** True while the list is cut into groups, i.e. headers are drawn. */
 const grouped = computed(() => store.view.groupBy !== "none");
+
+/**
+ * True while the set grid has the content area instead of the row list.
+ *
+ * The one axis whose groups overlap, so the one that cannot be a band: see
+ * `GRID_GROUP_BY`. Gated on the tab as well, because the training runs own the
+ * area on the other one.
+ */
+const isSetGrid = computed(
+  () => isShelfTab.value && store.view.groupBy === GRID_GROUP_BY,
+);
+
+/**
+ * True while a read is in flight with nothing to show yet. A refetch over rows
+ * already on screen keeps them until the new ones land, so the list keeps its
+ * scroll position; one over an empty view (Reset from a narrowed, empty Show)
+ * still says it is reading rather than flashing an empty state.
+ */
+const firstRead = computed(
+  () => store.loading && (!store.loaded || !store.visibleRows.length),
+);
+
+/**
+ * Answer "what else has this run with" for one model.
+ *
+ * The selection bar's own verb, so it reads the selection - which now answers on
+ * both screens. A tray row's own NAME still hands its file up through
+ * `@works-with` instead of going through the selection, because pressing a name
+ * is a question about that file and not a decision to act on it. Both land on
+ * {@link showWorksWith}, which is where the focus return is remembered - and
+ * the dialog normalises the two row shapes itself, because a shelf row's `name`
+ * is `modelName`'s `{text, state}` pair and a set member's is a string.
+ */
+function openWorksWith() {
+  showWorksWith(store.selectedRows[0] ?? null);
+}
+
+/**
+ * Every verb the selection bar emits, and what runs it.
+ *
+ * One map for two askers: the shelf's own bar, bound with `v-on`, and the
+ * Models rail, which is not this view's child and asks through
+ * `store.requestVerb`. Both act on `store.selectedRows`, which is the rail's
+ * selection while the rail has one, so each confirmation exists once.
+ */
+const verbListeners = {
+  "hide-sets": () => store.toggleHiddenSets(hideableSets.value),
+  "hide-models": () => store.toggleHiddenModels(store.selectedModels),
+  rename: startRenameSelected,
+  "set-base-model": () => (editVerb.value = "base-model"),
+  "set-kind": () => (editVerb.value = "kind"),
+  "set-trigger-words": () => (editVerb.value = "trigger-words"),
+  stack: confirmStack,
+  unstack: confirmUnstack,
+  "make-cover": makeCover,
+  "remove-from-stack": confirmRemoveFromStack,
+  move: () => openMove(store.selectedRows),
+  "merge-copies": openMergeCopies,
+  "open-location": openLocation,
+  "set-icon": pickIcon,
+  "clear-icons": confirmClearIcons,
+  forget: confirmForget,
+  delete: confirmDelete,
+  "works-with": openWorksWith,
+  "new-set": newSetWithCheckpoint,
+  "clone-set": (group) => store.cloneSetFromPictures(group),
+  "remove-from-set": removeSelectedFromSet,
+};
+
+watch(
+  () => store.verbRequest,
+  (request) => {
+    // The runs tab draws none of this, so nothing may open over it.
+    if (request && isShelfTab.value) verbListeners[request.verb]?.(...request.args);
+  },
+);
+
+/** Open the dialog, remembering what to hand focus back to. */
+function showWorksWith(model) {
+  if (!model) return;
+  worksWithInvoker.value =
+    document.activeElement === document.body ? null : document.activeElement;
+  worksWithModel.value = model;
+}
+
+function closeWorksWith() {
+  const returnTo = worksWithInvoker.value;
+  worksWithModel.value = null;
+  worksWithInvoker.value = null;
+  // The row or the card the reader was on, then the shelf root - never <body>.
+  nextTick(() => restoreFocus(returnTo, rootEl.value));
+}
 
 const activeSort = computed(
   () => SORT_LABELS[store.view.sortKey] || SORT_LABELS.added_at,
@@ -3952,27 +4965,20 @@ onMounted(() => {
 // than gating the empty state on `loaded`: the view is still on screen and its
 // job is to show the shelf, so a blank body would be a second wrong answer.
 // The store cannot do this itself: session-reset handlers run BEFORE the new
-// credential is installed, whereas this pre-flush watcher runs after.
+// credential is installed, whereas this pre-flush watcher runs after. The
+// sets go with the rows, and the set grid and the Models rail asked for them
+// only as they mounted, so they are read again here too.
 watch(
   () => store.loaded,
   (isLoaded) => {
-    if (!isLoaded) store.fetchRows();
+    if (isLoaded) return;
+    store.fetchRows();
+    store.loadWorkflowSets();
   },
 );
 </script>
 
 <style scoped>
-/* The spinner keeps spinning under reduced motion, slower. The global reset in
-   design-tokens.css zeroes every element's animation, and @mdi/font puts this
-   one on ::before, where the reset lands - a frozen mdi-loading reads as a
-   rendering fault rather than as "working". Same fix as `LoginScreen`. */
-@media (prefers-reduced-motion: reduce) {
-  .bar-btn .mdi-spin::before {
-    animation-duration: 2s !important;
-    animation-iteration-count: infinite !important;
-  }
-}
-
 .shelf {
   display: flex;
   flex-direction: column;
@@ -4105,8 +5111,9 @@ watch(
    Chromium at `width: max-content`, with the widest content each control can
    hold (a 12ch Group value, a 12ch Sort value, the shelf tab's long count):
 
-     full                1071px
-     after rung 1         840px
+     full                1263px   (1071px before the name field)
+     after rung 1        1032px
+     after rung 1b        840px
      after rung 2         679px
      after rung 3         565px   ← the floor
 
@@ -4135,12 +5142,28 @@ watch(
   display: none;
 }
 
+/* The toolbar's name field. A fixed width, so typing never moves the bar. */
+.shelf-name-bar {
+  width: 180px;
+  flex: none;
+}
+
 /* Rung 1. The two things on the bar that REPORT rather than control: the
    view's own name, which the sidebar and the tab pair beside it both already
    say, and the count, whose two widths ("1,842 models · 12 copies" vs "8
-   runs") are why the spacer sits where it does. Buys 231px. */
-@container shelfbar (max-width: 1046px) {
-  .shelf-fold-1070 {
+   runs") are why the spacer sits where it does. They go before the name
+   field, a control: the full bar plus the field (180px and a 12px gap) is
+   1071 + 192 = 1263px. Buys 231px. */
+@container shelfbar (max-width: 1238px) {
+  .shelf-fold-1262 {
+    display: none;
+  }
+}
+
+/* Rung 1b. The name field, a shortcut to the one at the top of Show: 840 +
+   192 = 1032px is what the bar needs with it after rung 1. */
+@container shelfbar (max-width: 1007px) {
+  .shelf-name-bar {
     display: none;
   }
 }
@@ -4158,7 +5181,7 @@ watch(
 
 /* Rung 3. `Add ▾` and `Model folders` fold into the ⋯ that appears in their
    place. They are the bar's only two verbs, they open something and write
-   nothing on the press, and their rows are the same `.shelf-mi` items the Add
+   nothing on the press, and their rows are the same `.ctx-item` rows the Add
    menu already draws. Buys 114px net of the ⋯ itself, and what is left - the
    tab pair, the ⋯, and the three compressed view menus - is the 565px floor:
    below that the bar overflows and there is nothing left to give. */
@@ -4173,8 +5196,9 @@ watch(
 
 /* The one filled button in the bar. It is the only control here with a result
    behind it - everything else changes what you are looking at - and that is
-   what the fill says. `on-primary` and not the surface ink: this is a solid
-   primary fill, which is the pairing that measures (§4).
+   what the fill says. Amber acts, olive selects: the key action's fill is
+   `accent` with its `on-accent` label, and a filled control's hover darkens
+   (`--hover-shade`) rather than taking the transparent buttons' wash.
 
    28px, not `.bar-btn`'s 32, and `--radius-sm` rather than the nothing it
    inherited. A filled control is the only kind whose box you can actually see:
@@ -4187,16 +5211,22 @@ watch(
    at a radius (0) that is not on the scale (§6). */
 .shelf-toolbar .bar-btn--accent {
   gap: var(--space-2);
-  height: 28px;
+  height: var(--control-h);
   border-radius: var(--radius-sm);
-  border-color: rgb(var(--v-theme-primary));
-  background: rgb(var(--v-theme-primary));
-  color: rgb(var(--v-theme-on-primary));
+  border-color: rgb(var(--v-theme-accent));
+  background: rgb(var(--v-theme-accent));
+  color: rgb(var(--v-theme-on-accent));
   font-weight: var(--weight-medium);
 }
 
+.shelf-toolbar .bar-btn--accent:hover:not(:disabled) {
+  background-color: rgb(var(--v-theme-accent));
+  background-image: var(--hover-shade);
+  color: rgb(var(--v-theme-on-accent));
+}
+
 .shelf-toolbar .bar-btn--accent :deep(.v-icon) {
-  color: rgb(var(--v-theme-on-primary));
+  color: rgb(var(--v-theme-on-accent));
 }
 
 /* Group and Sort carry their current VALUE as the label: their glyphs are
@@ -4259,98 +5289,26 @@ watch(
    clickable; the pill inside it takes them back. */
 
 /* ── The view switcher ─────────────────────────────────────────────────────
-   A welded pair of `.bar-btn`s: gap 0, and the outer corners rounded the way
-   `.bar-split-toggle`/`.bar-split-menu` already do it. NO container border -
-   `--v-theme-border` against this chrome measures 1.28:1 light / 1.35:1 dark,
-   which is a box with no job. Adjacency at gap 0 is what groups them. */
-/* The shipped segmented control's vocabulary (`.tbm-seg`, `App.css`): a track
-   in `--v-theme-input-background` with a `--v-theme-border` hairline, holding
-   equal segments. The track fill is only 1.17:1 light / 1.13:1 dark against the
-   toolbar, so the HAIRLINE is what separates it - which is why the shipped
-   control carries one and why a track without it reads as nothing.
-
-   Welded rather than gapped, and pill rather than `--radius-md`: the outer
-   corners are fully round and the seam between the two is a straight line, so
-   the pair reads as one object with a division in it rather than as two
-   controls that happen to touch. */
+   The shipped segmented track (`.tbm-seg`, `App.css`), sized for this bar per
+   the design system's `Segmented`: zero gap between segments,
+   `--control-h-sm` segments with a minimum width, and `--elevation-1` on the
+   selected one as the cue beyond hue. `--space-1` of inset rather than the spec's `--space-2`, so the
+   track is 30px and sits inside the 36px band with room for a focus ring.
+   `tbm-seg-btn--on` fills in `primary` and carries no weight change, so
+   selecting a segment never resizes the pair (the guardrail in
+   `ModelShelf.test.js` holds `.shelf-viewseg--on` to that). */
 .shelf-viewswitch {
-  display: inline-flex;
   gap: 0;
-  background: rgb(var(--v-theme-input-background));
-  border: 1px solid rgb(var(--v-theme-border));
-  border-radius: var(--radius-pill);
+  padding: var(--space-1);
 }
 
-/* 26px, not `.bar-btn`'s 32: this is the one control on any of the three bars
-   that wraps its buttons in a bordered track, so 32px segments made the switch
-   34px against every neighbour's 32. In the old 48px band that only misaligned
-   it; in the 36px band it also left 0.5px between the switch and the band edge,
-   so a focused segment's 3px ring painted over the first list row.
-
-   26 + 2×1px border = 28, matching `Add` beside it rather than the 32 of the
-   boxed buttons - and for the same reason `Add` moved: this switch and that
-   button are the only two objects on the bar that are visibly filled at rest,
-   so they are the only two whose height reads as a silhouette. 28 in a 36px
-   band leaves 3.5px above and below instead of 1.5. */
 .shelf-viewseg {
-  border-radius: 0;
-  height: 26px;
-  color: rgba(var(--v-theme-on-panel), 0.7);
+  flex: none;
+  min-width: 56px;
 }
 
-/* Round outwards, straight between. */
-/* No padding on the track, so a filled segment reaches the border rather than
-   floating inside a ring of track colour - which is what read as a wide inset
-   around the pair. The caps nest exactly because both are `--radius-pill`. */
-.shelf-viewseg:first-child {
-  border-radius: var(--radius-pill) 0 0 var(--radius-pill);
-}
-
-.shelf-viewseg:last-child {
-  border-radius: 0 var(--radius-pill) var(--radius-pill) 0;
-}
-
-.shelf-viewseg:not(.shelf-viewseg--on):hover {
-  color: rgb(var(--v-theme-on-panel));
-  background: var(--hover-wash);
-}
-
-/* The selected segment fills, and carries no weight change. A bolder label is a
-   wider label, so the pair resized on every switch and the whole left group
-   jumped - the fill says the same thing and costs no layout (and the guardrail
-   in `ModelShelf.test.js` holds this rule to any property that would).
-
-   A WASH and not the solid `primary` `.tbm-seg-btn--on` uses. That control
-   lives inside a menu panel, where a branded fill is the only thing on the
-   surface; here it sat in a 36px band beside `Add`, and two solid accents in
-   one strip is what made this bar read as louder than the other two. Every
-   other bar in the app runs on transparent buttons - ink and a hover wash,
-   nothing filled at rest.
-
-   The label leaves `on-primary` with the fill, because warm white on a 28%
-   tint does not measure; it goes to `toolbar-text` at FULL strength against the
-   0.7 its neighbour keeps. That step is not decoration - `.shelf-row--selected`
-   below states the rule this obeys: a wash alone is a hue, and it needs a
-   partner that survives greyscale and forced-colors. Here the partner is the
-   ink, since a pill cannot carry that rule's inset bar.
-
-   The two alphas live in `style.css` beside `--hover-wash` and `--active-wash`,
-   which is where every theme-varying value in this app is declared - including
-   the shelf's own drive-band meter colours. */
 .shelf-viewseg--on {
-  background: var(--shelf-viewseg-wash);
-  color: rgb(var(--v-theme-toolbar-text));
-}
-
-.shelf-viewseg--on:hover {
-  background: var(--shelf-viewseg-wash);
-  color: rgb(var(--v-theme-toolbar-text));
-}
-
-/* Raised so the focus ring is not clipped by the welded sibling. */
-.shelf-viewseg:focus-visible {
-  position: relative;
-  z-index: var(--z-raised);
+  box-shadow: var(--elevation-1);
 }
 
 /* The gap the count sits in is the bar's cluster gap, not a hair. */
@@ -4385,23 +5343,8 @@ watch(
   white-space: nowrap;
 }
 
-.shelf-banner-dismiss {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  flex: none;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: rgba(var(--v-theme-on-background), 0.7);
-  cursor: pointer;
-}
-
-.shelf-banner-dismiss:hover {
-  background: var(--hover-wash);
-  color: rgb(var(--v-theme-on-background));
+.shelf-banner b {
+  font-weight: var(--weight-semibold);
 }
 
 /* ── Drive bands ───────────────────────────────────────────────────────────
@@ -4491,8 +5434,8 @@ watch(
    the shelf has one drop treatment and a second dialect on the outer level
    would read as a different kind of target rather than the same one. */
 .shelf-band--drop {
-  background: rgba(var(--v-theme-primary), 0.12);
-  box-shadow: inset 0 0 0 2px rgba(var(--v-theme-primary), 0.65);
+  background: var(--active-wash);
+  box-shadow: inset 0 0 0 2px var(--active-bar);
 }
 
 /* The refusal, while the pointer is still down. `no-drop` is the same cursor
@@ -4500,7 +5443,7 @@ watch(
    hue and the hatch - the state has to survive greyscale and forced-colors. */
 .shelf-band--reject {
   background: rgba(var(--v-theme-error), 0.1);
-  box-shadow: inset 0 0 0 2px rgba(var(--v-theme-error), 0.65);
+  box-shadow: inset 0 0 0 2px rgba(var(--v-theme-surface-error), 0.65);
   cursor: no-drop;
 }
 
@@ -4603,11 +5546,11 @@ watch(
 /* The glyph is non-text at 16px, so it may carry the hue: 3.09 light, 6.72
    dark, both over the 3:1 UI floor. */
 .shelf-band-figures--low .v-icon {
-  color: rgb(var(--v-theme-warning));
+  color: rgb(var(--v-theme-surface-warning));
 }
 
 .shelf-band-figures--reject .v-icon {
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
 }
 
 .shelf-band-figures {
@@ -4716,6 +5659,7 @@ watch(
   height: 100%;
   padding: 0;
   border: 0;
+  border-radius: var(--radius-sm);
   background: none;
   cursor: pointer;
   transition: color var(--dur-1) var(--ease-standard);
@@ -4727,12 +5671,6 @@ watch(
 
 button.shelf-head-cell:hover {
   color: rgb(var(--v-theme-on-surface));
-}
-
-.shelf-head-cell:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-  border-radius: var(--radius-sm);
 }
 
 /* The sorted column is named in full ink with an arrow beside it. Both halves
@@ -4780,6 +5718,7 @@ button.shelf-head-cell:hover {
   bottom: 0;
   left: calc(var(--space-6) / -2 - var(--space-4) / 2);
   width: var(--space-6);
+  border-radius: var(--radius-sm);
   cursor: col-resize;
   touch-action: none;
 }
@@ -4804,17 +5743,12 @@ button.shelf-head-cell:hover {
 
 /* Colour only, never width: the hairline is `left: 50%` on the seam, so
    growing it would slide the line sideways under the pointer at the moment
-   the reader is aiming at it. */
+   the reader is aiming at it. Full ink, not a hue: hover and a drag in
+   progress are neither an action nor a selection. */
 .shelf-head-grip:hover::after,
 .shelf-head-grip--on::after,
 .shelf-head-grip:focus-visible::after {
-  background: rgb(var(--v-theme-primary));
-}
-
-.shelf-head-grip:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-  border-radius: var(--radius-sm);
+  background: rgb(var(--v-theme-on-background));
 }
 
 /* The key, once for the view. Wraps rather than scrolls: four short pairs at a
@@ -4908,7 +5842,7 @@ button.shelf-head-cell:hover {
 
 .shelf-group-btn--managed,
 .shelf-group-btn--builtin {
-  --shelf-rail: rgb(var(--v-theme-info));
+  --shelf-rail: rgb(var(--v-theme-surface-info));
 }
 
 /* An unplugged drive: muted ink and a muted rail, and deliberately NEVER the
@@ -4927,10 +5861,10 @@ button.shelf-head-cell:hover {
 /* The drop affordance keeps the tier rail beside it rather than replacing it:
    which folder this is does not stop being true while a drag is over it. */
 .shelf-group-btn--drop {
-  background: rgba(var(--v-theme-primary), 0.12);
+  background: var(--active-wash);
   box-shadow:
     inset 3px 0 0 var(--shelf-rail, transparent),
-    inset 0 0 0 2px rgba(var(--v-theme-primary), 0.65);
+    inset 0 0 0 2px var(--active-bar);
 }
 
 .shelf-group-chevron {
@@ -4996,17 +5930,18 @@ button.shelf-head-cell:hover {
   background: var(--hover-wash);
 }
 
+/* The global ink outline, drawn inside: a flush row in a scroller has no room
+   for the gap. */
 .shelf-row:focus-visible {
-  outline: 2px solid rgb(var(--v-theme-primary));
-  outline-offset: -2px;
+  outline-offset: calc(var(--focus-width) * -1);
 }
 
 /* A wash and an inset bar, not a border: a 1px outline on a selected row
    shifts every glyph in it by a pixel, and 200 selected rows would shimmer as
    the list scrolls. The bar is the greyscale half - the wash alone is a hue. */
 .shelf-row--selected {
-  background: rgba(var(--v-theme-primary), 0.12);
-  box-shadow: inset 3px 0 0 rgb(var(--v-theme-primary));
+  background: var(--active-wash);
+  box-shadow: var(--selection-edge);
 }
 
 /* ── The three kinds of absence ────────────────────────────────────────────
@@ -5026,7 +5961,7 @@ button.shelf-head-cell:hover {
    They are told apart in GREYSCALE, which is what makes this a treatment and
    not a hue: solid rail, dashed rail, no rail, plus two different glyphs. */
 .shelf-row--broken {
-  border-left-color: rgb(var(--v-theme-error));
+  border-left-color: rgb(var(--v-theme-surface-error));
 }
 
 .shelf-row--offline {
@@ -5053,6 +5988,23 @@ button.shelf-head-cell:hover {
   justify-content: center;
   width: calc(var(--entity-thumb) + var(--space-4));
   flex: none;
+}
+
+/* The cover chip is the grid's (App.css), but a 24px mark is not a tile: it
+   sits on the slot's own corner rather than inset from it, and straddles the
+   mark's bottom edge so the top of the face still shows. The slot plus the row
+   gap leave 48px before the name, and "COVER" at the grid's tracking and
+   padding measures up to 53px on DejaVu, so here it drops the tracking, takes
+   the hairline padding and starts in the row's own left padding: about 42px
+   at its widest, ending short of the name. The row's bottom padding (8px) is
+   what keeps the 4px overhang out of `content-visibility`'s paint clip.
+   Not hoverable, like the grid's: it overlaps the mark, whose own tooltip names
+   the assignments, and the chip's tip still describes it to assistive tech. */
+.shelf-row-ident .stack-cover-flag {
+  left: calc(var(--space-2) * -1);
+  bottom: calc(var(--space-2) * -1);
+  padding: 0 var(--space-1);
+  letter-spacing: normal;
 }
 
 .shelf-row-label {
@@ -5170,12 +6122,6 @@ button.shelf-head-cell:hover {
   border-radius: var(--radius-sm);
 }
 
-.shelf-row-rename:focus,
-.shelf-row-base-edit:focus {
-  outline: none;
-  box-shadow: var(--focus-ring);
-}
-
 /* The absence glyph leads the name line, because it changes what everything
    after it means: the name is still true, the file behind it is not there. */
 .shelf-row-loc {
@@ -5184,7 +6130,7 @@ button.shelf-head-cell:hover {
 
 .shelf-row-loc--missing,
 .shelf-row-loc--forgotten {
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
 }
 
 /* Muted, never the error colour, and 0.7 like every other muted figure on this
@@ -5212,6 +6158,26 @@ button.shelf-head-cell:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   color: rgba(var(--v-theme-on-background), 0.7);
+}
+
+/* The precision, in the app's mono face because it is a machine word read
+   character by character (`Q4_K_M`, `FP8`) rather than a phrase - the same
+   reason the filename line under it is monospaced. Nothing else changes: it is
+   the row's own chip, at the row's own size and border. */
+.shelf-chip--quant {
+  font-family: var(--font-mono);
+}
+
+/* The trigger word is a phrase somebody typed, so it is the one chip with no
+   natural length. Capped, and a block so the cap ends in an ellipsis: every
+   chip is `flex: none` and the name beside it is what gives way. */
+.shelf-chip--trigger {
+  display: inline-block;
+  max-width: 18ch;
+}
+
+.shelf-chip--trigger:not(.shelf-chip--none) {
+  font-family: var(--font-mono);
 }
 
 /* Not set is a DASHED chip, not a blank cell: a blank under a column that
@@ -5243,7 +6209,7 @@ button.shelf-head-cell:hover {
 }
 
 .shelf-stack-badge:hover {
-  border-color: rgb(var(--v-theme-primary));
+  background-image: var(--hover-neutral);
 }
 
 .shelf-stack-badge .v-icon {
@@ -5262,13 +6228,13 @@ button.shelf-head-cell:hover {
 .shelf-row-new {
   flex: none;
   padding: 0 var(--space-2);
-  border: 1px solid rgba(var(--v-theme-success), 0.5);
+  border: 1px solid rgba(var(--v-theme-surface-success), 0.5);
   border-radius: var(--radius-pill);
   font-size: var(--text-2xs);
   font-weight: var(--weight-semibold);
   letter-spacing: var(--tracking-label);
   text-transform: uppercase;
-  color: rgb(var(--v-theme-success));
+  color: rgb(var(--v-theme-surface-success));
 }
 
 .shelf-col {
@@ -5286,6 +6252,20 @@ button.shelf-head-cell:hover {
 
 .shelf-col--base {
   width: var(--shelf-col-base);
+}
+
+/* A guessed value carries a tag, and the tag is the part that must survive a
+   narrow column: the label ellipsises, the tag keeps its width. */
+.shelf-col--base:has(.shelf-name-tag) {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.shelf-base-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* The field fills the cell it replaces rather than widening the row: every
@@ -5367,7 +6347,7 @@ button.shelf-head-cell:hover {
 .shelf-dim {
   position: absolute;
   inset: 0;
-  z-index: calc(var(--z-sticky) + 10);
+  z-index: var(--z-floating);
   background: rgba(var(--v-theme-background), 0.55);
 }
 </style>

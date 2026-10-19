@@ -22,6 +22,7 @@ from .db_models import (
     Character,
     Face,
     Picture,
+    PicturePendingPerson,
     PictureSet,
     Snapshot,
     Tag,
@@ -32,6 +33,7 @@ from .db_models import (
     make_description_sentinel,
 )
 from .pixl_logging import get_logger
+from .scoring import match_faces_to_characters
 from pixlstash.startup_permissions import mkdir_private
 from pixlstash.inference.engine import InferenceEngine
 from .utils.image_processing.image_utils import ImageUtils
@@ -60,10 +62,16 @@ from pixlstash.services.set_lock_service import (
 )
 from pixlstash.utils.sql_chunking import chunked
 from pixlstash.services.scrapheap_service import DEFAULT_RETENTION_DAYS
+from pixlstash.services.workflow_ghost_service import DEFAULT_GHOST_RETENTION
 from pixlstash.services.snapshot_service import SnapshotService
 from pixlstash.services.restore import RestoreService
+from pixlstash.hub.registry import VAULT_FILENAME
 from pixlstash.trusted_sqlite import TrustedSQLiteLocation
 from pixlstash.utils.path_utils import LibraryRootsUnavailable
+from pixlstash.tasks.missing_saved_recipe_workflow_finder import (
+    MissingSavedRecipeWorkflowFinder,
+)
+from pixlstash.tasks.downloads_intake_finder import DownloadsIntakeFinder
 
 
 logger = get_logger(__name__)
@@ -98,6 +106,8 @@ class Vault:
         insightface_model_pack: str = "buffalo_l",
         scrapheap_retention_days: Optional[int] = DEFAULT_RETENTION_DAYS,
         scrapheap_retention_reduced_at: Optional[datetime.datetime] = None,
+        db_filename: Optional[str] = None,
+        ghost_retention: str = DEFAULT_GHOST_RETENTION,
     ):
         """
         Initialize a Vault instance.
@@ -110,6 +120,11 @@ class Vault:
                 WorkPlanner and ReferenceFolderWatcher are not started and
                 no models are ever loaded.  Intended for read-only deployments
                 where all processing is already complete.
+            db_filename (Optional[str]): Name of the database file inside
+                *image_root*. ``None`` takes it from the hub registration when
+                the vault is opened through one, which is what puts a library
+                still on its first import onto the temporary name without any
+                caller having to know. Falls back to ``vault.db``.
         """
         registered_hub = getattr(image_root, "hub", None)
         registered_library = getattr(image_root, "library", None)
@@ -128,7 +143,18 @@ class Vault:
             f"Image root path does not exist: {self.image_root}"
         )
 
-        self._db_path = os.path.join(self.image_root, "vault.db")
+        # The registration is the single source of truth for which file this
+        # library's database is: a first import runs against the temporary
+        # name and the promotion renames it. Reading it here means start-up,
+        # the library switch and the switch's own recovery path all open the
+        # right file without passing the name around.
+        if db_filename is None:
+            db_filename = (
+                registered_library.vault_filename
+                if registered_library is not None
+                else VAULT_FILENAME
+            )
+        self._db_path = os.path.join(self.image_root, db_filename)
         if registered_hub is not None and registered_library is not None:
             from pixlstash.hub.bootstrap import (
                 finalize_library_connection,
@@ -196,6 +222,14 @@ class Vault:
         self._scrapheap_retention_reduced_at: Optional[datetime.datetime] = (
             scrapheap_retention_reduced_at
         )
+        # The hub this vault was opened through, and which library it is, or
+        # None for both (the CLI tools, most tests). The purge needs them:
+        # ghosts live in the hub, ``deleted_file_log`` does not reach across,
+        # and a ghost is scoped to the library whose vault holds its cover
+        # (§B4).
+        self._hub = registered_hub
+        self._library_uuid: Optional[str] = getattr(registered_library, "uuid", None)
+        self._ghost_retention: str = ghost_retention
 
         self._planner_watchers = {}
         self._planner_watchers_lock = threading.Lock()
@@ -296,12 +330,42 @@ class Vault:
         # CLI tools, most tests - has no hub to reach), and harmless in the
         # multi-library case because only one vault is live at a time.
         if registered_hub is not None:
+            # Every permanent delete of a picture row, on whatever path, leaves
+            # its instance hash in ``pending_ghost_cascade`` (a vault trigger,
+            # migration 0117), and this finder is what runs the covered-ghost
+            # cascade over them (§B4). Hub-only because ghosts live in the hub;
+            # a hubless vault keeps the queue until a hub opens it.
+            from pixlstash.tasks.ghost_cascade_finder import GhostCascadeFinder
+
+            self._planner_work_finders[TaskType.GHOST_CASCADE] = GhostCascadeFinder(
+                vault=self
+            )
             from pixlstash.tasks.missing_checkpoint_hash_finder import (
                 MissingCheckpointHashFinder,
             )
 
             self._planner_work_finders[TaskType.CHECKPOINT_HASH] = (
                 MissingCheckpointHashFinder(hub=registered_hub)
+            )
+            # The watched Downloads folder, a hub fact for the same reason.
+            self._planner_work_finders[TaskType.DOWNLOADS_INTAKE] = (
+                DownloadsIntakeFinder(hub=registered_hub, notifier=self.notify)
+            )
+            # The workflow-card backfill (§B2). Hub-only in the strongest sense:
+            # it reads stored documents and never a picture, so it keys the
+            # recipes of libraries that are not even attached, and the pictures
+            # a trimmed library no longer has still have their workflow.
+            from pixlstash.tasks.workflow_card_backfill_finder import (
+                WorkflowCardBackfillFinder,
+            )
+
+            self._planner_work_finders[TaskType.WORKFLOW_CARD_BACKFILL] = (
+                WorkflowCardBackfillFinder(hub=registered_hub, vault=self)
+            )
+            # The cut-over (#1623): saved recipes naming a card are put on the
+            # workflow it became. Needs the hub's `workflow_key_successor`.
+            self._planner_work_finders[TaskType.SAVED_RECIPE_CONVERT] = (
+                MissingSavedRecipeWorkflowFinder(vault=self)
             )
             # And the workflow library's store is the hub too, so the ComfyUI
             # extraction can file a picture's graph where it outlives the
@@ -319,6 +383,8 @@ class Vault:
                     database=self.db,
                     image_root=self.image_root,
                     hub=registered_hub,
+                    library_uuid=self._library_uuid,
+                    vault=self,
                 )
             )
         self._work_planner = WorkPlanner(
@@ -341,24 +407,14 @@ class Vault:
 
         Call this at server startup. Tests that do not need the tagger can skip it;
         tagger init is also triggered lazily by get_worker_future().
+
+        On Metal this blocks for a few seconds while the CPU query encoders
+        load; see :meth:`_create_engine`.
         """
         if self._disable_background_workers:
             return
         if not self._engine:
-            self._engine = InferenceEngine.create(
-                image_root=self.image_root,
-                force_cpu=self._force_cpu,
-                fast_captions=self._fast_captions,
-                max_vram_gb=self._max_vram_gb,
-                wd14_enabled=self._wd14_tagger_enabled,
-                pixlstash_tagger_enabled=self._pixlstash_tagger_enabled,
-                wd14_threshold=self._wd14_threshold,
-                pixlstash_tagger_threshold_offset=self._pixlstash_tagger_threshold_offset
-                or 0.0,
-                keep_models_in_memory=self._keep_models_in_memory,
-                insightface_model_pack=self._insightface_model_pack,
-                tagger_settings=self._tagger_settings,
-            )
+            self._engine = self._create_engine()
             self._bind_engine_services()
 
     def start(self) -> None:
@@ -375,6 +431,38 @@ class Vault:
         self._ref_folder_watcher.start()
         self._start_existing_folder_watches()
         self._started = True
+
+    def _create_engine(self) -> InferenceEngine:
+        """Build the inference engine, with its CPU query encoders loaded.
+
+        The caller publishes the result to ``self._engine`` only after this
+        returns, and that order is the point. The planner's model finders queue
+        nothing while ``self._engine`` is ``None``, so loading the copies here
+        (Metal hosts only) runs no other model load beside them, even at boot,
+        where ``Server.__init__`` has already started the planner. A load beside
+        another one races transformers' and accelerate's imports. See
+        ``inference/cpu_query_encoders.py``.
+
+        Returns:
+            The engine, ready to publish.
+        """
+        engine = InferenceEngine.create(
+            image_root=self.image_root,
+            force_cpu=self._force_cpu,
+            fast_captions=self._fast_captions,
+            max_vram_gb=self._max_vram_gb,
+            wd14_enabled=self._wd14_tagger_enabled,
+            pixlstash_tagger_enabled=self._pixlstash_tagger_enabled,
+            wd14_threshold=self._wd14_threshold,
+            pixlstash_tagger_threshold_offset=self._pixlstash_tagger_threshold_offset
+            or 0.0,
+            keep_models_in_memory=self._keep_models_in_memory,
+            insightface_model_pack=self._insightface_model_pack,
+            tagger_settings=self._tagger_settings,
+        )
+        if engine.query_encoders is not None:
+            engine.query_encoders.load()
+        return engine
 
     def _bind_engine_services(self) -> None:
         """Inject the engine's service instances into registry plugins.
@@ -739,6 +827,31 @@ class Vault:
         self._scrapheap_retention_reduced_at = reduced_at
 
     @property
+    def hub(self):
+        """The hub database this vault was opened through, or None."""
+        return self._hub
+
+    @property
+    def library_uuid(self) -> Optional[str]:
+        """Which library this vault is, in the hub's registry, or None."""
+        return self._library_uuid
+
+    def set_ghost_retention(self, retention: str) -> None:
+        """Set the picture-ghost retention position at runtime.
+
+        Takes effect on the next purge. It never destroys anything
+        synchronously: turning the setting down is a statement about what future
+        purges may keep, and clearing what is ALREADY kept is its own request,
+        ``DELETE /server-config/ghost-retention/ghosts``.
+        """
+        self._ghost_retention = retention
+
+    @property
+    def ghost_retention(self) -> str:
+        """Which picture ghosts a purge may keep: off / covered / on."""
+        return self._ghost_retention
+
+    @property
     def scrapheap_retention_days(self) -> Optional[int]:
         """Scrapheap auto-purge window in days; None means "Never"."""
         return self._scrapheap_retention_days
@@ -849,6 +962,7 @@ class Vault:
         def _fetch_pic(session: Session):
             return session.get(Picture, picture_id)
 
+        reset_generation = self.db.tag_resets.current()
         pic = self.db.run_immediate_read_task(_fetch_pic)
         if pic is not None:
             task = TagTask(
@@ -857,6 +971,7 @@ class Vault:
                 pictures=[pic],
                 interactive=True,
                 engine_override=engine_name,
+                reset_generation=reset_generation,
             )
             self.submit_task(task)
 
@@ -1249,6 +1364,22 @@ class Vault:
             )
             return
 
+        if task.type == "OcrTask":
+            self._notify_worker_ids_processed(TaskType.OCR, changed)
+            picture_ids = [pic_id for _, pic_id, _, _ in changed]
+            if picture_ids:
+                # Not visible in the grid and no sort reads it: the open
+                # overlay refetches, nothing else moves.
+                self.notify(
+                    EventType.CHANGED_PICTURES,
+                    {
+                        "picture_ids": picture_ids,
+                        "change_kind": "updated",
+                        "fields": ["ocr_text"],
+                    },
+                )
+            return
+
         if task.type == "TextEmbeddingTask":
             self._notify_worker_ids_processed(TaskType.TEXT_EMBEDDING, changed)
             return
@@ -1271,6 +1402,10 @@ class Vault:
         Picture.pending_character_id.  This method is called after
         FaceExtractionTask completes and assigns the largest detected face for
         each such picture to the stored character, then clears the field.
+
+        A picture of several people (a run loading their LoRAs) waits in
+        ``PicturePendingPerson`` rows instead; its faces are matched to them
+        by likeness (``match_faces_to_characters``) and the rows deleted.
         """
 
         def _assign_if_pending(session: Session) -> bool:
@@ -1299,6 +1434,31 @@ class Vault:
                     best_face.character_id = character_id
                     session.add(best_face)
                     assigned_any = True
+            people_by_picture: dict[int, list[int]] = {}
+            for row in session.exec(
+                select(PicturePendingPerson).where(
+                    PicturePendingPerson.picture_id.in_(picture_ids)
+                )
+            ).all():
+                people_by_picture.setdefault(row.picture_id, []).append(
+                    row.character_id
+                )
+                session.delete(row)
+            session.flush()
+            for picture_id, people in people_by_picture.items():
+                faces = Face.find(session, picture_id=picture_id)
+                by_id = {face.id: face for face in faces}
+                pairs = match_faces_to_characters(session, faces, sorted(people))
+                for face_id, character_id in pairs.items():
+                    by_id[face_id].character_id = character_id
+                    session.add(by_id[face_id])
+                    assigned_any = True
+                logger.info(
+                    "Picture %s of people %s: faces %s matched to them by likeness.",
+                    picture_id,
+                    sorted(people),
+                    pairs,
+                )
             session.commit()
             return assigned_any
 
@@ -1374,20 +1534,7 @@ class Vault:
             concurrent.futures.Future: Future set to True when completed.
         """
         if not self._engine:
-            self._engine = InferenceEngine.create(
-                image_root=self.image_root,
-                force_cpu=self._force_cpu,
-                fast_captions=self._fast_captions,
-                max_vram_gb=self._max_vram_gb,
-                wd14_enabled=self._wd14_tagger_enabled,
-                pixlstash_tagger_enabled=self._pixlstash_tagger_enabled,
-                wd14_threshold=self._wd14_threshold,
-                pixlstash_tagger_threshold_offset=self._pixlstash_tagger_threshold_offset
-                or 0.0,
-                keep_models_in_memory=self._keep_models_in_memory,
-                insightface_model_pack=self._insightface_model_pack,
-                tagger_settings=self._tagger_settings,
-            )
+            self._engine = self._create_engine()
             self._bind_engine_services()
 
         # Register the watcher BEFORE checking the DB to avoid a TOCTOU race where
@@ -1631,6 +1778,13 @@ class Vault:
                     self.db.run_immediate_read_task(self._count_missing_text_score) or 0
                 )
                 label = "text_score"
+            elif worker_type == TaskType.OCR:
+                # Counted over the pictures that qualify for reading, not the
+                # library: most pictures are never read at all.
+                total, missing = self.db.run_immediate_read_task(
+                    self._count_ocr_progress
+                ) or (0, 0)
+                label = "text_read"
             elif worker_type == TaskType.DETECTION:
                 # User-triggered (no finder): surface live progress straight from
                 # the running task(s), mirroring the WATCH_FOLDERS handling.
@@ -1692,6 +1846,14 @@ class Vault:
                 finder = self._planner_work_finders.get(TaskType.CHECKPOINT_HASH)
                 total, missing = finder.progress() if finder is not None else (0, 0)
                 label = "checkpoints_hashed"
+            elif worker_type == TaskType.WORKFLOW_CARD_BACKFILL:
+                # Counted over the hub's recipes, not this library's pictures.
+                # Left in `planner_managed` below it would inherit the picture
+                # count and a hardcoded `missing = 0` - the "N / N, nothing
+                # remaining" row the two branches above exist to correct.
+                finder = self._planner_work_finders.get(TaskType.WORKFLOW_CARD_BACKFILL)
+                total, missing = finder.progress() if finder is not None else (0, 0)
+                label = "workflows_carded"
             elif worker_type == TaskType.ORIENTATION:
                 # Without its own count this row fell into `planner_managed`
                 # below - `missing = 0`, so it read "12,094 / 12,094, 0.00/s"
@@ -1705,8 +1867,8 @@ class Vault:
                 label = "orientations_read"
             elif worker_type == TaskType.THUMBNAIL_GENERATION:
                 # Whole-frame bitmap regeneration (MissingThumbnailFinder). After
-                # the v1.8.0 upgrade this counts the entire library, which is what
-                # the in-app "Upgrading thumbnails" progress bar reads.
+                # the v1.8.0 upgrade this counted the entire library; a fresh
+                # import does the same. The Tasks tab and Appearance read it.
                 missing = int(
                     self.db.run_immediate_read_task(self._count_missing_thumbnails) or 0
                 )
@@ -1782,8 +1944,8 @@ class Vault:
 
         Mirrors ``MissingThumbnailFinder._fetch_missing``: keyed on
         ``thumbnail_width IS NULL`` for live, file-backed pictures. Excludes
-        undecodable pictures (issue #585) so the "Upgrading thumbnails"
-        progress bar can reach 0 instead of stalling on files that can never
+        undecodable pictures (issue #585) so the thumbnail worker's
+        `remaining` can reach 0 instead of stalling on files that can never
         produce a thumbnail.
         """
         suppressed_ids = self.db.unprocessable_images.active_suppressed_ids()
@@ -1927,6 +2089,12 @@ class Vault:
         return TextScoreTask.count_missing_text_score(session)
 
     @staticmethod
+    def _count_ocr_progress(session: Session) -> tuple[int, int]:
+        from pixlstash.tasks.ocr_task import OcrTask
+
+        return OcrTask.count_progress(session)
+
+    @staticmethod
     def _count_pending_likeness_queue(session: Session) -> int:
         return LikenessTask.count_queue(session)
 
@@ -2060,7 +2228,7 @@ class Vault:
             source_file_path=logo_src,
         )
         picture.description = "PixlStash Logo"
-        picture.imported_at = datetime.datetime.now()
+        picture.imported_at = datetime.datetime.now(datetime.timezone.utc)
 
         assert picture.file_path
 
@@ -2091,7 +2259,7 @@ class Vault:
                         source_file_path=src_path,
                     )
                     pic.description = os.path.basename(src_path)
-                    pic.imported_at = datetime.datetime.now()
+                    pic.imported_at = datetime.datetime.now(datetime.timezone.utc)
                     assert pic.file_path
                     self.db.run_task(
                         add_picture,

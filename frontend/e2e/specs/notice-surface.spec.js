@@ -58,6 +58,28 @@ test.describe('notice surface', () => {
     await expect(notices.cards).toHaveCount(0)
   })
 
+  // Not a spec check: a guard on the page object. `clear()` is synchronous in
+  // the store but the TransitionGroup holds each leaving card for its leave
+  // transition, so a push straight afterwards leaves TWO cards in the DOM and
+  // `cards.first()` is the old one. It is visible, so `toBeVisible()` passes;
+  // it then detaches mid-measurement, and a detached element has an empty
+  // computed style. That is how `colorsOf` came back full of nulls and
+  // `composite` threw `Cannot read properties of null` from another file.
+  // Read single-shot here, exactly as `colorsOf` does - `toContainText` would
+  // retry until the right card arrived and prove nothing.
+  test('a card read straight after clear + push is the new one', async ({
+    notices,
+  }) => {
+    await notices.push({ level: 'error', text: 'OLD' })
+    await expect(notices.cards).toHaveCount(1)
+    await notices.clear()
+    await notices.push({ level: 'error', text: 'NEW' })
+    const text = await notices
+      .onlyCard()
+      .evaluate((el) => el.querySelector('.notice-message')?.textContent)
+    expect(text).toBe('NEW')
+  })
+
   // Spec §6: errors must not auto-dismiss; a failure the user has to act on
   // cannot vanish while they are reading it.
   test('an error never auto-dismisses while a success does', async ({
@@ -344,7 +366,7 @@ test.describe('notice surface', () => {
     await grid.searchButton.focus()
     const before = await page.evaluate(() => ({
       tag: document.activeElement?.tagName,
-      title: document.activeElement?.getAttribute('title'),
+      name: document.activeElement?.getAttribute('aria-label'),
     }))
     expect(before.tag).toBe('BUTTON')
 
@@ -354,11 +376,12 @@ test.describe('notice surface', () => {
     await page.waitForTimeout(400)
     const after = await page.evaluate(() => ({
       tag: document.activeElement?.tagName,
-      title: document.activeElement?.getAttribute('title'),
+      name: document.activeElement?.getAttribute('aria-label'),
       inNotice: !!document.activeElement?.closest('.notice-host'),
     }))
     expect(after.inNotice).toBe(false)
-    expect(after).toMatchObject({ tag: before.tag, title: before.title })
+    expect(before.name).toBeTruthy()
+    expect(after).toMatchObject({ tag: before.tag, name: before.name })
   })
 
   test('action and dismiss are keyboard-reachable with a visible focus ring', async ({
@@ -379,19 +402,17 @@ test.describe('notice surface', () => {
     // user (a programmatic .focus() alone does not reliably match it).
     await page.keyboard.press('Tab')
     await expect(dismiss).toBeFocused()
-    const ring = await dismiss.evaluate((el) => getComputedStyle(el).boxShadow)
+    const ring = await dismiss.evaluate((el) => getComputedStyle(el).outlineStyle)
     expect(ring).not.toBe('none')
 
-    // Hit area: 24×24 visual box expanded to 40×40 (WCAG 2.5.8 floor is 24×24).
+    // Hit area: the 32px bar control (WCAG 2.5.8 floor is 24×24).
     const hit = await dismiss.evaluate((el) => {
       const b = el.getBoundingClientRect()
-      const before = getComputedStyle(el, '::before')
-      return { w: b.width, h: b.height, inset: before.inset }
+      return { w: b.width, h: b.height }
     })
-    // 23.9999… in Chromium: the 24px box is laid out sub-pixel.
-    expect(hit.w).toBeGreaterThanOrEqual(23.9)
-    expect(hit.h).toBeGreaterThanOrEqual(23.9)
-    expect(hit.inset).toBe('-8px') // ::before expansion → 40×40 (WCAG 2.5.8)
+    // Allow for sub-pixel layout in Chromium.
+    expect(hit.w).toBeGreaterThanOrEqual(31.9)
+    expect(hit.h).toBeGreaterThanOrEqual(31.9)
 
     await page.keyboard.press('Shift+Tab')
     await expect(action).toBeFocused()
@@ -423,7 +444,7 @@ test.describe('notice surface', () => {
   // ── Contrast + token conformance (spec §8 table, check 12) ──────────────
   // Stands in for an axe-core colour-contrast run: axe is not a dependency of
   // this repo (see the QA report) and, more to the point, it would measure the
-  // card's untinted `background-color` and miss the rgba(status,.08) ::before
+  // card's untinted `background-color` and miss the rgba(status,.08) tint
   // layer that is the card's real background.
 
   for (const theme of ['light', 'dark']) {

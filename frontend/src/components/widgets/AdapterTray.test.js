@@ -14,6 +14,18 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 
+vi.mock("vuetify/components", async (importOriginal) => ({
+  ...(await importOriginal()),
+  // Tooltip.vue wraps VTooltip: render the activator only, as a closed tip does.
+  VTooltip: {
+    name: "VTooltip",
+    setup:
+      (_p, { slots }) =>
+      () =>
+        slots.activator?.({ props: {} }),
+  },
+}));
+
 const listAdapters = vi.fn();
 vi.mock("../../api/modelShelf", () => ({
   listAdapters: (...args) => listAdapters(...args),
@@ -30,7 +42,8 @@ function adapter(overrides = {}) {
     display_name: "Cyanwood Style",
     filename: "Cyanwood_Style_000000250.safetensors",
     base_model: "flux.1-dev",
-    trigger_words: null,
+    trigger_words: [],
+    trigger_words_source: null,
     icon_sha256: null,
     added_at: "2026-08-01T10:00:00Z",
     ...overrides,
@@ -119,7 +132,8 @@ describe("AdapterTray", () => {
                 display_name: null,
                 filename: "ivy.safetensors",
                 base_model: null,
-                trigger_words: "ivy_woman",
+                trigger_words: ["ivy_woman", "portrait"],
+                trigger_words_source: "recorded",
                 added_at: "2026-08-05T10:00:00Z",
               }),
             ],
@@ -137,7 +151,11 @@ describe("AdapterTray", () => {
     expect(cards[0].find(".adapter-card__meta").text()).toBe(
       "Base model not set",
     );
-    expect(cards[0].find(".adapter-card__trigger").text()).toBe("ivy_woman");
+    // The list the API serves, as the first word and a count: printed whole it
+    // was a JSON string, brackets and all.
+    expect(cards[0].find(".adapter-card__trigger").text()).toBe(
+      "Trigger word: ivy_woman +1",
+    );
   });
 
   it("names a row that has nothing to be named from", async () => {
@@ -504,11 +522,15 @@ describe("AdapterTray", () => {
       adapter({ id: 3, display_name: null, filename: "000002750.safetensors" }),
     ]);
     const cards = (await mountTray()).findAll(".adapter-card");
-    expect(cards[0].attributes("title")).toBe(
+    expect(cards[0].findComponent({ name: "Tooltip" }).props("text")).toBe(
       "Cyanwood Style - cw_v3.safetensors",
     );
-    expect(cards[1].attributes("title")).toBe("ivy - ivy.safetensors");
-    expect(cards[2].attributes("title")).toBe("000002750.safetensors");
+    expect(cards[1].findComponent({ name: "Tooltip" }).props("text")).toBe(
+      "ivy - ivy.safetensors",
+    );
+    expect(cards[2].findComponent({ name: "Tooltip" }).props("text")).toBe(
+      "000002750.safetensors",
+    );
   });
 
   it("asks for nothing at all if it is not told which kind of entity", async () => {

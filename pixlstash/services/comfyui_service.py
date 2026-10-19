@@ -11,21 +11,31 @@ exception to the origin-aware event envelope; its contract is documented on the
 function itself and in ``docs/backend_architecture.md`` §15. Preserve it exactly.
 """
 
+import ipaddress
 import json
 import mimetypes
+import ntpath
 import os
-import random
+import posixpath
+import re
+import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
+from urllib.parse import urlsplit
+
+from urllib3.util import parse_url
 
 import requests
 from fastapi import HTTPException
+from websockets.sync.client import connect as ws_connect
 from sqlmodel import select
 
 from pixlstash.db_models import (
     Character,
+    Face,
     Picture,
+    PicturePendingPerson,
     PictureProjectMember,
     PictureSetMember,
     PictureStack,
@@ -35,7 +45,19 @@ from pixlstash.db_models import (
 from pixlstash.event_types import EventType
 from pixlstash.services import import_dedup_service
 from pixlstash.services.layout_move_service import resolve_placement
-from pixlstash.services.comfyui_recipe_service import format_prompt_rejection
+from pixlstash.services.move_reconciliation_service import add_person
+from pixlstash.scoring import match_faces_to_characters
+from pixlstash.services.comfyui_recipe_service import (
+    CHECKPOINT_LOADER_ID,
+    CHECKPOINT_LOADER_SHELF,
+    PACK_SAVERS,
+    PICTURE_LOADER_IDS,
+    PICTURE_LOADER_LIBRARY,
+    PIXLSTASH_CHECKPOINT_LOADER,
+    PIXLSTASH_PICTURE_LOADER,
+    VIDEO_SAVE_CLASSES,
+    format_prompt_rejection,
+)
 from pixlstash.services.set_lock_service import drop_locked_set_ids
 from pixlstash.stacking import normalize_stack_positions
 from pixlstash.utils.image_processing.image_utils import ImageUtils
@@ -51,14 +73,315 @@ SEED_NODE_CLASSES = {"RandomNoise", "KSampler", "KSamplerAdvanced"}
 # instead of writing a file for PixlStash to collect. Their history entry
 # carries the ids they created under PIXLSTASH_IDS_KEY, and the images they do
 # report are `type: "temp"` previews of pictures that are already imported.
-PIXLSTASH_SAVER_CLASSES = frozenset({"PixlStashPictureSaver"})
+# Each with the stock saver a run submits in its place, and the input that
+# carries what it saves (`swap_pixlstash_savers`).
+_PIXLSTASH_SAVER_RUNS_AS = {
+    pack: (stock, carried) for stock, (pack, carried) in PACK_SAVERS.items()
+}
+PIXLSTASH_SAVER_CLASSES = frozenset(_PIXLSTASH_SAVER_RUNS_AS)
 PIXLSTASH_IDS_KEY = "picture_ids"
 
 # Every class in the ComfyUI-PixlStash pack starts with this.
 PIXLSTASH_NODE_PREFIX = "PixlStash"
 
-# Every class that ends a graph with an image PixlStash can end up owning.
-SAVE_NODE_CLASSES = frozenset({"SaveImage"}) | PIXLSTASH_SAVER_CLASSES
+# The savers that write a file under their own ``filename_prefix`` and report
+# it in the prompt's history, for PixlStash to download.
+FILE_SAVE_NODE_CLASSES = frozenset({"SaveImage"}) | VIDEO_SAVE_CLASSES
+
+# Every class that ends a graph with a picture or video PixlStash can end up
+# owning.
+SAVE_NODE_CLASSES = FILE_SAVE_NODE_CLASSES | PIXLSTASH_SAVER_CLASSES
+
+# Where VideoHelperSuite's combine lists the file it wrote; every ComfyUI saver
+# lists its own, a video included, under ``images``.
+VHS_FILES_KEY = "gifs"
+
+# Requests that vet or link a ComfyUI go straight to the address asked.
+# ``requests`` otherwise honours HTTP_PROXY / HTTPS_PROXY / ALL_PROXY from the
+# environment, and a proxy is a host nobody checked. A ``None`` value drops the
+# environment's entry for that key, so ``all`` must be named as well.
+NO_PROXY = {"http": None, "https": None, "all": None}
+
+# How many followed prompts' endings are kept for GET /workflows/runs/{id}.
+MAX_RUN_OUTCOMES = 500
+_run_outcomes: dict[str, dict] = {}
+_run_outcomes_lock = threading.Lock()
+
+# The most of ComfyUI's own exception text a failure sentence carries: a
+# state_dict size mismatch runs to kilobytes, and the sentence is drawn on a
+# card and spoken as part of its name.
+MAX_FAILURE_REASON = 300
+
+# Bumped each time PixlStash itself has cleared ComfyUI's queue, so every poller
+# asks the queue about its prompt at once instead of at its next check.
+_queue_cleared = 0
+
+# The ComfyUI client every run is submitted under. ComfyUI sends a prompt's
+# ``executing`` and ``progress`` messages to the client the prompt names, so
+# naming this one is how ``_listen_for_progress`` hears them.
+RUN_CLIENT_ID = f"pixlstash-{uuid.uuid4().hex[:12]}"
+# What a run that says nothing about itself is called in the Tasks tab.
+RUN_LABEL_FALLBACK = "ComfyUI"
+# How long the listener waits for a message before asking whether any run is
+# still in flight, and how long before it tries a socket that failed again.
+LISTEN_POLL_S = 2.0
+LISTEN_RETRY_S = 5.0
+# The largest frame the listener takes off ComfyUI's socket.
+LISTEN_MAX_FRAME = 16 * 1024 * 1024
+
+# The runs in flight, by prompt id, in the order they were queued: what
+# GET /workers/progress reports. From ``follow_run`` until
+# ``record_run_outcome`` records an ending. Under ``_run_outcomes_lock``.
+_live_runs: dict[str, dict] = {}
+# The ComfyUI addresses ``_listen_for_progress`` has a thread on. Same lock.
+_listening: set[str] = set()
+
+
+class ComfyUIRunStopped(RuntimeError):
+    """A run that was stopped (interrupted, or taken off ComfyUI's queue)
+    rather than one a node failed in."""
+
+
+def record_run_outcome(
+    prompt_id: str,
+    status: str,
+    message: str | None = None,
+    stopped: bool = False,
+    picture_ids: list[int] | None = None,
+    library_uuid: str | None = None,
+) -> None:
+    """Remember how a followed prompt stands: ``running``, ``completed`` or
+    ``failed``. In memory, the newest ``MAX_RUN_OUTCOMES``.
+
+    *library_uuid* is the library the run was started in, given when it is
+    queued and kept by every later update: its picture ids mean nothing in
+    another library. A run still going is the last to be dropped.
+
+    An ending also takes the run out of the runs in flight (``live_runs``):
+    every ending is recorded here before it is announced, so a tab that reads
+    the runs on hearing of one never finds it still listed.
+    """
+    with _run_outcomes_lock:
+        if status != "running":
+            _live_runs.pop(prompt_id, None)
+        previous = _run_outcomes.pop(prompt_id, None) or {}
+        _run_outcomes[prompt_id] = {
+            "prompt_id": prompt_id,
+            "status": status,
+            "message": message,
+            "stopped": stopped,
+            "picture_ids": list(picture_ids or []),
+            "library_uuid": library_uuid or previous.get("library_uuid"),
+        }
+        while len(_run_outcomes) > MAX_RUN_OUTCOMES:
+            ended = (
+                key
+                for key, outcome in _run_outcomes.items()
+                if outcome["status"] != "running"
+            )
+            del _run_outcomes[next(ended, None) or next(iter(_run_outcomes))]
+
+
+def run_outcome(prompt_id: str) -> dict | None:
+    """What ``record_run_outcome`` last said of *prompt_id*, or None."""
+    with _run_outcomes_lock:
+        outcome = _run_outcomes.get(prompt_id)
+        return dict(outcome) if outcome else None
+
+
+def follow_run(
+    prompt_id: str,
+    base_url: str,
+    label: str | None = None,
+    workflow_id: str | None = None,
+    library_uuid: str | None = None,
+) -> None:
+    """Take a prompt ComfyUI accepted as a run in flight.
+
+    Recorded as ``running`` for ``GET /workflows/runs/{prompt_id}`` and listed
+    by ``live_runs`` as ``queued`` until ComfyUI speaks of it. *label* is what
+    the Tasks tab calls it. Starts the listener on *base_url* if none is up.
+    """
+    record_run_outcome(prompt_id, "running", library_uuid=library_uuid)
+    with _run_outcomes_lock:
+        _live_runs[prompt_id] = {
+            "prompt_id": prompt_id,
+            "label": label or RUN_LABEL_FALLBACK,
+            "workflow_id": workflow_id,
+            "status": "queued",
+            "percent": 0.0,
+            "library_uuid": library_uuid,
+            "base_url": base_url,
+        }
+        listen = base_url not in _listening
+        if listen:
+            _listening.add(base_url)
+    if listen:
+        threading.Thread(
+            target=_listen_for_progress, args=(base_url,), daemon=True
+        ).start()
+
+
+def live_runs(library_uuid: str | None) -> list[dict]:
+    """The runs in flight that were started in *library_uuid*, oldest first:
+    ``prompt_id``, ``label``, ``workflow_id``, ``status`` (``queued`` or
+    ``running``) and ``percent``, the running node's own progress."""
+    shown = ("prompt_id", "label", "workflow_id", "status", "percent")
+    with _run_outcomes_lock:
+        return [
+            {key: run[key] for key in shown}
+            for run in _live_runs.values()
+            if run["library_uuid"] in (None, library_uuid)
+        ]
+
+
+def _note_run_message(raw: str) -> None:
+    """Read one message off ComfyUI's socket into the runs in flight.
+
+    Any message naming a run means ComfyUI has started on it (a queued prompt
+    is never spoken of by id), and ``progress`` carries the running node's
+    steps. A percent is one node's sampler, so 100 is the first pass of a
+    two-pass graph done, not the run: only ``_wait_for_comfyui_outputs`` ends
+    one.
+    """
+    try:
+        payload = json.loads(raw)
+    except ValueError as exc:
+        logger.debug("Unreadable message on ComfyUI's socket: %s (%r)", exc, raw[:200])
+        return
+    data = payload.get("data") if isinstance(payload, dict) else None
+    prompt_id = data.get("prompt_id") if isinstance(data, dict) else None
+    if not isinstance(prompt_id, str):
+        return
+    percent = None
+    if payload.get("type") == "progress":
+        try:
+            percent = 100.0 * float(data.get("value")) / float(data.get("max"))
+        except (TypeError, ValueError, ArithmeticError) as exc:
+            # Not two numbers, a max of zero, or one too large to be a step.
+            logger.debug("Unreadable progress for prompt %s: %s", prompt_id, exc)
+    with _run_outcomes_lock:
+        run = _live_runs.get(prompt_id)
+        if run is None:
+            return
+        run["status"] = "running"
+        if percent is not None:
+            run["percent"] = max(0.0, min(100.0, percent))
+
+
+def _note_running_prompts(base_url: str) -> None:
+    """Mark the runs ComfyUI's queue lists as running.
+
+    Read once a socket is open: the run that started the listener was
+    submitted before the socket existed, so ComfyUI may already have said it
+    started on it, and through a long model load it says nothing more.
+    """
+    try:
+        response = requests.get(f"{base_url}/queue", timeout=30)
+        response.raise_for_status()
+        queue = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning(
+            "ComfyUI's queue at %s could not be read, so a run already "
+            "started reads as queued until ComfyUI next speaks of it: %s",
+            base_url,
+            exc,
+        )
+        return
+    running = queue.get("queue_running") if isinstance(queue, dict) else None
+    # Each entry is ``[number, prompt_id, prompt, ...]``.
+    ids = {
+        item[1]
+        for item in running or []
+        if isinstance(item, (list, tuple)) and len(item) > 1
+    }
+    with _run_outcomes_lock:
+        for prompt_id, run in _live_runs.items():
+            if prompt_id in ids:
+                run["status"] = "running"
+
+
+def _runs_on(base_url: str) -> bool:
+    """Whether a run on *base_url* is in flight. Call with the lock held."""
+    return any(run["base_url"] == base_url for run in _live_runs.values())
+
+
+def _still_listening(base_url: str) -> bool:
+    """Whether a run on *base_url* is still in flight. When none is, the
+    listener is struck off in the same breath, so a run queued a moment later
+    starts a new one rather than counting on this one."""
+    with _run_outcomes_lock:
+        if _runs_on(base_url):
+            return True
+        _listening.discard(base_url)
+        return False
+
+
+def _listen_for_progress(base_url: str) -> None:
+    """Hear ComfyUI say how far its runs are, until none is in flight.
+
+    One socket per ComfyUI for the whole app, opened as ``RUN_CLIENT_ID``,
+    which every run is submitted under. It is for the Tasks tab only: a run's
+    ending is read from ComfyUI's history, so a socket that cannot be opened
+    costs the step progress and nothing else.
+
+    Never two sockets on one address: ComfyUI keys its clients by id, and the
+    first of two to close would take the other's messages with it. So the
+    listener is struck off (``_still_listening``) only once its socket is
+    closed, and a run queued before that keeps this thread rather than
+    starting another.
+
+    ponytail: with no socket a run reads ``queued`` until it ends, or until
+    the next socket's queue read. The queue read in
+    ``_wait_for_comfyui_outputs`` could say ``running`` if a ComfyUI behind a
+    proxy that drops WebSockets ever matters.
+    """
+    ws_url = f"{re.sub('^http', 'ws', base_url)}/ws?clientId={RUN_CLIENT_ID}"
+    warned = False
+    try:
+        while _still_listening(base_url):
+            try:
+                # No pings: a ComfyUI loading a model answers nothing for
+                # minutes. Frames are JSON and previews, far under the cap.
+                with ws_connect(
+                    ws_url,
+                    ping_interval=None,
+                    max_size=LISTEN_MAX_FRAME,
+                    open_timeout=10,
+                    close_timeout=2,
+                ) as upstream:
+                    warned = False
+                    _note_running_prompts(base_url)
+                    while True:
+                        with _run_outcomes_lock:
+                            if not _runs_on(base_url):
+                                break
+                        try:
+                            message = upstream.recv(timeout=LISTEN_POLL_S)
+                        except TimeoutError:
+                            continue
+                        # Bytes are previews, which nothing here shows.
+                        if isinstance(message, str):
+                            _note_run_message(message)
+                continue
+            except Exception as exc:
+                # Whatever it is, the socket is only the step progress: say so
+                # once and try again, rather than lose it until a restart.
+                if not warned:
+                    logger.warning(
+                        "ComfyUI's socket at %s cannot be followed, so its runs "
+                        "show no step progress until it can: %s: %s",
+                        base_url,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    warned = True
+            time.sleep(LISTEN_RETRY_S)
+    finally:
+        # Normally struck off already; this is for a thread that is ending
+        # some other way, so the next run can start a listener again.
+        with _run_outcomes_lock:
+            _listening.discard(base_url)
 
 
 def _extract_history_entry(history_payload: dict, prompt_id: str) -> dict:
@@ -109,9 +432,66 @@ def _extract_text_from_value(value) -> str:
     return str(value)
 
 
+def _node_label(entry: dict, event: dict) -> str:
+    """``Title (Class)`` for the node an execution event names.
+
+    The class is the event's ``node_type``; the title is the node's own in the
+    graph the history entry carries (``prompt[2]``), left out where it only
+    repeats the class. Empty when the event names no node.
+    """
+    class_type = str(event.get("node_type") or "").strip()
+    prompt = entry.get("prompt")
+    graph = prompt[2] if isinstance(prompt, (list, tuple)) and len(prompt) > 2 else None
+    node = graph.get(str(event.get("node_id"))) if isinstance(graph, dict) else None
+    title = ""
+    if isinstance(node, dict):
+        meta = node.get("_meta")
+        title = str((meta.get("title") if isinstance(meta, dict) else "") or "").strip()
+        class_type = class_type or str(node.get("class_type") or "").strip()
+    if title and class_type and title != class_type:
+        return f"{title} ({class_type})"
+    return title or class_type
+
+
+def _describe_execution_event(entry: dict, name: str, event) -> str:
+    """Which node ended a prompt and why, from ComfyUI's own account of it.
+
+    ``Load Diffusion Model (UNETLoader) failed: KeyError 'asym_w4a8_int8'`` for
+    an ``execution_error``, ``Interrupted at <node>`` for an
+    ``execution_interrupted``. Empty when the event does not say enough, and
+    the caller falls back to whatever text it holds.
+    """
+    if not isinstance(event, dict):
+        return ""
+    node = _node_label(entry, event)
+    if name == "execution_interrupted":
+        return f"Interrupted at {node}" if node else "Interrupted"
+    if name != "execution_error":
+        return ""
+    # The exception's message alone can be a bare key ("'asym_w4a8_int8'" for
+    # a KeyError), so its type goes in front. One line: a traceback-style
+    # message would otherwise fill the card it is shown on.
+    reason = " ".join(
+        " ".join(str(event.get(key) or "").split())
+        for key in ("exception_type", "exception_message")
+        if str(event.get(key) or "").strip()
+    )
+    if len(reason) > MAX_FAILURE_REASON:
+        reason = reason[:MAX_FAILURE_REASON].rstrip() + "…"
+    if not node:
+        return reason
+    return f"{node} failed: {reason}" if reason else f"{node} failed"
+
+
 def _extract_history_status_and_error(
     history_payload: dict, prompt_id: str
 ) -> tuple[str | None, str | None]:
+    """A prompt's status and, where it ended badly, the sentence that says why.
+
+    An interrupted prompt answers ``interrupted`` whatever ComfyUI's own
+    ``status_str`` (it files one under ``error``), so the caller can tell a
+    stopped run from a failed one.
+    """
     entry = _extract_history_entry(history_payload, prompt_id)
     status = entry.get("status") or {}
     status_str = None
@@ -138,9 +518,13 @@ def _extract_history_status_and_error(
                 "error",
                 "execution_interrupted",
             }:
-                if status_str is None:
+                if event_name == "execution_interrupted":
+                    status_str = "interrupted"
+                elif status_str is None:
                     status_str = "error"
-                error_text = _extract_text_from_value(event_payload)
+                error_text = _describe_execution_event(
+                    entry, event_name, event_payload
+                ) or _extract_text_from_value(event_payload)
                 if error_text:
                     break
 
@@ -159,79 +543,24 @@ def _extract_history_status_and_error(
     return status_str, (error_text or None)
 
 
-def _replace_placeholders(value, replacements: dict[str, str]):
-    if isinstance(value, str):
-        updated = value
-        for key, replacement in replacements.items():
-            if key in updated:
-                updated = updated.replace(key, replacement)
-        return updated
-    if isinstance(value, list):
-        return [_replace_placeholders(item, replacements) for item in value]
-    if isinstance(value, dict):
-        return {
-            key: _replace_placeholders(val, replacements) for key, val in value.items()
-        }
-    return value
+def _upload_image_to_comfyui(
+    base_url: str, file_path: str, upload_name: str | None = None
+) -> str:
+    """Upload a picture to ComfyUI's input folder, returning the name to load it by.
 
+    ``upload_name`` names it there instead of the file's own name.
 
-def _randomize_seeds(workflow: dict) -> None:
-    """Replace seed values in sampler/noise nodes with a fresh random integer.
-
-    This mirrors what the ComfyUI frontend does when 'randomize' is enabled,
-    ensuring repeated runs on the same prompt produce different images.
+    The only code that POSTs to ComfyUI's ``/upload/image``, so the only way a
+    picture reaches a run: ``POST /workflows/run`` calls it to fill a card's
+    picture inputs (#1457), once per distinct picture and only after every
+    refusal has been decided.
     """
-    for node in workflow.values():
-        if not isinstance(node, dict):
-            continue
-        if node.get("class_type") not in SEED_NODE_CLASSES:
-            continue
-        inputs = node.get("inputs")
-        if not isinstance(inputs, dict):
-            continue
-        for field in SEED_FIELDS:
-            if field in inputs and isinstance(inputs[field], (int, float)):
-                inputs[field] = random.randint(0, 2**32 - 1)
-
-
-def _apply_fixed_seed(workflow: dict, seed: int) -> None:
-    """Set seed values in sampler/noise nodes to a specific fixed integer."""
-    for node in workflow.values():
-        if not isinstance(node, dict):
-            continue
-        if node.get("class_type") not in SEED_NODE_CLASSES:
-            continue
-        inputs = node.get("inputs")
-        if not isinstance(inputs, dict):
-            continue
-        for field in SEED_FIELDS:
-            if field in inputs and isinstance(inputs[field], (int, float)):
-                inputs[field] = seed
-
-
-def _apply_filename_prefix(workflow: dict, prefix: str) -> bool:
-    updated = False
-    for node in workflow.values():
-        if not isinstance(node, dict):
-            continue
-        if node.get("class_type") != "SaveImage":
-            continue
-        inputs = node.get("inputs") or {}
-        if not isinstance(inputs, dict):
-            inputs = {}
-        inputs["filename_prefix"] = prefix
-        node["inputs"] = inputs
-        updated = True
-    return updated
-
-
-def _upload_image_to_comfyui(base_url: str, file_path: str) -> str:
     mime_type, _ = mimetypes.guess_type(file_path)
     if not mime_type:
         mime_type = "application/octet-stream"
     with open(file_path, "rb") as handle:
         files = {
-            "image": (os.path.basename(file_path), handle, mime_type),
+            "image": (upload_name or os.path.basename(file_path), handle, mime_type),
         }
         data = {
             "type": "input",
@@ -289,8 +618,17 @@ def _submit_comfyui_prompt(
     # Strip PixlStash-specific metadata keys before sending to ComfyUI.
     # ComfyUI iterates all top-level entries as nodes and will crash on any
     # non-dict value (e.g. the list stored in "pixlstash_output_nodes").
+    # `is_changed` is ComfyUI's own cache annotation, copied into every prompt
+    # chunk it writes. ComfyUI recomputes it, and an unreadable file leaves it
+    # NaN, which no JSON request can carry: drop it rather than send it back.
     clean_workflow = {
-        k: v for k, v in workflow.items() if not k.startswith("pixlstash_")
+        k: (
+            {key: value for key, value in v.items() if key != "is_changed"}
+            if isinstance(v, dict)
+            else v
+        )
+        for k, v in workflow.items()
+        if not k.startswith("pixlstash_")
     }
     # Do NOT pass the graph under extra_data.extra_pnginfo.workflow: that PNG
     # chunk is where the ComfyUI frontend stores the *UI* node graph, and the
@@ -383,42 +721,283 @@ def _extract_output_node_ids(workflow: dict, payload: dict) -> list[str]:
     return save_nodes
 
 
-def graph_has_pixlstash_nodes(workflow: dict) -> bool:
-    """True when *workflow* calls back into PixlStash from inside the graph.
+# What a run of each ComfyUI-PixlStash node needs (#1521). A class of the
+# pack that is not named below is refused, so a node added to the pack later
+# stays refused until it has an entry here. The problems each entry answers are
+# in ``docs/backend_architecture.md`` §4.
+#
+# A loader that names a project, set or character serialises its choice as
+# ``"<name> #<id>"`` in this widget, and the id is frozen: it runs only when
+# the id is one this library has.
+PIXLSTASH_LIBRARY_LOADERS: dict[str, tuple[str, str]] = {
+    "PixlStashProjectLoader": ("pixlstash_project", "project"),
+    "PixlStashSetLoader": ("pixlstash_set", "set"),
+    "PixlStashCharacterLoader": ("pixlstash_character", "character"),
+}
+# Allowed wherever they appear. The model loaders address a file by its
+# digest, which is the same on every hub; the searches and gates read the
+# library through ids wired from a loader above, and write nothing.
+PIXLSTASH_ALLOWED_NODES = frozenset(
+    {
+        "PixlStashAdapterLoader",
+        "PixlStashMultiAdapterLoader",
+        "PixlStashVAELoader",
+        "PixlStashCLIPLoader",
+        "PixlStashControlNetLoader",
+        "PixlStashUpscaleModelLoader",
+        "PixlStashLikenessSearch",
+        "PixlStashSemanticSearch",
+        "PixlStashFaceLikenessGate",
+        "PixlStashPictureLikenessGate",
+    }
+)
+# The picture loader sources its own input: baked ``picture_ids``, or its own
+# sort and filters when that is empty. Allowed only where the run writes the
+# ids in itself, or where the ids are this library's own
+# (``PICTURE_LOADER_LIBRARY``).
+#
+# The checkpoint loader names a shelf row id, which is per-hub. Allowed from a
+# stored workflow file, which was authored against this hub's shelf, and
+# wherever the id is this shelf's own (``CHECKPOINT_LOADER_SHELF``).
+#
+# What an id may be: the node's own rule (`str.isdigit`), and no longer than a
+# row id can be (`workflow_hash._MAX_SHELF_ID_LENGTH`).
+_ROW_ID_RE = re.compile(r"[0-9]{1,12}")
+# A shelf row id as the checkpoint loader matches it, which is as text
+# against the row's own: no padding, so `007` is no row's id there.
+_SHELF_ROW_ID_RE = re.compile(r"[1-9][0-9]{0,11}")
 
-    Every class in the ComfyUI-PixlStash pack is prefixed, so the prefix is the
-    rule: a node added to the pack later is covered without editing this.
+# The pack's own rule for reading the id out of a loader's choice.
+_LIBRARY_ID_RE = re.compile(r"#(\d+)\s*$")
 
-    Such a graph is a cycle - PixlStash runs ComfyUI, which calls PixlStash -
-    and it carries **frozen ids**: the loaders serialise a choice as
-    ``"<name> #<id>"``, so a replayed file re-applies whatever project, set,
-    character or picture id was current when it was authored. That is fine for a
-    template the owner picks now, and wrong for a recipe replay, where the ids
-    can name a deleted project or one belonging to a different library.
+
+def _pixlstash_nodes(workflow: dict) -> list[tuple[str, dict]]:
+    """Every ComfyUI-PixlStash node in *workflow*, as ``(node_id, node)``.
+
+    Every class in the pack is prefixed, so the prefix is the rule: a node
+    added to the pack later is found without editing this, and refused as
+    ``no_policy`` until it has an entry above.
     """
     if not isinstance(workflow, dict):
-        return False
-    return any(
-        isinstance(node, dict)
+        return []
+    return [
+        (str(node_id), node)
+        for node_id, node in workflow.items()
+        if isinstance(node, dict)
         and isinstance(node.get("class_type"), str)
         and node["class_type"].startswith(PIXLSTASH_NODE_PREFIX)
-        for node in workflow.values()
-    )
+    ]
 
 
-def graph_has_pixlstash_saver(workflow: dict) -> bool:
-    """True when *workflow* ends in a node that imports into the vault itself.
+def _library_choice(node: dict) -> tuple[str, int | None | bool, str]:
+    """``(kind, id, name)`` a library loader names: id ``None`` for no id,
+    ``False`` for a value that cannot be read (a link, where the choice is made
+    elsewhere)."""
+    field, kind = PIXLSTASH_LIBRARY_LOADERS[node["class_type"]]
+    value = (node.get("inputs") or {}).get(field, "")
+    if not isinstance(value, str):
+        return kind, False, ""
+    match = _LIBRARY_ID_RE.search(value)
+    if not match:
+        return kind, None, ""
+    return kind, int(match.group(1)), value[: match.start()].strip()
 
-    Such a graph needs no ``filename_prefix`` tagging to be stacked: the saver
-    reports the picture ids it created and ``_process_comfyui_outputs`` adopts
-    them directly.
+
+def library_ids_named(workflow: dict) -> dict[str, set[int]]:
+    """Every project, set and character id the graph's loaders name, by kind.
+
+    What the caller looks up in the vault before asking
+    :func:`pixlstash_node_refusals`, which is pure.
     """
-    if not isinstance(workflow, dict):
-        return False
-    return any(
-        isinstance(node, dict) and node.get("class_type") in PIXLSTASH_SAVER_CLASSES
+    named: dict[str, set[int]] = {}
+    for _node_id, node in _pixlstash_nodes(workflow):
+        if node["class_type"] not in PIXLSTASH_LIBRARY_LOADERS:
+            continue
+        kind, library_id, _name = _library_choice(node)
+        if library_id is not None and library_id is not False:
+            named.setdefault(kind, set()).add(library_id)
+    return named
+
+
+def own_picture_ids(node: dict, library_uuid: str | None) -> list[int]:
+    """The pictures a picture loader names, when it says they are this library's.
+
+    Empty for a loader that names no library or another one, that holds no id
+    (it would pick pictures by its own sort), or whose ids do not read. Whether
+    the library still has each picture is the caller's to look up.
+    """
+    inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+    raw = inputs.get(PICTURE_LOADER_IDS)
+    if (
+        not library_uuid
+        or inputs.get(PICTURE_LOADER_LIBRARY) != library_uuid
+        or not isinstance(raw, str)
+    ):
+        return []
+    ids = [part.strip() for part in raw.split(",") if part.strip()]
+    if not all(_ROW_ID_RE.fullmatch(part) for part in ids):
+        return []
+    return [int(part) for part in ids]
+
+
+def own_checkpoint_id(node: dict, shelf_uuid: str | None) -> str | None:
+    """The shelf row a checkpoint loader names, when it says the id is this
+    shelf's; ``None`` for no shelf named, another's, or an id that does not
+    read. Whether the shelf still has the row is the caller's to look up."""
+    inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+    shelf_id = inputs.get(CHECKPOINT_LOADER_ID)
+    if (
+        not shelf_uuid
+        or inputs.get(CHECKPOINT_LOADER_SHELF) != shelf_uuid
+        or not isinstance(shelf_id, str)
+        or not _SHELF_ROW_ID_RE.fullmatch(shelf_id.strip())
+    ):
+        return None
+    return shelf_id.strip()
+
+
+def pixlstash_node_refusals(
+    workflow: dict,
+    *,
+    library_ids: dict[str, dict[int, str]] | None = None,
+    picture_loader: bool = False,
+    from_file: bool = False,
+    library_uuid: str | None = None,
+    shelf_uuid: str | None = None,
+) -> list[dict]:
+    """Every ComfyUI-PixlStash node in *workflow* that may not run, and why.
+
+    Each entry is ``{node_id, class_type, title, why}``; ``why`` is one of
+    ``not_in_library`` (with ``kind`` and ``id``), ``unreadable_id``,
+    ``picks_its_own_picture``, ``per_hub_checkpoint``, ``imports_itself`` and
+    ``no_policy``. Empty means every such node may run.
+
+    The defaults are the strictest answer, so a caller that says nothing about
+    its run refuses rather than allows.
+
+    Args:
+        workflow: The API-format graph, as it will be submitted.
+        library_ids: The ids :func:`library_ids_named` found that this library
+            has, by kind, each with its name. A loader runs only when both
+            match: ids start at 1 in every library, so an id alone would run
+            another library's "Portraits #3" against this one's project 3.
+        picture_loader: Whether the run writes the picture loader's ids itself
+            (a card run's picture inputs). The caller then owns refusing a
+            loader it did not feed.
+        from_file: Whether the graph is a stored workflow file.
+        library_uuid: This library's uuid. A picture loader that names it
+            beside its ids runs on them, fed or not.
+        shelf_uuid: This shelf's own id. A checkpoint loader that names it
+            beside its row id runs whatever the graph's source.
+    """
+    present = library_ids or {}
+    refused = []
+    for node_id, node in _pixlstash_nodes(workflow):
+        class_type = node["class_type"]
+        why: dict = {}
+        if class_type in PIXLSTASH_ALLOWED_NODES:
+            continue
+        if class_type in PIXLSTASH_LIBRARY_LOADERS:
+            kind, library_id, name = _library_choice(node)
+            if library_id is False:
+                why = {"why": "unreadable_id", "kind": kind}
+            elif library_id is not None and (
+                library_id not in present.get(kind, {})
+                or (name and present[kind][library_id] != name)
+            ):
+                why = {"why": "not_in_library", "kind": kind, "id": library_id}
+        elif class_type == PIXLSTASH_PICTURE_LOADER:
+            if not picture_loader and not own_picture_ids(node, library_uuid):
+                why = {"why": "picks_its_own_picture"}
+        elif class_type == PIXLSTASH_CHECKPOINT_LOADER:
+            if not from_file and own_checkpoint_id(node, shelf_uuid) is None:
+                why = {"why": "per_hub_checkpoint"}
+        elif class_type in PIXLSTASH_SAVER_CLASSES:
+            # Never submitted: swap_pixlstash_savers takes it out first.
+            why = {"why": "imports_itself"}
+        else:
+            why = {"why": "no_policy"}
+        if why:
+            refused.append(
+                {
+                    "node_id": node_id,
+                    "class_type": class_type,
+                    "title": (node.get("_meta") or {}).get("title") or class_type,
+                    **why,
+                }
+            )
+    return refused
+
+
+def unfed_picture_loaders(workflow: dict, fed: set[str]) -> list[dict]:
+    """The picture loaders a run allowed but did not write ids into.
+
+    The other half of ``picture_loader=True``: such a loader would read the
+    ids baked into the file, or pick pictures by its own sort, so it is refused
+    the way :func:`pixlstash_node_refusals` would have.
+    """
+    return [
+        {
+            "node_id": node_id,
+            "class_type": node["class_type"],
+            "title": (node.get("_meta") or {}).get("title") or node["class_type"],
+            "why": "picks_its_own_picture",
+        }
+        for node_id, node in _pixlstash_nodes(workflow)
+        if node["class_type"] == PIXLSTASH_PICTURE_LOADER and node_id not in fed
+    ]
+
+
+def swap_pixlstash_savers(workflow: dict) -> list[str]:
+    """Replace every ComfyUI-PixlStash saver with the stock one, in place.
+
+    The saver imports its outputs itself, which competes with the import the
+    run is already doing and applies the project, set and character ids baked
+    into the file. ``SaveImage`` on the same images and prefix (``SaveVideo``
+    on the same video, format and prefix, for the video saver) leaves the
+    run's own import as the only one. The node keeps its id and title, so an
+    explicit ``pixlstash_output_nodes`` still names it. A saver whose output
+    another node reads is left alone, since the stock one has none to hand on.
+
+    Returns:
+        The ids of the nodes swapped.
+    """
+    read = {
+        str(value[0])
         for node in workflow.values()
-    )
+        if isinstance(node, dict)
+        for value in (node.get("inputs") or {}).values()
+        if isinstance(value, list) and len(value) == 2
+    }
+    swapped = []
+    for node_id, node in _pixlstash_nodes(workflow):
+        if node["class_type"] not in PIXLSTASH_SAVER_CLASSES:
+            continue
+        if node_id in read:
+            # Something reads its `picture_ids` output, which the stock
+            # saver does not have: left as it is, and refused as
+            # `imports_itself`.
+            continue
+        stock, carried = _PIXLSTASH_SAVER_RUNS_AS[node["class_type"]]
+        inputs = node.get("inputs") or {}
+        if inputs.get(carried) is None:
+            # Nothing to hand to the stock saver: left as it is, and refused
+            # as `imports_itself` rather than queued as a saver ComfyUI then
+            # rejects.
+            continue
+        node["class_type"] = stock
+        # Everything but what only the PixlStash saver has: where the result
+        # is filed, and whether the workflow is embedded in it.
+        node["inputs"] = {
+            **{
+                name: value
+                for name, value in inputs.items()
+                if name != "save_workflow" and not name.startswith("pixlstash_")
+            },
+            "filename_prefix": inputs.get("filename_prefix") or "PixlStash",
+        }
+        swapped.append(node_id)
+    return swapped
 
 
 def _fetch_comfyui_history(base_url: str, prompt_id: str) -> dict:
@@ -431,7 +1010,7 @@ def _fetch_comfyui_history(base_url: str, prompt_id: str) -> dict:
         logger.warning("ComfyUI history request failed: %s", exc)
         raise HTTPException(
             status_code=502,
-            detail="ComfyUI history request failed",
+            detail="ComfyUI stopped answering before the run finished",
         ) from exc
     if response.status_code >= 300:
         detail = (response.text or "").strip()
@@ -518,7 +1097,16 @@ def _extract_comfyui_output_images(
             # A PixlStash saver's images are temp previews of pictures it has
             # already imported. Downloading them would re-import a duplicate.
             continue
-        for image in node_payload.get("images") or []:
+        # A VideoHelperSuite node with `save_output` off is a preview: it
+        # writes a `temp` file its author chose not to keep, so it is not
+        # collected. (A `temp` under `images` is: an explicit
+        # `pixlstash_output_nodes` choice may name a preview node.)
+        kept = [
+            entry
+            for entry in node_payload.get(VHS_FILES_KEY) or []
+            if isinstance(entry, dict) and entry.get("type") != "temp"
+        ]
+        for image in [*(node_payload.get("images") or []), *kept]:
             if not isinstance(image, dict):
                 continue
             filename = image.get("filename")
@@ -534,22 +1122,84 @@ def _extract_comfyui_output_images(
     return images
 
 
+def _comfyui_prompt_queued(base_url: str, prompt_id: str) -> bool:
+    """Whether ComfyUI still holds *prompt_id*, running or waiting its turn.
+
+    True when the queue cannot be read: only an answer that does not list the
+    prompt says it is gone, and one slow answer from a busy ComfyUI must not
+    abandon a run that is still going. A ComfyUI that is down ends the wait
+    through the history read instead, which raises.
+    """
+    try:
+        response = requests.get(f"{base_url}/queue", timeout=30)
+        response.raise_for_status()
+        queue = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning(
+            "ComfyUI queue could not be read for prompt %s, so it is taken as "
+            "still queued: %s",
+            prompt_id,
+            exc,
+        )
+        return True
+    if not isinstance(queue, dict):
+        logger.warning(
+            "ComfyUI /queue returned %s, not an object, so prompt %s is taken "
+            "as still queued",
+            type(queue).__name__,
+            prompt_id,
+        )
+        return True
+    # Each entry is ``[number, prompt_id, prompt, ...]``.
+    return any(
+        isinstance(item, (list, tuple)) and len(item) > 1 and item[1] == prompt_id
+        for key in ("queue_running", "queue_pending")
+        for item in queue.get(key) or []
+    )
+
+
 def _wait_for_comfyui_outputs(
     base_url: str,
     prompt_id: str,
     output_node_ids: list[str] | None,
-    timeout_s: float = 300.0,
+    timeout_s: float = 30.0,
     poll_s: float = 1.0,
 ) -> tuple[list[dict], list[int] | None]:
     """Poll history until the prompt produces output.
 
-    Returns the images to download and import, plus the picture ids a PixlStash
+    *timeout_s* is how often ComfyUI's queue is asked whether it still holds
+    the prompt, not a cap on the run: a video, or a prompt behind others in
+    the queue, takes longer than any fixed budget, so while ComfyUI still lists
+    the prompt as running or pending the wait goes on.
+
+    Returns the files to download and import, plus the picture ids a PixlStash
     saver node imported on its own (None when no such node ran).
+
+    Raises ``ComfyUIRunStopped`` for a prompt that was interrupted, and for one
+    ComfyUI holds neither in its queue nor in its history: taken off the queue
+    before its turn, or lost to a restart. Any other failure is a
+    ``RuntimeError`` carrying the sentence to show.
+
+    ponytail: one ``GET /queue`` per followed prompt per *timeout_s*, and the
+    answer carries every queued graph. Fine for tens of prompts; a 200-run
+    batch wants one shared queue read instead of one per poller.
     """
-    # 5 min budget covers cold model loading plus generation before giving up.
     deadline = time.time() + timeout_s
-    last_images = []
-    while time.time() < deadline:
+    cleared = _queue_cleared
+    while True:
+        # Asked BEFORE the history read, so a prompt that finishes in between
+        # is still collected by this pass rather than given up on.
+        gone = False
+        if cleared != _queue_cleared:
+            # PixlStash's own Abort just emptied the queue: say so now, not
+            # up to *timeout_s* after the owner has moved on to the next run.
+            cleared = _queue_cleared
+            deadline = 0.0
+        if time.time() >= deadline:
+            if _comfyui_prompt_queued(base_url, prompt_id):
+                deadline = time.time() + timeout_s
+            else:
+                gone = True
         history_payload = _fetch_comfyui_history(base_url, prompt_id)
         images = _extract_comfyui_output_images(
             history_payload, prompt_id, output_node_ids
@@ -562,31 +1212,95 @@ def _wait_for_comfyui_outputs(
         )
         if images or pixlstash_ids is not None:
             return images, pixlstash_ids
-        if status_str in {"error", "failed", "failure", "interrupted", "cancelled"}:
+        if status_str == "success":
+            # Finished with nothing to import: ComfyUI writes a prompt's outputs
+            # and its status together, so polling on would only wait out the
+            # timeout before saying the same thing.
+            return [], None
+        if status_str in {"interrupted", "cancelled"}:
+            raise ComfyUIRunStopped(error_text or "Interrupted")
+        if status_str in {"error", "failed", "failure"}:
             raise RuntimeError(error_text or f"ComfyUI status={status_str}")
         if error_text and status_str != "success":
             raise RuntimeError(error_text)
-        last_images = images
+        if gone:
+            if not _extract_history_entry(history_payload, prompt_id):
+                raise ComfyUIRunStopped(
+                    "ComfyUI no longer has this run: it was taken off the "
+                    "queue, or ComfyUI restarted"
+                )
+            return [], None
         time.sleep(poll_s)
-    return last_images, None
 
 
-def _emit_comfyui_failure_progress(server, prompt_id: str, message: str) -> None:
+def _emit_comfyui_progress(
+    server,
+    prompt_id: str,
+    status: str,
+    message: str,
+    progress: int = 0,
+    workflow_id: str | None = None,
+    notice: str | None = None,
+    stopped: bool = False,
+) -> None:
+    """Say how a prompt's run ended. *workflow_id* is the workflow that ran,
+    so the failure can be shown on it; *stopped* marks a failure that is a
+    run somebody stopped; *notice* is shown for a run that completed."""
     try:
         server.vault.notify(
             EventType.PLUGIN_PROGRESS,
             {
                 "plugin": "ComfyUI",
-                "status": "failed",
+                "status": status,
                 "run_id": f"comfyui-{prompt_id}",
-                "message": str(message or "ComfyUI failed"),
+                "workflow_id": workflow_id,
+                "stopped": stopped,
+                "message": message,
+                "notice": notice,
                 "current": 0,
                 "total": 0,
-                "progress": 0,
+                "progress": progress,
             },
         )
     except Exception as exc:
-        logger.debug("Failed to emit ComfyUI failure progress event: %s", exc)
+        logger.debug(
+            "Failed to emit ComfyUI %s progress event for prompt %s: %s",
+            status,
+            prompt_id,
+            exc,
+        )
+
+
+def _emit_comfyui_failure_progress(
+    server,
+    prompt_id: str,
+    message: str,
+    workflow_id: str | None = None,
+    stopped: bool = False,
+) -> None:
+    _emit_comfyui_progress(
+        server,
+        prompt_id,
+        "failed",
+        str(message or "ComfyUI failed"),
+        workflow_id=workflow_id,
+        stopped=stopped,
+    )
+
+
+def _emit_comfyui_completed_progress(
+    server, prompt_id: str, workflow_id: str | None = None, notice: str | None = None
+) -> None:
+    """Say a prompt's run is over, once what it made is in the library.
+
+    No browser listens to ComfyUI: this event is how a tab hears that a run
+    ended, and reads the runs in flight again to drop its row. *notice* is a
+    sentence the owner is owed about a run that did not fail
+    (``_duplicates_notice``).
+    """
+    _emit_comfyui_progress(
+        server, prompt_id, "completed", "ComfyUI complete", 100, workflow_id, notice
+    )
 
 
 def _download_comfyui_image(base_url: str, entry: dict) -> tuple[bytes, str]:
@@ -707,7 +1421,7 @@ def _import_comfyui_outputs(
         def mark_imported(session, ids: list[int]):
             if not ids:
                 return []
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             pics = session.exec(select(Picture).where(Picture.id.in_(ids))).all()
             updated = []
             for pic in pics:
@@ -772,7 +1486,7 @@ def _assign_outputs_to_stack_top(
         # the grid) regardless of any pre-existing NULL/gapped positions.
         normalize_stack_positions(session, stack_id)
 
-        stack.updated_at = datetime.utcnow()
+        stack.updated_at = datetime.now(timezone.utc)
         session.add(stack)
         session.commit()
 
@@ -944,6 +1658,95 @@ def _assign_pictures_to_view_context(
     )
 
 
+def _assign_outputs_to_lora_people(
+    server, character_ids: list[int] | None, new_ids: list[int]
+) -> None:
+    """Say the run's pictures are of the people whose LoRAs it loaded.
+
+    Or of the person the run named (``RunRequest.character_id``), where its
+    LoRAs named nobody: the caller decides which, and both are linked alike.
+
+    One person: a fresh output has no faces yet, so this is the deferral a
+    drop onto a person uses (``Picture.pending_character_id``, which face
+    extraction turns into the largest face it finds, and drops when it finds
+    none). One whose faces are already in takes its largest unassigned one
+    instead, and never a face that names somebody else.
+
+    Several people: which face is whose is a matter of likeness
+    (``match_faces_to_characters``). Read now where the faces are in, else
+    after face extraction, from a ``PicturePendingPerson`` row per person.
+
+    Projects are left alone, as every automatic naming of a face leaves them:
+    the run's own destination decides where its pictures are filed.
+    """
+    if not character_ids or not new_ids:
+        return
+
+    def assign(session) -> tuple[int, int]:
+        people = []
+        for character_id in dict.fromkeys(character_ids):
+            if session.get(Character, character_id) is None:
+                logger.warning(
+                    "Person %s was deleted before the run's pictures %s could "
+                    "be linked to them.",
+                    character_id,
+                    new_ids,
+                )
+            else:
+                people.append(character_id)
+        if not people:
+            return 0, 0
+        named = deferred = 0
+        for pic in session.exec(select(Picture).where(Picture.id.in_(new_ids))).all():
+            if len(people) == 1:
+                if not add_person(session, pic, people[0]):
+                    continue
+                if pic.pending_character_id == people[0]:
+                    deferred += 1
+                else:
+                    named += 1
+                continue
+            faces = Face.find(session, picture_id=pic.id)
+            if faces:
+                by_id = {face.id: face for face in faces}
+                for face_id, character_id in match_faces_to_characters(
+                    session, faces, people
+                ).items():
+                    by_id[face_id].character_id = character_id
+                    session.add(by_id[face_id])
+                    named += 1
+            elif (
+                session.exec(
+                    select(Face.id).where(Face.picture_id == pic.id).limit(1)
+                ).first()
+                is None
+            ):
+                # Extraction has not run yet (a row of any kind says it has).
+                for character_id in people:
+                    session.merge(
+                        PicturePendingPerson(
+                            picture_id=pic.id, character_id=character_id
+                        )
+                    )
+                deferred += 1
+        session.commit()
+        return named, deferred
+
+    named, deferred = server.vault.db.run_task(assign)
+    if named:
+        # Face extraction announces the ones it names later.
+        server.vault.notify(EventType.CHANGED_CHARACTERS)
+        server.vault.notify(EventType.CHANGED_FACES)
+    logger.info(
+        "People %s, whom the run's LoRAs or its request named: %s face(s) of "
+        "its %s picture(s) linked now, %s picture(s) when their faces are read",
+        list(character_ids),
+        named,
+        len(new_ids),
+        deferred,
+    )
+
+
 def _set_source_picture_id_on_pictures(
     server,
     source_picture_id: int | None,
@@ -963,6 +1766,79 @@ def _set_source_picture_id_on_pictures(
     server.vault.db.run_task(update)
 
 
+def _set_run_workflow_id(
+    server,
+    workflow_id: str,
+    picture_ids: list[int],
+    version: int | None = None,
+) -> None:
+    """File the pictures a manual workflow's run made on that workflow.
+
+    Only the ones this run imported or its saver reported: a duplicate was
+    already in the library, made by something else, and keeps its filing.
+    *version* is the version of the workflow's document the run submitted
+    (``Picture.run_workflow_version``), written with the id. A picture the
+    filename tag or the extraction already filed on this same workflow gets
+    the version too: they learn the id before this poller does, never the
+    version a Run submitted.
+    """
+
+    def update(session):
+        for pid in picture_ids:
+            pic = session.get(Picture, pid)
+            if pic is None:
+                continue
+            # Written once: a saver can report a picture filed by another run.
+            if pic.run_workflow_id is None:
+                pic.run_workflow_id = workflow_id
+            if (
+                pic.run_workflow_id == workflow_id
+                and pic.run_workflow_version is None
+                and version is not None
+            ):
+                pic.run_workflow_version = version
+            session.add(pic)
+        session.commit()
+
+    server.vault.db.run_task(update)
+
+
+def _held_before(server, picture_ids: list[int], started: datetime) -> list[int]:
+    """Those of *picture_ids* the library held before *started*.
+
+    A watched ComfyUI output folder can import a run's file before the poller
+    downloads it, and that picture then comes back as a duplicate too: it is
+    this run's, and newer than the run.
+    """
+
+    def read(session):
+        held = []
+        for pid in dict.fromkeys(picture_ids):
+            pic = session.get(Picture, pid)
+            if pic is not None and (
+                pic.imported_at is None or pic.imported_at < started
+            ):
+                held.append(pid)
+        return held
+
+    return server.vault.db.run_immediate_read_task(read)
+
+
+def _duplicates_notice(added: int, duplicates: int) -> str:
+    """What to say of a run whose output the library already had.
+
+    Exact duplicates are not imported twice, so a run repeated on its own seed
+    ends with nothing to show for it and has to say why.
+    """
+    made = "a picture" if duplicates == 1 else f"{duplicates} pictures"
+    if not added:
+        return (
+            f"The run made {made} this library already has, so nothing was "
+            "added. Change the seed or a setting to get a new one."
+        )
+    return f"The run also made {made} this library already has, not added again."
+
+
 def _process_comfyui_outputs(
     server,
     base_url: str,
@@ -973,8 +1849,33 @@ def _process_comfyui_outputs(
     view_context: dict | None = None,
     origin_generation: int | None = None,
     origin_library_uuid: str | None = None,
+    run_workflow_id: str | None = None,
+    rejected: str | None = None,
+    run_workflow_version: int | None = None,
+    workflow_id: str | None = None,
+    lora_character_ids: list[int] | None = None,
 ) -> None:
-    """Poll ComfyUI for a prompt's outputs, import them, and emit ONE event.
+    """Poll ComfyUI for a prompt's outputs, import them, and say how it ended.
+
+    *workflow_id* is the workflow the run was of, manual or automatic; it
+    travels on the ending's event so a failure is shown on that workflow.
+    Every ending is also recorded (``record_run_outcome``) for
+    ``GET /workflows/runs/{prompt_id}``.
+
+    *rejected* is ComfyUI's account of the outputs it dropped at validation
+    while still accepting the prompt (``format_prompt_rejection``); a run that
+    then produces nothing reports it instead of a bare "no outputs".
+
+    *run_workflow_id* is the manual workflow that ran, whose pictures these
+    are (``Picture.run_workflow_id``), and *run_workflow_version* the version
+    of its document the run submitted (``Picture.run_workflow_version``). An output the watch folder imports
+    before this poller sees it is filed by the tag ``_tag_for_workflow`` put
+    in its filename instead.
+
+    *lora_character_ids* are the people whose LoRAs the run loaded, or the one
+    its request named where no LoRA did, whom its pictures are then of
+    (``_assign_outputs_to_lora_people``). Like the workflow, only what this run
+    imported or its saver reported: a duplicate keeps the people it has.
 
     This is the documented single-event import path (see
     ``docs/backend_architecture.md`` §15). It is a deliberate exception to the
@@ -983,8 +1884,9 @@ def _process_comfyui_outputs(
 
     - On success with newly imported pictures it emits exactly ONE
       ``EventType.PICTURE_IMPORTED`` event - never a second event, and none for
-      already-existing re-imports (``duplicate_ids`` are intentionally ignored;
-      they are already in the grid and need no event).
+      already-existing re-imports (``duplicate_ids`` are already in the grid
+      and need no event; the ``completed`` event's ``notice`` says the run made
+      a picture the library already had).
     - The payload carries ``source: "ui"`` and ``change_kind: "added"``.
     - It deliberately does NOT echo an ``origin_client_id``. In-app ComfyUI
       generation is UI-initiated but async: there is no optimistic client-side
@@ -995,9 +1897,19 @@ def _process_comfyui_outputs(
 
     Failures emit a ``PLUGIN_PROGRESS`` failure event via
     ``_emit_comfyui_failure_progress`` and never a ``PICTURE_IMPORTED`` event.
+    Its ``message`` names the node that failed and why
+    (``_describe_execution_event``), and ``stopped`` is true for a run that was
+    interrupted or taken off ComfyUI's queue (``ComfyUIRunStopped``).
+
+    A run that did not fail ends with a ``PLUGIN_PROGRESS`` ``completed`` event
+    (``_emit_comfyui_completed_progress``), after the import event and also
+    when every output was a duplicate. The run's row in the Tasks tab is
+    ``live_runs``, which ``record_run_outcome`` takes it out of just before
+    either event; the event is what makes a tab read them again at once.
     """
     lease = None
     pinned_server = None
+    started = datetime.now(timezone.utc)
 
     def acquire_origin():
         coordinator = getattr(server, "library_coordinator", None)
@@ -1025,8 +1937,13 @@ def _process_comfyui_outputs(
 
         return candidate, PinnedServer(server, candidate.vault)
 
-    def emit_failure_if_current(message: str) -> None:
-        failure_lease, failure_server = acquire_origin()
+    def emit_failure(message: str, stopped: bool = False) -> None:
+        """Say the run failed: on the library already pinned, else on the
+        origin if it is still the current one."""
+        record_run_outcome(prompt_id, "failed", message=message, stopped=stopped)
+        failure_lease, failure_server = None, pinned_server
+        if failure_server is None:
+            failure_lease, failure_server = acquire_origin()
         if failure_server is None:
             logger.info(
                 "Discarding stale ComfyUI failure for prompt %s after library change",
@@ -1034,7 +1951,13 @@ def _process_comfyui_outputs(
             )
             return
         try:
-            _emit_comfyui_failure_progress(failure_server, prompt_id, message)
+            _emit_comfyui_failure_progress(
+                failure_server,
+                prompt_id,
+                message,
+                workflow_id=workflow_id,
+                stopped=stopped,
+            )
         finally:
             if failure_lease is not None:
                 server.library_coordinator.release_read(failure_lease)
@@ -1045,7 +1968,7 @@ def _process_comfyui_outputs(
         )
         if not images and pixlstash_ids is None:
             logger.warning("ComfyUI produced no outputs for prompt %s", prompt_id)
-            emit_failure_if_current("ComfyUI finished without outputs.")
+            emit_failure(rejected or "ComfyUI finished without outputs.")
             return
         entries = []
         for entry in images:
@@ -1058,6 +1981,11 @@ def _process_comfyui_outputs(
             logger.info(
                 "Discarding stale ComfyUI outputs for prompt %s after library change",
                 prompt_id,
+            )
+            record_run_outcome(
+                prompt_id,
+                "failed",
+                message="The library changed before this run's outputs were imported",
             )
             return
 
@@ -1079,9 +2007,9 @@ def _process_comfyui_outputs(
                 raw = src_pic.original_file_name or os.path.basename(src_pic.file_path)
                 source_file_stem = os.path.splitext(raw)[0] if raw else None
 
-        # Already-existing re-imports (`duplicate_ids`) are deliberately ignored:
-        # they are already in the grid and need no event.
-        new_ids, _duplicate_ids = _import_comfyui_outputs(
+        # Already-existing re-imports (`duplicate_ids`) get no import event:
+        # they are already in the grid. The ending says so instead.
+        new_ids, duplicate_ids = _import_comfyui_outputs(
             pinned_server,
             entries,
             output_dir=output_dir,
@@ -1099,6 +2027,10 @@ def _process_comfyui_outputs(
             # vault would adopt ids belonging to unrelated pictures; the fix is
             # for the node to report its target URL, not a heuristic here.
             new_ids = new_ids + [pid for pid in pixlstash_ids if pid not in new_ids]
+        if run_workflow_id and new_ids:
+            _set_run_workflow_id(
+                pinned_server, run_workflow_id, new_ids, run_workflow_version
+            )
         if stack_id and new_ids:
             _assign_outputs_to_stack_top(pinned_server, stack_id, new_ids)
         if new_ids:
@@ -1143,18 +2075,39 @@ def _process_comfyui_outputs(
                     "change_kind": "added",
                 },
             )
+        # After the event: a failure here must not cost the pictures their
+        # import event. Before the ending, so a run has one.
+        _assign_outputs_to_lora_people(pinned_server, lora_character_ids, new_ids)
+        held = []
+        if duplicate_ids:
+            try:
+                held = _held_before(pinned_server, duplicate_ids, started)
+            except Exception as exc:
+                # The run is done and its pictures are in: a notice that cannot
+                # be worked out is left unsaid rather than failing the run.
+                logger.warning(
+                    "Could not read whether pictures %s were in the library "
+                    "before prompt %s ran, so its ending says nothing of "
+                    "duplicates: %s",
+                    duplicate_ids,
+                    prompt_id,
+                    exc,
+                )
+        notice = _duplicates_notice(len(new_ids), len(held)) if held else None
+        record_run_outcome(prompt_id, "completed", message=notice, picture_ids=new_ids)
+        _emit_comfyui_completed_progress(pinned_server, prompt_id, workflow_id, notice)
+    except ComfyUIRunStopped as exc:
+        logger.warning("ComfyUI prompt %s was stopped: %s", prompt_id, exc)
+        emit_failure(str(exc), stopped=True)
     except RuntimeError as exc:
         logger.warning("ComfyUI prompt %s failed before outputs: %s", prompt_id, exc)
-        if pinned_server is not None:
-            _emit_comfyui_failure_progress(pinned_server, prompt_id, str(exc))
-        else:
-            emit_failure_if_current(str(exc))
+        emit_failure(str(exc))
     except Exception as exc:
-        logger.warning("Failed to import ComfyUI outputs: %s", exc)
-        if pinned_server is not None:
-            _emit_comfyui_failure_progress(pinned_server, prompt_id, str(exc))
-        else:
-            emit_failure_if_current(str(exc))
+        logger.warning(
+            "Failed to import ComfyUI outputs of prompt %s: %s", prompt_id, exc
+        )
+        # An HTTPException's str() is "502: <detail>"; the detail is the sentence.
+        emit_failure(str(getattr(exc, "detail", None) or exc))
     finally:
         if lease is not None:
             server.library_coordinator.release_read(lease)
@@ -1167,6 +2120,7 @@ def _comfyui_abort(base_url: str) -> dict:
     ``POST /queue`` with ``{"clear": true}`` to remove pending items.
     Returns a dict with ``interrupted`` and ``queue_cleared`` booleans.
     """
+    global _queue_cleared
     result = {"interrupted": False, "queue_cleared": False}
     try:
         resp = requests.post(f"{base_url}/interrupt", timeout=10)
@@ -1192,4 +2146,286 @@ def _comfyui_abort(base_url: str) -> dict:
     except requests.RequestException as exc:
         logger.warning("ComfyUI /queue clear request failed: %s", exc)
 
+    # Only a queue that was really emptied: the pollers are told to ask it
+    # about their prompt now, and one that still holds them answers nothing new.
+    if result["queue_cleared"]:
+        _queue_cleared += 1
     return result
+
+
+def comfyui_pixlstash_scripts(base_url: str) -> set[str] | None:
+    """The file names of the scripts the ComfyUI-PixlStash node hands the browser.
+
+    ComfyUI's ``GET /extensions`` lists every script it serves. ``None`` when
+    ComfyUI cannot be asked.
+
+    ponytail: matches the pack by a "pixlstash" folder name, which holds for the
+    registry and git installs; ask the node for its version if that ever breaks.
+    """
+    try:
+        response = requests.get(f"{base_url}/extensions", timeout=5)
+        response.raise_for_status()
+        scripts = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        logger.info("Could not list ComfyUI extensions at %s: %s", base_url, exc)
+        return None
+    if not isinstance(scripts, list):
+        logger.warning(
+            "ComfyUI /extensions at %s returned %s, not a list",
+            base_url,
+            type(scripts).__name__,
+        )
+        return None
+    return {
+        script.rsplit("/", 1)[-1]
+        for script in scripts
+        if isinstance(script, str) and "pixlstash" in script.lower()
+    }
+
+
+# The pack's scripts PixlStash asks ComfyUI for: the one that reads a
+# ``?pixlstash_workflow=<key>`` link, and the one that saves a workflow opened
+# that way back to PixlStash (#1852; a pack from before it opens a copy), and
+# the one that reads a ``?pixlstash_run=<opening>`` link from the Run popup.
+PACK_OPENS_WORKFLOWS = "open_workflow.js"
+PACK_SAVES_BACK = "save_workflow.js"
+PACK_OPENS_RUNS = "open_run.js"
+
+
+def comfyui_can_open_workflows(base_url: str) -> bool | None:
+    """Whether ComfyUI can open a ``?pixlstash_workflow=<key>`` link.
+
+    Only the ComfyUI-PixlStash node's ``open_workflow.js`` reads that
+    parameter; without it ComfyUI opens on whatever it had last. ``None`` when
+    ComfyUI cannot be asked.
+    """
+    scripts = comfyui_pixlstash_scripts(base_url)
+    return None if scripts is None else PACK_OPENS_WORKFLOWS in scripts
+
+
+def normalize_comfyui_url(url: str) -> str:
+    """``scheme://host[:port][/path]/`` for an http(s) URL, else ``ValueError``.
+
+    The trailing slash is the form ``comfyui_url`` has always been saved in. The
+    scheme's default port (``:80``, ``:443``) is dropped.
+    """
+    text = str(url or "").strip()
+    parts = urlsplit(text)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError(
+            f"A ComfyUI address needs http:// or https:// and a host, not {url!r}."
+        )
+    # Scheme, host, port and path only. A user part, a backslash, a query or a
+    # fragment is where URL parsers disagree on the host: `urlsplit` reads
+    # ``http://evil.example\\@127.0.0.1/`` as 127.0.0.1 while urllib3, which
+    # sends the request, connects to evil.example. Refused, and the host is
+    # then required to read the same to both.
+    if any(mark in text for mark in "@\\?#") or parts.username is not None:
+        raise ValueError(
+            f"A ComfyUI address is scheme, host, port and path only, not {url!r}."
+        )
+    sent_to = (parse_url(text).host or "").strip("[]").lower()
+    if sent_to != parts.hostname.lower():
+        raise ValueError(f"The host in {url!r} is ambiguous.")
+    netloc = parts.netloc
+    # The scheme's own port is the same address without it; one spelling only.
+    if parts.port == {"http": 80, "https": 443}[parts.scheme]:
+        netloc = netloc.rsplit(":", 1)[0]
+    return f"{parts.scheme}://{netloc}{parts.path.rstrip('/')}/"
+
+
+def comfyui_listens_on_network(argv) -> bool | None:
+    """Whether ComfyUI's ``--listen`` lets other computers reach it.
+
+    Read from the ``argv`` ComfyUI's ``system_stats`` reports. ``--listen``
+    alone means every interface (ComfyUI's ``0.0.0.0,::``); its value is a
+    comma-separated list of addresses; without it ComfyUI listens on
+    127.0.0.1. None when ComfyUI did not report its arguments.
+    """
+    if not isinstance(argv, list):
+        return None
+    args = [str(arg) for arg in argv]
+    listen = None
+    for i, arg in enumerate(args):
+        if arg == "--listen":
+            value = args[i + 1] if i + 1 < len(args) else ""
+            listen = value if value and not value.startswith("-") else "0.0.0.0"
+        elif arg.startswith("--listen="):
+            listen = arg.split("=", 1)[1] or "0.0.0.0"
+    if listen is None:
+        return False
+    # Not skipping an empty entry (``--listen 127.0.0.1,``): ComfyUI binds
+    # every entry as given, and asyncio binds an empty host to every
+    # interface, so it falls through to "reachable" below.
+    for host in (h.strip().strip("[]") for h in listen.split(",")):
+        if host.lower() == "localhost":
+            continue
+        try:
+            if not ipaddress.ip_address(host).is_loopback:
+                return True
+        except ValueError:
+            # A host name: it may name any interface, so it may be reachable.
+            return True
+    return False
+
+
+def probe_comfyui(url: str, timeout: float = 2.0) -> dict:
+    """Whether ComfyUI answers at *url*, asked from this server.
+
+    ``GET /system_stats`` is ComfyUI's own and carries a ``system`` object, so
+    another web server answering on the port is told apart from ComfyUI.
+    Asked from the backend because the backend is what submits runs: an
+    address the browser can reach and the server cannot is no use.
+
+    Returns:
+        ``{"reachable", "url", "version", "detail", "listens_on_network"}``:
+        ``url`` normalised, ``version`` ComfyUI's own when it reports one,
+        ``detail`` the reason when not reachable, written for the person who
+        typed the address, ``listens_on_network`` from
+        :func:`comfyui_listens_on_network` (None when not known).
+
+    Raises:
+        ValueError: *url* is not an http(s) URL with a host.
+    """
+    base = normalize_comfyui_url(url)
+    where = urlsplit(base).netloc
+    result = {
+        "reachable": False,
+        "url": base,
+        "version": None,
+        "detail": None,
+        "listens_on_network": None,
+    }
+    try:
+        # A redirect is not ComfyUI answering: it is another host's address.
+        response = requests.get(
+            f"{base}system_stats",
+            timeout=timeout,
+            allow_redirects=False,
+            proxies=NO_PROXY,
+        )
+    except requests.exceptions.SSLError as exc:
+        logger.info("ComfyUI probe of %s: TLS failed: %s", base, exc)
+        result["detail"] = (
+            f"{where} answered, but its HTTPS certificate could not be checked."
+        )
+        return result
+    except requests.Timeout:
+        logger.info("ComfyUI probe of %s: no answer within %ss", base, timeout)
+        result["detail"] = f"{where} did not answer within {timeout:g} seconds."
+        return result
+    except requests.RequestException as exc:
+        logger.info("ComfyUI probe of %s: %s", base, exc)
+        result["detail"] = (
+            f"Nothing answered at {where}. Check that ComfyUI is running and "
+            "that the port matches the one in its console."
+        )
+        return result
+    try:
+        stats = response.json() if response.status_code == 200 else None
+    except ValueError:
+        stats = None
+    system = stats.get("system") if isinstance(stats, dict) else None
+    if not isinstance(system, dict):
+        logger.info(
+            "ComfyUI probe of %s: HTTP %s without ComfyUI's system_stats",
+            base,
+            response.status_code,
+        )
+        result["detail"] = f"Something answered at {where}, but it is not ComfyUI."
+        return result
+    version = system.get("comfyui_version")
+    result["reachable"] = True
+    result["version"] = str(version) if version else None
+    result["listens_on_network"] = comfyui_listens_on_network(system.get("argv"))
+    return result
+
+
+def comfyui_folder_paths(base_url: str):
+    """ComfyUI's ``GET /internal/folder_paths``, parsed; only a 200 counts.
+
+    Never follows a redirect and never goes through a proxy: the answer names
+    folders on this machine that PixlStash then scans or writes into.
+
+    Raises:
+        requests.RequestException: ComfyUI did not answer with a 200.
+        ValueError: the answer is not JSON.
+    """
+    url = f"{base_url.rstrip('/')}/internal/folder_paths"
+    response = requests.get(url, timeout=5, allow_redirects=False, proxies=NO_PROXY)
+    if response.status_code != 200:
+        raise requests.HTTPError(
+            f"ComfyUI answered HTTP {response.status_code} at {url}"
+        )
+    return response.json()
+
+
+def _path_module(path: str):
+    """``ntpath`` for a Windows path (drive or UNC), else ``posixpath``.
+
+    The paths are spelled by ComfyUI's filesystem, which need not be this one's.
+    """
+    return ntpath if re.match(r"^([A-Za-z]:[\\/]|\\\\)", path) else posixpath
+
+
+def comfyui_model_roots(base_url: str) -> list[str]:
+    """The folders ComfyUI loads models from, reduced to their roots.
+
+    ComfyUI's ``GET /internal/folder_paths`` maps each model category to its
+    directories (``extra_model_paths.yaml`` included), as ComfyUI's own
+    filesystem spells them. A parent holding folders of two or more categories
+    is a models root (``ComfyUI/models``) and is returned in their place; folders
+    of one category alone under their parent are returned as themselves, so a
+    ``loras:`` entry pointing straight at ``~/loras`` does not turn into the
+    whole home folder. ``custom_nodes`` is skipped: its parent is the ComfyUI
+    install, not models.
+
+    Empty when ComfyUI cannot be asked. Whether a root is reachable from this
+    machine is the caller's question.
+
+    ponytail: ``/internal`` is ComfyUI's frontend API, not a stable one; if it
+    moves, ask the PixlStash node pack to report ``folder_paths`` instead.
+    """
+    try:
+        folder_paths = comfyui_folder_paths(base_url)
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning(
+            "Could not read ComfyUI model folders from %s: %s", base_url, exc
+        )
+        return []
+    if not isinstance(folder_paths, dict):
+        logger.warning(
+            "ComfyUI /internal/folder_paths at %s returned %s, not an object",
+            base_url,
+            type(folder_paths).__name__,
+        )
+        return []
+    # parent -> {child folder -> the categories that use it}
+    by_parent: dict[str, dict[str, set[str]]] = {}
+    seps: dict[str, str] = {}
+    for category, paths in folder_paths.items():
+        if category == "custom_nodes" or not isinstance(paths, list):
+            continue
+        for path in paths:
+            if isinstance(path, str) and path.strip():
+                pathmod = _path_module(path)
+                path = pathmod.normpath(path)
+                seps[path] = pathmod.sep
+                children = by_parent.setdefault(pathmod.dirname(path), {})
+                children.setdefault(path, set()).add(category)
+    roots = set()
+    for parent, children in by_parent.items():
+        categories = set().union(*children.values())
+        if len(children) > 1 and len(categories) > 1:
+            roots.add(parent)
+            seps[parent] = seps[next(iter(children))]
+        else:
+            roots.update(children)
+    return sorted(
+        root
+        for root in roots
+        if not any(
+            other != root and root.startswith(other.rstrip(seps[other]) + seps[other])
+            for other in roots
+        )
+    )

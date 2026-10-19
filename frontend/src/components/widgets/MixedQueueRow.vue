@@ -37,16 +37,19 @@
            is blocked: a reason that lives only in a tooltip is a reason the
            keyboard never reaches. Named, because the set is what has to be
            unlocked and "locked" alone is a dead end. -->
-      <span
-        v-if="lockNote"
-        :id="lockNoteId"
-        class="mqlock"
-        :class="{ 'mqlock--flash': lockFlash }"
-        :title="lockTitle"
-      >
-        <v-icon size="13">mdi-lock-outline</v-icon>
-        {{ lockNote }}
-      </span>
+      <Tooltip v-if="lockNote" :text="lockTitle">
+        <template #activator="{ props: tipProps }">
+          <span
+            :id="lockNoteId"
+            class="mqlock"
+            :class="{ 'mqlock--flash': lockFlash }"
+            v-bind="tipProps"
+          >
+            <v-icon size="13">mdi-lock-outline</v-icon>
+            {{ lockNote }}
+          </span>
+        </template>
+      </Tooltip>
     </div>
 
     <!-- One tile per MEMBER, never collapsed: the whole point of this page is
@@ -79,21 +82,26 @@
            it keeps its place in the tab order and the reason it points at stays
            reachable. The page owns the guard, so the press is answered rather
            than dead. -->
-      <button
-        v-if="!readOnly"
-        type="button"
-        class="gbtn gbtn--stack"
-        :tabindex="focused ? 0 : -1"
-        :disabled="busy"
-        aria-keyshortcuts="Enter"
-        :title="lockNote ? lockTitle : primaryTitle"
-        v-bind="primaryLockAttrs"
-        @click.stop="emit('resolve')"
-      >
-        <v-icon size="16">mdi-{{ plan.icon }}</v-icon>
-        <span>{{ plan.label }}</span>
-        <kbd v-if="focused" aria-hidden="true">Enter</kbd>
-      </button>
+      <!-- The tip rides the activator slot, not AppButton's `tooltip` prop: a
+           tip bound to its parent writes that parent's `aria-describedby`, and
+           the lock note has to stay the description of a blocked primary. -->
+      <Tooltip v-if="!readOnly" :text="lockNote ? lockTitle : primaryTitle">
+        <template #activator="{ props: tipProps }">
+          <AppButton
+            :variant="focused ? 'primary' : 'outline'"
+            :icon-left="plan.icon"
+            data-testid="mixed-resolve"
+            :tabindex="focused ? 0 : -1"
+            :disabled="busy"
+            aria-keyshortcuts="Enter"
+            v-bind="mergeProps(tipProps, primaryLockAttrs)"
+            @click.stop="emit('resolve')"
+          >
+            {{ plan.label }}
+            <kbd v-if="focused" aria-hidden="true">Enter</kbd>
+          </AppButton>
+        </template>
+      </Tooltip>
       <!-- Keep is what makes this list drainable. Without it the
            legitimate-but-odd stacks sit here forever and the page becomes
            ignorable. It changes no picture, so it is not undoable; the way back
@@ -109,48 +117,48 @@
            bulk primary could not name what it was about to do; a button that
            cannot name its outcome on this page is a button that must not act on
            twelve rows at once. -->
-      <button
+      <AppButton
         v-if="!readOnly"
-        type="button"
-        class="gbtn"
+        variant="outline"
+        icon-left="check"
+        data-testid="mixed-keep"
         :tabindex="focused ? 0 : -1"
         :disabled="busy"
         aria-keyshortcuts="K"
-        :title="
+        :tooltip="
           bulk
             ? `Leave all ${selectionCount} selected stacks exactly as they are. They stop being listed until their pictures change.`
             : 'This stack is fine. It stops being listed until its pictures change.'
         "
         @click.stop="emit('keep')"
       >
-        <v-icon size="16">mdi-check</v-icon>
-        <span>{{ bulk ? `Keep ${selectionCount} stacks` : "Keep" }}</span>
+        {{ bulk ? `Keep ${selectionCount} stacks` : "Keep" }}
         <kbd v-if="showsKeepKey" aria-hidden="true">K</kbd>
-      </button>
-      <button
-        type="button"
-        class="gcompare"
+      </AppButton>
+      <AppButton
+        variant="ghost"
+        icon-left="compare-horizontal"
+        data-testid="mixed-compare"
         :tabindex="focused ? 0 : -1"
         @click.stop="emit('compare')"
       >
-        <v-icon size="15">mdi-compare-horizontal</v-icon>
-        <span>Compare all {{ members.length }}</span>
+        Compare all {{ members.length }}
         <kbd v-if="focused" aria-hidden="true">C</kbd>
-      </button>
+      </AppButton>
       <!-- Back to the review queue, but only when there is somewhere real to
            land: that queue is paged, and a shortcut that scrolled to a guessed
            row would be worse than one that is not offered. -->
-      <button
+      <AppButton
         v-if="canShowQueue"
-        type="button"
-        class="gcompare"
+        variant="ghost"
+        icon-left="format-list-checks"
+        data-testid="mixed-show-queue"
         :tabindex="focused ? 0 : -1"
-        title="Show the duplicate group this stack appears in, back in the review queue."
+        tooltip="Show the duplicate group this stack appears in, back in the review queue."
         @click.stop="emit('show-queue')"
       >
-        <v-icon size="15">mdi-format-list-checks</v-icon>
-        <span>In the queue</span>
-      </button>
+        In the queue
+      </AppButton>
     </div>
   </div>
 </template>
@@ -180,10 +188,12 @@
 // selection all belong to the page (`useMixedStackQueue`); this component
 // reports what was pressed.
 
-import { computed, useId } from "vue";
+import { computed, mergeProps, useId } from "vue";
 
+import AppButton from "./AppButton.vue";
 import DedupPictureStrip from "./DedupPictureStrip.vue";
 import DedupWhyPills from "./DedupWhyPills.vue";
+import Tooltip from "./Tooltip.vue";
 import { pictureThumbnailUrl } from "../../api/pictures";
 import {
   isMixedStackStackable,
@@ -358,7 +368,6 @@ const tiles = computed(() =>
       chip: {
         icon: "mdi-approximately-equal",
         text: edgePercentText(member.nearestEdge),
-        title: matchSentence(member),
       },
     };
   }),
@@ -538,7 +547,7 @@ function onDblClick(event) {
 
 .grow--focus {
   background: var(--active-wash);
-  border-color: rgba(var(--v-theme-accent), 0.4);
+  border-color: var(--active-bar);
 }
 
 .grow--focus::before {
@@ -547,15 +556,11 @@ function onDblClick(event) {
   inset: 0 auto 0 0;
   width: var(--rail-w);
   border-radius: var(--radius-md) 0 0 var(--radius-md);
-  background: rgb(var(--v-theme-accent));
+  background: var(--active-bar);
 }
 
 .grow--selected {
-  border-color: rgba(var(--v-theme-accent), 0.55);
-  background: var(--hover-wash);
-}
-
-.grow--selected.grow--focus {
+  border-color: var(--active-bar);
   background: var(--active-wash);
 }
 
@@ -576,7 +581,7 @@ function onDblClick(event) {
 }
 
 .gcaret {
-  color: rgb(var(--v-theme-accent));
+  color: var(--active-text);
   flex-shrink: 0;
   align-self: center;
   margin-left: calc(-1 * var(--space-2));
@@ -668,53 +673,10 @@ function onDblClick(event) {
   gap: var(--space-2);
 }
 
-.gbtn,
-.gcompare {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  height: 27px;
-  padding: 0 var(--space-4);
-  border-radius: var(--radius-md);
-  border: 1px solid rgb(var(--v-theme-border));
-  color: rgb(var(--v-theme-on-surface));
-  font-family: var(--font-ui);
-  font-size: var(--text-sm);
-  font-weight: var(--weight-medium);
-  transition:
-    background var(--dur-1) var(--ease-standard),
-    border-color var(--dur-1) var(--ease-standard);
-}
-
-.gbtn:hover:not(:disabled):not([aria-disabled="true"]),
-.gcompare:hover {
-  background: var(--hover-wash);
-}
-
-.gbtn:disabled {
-  opacity: var(--opacity-disabled);
-  cursor: default;
-}
-
-/* A refused primary looks disabled and is still a tab stop, which is the whole
-   point of `aria-disabled`: the reason it points at has to be reachable. */
-.gbtn[aria-disabled="true"] {
-  opacity: var(--opacity-disabled);
-  cursor: not-allowed;
-}
-
-/* The primary fills only on the focused row, so the eye lands on the one button
-   `Enter` would press. ACCENT, not warning: warning marks evidence on this page
-   (the strangers) and accent marks action, and the two never swap. */
-.grow--focus .gbtn--stack {
-  background: rgb(var(--v-theme-accent));
-  border-color: rgb(var(--v-theme-accent));
-  color: rgb(var(--v-theme-on-accent));
-}
-
-.gcompare {
-  border-color: transparent;
-  color: rgba(var(--v-theme-on-surface), 0.75);
+/* Left-aligned like `DedupGroupRow`'s, not AppButton's centred default. A
+   refused primary (`aria-disabled`) takes AppButton's own disabled fade. */
+.gact > button {
+  justify-content: flex-start;
 }
 
 kbd {

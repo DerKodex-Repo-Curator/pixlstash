@@ -22,7 +22,9 @@ if TYPE_CHECKING:  # annotations only - see the function-local import note below
     from torchvision import transforms
 
 from pixlstash.tagger_plugins.base import TagResult, TaggerPlugin
+from pixlstash.utils.accelerator import is_accelerated, supports_fp16
 from pixlstash.utils.service.caption_utils import naturalize_tags, sanitise_tag
+from pixlstash.utils.vram_utils import empty_device_cache, is_vram_oom
 
 # ML imports (torch / torchvision) are deliberately FUNCTION-LOCAL throughout
 # this module. They cost seconds to import, and this module sits on the API
@@ -38,7 +40,7 @@ PIXLSTASH_TAGGER_REV_FILENAME = "pixlstash-anomaly-tagger.revision"
 # Pin a specific HuggingFace git commit SHA so the model is re-downloaded
 # whenever this value is updated, even if the local file already exists.
 # Set to "main" to always use the latest commit on the default branch.
-PIXLSTASH_TAGGER_REVISION = "26e6f88f76d97bbf776f22daf13cbf6a47b40576"
+PIXLSTASH_TAGGER_REVISION = "9c980e90c73b1270ddc5c7b9cf55536ec40c7afc"
 PIXLSTASH_TAGGER_DEFAULT_THRESHOLD = 0.50
 PIXLSTASH_TAGGER_LABEL_THRESHOLD_BIAS = 0.0
 
@@ -48,15 +50,17 @@ QUALITY_CROP_TAG_WHITELIST = frozenset(
     {
         "blocky",
         "malformed teeth",
+        "malformed eyes",
         "flux chin",
     }
 )
-# The subset of the whitelist that only makes sense on a face. When no face is found
-# the quality pass falls back to a centre crop, which contains no face - judging these
+# The subset of the whitelist that only makes sense on a face. When no face is found,
+# or only one too small to judge, the quality pass falls back to a centre crop, which contains no face - judging these
 # anomalies from it would be meaningless, so they are excluded there.
 FACE_QUALITY_CROP_TAGS = frozenset(
     {
         "malformed teeth",
+        "malformed eyes",
         "flux chin",
     }
 )
@@ -64,7 +68,11 @@ FACE_QUALITY_CROP_TAGS = frozenset(
 # to a face (e.g. blockiness).
 CENTRE_CROP_TAG_WHITELIST = QUALITY_CROP_TAG_WHITELIST - FACE_QUALITY_CROP_TAGS
 PIXLSTASH_TAGGER_IMAGE_SIZE_FULL = 576
-PIXLSTASH_TAGGER_IMAGE_SIZE_QUALITY_CROP = 320
+# The quality crop's input size. By default the crop is a fixed 320px window
+# taken at its native size; with the `whole_face_crop` setting on (#1648) it is
+# sized by the face and resized to 512.
+PIXLSTASH_TAGGER_IMAGE_SIZE_QUALITY_CROP = 512
+PIXLSTASH_TAGGER_IMAGE_SIZE_FIXED_QUALITY_CROP = 320
 
 # ------------------------------------------------------------------------- #
 # Grad-CAM anomaly-localisation tuning
@@ -300,11 +308,16 @@ class PixlStashTaggerService:
         # Normalise dtype first: safetensors weights may be FP16 while the
         # freshly-built classifier head is FP32.  Cast everything to FP32,
         # load the state dict (now a consistent dtype), then promote to FP16
-        # on CUDA for faster inference.  CPU always stays FP32.
+        # on an accelerator.  CPU always stays FP32.
+        #
+        # On CUDA fp16 buys speed. On MPS it buys *headroom* - measured
+        # tag-identical to fp32 and to the CPU, no measurable speed change, and
+        # ~45 % less device memory at the same batch - which on unified memory
+        # is the thing that keeps a batch from taking the machine with it.
         self._model.float()
         self._model.load_state_dict(state_dict)
         self._model.to(self._device)
-        if str(self._device) == "cuda":
+        if supports_fp16(self._device):
             self._model.half()
             self._dtype = torch.float16
         else:
@@ -320,18 +333,13 @@ class PixlStashTaggerService:
             True if the model is successfully loaded, False if loading
             failed on both GPU and CPU.
         """
-        import torch
-
         if self.is_loaded():
             return True
         try:
             self.init()
             return True
         except Exception as exc:
-            is_oom = isinstance(exc, torch.cuda.OutOfMemoryError) or (
-                "out of memory" in str(exc).lower()
-            )
-            if is_oom and self._device != "cpu":
+            if is_vram_oom(exc) and is_accelerated(self._device):
                 logger.warning(
                     "PixlStash tagger GPU load failed (OOM); retrying on CPU: %s", exc
                 )
@@ -377,11 +385,14 @@ class PixlStashTaggerService:
                 # state on GPU, causing every subsequent inference to fail).
                 self._model.to("cpu")
                 self._model.float()
+            previous_device = self._device
             self._device = "cpu"
             self._dtype = torch.float32
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            logger.debug("PixlStash tagger reloaded on CPU")
+            # Release the accelerator's cache, not CUDA's specifically: this is
+            # the recovery path, and on MPS the old code freed nothing at all,
+            # so the retry met the same full device it had just failed on.
+            empty_device_cache()
+            logger.debug("PixlStash tagger reloaded on CPU from %s", previous_device)
             return True
         except Exception as cpu_error:
             # If the move to CPU itself failed, unload the model entirely so it
@@ -482,10 +493,7 @@ class PixlStashTaggerService:
                     logits = self._model(inputs)
                     probs = torch.sigmoid(logits).cpu().numpy()
             except Exception as exc:
-                is_cuda_oom = isinstance(exc, torch.cuda.OutOfMemoryError) or (
-                    "CUDA out of memory" in str(exc)
-                )
-                if is_cuda_oom and device == "cuda":
+                if is_vram_oom(exc) and is_accelerated(device):
                     logger.warning(
                         "PixlStash tagger CUDA OOM; falling back to CPU for this run."
                     )
@@ -596,10 +604,7 @@ class PixlStashTaggerService:
                     logits = self._model(inputs)
                     probs = torch.sigmoid(logits).float().cpu().numpy()
             except Exception as exc:
-                is_cuda_oom = isinstance(exc, torch.cuda.OutOfMemoryError) or (
-                    "CUDA out of memory" in str(exc)
-                )
-                if is_cuda_oom and device == "cuda":
+                if is_vram_oom(exc) and is_accelerated(device):
                     logger.warning(
                         "PixlStash tagger CUDA OOM; falling back to CPU for this run."
                     )
@@ -641,6 +646,7 @@ class PixlStashTaggerService:
         stop_event=None,
         threshold_offset: float = 0.0,
         out_raw_scores: dict | None = None,
+        image_size: int | None = None,
     ) -> dict:
         """Run the PixlStash tagger on quality-crop images and return only whitelist tags.
 
@@ -654,6 +660,8 @@ class PixlStashTaggerService:
             out_raw_scores: When provided, raw confidence scores for every label
                 above ``min_confidence`` are merged into this dict
                 (``{key: {label: float}}``) during the same GPU pass.
+            image_size: Square input size the crops are resized to; defaults
+                to ``PIXLSTASH_TAGGER_IMAGE_SIZE_QUALITY_CROP``.
 
         Returns:
             Dict mapping key to list of whitelist-filtered quality tags.
@@ -667,7 +675,7 @@ class PixlStashTaggerService:
                 stop_event=stop_event,
                 threshold_offset=threshold_offset,
                 threshold=None,
-                image_size=self._image_size_quality_crop,
+                image_size=image_size or self._image_size_quality_crop,
                 pass_name="quality_crops",
             )
             out_raw_scores.update(scores_by_key)
@@ -677,7 +685,7 @@ class PixlStashTaggerService:
                 stop_event=stop_event,
                 threshold_offset=threshold_offset,
                 threshold=None,
-                image_size=self._image_size_quality_crop,
+                image_size=image_size or self._image_size_quality_crop,
                 pass_name="quality_crops",
             )
         filtered = {}
@@ -744,10 +752,7 @@ class PixlStashTaggerService:
                     logits = self._model(inputs)
                     probs = torch.sigmoid(logits).cpu().numpy()
             except Exception as exc:
-                is_cuda_oom = isinstance(exc, torch.cuda.OutOfMemoryError) or (
-                    "CUDA out of memory" in str(exc)
-                )
-                if is_cuda_oom and device == "cuda":
+                if is_vram_oom(exc) and is_accelerated(device):
                     logger.warning(
                         "Custom scorer CUDA OOM; falling back to CPU for this batch."
                     )
@@ -1123,6 +1128,18 @@ class PixlStashTaggerPlugin(TaggerPlugin):
                     "Positive values raise the bar; negative values lower it."
                 ),
             },
+            {
+                "name": "whole_face_crop",
+                "label": "Whole-face close-up",
+                "type": "bool",
+                "default": False,
+                "description": (
+                    "Check faces for malformed eyes, teeth and chins on a close-up "
+                    "of the whole face at higher resolution. More accurate, but "
+                    "tagging takes longer. Off uses a smaller fixed window that "
+                    "can cut off part of a large face."
+                ),
+            },
         ]
 
     def default_params(self) -> dict:
@@ -1207,7 +1224,7 @@ class PixlStashTaggerPlugin(TaggerPlugin):
             ext = os.path.splitext(path_str)[1].lower()
             img = preloaded_map.get(path_str)
             if img is None:
-                if ext in _VIDEO_EXTS:
+                if ext in _VIDEO_EXTS or VideoUtils.is_animated_gif(path_str):
                     frames = VideoUtils.extract_representative_video_frames(
                         path_str, count=1
                     )

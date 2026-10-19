@@ -37,8 +37,15 @@ export const MANAGED_KIND = "managed";
  */
 export const SOURCE_KIND = "source";
 
+/**
+ * The Downloads folder the shelf watches. One at most: models that land in it
+ * are moved into the default folder by the server, so it is never scanned and
+ * never a destination.
+ */
+export const DOWNLOADS_KIND = "downloads";
+
 /** The folder kinds a caller may register (`managed`/`foreign` are ours). */
-export const CREATABLE_KINDS = ["user", "source"];
+export const CREATABLE_KINDS = ["user", "source", DOWNLOADS_KIND];
 
 /**
  * List every registered model folder.
@@ -48,10 +55,13 @@ export const CREATABLE_KINDS = ["user", "source"];
  *
  * @returns {Promise<Array<Object>>} the `folders` array. Each entry carries
  *   `id`, `path`, `kind` (`user`/`managed`/`foreign`/`source`), `owner`,
- *   `movable`, `relocatable` (whether `POST .../relocate` will move it whole -
+ *   `tool` (whose folder it is, the row's label: `PixlStash`, `HuggingFace`,
+ *   `ai-toolkit`, `StabilityMatrix`, or null for the owner's own), `movable`, `relocatable` (whether `POST .../relocate` will move it whole -
  *   offer Move on exactly these, never on `movable === "root_only"`, which the
  *   InsightFace packs also say and cannot be moved yet), `host_path`,
- *   `delete_after_import`, `last_checked`, `created_at`, `file_count` (copies
+ *   `delete_after_import`, `is_default` (where a new model goes when nothing
+ *   is named: true on exactly one row while the managed store is registered),
+ *   `last_checked`, `created_at`, `file_count` (copies
  *   registered under it, in any state) and `present_bytes` (bytes of the
  *   `present` ones only, so zero is an answer rather than an unknown).
  */
@@ -88,8 +98,9 @@ export async function listModelFolderDevices() {
  *
  * @param {Object} options
  * @param {string} options.path - absolute host path, chosen by the owner.
- * @param {string} [options.kind="user"] - `user` to catalogue in place, or
- *   `source` for an ai-toolkit output root that is taken from instead.
+ * @param {string} [options.kind="user"] - `user` to catalogue in place,
+ *   `source` for an ai-toolkit output root that is taken from instead, or
+ *   `downloads` for the one folder whose new models are moved onto the shelf.
  * @param {string} [options.hostPath] - Docker bind source. REQUIRED when the
  *   server runs in Docker; the API answers 400 without it.
  * @param {boolean} [options.deleteAfterImport] - `source` folders only.
@@ -107,6 +118,20 @@ export async function createModelFolder({
     body.delete_after_import = deleteAfterImport;
   }
   return unwrap(apiClient.post(MODEL_FOLDERS_URL, body));
+}
+
+/**
+ * Make a folder the default destination for a new model, or hand the role back
+ * to the managed store.
+ *
+ * @param {number|string} id - a `user` folder or the managed store.
+ * @param {boolean} isDefault
+ * @returns {Promise<Object>} the updated folder.
+ */
+export async function setDefaultModelFolder(id, isDefault) {
+  return unwrap(
+    apiClient.patch(`${MODEL_FOLDERS_URL}/${id}`, { is_default: isDefault }),
+  );
 }
 
 /**

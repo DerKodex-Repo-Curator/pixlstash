@@ -145,10 +145,7 @@ function keepCoverOnlyBody({ stackIds, pictureIds } = {}) {
  *   bytes_held_by_copies, originals_deleted_from_disk,
  *   scrapheap_retention_days, unknown_stack_ids, stacks }`.
  */
-export async function previewKeepCoverOnly({
-  stackIds,
-  pictureIds,
-} = {}) {
+export async function previewKeepCoverOnly({ stackIds, pictureIds } = {}) {
   return unwrap(apiClient.post(
     stacksUrl("/keep-cover-only/preview"),
     keepCoverOnlyBody({ stackIds, pictureIds }),
@@ -178,11 +175,7 @@ export async function previewKeepCoverOnly({
  *   stacks_skipped_locked, stacks_skipped_character_on_copy,
  *   stacks_skipped_single_member, unknown_stack_ids }`.
  */
-export async function keepCoverOnly({
-  stackIds,
-  pictureIds,
-  batchId,
-} = {}) {
+export async function keepCoverOnly({ stackIds, pictureIds, batchId } = {}) {
   const body = keepCoverOnlyBody({ stackIds, pictureIds });
   if (batchId) body.batch_id = batchId;
   return unwrap(apiClient.post(stacksUrl("/keep-cover-only"), body));

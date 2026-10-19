@@ -103,7 +103,8 @@ jobs:
 
       - name: Check formatting with ruff
         run: |
-          ruff check pixlstash
+          ruff check pixlstash tests scripts
+          ruff format --check pixlstash tests scripts
 
       - name: Check backend_architecture.md is up to date
         run: |
@@ -439,6 +440,10 @@ jobs:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # tests/test_architecture_guardrails.py reads the ComfyUI-PixlStash
+          # nodes (a public submodule) to hold the ComfyUI token scope to them.
+          submodules: true
       - uses: ./.github/actions/setup-backend
 
       - name: Backend tests (shard ${{ matrix.shard }} of 8)
@@ -471,12 +476,15 @@ jobs:
           tests/test_cli_documentation.py
           tests/test_clip_text_embedding_similarity.py
           tests/test_comfyui_api_prompt_extraction.py
+          tests/test_comfyui_pack_model_mark.py
           tests/test_comfyui_pixlstash_saver.py
           tests/test_comfyui_recipe_preflight.py
           tests/test_comfyui_recipe_route.py
           tests/test_comfyui_stack_filter.py
           tests/test_comfyui_submit_prompt.py
+          tests/test_comfyui_ui_graph_conversion.py
           tests/test_comfyui_workflow_extraction.py
+          tests/test_cpu_query_encoders.py
           tests/test_database_engine_config.py
           tests/test_dedup_mixed_stacks.py
           tests/test_dedup_sweep_api.py
@@ -487,6 +495,7 @@ jobs:
           tests/test_description_cancel_blanking.py
           tests/test_detections_scope.py
           tests/test_docker_demo_hub_rewrite.py
+          tests/test_downloads_intake.py
           tests/test_export_api.py
           tests/test_face_score_aggregation.py
           tests/test_facial_features_worker.py
@@ -496,6 +505,7 @@ jobs:
           tests/test_florence_model_variant.py
           tests/test_folder_structure_commit.py
           tests/test_folder_structure_read.py
+          tests/test_frame_count.py
           tests/test_hub_bootstrap.py
           tests/test_hub_engine.py
           tests/test_hub_model_shelf_schema.py
@@ -511,6 +521,7 @@ jobs:
           tests/test_invalid_image_endless_retry.py
           tests/test_ip_locality_fail_closed.py
           tests/test_keep_cover_only.py
+          tests/test_known_base_model_identify.py
           tests/test_known_base_models.py
           tests/test_label_ledger.py
           tests/test_libraries_routes.py
@@ -520,6 +531,8 @@ jobs:
           tests/test_library_generation_coordinator.py
           tests/test_library_insights.py
           tests/test_library_layout.py
+          tests/test_library_move.py
+          tests/test_library_move_cleanup.py
           tests/test_library_restore_cli.py
           tests/test_library_root_scan.py
           tests/test_library_settings.py
@@ -528,6 +541,7 @@ jobs:
           tests/test_likeness_worker.py
           tests/test_managed_model_store.py
           tests/test_many_to_many_face_data.py
+          tests/test_mcp_server.py
           tests/test_metadata_hash.py
           tests/test_metadata_hash_batching.py
           tests/test_migrations.py
@@ -541,6 +555,9 @@ jobs:
           tests/test_model_shelf_library_fixture.py
           tests/test_model_shelf_scan_invariants.py
           tests/test_model_unload_race.py
+          tests/test_mps_device_check.py
+          tests/test_mps_memory_and_providers.py
+          tests/test_ocr_text.py
           tests/test_openapi_response_schemas.py
           tests/test_operation_log.py
           tests/test_orientation.py
@@ -549,6 +566,7 @@ jobs:
           tests/test_picture_is_video.py
           tests/test_picture_mutation_scope.py
           tests/test_picture_plugins.py
+          tests/test_picture_recipe.py
           tests/test_picture_set_locking.py
           tests/test_picture_sets.py
           tests/test_picture_sets_query_cost.py
@@ -559,8 +577,10 @@ jobs:
           tests/test_plugin_create.py
           tests/test_plugin_install.py
           tests/test_plugin_lifecycle_gaps.py
+          tests/test_process_teardown.py
           tests/test_project_membership_service.py
           tests/test_projects_api.py
+          tests/test_prompt_match.py
           tests/test_rate_limiter.py
           tests/test_read_token_security.py
           tests/test_reference_folder_moves.py
@@ -570,6 +590,7 @@ jobs:
           tests/test_reviews_api.py
           tests/test_rocm_device_check.py
           tests/test_root_scan_first_import.py
+          tests/test_saved_recipes.py
           tests/test_scope_table.py
           tests/test_score_agreement_stats.py
           tests/test_scrapheap_retention.py
@@ -594,6 +615,8 @@ jobs:
           tests/test_tag_worker.py
           tests/test_tagger_plugin_registry.py
           tests/test_tagger_user_plugins.py
+          tests/test_task_runner_submit_and_wait.py
+          tests/test_temp_vault_first_import.py
           tests/test_thumbnail_cache_headers.py
           tests/test_thumbnail_location.py
           tests/test_token_identity.py
@@ -606,7 +629,15 @@ jobs:
           tests/test_websocket_auth.py
           tests/test_workers_api.py
           tests/test_work_planner.py
+          tests/test_workflow_cards.py
+          tests/test_workflow_group_convert.py
+          tests/test_workflow_identity.py
+          tests/test_workflow_io.py
           tests/test_workflow_library.py
+          tests/test_workflow_parameters.py
+          tests/test_workflow_stage_bypass.py
+          tests/test_workflow_versions.py
+          tests/test_workflows_api.py
           tests/test_ws_broadcaster.py
 
   # ---------------------------------------------------------------------------
@@ -697,6 +728,10 @@ jobs:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # tests/test_architecture_guardrails.py reads the ComfyUI-PixlStash
+          # nodes (a public submodule) to hold the ComfyUI token scope to them.
+          submodules: true
       - uses: ./.github/actions/setup-backend
 
       - name: Full suite in collection order (block ${{ matrix.shard }} of 6)
@@ -921,17 +956,24 @@ jobs:
     # See the `backend` job for the rationale and the read-only token requirement.
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      # This job intermittently exits 139 SECONDS AFTER pytest prints a fully
-      # green summary, with no traceback anywhere in the log. pytest's bundled
-      # faulthandler plugin tears itself down in pytest_unconfigure, so it is
-      # already gone by then; that places the crash in Py_FinalizeEx. The env
-      # var enables faulthandler at interpreter start-up instead, where nothing
-      # can unregister it, so the next occurrence names the thread and frame.
-      # Costs nothing: it only installs a signal handler, and prints only if
-      # the process actually dies on a fatal signal.
+      # This job used to intermittently exit 139 SECONDS AFTER pytest printed a
+      # fully green summary, with no traceback anywhere in the log. The suite
+      # now ends this process with os._exit once pytest has its status, which
+      # skips the exit-time native destructors the crash was traced to.
+      # tests/process_teardown.py carries the evidence and the opt-out.
+      #
+      # PYTHONFAULTHANDLER stays. It enables faulthandler at interpreter
+      # start-up, where pytest's own plugin cannot unregister it in
+      # pytest_unconfigure, so it covers the whole run rather than stopping at
+      # the summary. Costs nothing: it only installs a handler, and prints only
+      # if the process actually dies on a fatal signal.
       PYTHONFAULTHANDLER: 1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # tests/test_architecture_guardrails.py reads the ComfyUI-PixlStash
+          # nodes (a public submodule) to hold the ComfyUI token scope to them.
+          submodules: true
 
       # The wheel build (pip install . below) runs `npm ci` via setup.py. Set up
       # Node with an npm cache so that step pulls tarballs from the warm cache
@@ -974,31 +1016,65 @@ jobs:
         shell: bash
         env:
           CI_SHARD: ${{ matrix.shard }}
-        run: >-
-          python -m pytest $PYTEST_FLAGS --ci-shard "$CI_SHARD/4"
-          tests/test_migrations.py
-          tests/test_snapshots.py
-          tests/test_restore.py
-          tests/test_snapshots_auth.py
-          tests/test_metadata_hash.py
-          tests/test_architecture_guardrails.py
-          tests/multi_project_authz/test_multi_project_membership_authz.py
-          tests/test_openapi_response_schemas.py
-          tests/test_find_orphaned_files.py
-          tests/test_library_layout.py
-          tests/test_server.py
-          tests/test_authentication.py
-          tests/test_rate_limiter.py
-          tests/test_picture_sets.py
-          tests/test_picture_stack_utils.py
-          tests/test_picture_plugins.py
-          tests/test_comfyui_api_prompt_extraction.py
-          tests/test_comfyui_recipe_preflight.py
-          tests/test_comfyui_recipe_route.py
-          tests/test_comfyui_submit_prompt.py
-          tests/test_comfyui_workflow_extraction.py
-          tests/test_watch_folder_worker.py
-          tests/test_work_planner.py
+        run: |
+          # Piped through tee so the step can read its own output back: the
+          # line the fast process exit prints is the only evidence that the
+          # fix for this job's intermittent 139 actually engaged, and nobody
+          # should have to open a log to find out. See the check below.
+          #
+          # `set +e` because Actions runs `shell: bash` with -e, which would
+          # abort the step the instant pytest exits non-zero and skip that
+          # check - on the crashing run, which is the one whose diagnosis
+          # matters most. PIPESTATUS[0] is pytest's own status, past the tee.
+          set +e
+          python -m pytest $PYTEST_FLAGS --ci-shard "$CI_SHARD/4" \
+            tests/test_migrations.py \
+            tests/test_snapshots.py \
+            tests/test_restore.py \
+            tests/test_snapshots_auth.py \
+            tests/test_metadata_hash.py \
+            tests/test_architecture_guardrails.py \
+            tests/multi_project_authz/test_multi_project_membership_authz.py \
+            tests/test_openapi_response_schemas.py \
+            tests/test_find_orphaned_files.py \
+            tests/test_library_layout.py \
+            tests/test_server.py \
+            tests/test_authentication.py \
+            tests/test_rate_limiter.py \
+            tests/test_picture_sets.py \
+            tests/test_picture_stack_utils.py \
+            tests/test_picture_plugins.py \
+            tests/test_comfyui_api_prompt_extraction.py \
+            tests/test_comfyui_recipe_preflight.py \
+            tests/test_comfyui_recipe_route.py \
+            tests/test_comfyui_submit_prompt.py \
+            tests/test_comfyui_workflow_extraction.py \
+            tests/test_watch_folder_worker.py \
+            tests/test_work_planner.py \
+            tests/test_process_teardown.py \
+            2>&1 | tee pytest-windows.log
+          status=${PIPESTATUS[0]}
+          set -e
+
+          # Reported in every case, because the combination is the
+          # diagnosis. Fired + exit 0 is the fix working. Fired + 139 means
+          # the crash outlived os._exit and the remaining suspect is
+          # DLL_PROCESS_DETACH under ExitProcess. Not fired + 139 is the
+          # original crash, untouched.
+          if grep -q 'without interpreter finalization' pytest-windows.log; then
+            fired=yes
+          else
+            fired=no
+          fi
+          echo "Fast process exit fired: $fired (pytest exit status $status)"
+
+          if [ "$status" -ne 0 ]; then
+            exit $status
+          fi
+          if [ "$fired" != "yes" ]; then
+            echo "::error::pytest passed but the fast process exit never fired, so this job ran CPython's full native teardown - the window the intermittent 139 lives in. The pytest_unconfigure hook in the tests/ conftest is not engaging; tests/process_teardown has the detail."
+            exit 1
+          fi
 
       # `PYTHONFAULTHANDLER` above did not name it, and that is itself the
       # finding: pytest's faulthandler plugin restores the handler in its
@@ -1010,6 +1086,13 @@ jobs:
       # one layer below that, an Application Error record naming the faulting
       # module, its version and the fault offset — the DLL this has never been
       # able to name.
+      #
+      # This step has not narrowed it further either. Run 35252455611 printed
+      # "No Application Error record", i.e. the Application log held nothing
+      # from either provider — which on a hosted runner may only mean Windows
+      # Error Reporting is switched off, so it is not evidence either way. The
+      # step is kept because it costs a second on an already-failing job and
+      # would name the module the moment a runner does log one.
       #
       # Read the event rather than shipping a minidump: artifacts on a public
       # repository are downloadable by anyone, and dumped process memory reaches

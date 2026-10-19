@@ -37,6 +37,25 @@ _WS_SNAPSHOT_EVENT_TYPES = {
 }
 
 
+# Why a card changed, as the wire carries it (v1.12 B4). Closed on purpose and
+# degraded rather than rejected, exactly like ``CHANGE_KINDS`` below: an emit
+# site naming something else still says "look again", which is the whole of the
+# contract, and the reason is a hint about what to look at first.
+# "regrouped" is the background family pass retiring ids; its frame's
+# ``renamed`` says where each retired id went. "pictures" is the ComfyUI
+# extraction filing new pictures onto the workflows in ``keys``: only their
+# counts and covers moved, so a client may re-read just those.
+WORKFLOW_CHANGE_REASONS = (
+    "imported",
+    "changed",
+    "stacks",
+    "recipes",
+    "regrouped",
+    "pictures",
+)
+DEFAULT_REASON = "changed"
+
+
 class WsBroadcasterMixin:
     """WebSocket vault-event broadcasting for ``Server``."""
 
@@ -93,8 +112,8 @@ class WsBroadcasterMixin:
     ) -> None:
         """Synchronously close one already-claimed socket generation.
 
-        TestClient can host separate WebSocket sessions on separate event loops,
-        and the ComfyUI proxy can be the only live socket. Keep each connection's
+        TestClient can host separate WebSocket sessions on separate event
+        loops. Keep each connection's
         owning loop instead of assuming the updates broadcaster's last loop owns
         them all. Production normally has one uvicorn loop, so this grouping is
         free there and makes the lifecycle invariant explicit everywhere.
@@ -152,6 +171,12 @@ class WsBroadcasterMixin:
                 # Vault-wide, like VRAM_OOM: the reconciliation queue is not a
                 # grid view a client's filters could exclude it from.
                 EventType.EXTERNAL_MOVES_PENDING,
+                # A card is not a picture, so the grid filters say nothing
+                # about it: a client filtering to one character still has the
+                # Workflows view open.
+                EventType.CHANGED_WORKFLOWS,
+                # A model is not a picture either: the shelf is machine-wide.
+                EventType.MODELS_ARRIVED,
             )
             or event_type in _WS_SNAPSHOT_EVENT_TYPES
         )
@@ -281,6 +306,42 @@ class WsBroadcasterMixin:
                 "type": "external_moves_pending",
                 "event": event_type.name,
             }
+        elif event_type == EventType.CHANGED_WORKFLOWS:
+            # A "look again" nudge like external_moves_pending, and for the
+            # same reason: a card's counts, covers and stack are computed per
+            # request over the whole vault, so anything carried here would be
+            # a card the client then has to re-read anyway. It says which keys
+            # to look at and why; the envelope below says which tab did it.
+            info = data if isinstance(data, dict) else {}
+            reason = info.get("reason")
+            payload = {
+                "type": "workflows_changed",
+                "event": event_type.name,
+                "keys": [str(key) for key in (info.get("keys") or [])],
+                "reason": (
+                    reason if reason in WORKFLOW_CHANGE_REASONS else DEFAULT_REASON
+                ),
+                # {retired id: the id that took most of its variants}, so a tab
+                # holding a retired id (a selection, an open inspector) can
+                # follow it. Always present, ``{}`` when nothing was retired.
+                "renamed": {
+                    str(old): str(new)
+                    for old, new in (
+                        info.get("renamed")
+                        if isinstance(info.get("renamed"), dict)
+                        else {}
+                    ).items()
+                },
+            }
+        elif event_type == EventType.MODELS_ARRIVED:
+            # Another "look again": the shelf re-reads its rows. The ids only
+            # say how many arrived.
+            info = data if isinstance(data, dict) else {}
+            payload = {
+                "type": "models_arrived",
+                "event": event_type.name,
+                "model_ids": [int(i) for i in (info.get("model_ids") or [])],
+            }
         elif event_type in _WS_SNAPSHOT_EVENT_TYPES:
             info = data if isinstance(data, dict) else {}
             payload = {
@@ -331,11 +392,6 @@ class WsBroadcasterMixin:
             # outside a token's grant). Per-resource scoped delivery, if ever
             # wanted, would be an additive change here.
             if not client.get("owner"):
-                continue
-            # ComfyUI progress proxy sockets share the switch lifecycle registry
-            # so they are retired too, but they are not subscribers to vault
-            # event envelopes.
-            if not client.get("broadcast", True):
                 continue
             filters = client.get("filters") or {}
             if not self._should_send_ws_update(event_type, filters):

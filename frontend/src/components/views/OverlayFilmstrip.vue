@@ -17,8 +17,12 @@
             },
           ]"
           @click.stop="emit('select', item.index)"
-          :title="item.description || 'Image'"
         >
+          <Tooltip
+            :text="item.description || 'Image'"
+            activator="parent"
+            :describe="false"
+          />
           <div class="filmstrip-thumb-tile" :style="item.stackTileStyle">
             <img
               v-if="item.thumbSrc && !isThumbBroken(item)"
@@ -53,10 +57,10 @@
           <div
             v-if="item.stackBadgeVisible && item.thumbSrc && item.isStackLead"
             class="filmstrip-badge filmstrip-badge--top-left"
-            :title="item.stackBadgeTitle"
             @click.stop="emit('toggle-expand', item)"
             @mouseenter.stop="emit('prefetch', item)"
           >
+            <Tooltip :text="item.stackBadgeTitle" activator="parent" />
             <v-icon size="14" :style="item.stackIconStyle">mdi-layers</v-icon>
           </div>
           <div
@@ -67,9 +71,39 @@
                 ? 'filmstrip-badge--top-left-stack'
                 : 'filmstrip-badge--top-left',
             ]"
-            :title="item.problemTitle"
           >
-            <v-icon size="14" color="error">mdi-emoticon-sad-outline</v-icon>
+            <Tooltip :text="item.problemTitle" activator="parent" />
+            <v-icon size="14" color="dark-surface-error"
+              >mdi-emoticon-sad-outline</v-icon
+            >
+          </div>
+          <!-- Move earlier / Make cover / Move later on a picture of a stack
+               opened here, stacked like the rail. Spans, not buttons: the
+               thumb is itself a button. -->
+          <div
+            v-if="item.stackPlace && !readOnly"
+            class="filmstrip-stack-bar"
+            role="group"
+            aria-label="Stack order"
+          >
+            <span
+              v-for="handle in stackHandles(item.stackPlace)"
+              :key="handle.where"
+              class="filmstrip-stack-btn"
+              :class="{
+                'filmstrip-stack-btn--cover': handle.where === 'cover',
+                'filmstrip-stack-btn--disabled': handle.disabled,
+              }"
+              role="button"
+              :aria-label="handle.label"
+              :aria-disabled="handle.disabled ? 'true' : undefined"
+              @click.stop="
+                !handle.disabled && emit('stack-move', item, handle.where)
+              "
+            >
+              <Tooltip :text="handle.label" activator="parent" />
+              <v-icon size="14">{{ handle.icon }}</v-icon>
+            </span>
           </div>
         </button>
       </transition-group>
@@ -79,12 +113,33 @@
 
 <script setup>
 import { reactive, ref } from "vue";
+import Tooltip from "../widgets/Tooltip.vue";
 
 defineProps({
   items: { type: Array, default: () => [] },
   canvasStyle: { type: Object, default: () => ({}) },
   hidden: { type: Boolean, default: false },
+  readOnly: { type: Boolean, default: false },
 });
+
+function stackHandles(place) {
+  const last = place.position >= place.count - 1;
+  return [
+    {
+      where: "earlier",
+      label: "Move earlier",
+      icon: "mdi-arrow-up",
+      disabled: place.position === 0,
+    },
+    {
+      where: "cover",
+      label: "Make this the cover",
+      icon: "mdi-star-outline",
+      disabled: place.position === 0,
+    },
+    { where: "later", label: "Move later", icon: "mdi-arrow-down", disabled: last },
+  ];
+}
 
 // Thumbs whose <img> fired @error (e.g. an undecodable source, #585): show a
 // centered broken-image icon instead of the browser's alt-text rendering.
@@ -102,7 +157,13 @@ function isThumbBroken(item) {
   return failedThumbKeys.has(thumbKey(item));
 }
 
-const emit = defineEmits(["select", "toggle-expand", "prefetch", "navigate"]);
+const emit = defineEmits([
+  "select",
+  "toggle-expand",
+  "prefetch",
+  "navigate",
+  "stack-move",
+]);
 
 const railRef = ref(null);
 defineExpose({ railEl: railRef, resetWheel });
@@ -164,11 +225,11 @@ function onFilmstripWheel(event) {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: var(--filmstrip-padding, 8px) 6px;
+  padding: var(--filmstrip-padding, var(--space-3)) 6px;
   transition: opacity 0.2s ease;
   overflow: hidden;
   height: calc(100% - var(--topbar-height));
-  z-index: 3;
+  z-index: var(--z-raised);
 }
 
 .overlay-rail.hidden {
@@ -186,7 +247,7 @@ function onFilmstripWheel(event) {
 .filmstrip-list {
   display: flex;
   flex-direction: column;
-  gap: var(--filmstrip-gap, 8px);
+  gap: var(--filmstrip-gap, var(--space-3));
   overflow-y: visible;
   width: var(--filmstrip-thumb-size, 100%);
   align-items: center;
@@ -234,7 +295,7 @@ function onFilmstripWheel(event) {
 }
 
 .filmstrip-thumb-stack-joined {
-  margin-top: calc(-1 * var(--filmstrip-gap, 8px));
+  margin-top: calc(-1 * var(--filmstrip-gap, var(--space-3)));
 }
 
 .filmstrip-thumb-image {
@@ -246,8 +307,8 @@ function onFilmstripWheel(event) {
 }
 
 .filmstrip-thumb-image-active {
-  box-shadow: 0 0 0 4px rgba(var(--v-theme-accent), 0.9);
-  z-index: 2;
+  box-shadow: 0 0 0 4px rgb(var(--v-theme-dark-surface-primary));
+  z-index: var(--z-raised);
 }
 
 .filmstrip-thumb-placeholder {
@@ -272,7 +333,7 @@ function onFilmstripWheel(event) {
   padding: var(--space-1) var(--space-2);
   color: rgb(var(--v-theme-on-dark-surface));
   box-shadow: 0 2px 6px rgba(var(--v-theme-shadow), 0.3);
-  z-index: 2;
+  z-index: var(--z-raised);
 }
 
 .filmstrip-badge--top-left {
@@ -283,6 +344,53 @@ function onFilmstripWheel(event) {
 .filmstrip-badge--top-left-stack {
   top: 28px;
   left: 8px;
+}
+
+.filmstrip-stack-bar {
+  position: absolute;
+  right: var(--space-2);
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border-radius: var(--radius-pill);
+  background: var(--scrim-photo-strong);
+  z-index: var(--z-raised);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-1) var(--ease-standard);
+}
+
+.filmstrip-thumb:hover .filmstrip-stack-bar,
+.filmstrip-thumb:focus-visible .filmstrip-stack-bar {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.filmstrip-stack-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-h-sm);
+  height: var(--control-h-sm);
+  border-radius: var(--radius-pill);
+  color: rgb(var(--v-theme-on-dark-surface));
+  cursor: pointer;
+}
+
+.filmstrip-stack-btn:hover:not(.filmstrip-stack-btn--disabled) {
+  background: rgba(var(--v-theme-on-dark-surface), 0.16);
+}
+
+.filmstrip-stack-btn--cover:not(.filmstrip-stack-btn--disabled) {
+  background: rgba(var(--v-theme-dark-surface-accent), 0.28);
+}
+
+.filmstrip-stack-btn--disabled {
+  opacity: var(--opacity-disabled);
+  cursor: default;
 }
 
 @media (max-width: 720px) {

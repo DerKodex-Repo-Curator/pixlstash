@@ -28,6 +28,7 @@ from pixlstash.db_models import (
 )
 from pixlstash.event_types import EventType
 from pixlstash.pixl_logging import get_logger
+from pixlstash.scoring.prompt_match import looks_like_prompt
 from pixlstash.services import operation_log_service, scrapheap_service
 from pixlstash.services.set_lock_service import (
     enforce_pictures_not_locked,
@@ -134,6 +135,13 @@ class PictureFullMetadataResponse(BaseModel):
     tags: Optional[list] = None
     smartScore: Optional[float] = None
     metadata: Optional[dict] = None
+    frame_count: Optional[int] = Field(
+        default=None,
+        description=(
+            "Frames in the file: 1 for a still image, more for a video or an "
+            "animated GIF/WebP/PNG. Null when the file cannot be read."
+        ),
+    )
     locked: bool = Field(
         default=False,
         description=(
@@ -153,6 +161,25 @@ class PictureFullMetadataResponse(BaseModel):
             "name of a locked set outside its grant, so this list can be empty "
             "while ``locked`` is true - render the 'Locked by <names>' detail only "
             "when it is non-empty, and never derive locked-ness from its length."
+        ),
+    )
+    prompt_match: Optional[float] = Field(
+        default=None,
+        description=(
+            "Whether the picture looks like its prompt at all, 0 to 1: the "
+            "share of a fixed bank of unrelated texts that CLIP finds less like "
+            "the picture than its own prompt. A sanity check for total failures "
+            "(noise, a blank frame, an unrelated picture), not a quality score. "
+            "Null without a prompt or before it is scored, -1 when scoring failed."
+        ),
+    )
+    looks_like_prompt: Optional[bool] = Field(
+        default=None,
+        description=(
+            "``prompt_match`` against its threshold. False means the picture "
+            "does not resemble its prompt at all; true means only that it does "
+            "not fail that check, never that it is good. Null when there is no "
+            "usable score."
         ),
     )
 
@@ -212,6 +239,14 @@ class ScrapheapDeleteResponse(BaseModel):
     skipped_restored: list[int] = []
     # Echoes the effective ``include_protected`` flag for this call.
     include_protected: bool = False
+    # The hub reach (§B4). Picture ghosts — a destroyed picture's thumbnail AND
+    # prompt — this purge RETAINED under the ghost-retention setting, and the
+    # ones it destroyed because the last picture covering their instance hash
+    # has just gone. Reported rather than only logged: the plan's stated failure
+    # mode for the cascade is "nothing on screen says it happened". Both 0 for a
+    # vault with no hub attached.
+    ghosts_kept: int = 0
+    ghosts_cascaded: int = 0
     # Snapshots that still contain metadata for the just-purged pictures, each
     # ``{id, kind, label, created_at, matched_count}``. The archives are not
     # scrubbed; the user can delete these snapshots to erase that metadata.
@@ -341,6 +376,85 @@ class PictureRotateResponse(BaseModel):
     # The operation-log batch this rotate was recorded under, so the client can
     # offer one Undo for the whole gesture. Null when nothing changed.
     batch_id: Optional[str] = None
+
+
+def scrapheap_pictures(server, request: Request, pic_ids: list[int]):
+    """Move *pic_ids* to the Scrapheap as one undoable operation.
+
+    The body of ``DELETE /pictures``, shared with the move to another library,
+    whose last step is this same soft delete.
+
+    Returns:
+        ``(deleted_ids, skipped_locked)``: the pictures that were moved, and
+        the ones left alone because a locked set freezes them.
+    """
+    vault = server.vault
+
+    def delete_pics(session, ids):
+        # Pictures frozen by a locked set are read-only: skip them (reporting
+        # which) rather than failing the whole batch, so the rest still delete.
+        locked = locked_picture_ids(session, ids)
+        newly_deleted: list[int] = []
+        affected_stacks: set = set()
+        deleted_at = datetime.now(timezone.utc)
+        for pid in ids:
+            if pid in locked:
+                continue
+            pic = session.get(Picture, pid)
+            if not pic or pic.deleted:
+                continue
+            pic.deleted = True
+            # Same retention clock as the single-picture soft delete; stamped
+            # only on the False -> True transition (already-deleted rows are
+            # skipped by the guard above).
+            pic.deleted_at = deleted_at
+            session.add(pic)
+            # Soft-deleting a stack member must not strand stack_position 0 (the
+            # whole stack would vanish from the grid). Collect the affected stacks
+            # and normalise each once after every selected member is marked deleted,
+            # so a still-live member is promoted to leader.
+            if pic.stack_id is not None:
+                affected_stacks.add(pic.stack_id)
+            newly_deleted.append(pid)
+        for stack_id in affected_stacks:
+            normalize_stack_positions(session, stack_id)
+        session.flush()
+        return newly_deleted, sorted(locked)
+
+    # One bulk action, one operation row, one batch id - so the client can
+    # offer a single "Undo" for the whole move, by batch id or by simply
+    # popping the newest operation.
+    (deleted_ids, skipped_locked), _operation = (
+        operation_log_service.run_recorded_metadata_task(
+            vault,
+            delete_pics,
+            pic_ids,
+            op_type=operation_log_service.OP_SCRAPHEAP_MOVE,
+            picture_ids=pic_ids,
+            # Expand only the undo snapshot, not delete_pics' pic_ids argument:
+            # normalising positions can change siblings that remain live.
+            expand_stacks=True,
+            expand_stacks_include_deleted=True,
+            summary=operation_log_service.scrapheap_move_summary,
+            # Always batched: the caller's gesture id when it sent one, a
+            # server-minted ``srv-…`` otherwise.
+            **operation_log_service.request_context(
+                request, fallback_batch_id=operation_log_service.new_batch_id()
+            ),
+        )
+    )
+    # Soft-delete removes the cards from active grid views. Broadcast a single
+    # ``removed`` event so other tabs drop the stale cards in one update.
+    if deleted_ids:
+        vault.notify(
+            EventType.CHANGED_PICTURES,
+            {
+                "picture_ids": deleted_ids,
+                "origin_client_id": getattr(request.state, "origin_client_id", None),
+                "change_kind": "removed",
+            },
+        )
+    return deleted_ids, skipped_locked
 
 
 def register_routes(router, server):
@@ -889,8 +1003,10 @@ def register_routes(router, server):
 
         if smart_score:
             pic_dict["smartScore"] = pic.smart_score  # already stored in DB
+        pic_dict["looks_like_prompt"] = looks_like_prompt(pic.prompt_match)
 
         embedded_metadata = {}
+        file_path = None
         try:
             file_path = ImageUtils.resolve_picture_path(
                 server.vault.image_root, pic.file_path
@@ -910,6 +1026,8 @@ def register_routes(router, server):
 
         if embedded_metadata:
             pic_dict["metadata"] = embedded_metadata
+
+        pic_dict["frame_count"] = ImageUtils.frame_count(file_path)
 
         if embedded_metadata:
             logger.debug(
@@ -1468,6 +1586,8 @@ def register_routes(router, server):
             "skipped_locked": outcome.skipped_locked,
             "skipped_restored": outcome.skipped_restored,
             "include_protected": include_protected,
+            "ghosts_kept": outcome.ghosts_kept,
+            "ghosts_cascaded": outcome.ghosts_cascaded,
             "snapshots_with_deleted": snapshots_with_deleted,
         }
 
@@ -1573,7 +1693,6 @@ def register_routes(router, server):
         response_model=BulkPictureDeleteResponse,
     )
     def delete_pictures_bulk(request: Request, payload: dict = Body(...)):
-        origin_client_id = getattr(request.state, "origin_client_id", None)
         maybe_ids = payload.get("picture_ids") if isinstance(payload, dict) else None
         if not isinstance(maybe_ids, list) or not maybe_ids:
             raise HTTPException(
@@ -1596,68 +1715,7 @@ def register_routes(router, server):
                 status_code=400, detail="picture_ids must contain valid integers"
             )
 
-        def delete_pics(session, ids):
-            # Pictures frozen by a locked set are read-only: skip them (reporting
-            # which) rather than failing the whole batch, so the rest still delete.
-            locked = locked_picture_ids(session, ids)
-            newly_deleted: list[int] = []
-            affected_stacks: set = set()
-            deleted_at = datetime.now(timezone.utc)
-            for pid in ids:
-                if pid in locked:
-                    continue
-                pic = session.get(Picture, pid)
-                if not pic or pic.deleted:
-                    continue
-                pic.deleted = True
-                # Same retention clock as the single-picture soft delete; stamped
-                # only on the False -> True transition (already-deleted rows are
-                # skipped by the guard above).
-                pic.deleted_at = deleted_at
-                session.add(pic)
-                # Soft-deleting a stack member must not strand stack_position 0 (the
-                # whole stack would vanish from the grid). Collect the affected stacks
-                # and normalise each once after every selected member is marked deleted,
-                # so a still-live member is promoted to leader.
-                if pic.stack_id is not None:
-                    affected_stacks.add(pic.stack_id)
-                newly_deleted.append(pid)
-            for stack_id in affected_stacks:
-                normalize_stack_positions(session, stack_id)
-            session.flush()
-            return newly_deleted, sorted(locked)
-
-        # One bulk action, one operation row, one batch id - so the client can
-        # offer a single "Undo" for the whole move, by batch id or by simply
-        # popping the newest operation.
-        (deleted_ids, skipped_locked), _operation = (
-            operation_log_service.run_recorded_metadata_task(
-                server.vault,
-                delete_pics,
-                pic_ids,
-                op_type=operation_log_service.OP_SCRAPHEAP_MOVE,
-                picture_ids=pic_ids,
-                expand_stacks=True,
-                expand_stacks_include_deleted=True,
-                summary=operation_log_service.scrapheap_move_summary,
-                # Always batched: the caller's gesture id when it sent one, a
-                # server-minted ``srv-…`` otherwise.
-                **operation_log_service.request_context(
-                    request, fallback_batch_id=operation_log_service.new_batch_id()
-                ),
-            )
-        )
-        # Soft-delete removes the cards from active grid views. Broadcast a single
-        # ``removed`` event so other tabs drop the stale cards in one update.
-        if deleted_ids:
-            server.vault.notify(
-                EventType.CHANGED_PICTURES,
-                {
-                    "picture_ids": deleted_ids,
-                    "origin_client_id": origin_client_id,
-                    "change_kind": "removed",
-                },
-            )
+        deleted_ids, skipped_locked = scrapheap_pictures(server, request, pic_ids)
         return {
             "status": "success",
             "deleted_count": len(deleted_ids),
@@ -1823,12 +1881,31 @@ def register_routes(router, server):
         if rotated_ids:
             # The card keeps its place and its id; its bitmap and its aspect
             # ratio changed. ``updated`` is the kind for that.
+            #
+            # ``pixels`` names WHICH facet changed, exactly as the undo of this
+            # operation already does (``operation_log_service._emit``). Without
+            # it the event is a bare ``updated``, so a receiving client re-reads
+            # metadata it already has and goes on painting the pre-rotate
+            # bitmap - the thumbnail URL comes from the batch-thumbnail
+            # endpoint, not from ``GET /pictures/{id}/metadata``. Naming the
+            # field is what tells the client a metadata refresh is not enough.
+            #
+            # This was the one producer of a byte rewrite that did not name it;
+            # the restore above, ``ThumbnailGenerationTask`` and the layout move
+            # (route and task) all did.
+            #
+            # ``orientation`` says it was a TURN, which ``pixels`` alone does
+            # not: the thumbnail task and the layout move rewrite bytes without
+            # turning anything, and only a turn invalidates what is drawn in the
+            # file's own coordinate space (the face and object boxes, the text)
+            # or moves the ``?v=o<n>`` the lightbox builds its <img> from.
             server.vault.notify(
                 EventType.CHANGED_PICTURES,
                 {
                     "picture_ids": rotated_ids,
                     "origin_client_id": origin_client_id,
                     "change_kind": "updated",
+                    "fields": ["orientation", "pixels"],
                 },
             )
         return {

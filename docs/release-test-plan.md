@@ -48,6 +48,15 @@ plan; legacy § numbers are still cited in spec titles):
 2. Mark each item ✅ Pass / ❌ Fail / ⏭ Skip (with reason).
 3. A release is only signed off when all non-skipped items pass.
 
+**Before cutting the release, review the known base models.** The Models
+shelf identifies each file's base model against the table in
+`pixlstash/utils/known_base_models.py`, and that table only grows when a
+release ships. Add any base model released since the last one that people are
+training on: a label a person would recognise, its `family` (what it loads
+alongside, which the name does not tell you), its `modality`, and the aliases
+Civitai, kohya and HuggingFace use for it. Each addition gets a `changelog.d/`
+fragment, because files already on a shelf pick it up on their next scan.
+
 ---
 
 ## 1. Installation & Packaging
@@ -269,7 +278,8 @@ run with workers ON.
 
 Requires a live ComfyUI server.
 
-- [ ] Settings → **Workflows**: enter the ComfyUI server URL → Save → the host appears in the dialog
+- [ ] Settings → **ComfyUI**, no address saved, ComfyUI running locally: "Found ComfyUI on this computer" offers its address → **Connect** → Connected, with the node-pack line
+- [ ] Same, ComfyUI stopped: the address form appears; a wrong port shows "Nothing answered at …" and saves nothing (reopen Settings: still not connected)
 - [ ] Toolbar ComfyUI menu: run a text-to-image workflow with a prompt — progress shows; the output picture appears in the grid
 - [ ] Run an image-to-image workflow from a source picture — output appears and is linked to the source
 - [ ] **Abort** during a run — execution stops and the progress indicator disappears

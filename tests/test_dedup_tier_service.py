@@ -24,7 +24,7 @@ import json
 import os
 import tempfile
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlmodel import select
@@ -58,7 +58,7 @@ from pixlstash.tasks.dedup_scan_finder import DedupScanFinder
 from pixlstash.tasks.task_type import TaskType
 from pixlstash.task_runner import TaskRunner
 
-_BASE_TIME = datetime(2026, 1, 1, 12, 0, 0)
+_BASE_TIME = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 
 # A 64-bit dHash is 16 hex chars. These differ from ZERO by a controlled number
 # of set bits, so the Hamming distance (and therefore the similarity) is exact.
@@ -1339,18 +1339,26 @@ def test_task_runner_shutdown_stops_scan_after_current_slice():
 
     task = DedupScanTask(FakeDatabase(), scan_id=7)
     runner = TaskRunner(name="dedup-shutdown-test", num_workers=1)
+    shutdown = threading.Thread(target=runner.stop)
     runner.start()
     runner.submit(task)
-    assert slice_started.wait(timeout=1)
+    try:
+        assert slice_started.wait(timeout=1)
 
-    shutdown = threading.Thread(target=runner.stop)
-    shutdown.start()
-    # stop() must wait for the callback that currently owns the DB session.
-    shutdown.join(timeout=0.05)
-    assert shutdown.is_alive()
+        shutdown.start()
+        # stop() must wait for the callback that currently owns the DB session.
+        shutdown.join(timeout=0.05)
+        assert shutdown.is_alive()
+    finally:
+        # Inside the try, so an assertion that fires still releases the paused
+        # slice instead of leaving a runner worker parked on
+        # release_slice.wait(2) and stop() running into the next test.
+        release_slice.set()
+        if shutdown.ident is not None:
+            shutdown.join(timeout=1)
+        else:  # the slice never began, so nothing else will stop the runner
+            runner.stop()
 
-    release_slice.set()
-    shutdown.join(timeout=1)
     assert not shutdown.is_alive()
     assert calls == ["_start_scan_slice", "_mark_pending_after_cancel"]
     assert task.result == {
@@ -1653,6 +1661,22 @@ def test_a_tampered_cursor_is_refused_rather_than_reinterpreted():
         tiers.decode_queue_cursor(forged)
 
 
+def test_a_decided_cursor_minted_before_the_upgrade_reads_as_utc():
+    """An open Decided page may hold a cursor with a naive stamp; it must stay usable.
+
+    A naive value would reach the UTCDateTime bind and raise, a 500 rather than a page.
+    """
+    import base64
+
+    raw = f"{tiers.CURSOR_VERSION}|{tiers.DECIDED_CURSOR_KIND}|2026-07-30T12:28:53.123456|7"
+    legacy = base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+    stamp = datetime(2026, 7, 30, 12, 28, 53, 123456, tzinfo=timezone.utc)
+    assert tiers.decode_decided_cursor(legacy) == (stamp, 7)
+    fresh = tiers.encode_decided_cursor(stamp, 7)
+    assert tiers.decode_decided_cursor(fresh) == (stamp, 7)
+    assert tiers.decode_decided_cursor(fresh)[0].tzinfo is not None
+
+
 def test_the_cursor_resumes_a_tied_confidence_run_without_gap_or_repeat(server):
     """Every exact group ties at the same confidence; the id breaks the tie."""
     for index in range(5):
@@ -1784,7 +1808,8 @@ def test_a_group_naming_one_member_of_a_four_stack_reports_the_stacks_depth(serv
     # The face is the stack's leader, which is NOT the matched member.
     assert deck["leader_picture_id"] == ids[0]
     assert deck["leader_picture_id"] not in deck["matched_picture_ids"]
-    assert deck["leader_thumbnail_version"] == "1024x768"
+    # The size, then the file: a reused picture id gets a URL of its own.
+    assert deck["leader_thumbnail_version"].startswith("1024x768-")
     assert deck["stackable"] is True
     assert deck["blocked_by_sets"] == []
     # Eager count and leader, LAZY members: the members are never inlined.
@@ -1948,7 +1973,7 @@ def test_stack_members_pages_in_canonical_order(server):
     assert first["stack_id"] == stack_id
     assert first["member_count"] == 5
     assert first["leader_picture_id"] == ids[0]
-    assert first["leader_thumbnail_version"] == "640x480"
+    assert first["leader_thumbnail_version"].startswith("640x480-")
     assert [m["picture_id"] for m in first["members"]] == ids[:2]
     assert [m["position"] for m in first["members"]] == [0, 1]
     assert [m["is_leader"] for m in first["members"]] == [True, False]

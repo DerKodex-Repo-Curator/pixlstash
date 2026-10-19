@@ -290,3 +290,39 @@ describe("keepCoverOnlySkipNote", () => {
     expect(keepCoverOnlySkipNote(null)).toBe("");
   });
 });
+
+describe("Keep recipes only copy", () => {
+  it("counts a stack with nothing reproducible as one that won't change", () => {
+    const preview = {
+      stacks_skipped_locked: 1,
+      stacks_skipped_nothing_reproducible: 2,
+    };
+    expect(keepCoverOnlySkippedCount(preview)).toBe(3);
+    expect(keepCoverOnlySkipReasons(preview).map((r) => r.key)).toEqual([
+      "nothing_reproducible",
+      "locked",
+    ]);
+  });
+
+  it("names unchanged stacks on the receipt", () => {
+    expect(
+      keepCoverOnlySkipNote({
+        stacks_skipped_nothing_reproducible: [{}, {}],
+        pictures_staying: 3,
+      }),
+    ).toBe(
+      "2 stacks unchanged: nothing in them could be made again. 3 pictures stay: they could not be made again.",
+    );
+  });
+
+  it("puts the pictures that stayed on the receipt", () => {
+    expect(keepCoverOnlySkipNote({ pictures_staying: 2 })).toBe(
+      "2 pictures stay: they could not be made again.",
+    );
+    expect(
+      keepCoverOnlySkipNote({ stacks_skipped_locked: [{}], pictures_staying: 1 }),
+    ).toBe(
+      "1 stack skipped: held by a locked picture set. 1 picture stays: it could not be made again.",
+    );
+  });
+});

@@ -28,10 +28,13 @@ metadata: it is the only signal present on every file regardless of provenance.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import re
 import struct
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -44,6 +47,10 @@ logger = get_logger(__name__)
 # well under a megabyte. The point of the cap is that the length prefix comes
 # from the file, so an 8-byte field can otherwise ask us to allocate 16 EiB.
 _MAX_HEADER_BYTES = 16 * 1024 * 1024
+
+# Longest metadata string kept. Names and base-model declarations are tens of
+# characters; this only stops a hostile header filling a column.
+_MAX_METADATA_TEXT = 256
 
 # A file shorter than this cannot contain a length prefix and a header.
 _MIN_FILE_BYTES = 8
@@ -93,18 +100,48 @@ FILE_ENGINE = "engine"
 # machine, and it is why "what can I delete" had no answer.
 FILE_VAE = "vae"
 FILE_TEXT_ENCODER = "text_encoder"
+# A ControlNet is loaded beside a model too, by its own loader, which the
+# ComfyUI-PixlStash ControlNet Loader stands in for. Big ones (SDXL, SD3.5)
+# clear `_CHECKPOINT_MIN_PARAMS` and read as `checkpoint`, which the shelf's
+# hash routes refuse, so it needs a name of its own to be fetched by digest.
+FILE_CONTROLNET = "controlnet"
+# An image upscaler (ESRGAN, SwinIR, DAT...), loaded by its own loader, which
+# the ComfyUI-PixlStash Upscale Model Loader stands in for. Mostly `.pth`,
+# which has no header to read, so it is told by its folder alone.
+FILE_UPSCALER = "upscaler"
+
+# Tensors only a ControlNet carries: diffusers' (SD, SDXL, SD3.5, Flux) and the
+# original `control_model.` layout's. Positive evidence as an adapter marker is:
+# a ControlNet kept under `diffusion_models/` (where launchers put the big ones)
+# is still one, and the folder would otherwise file it as a checkpoint.
+_CONTROLNET_RE = re.compile(
+    r"(?:^|\.)(?:controlnet_(?:blocks|single_blocks|down_blocks|mid_block|"
+    r"cond_embedding|x_embedder)|input_hint_block|zero_convs)\."
+)
+
+# The first convolution of an autoencoder's two halves, at the top level of the
+# file: SD, SDXL, FLUX and SD3.5 VAEs carry them, and so does SeedVR2's 3D one.
+# Both, so a decoder-only or encoder-only file is not taken for a whole VAE. A
+# checkpoint bakes its VAE in under `first_stage_model.`, which never matches.
+_VAE_TENSORS = frozenset(("encoder.conv_in.weight", "decoder.conv_in.weight"))
 
 # What a directory NAMES the files inside it, normalised by `_normalise_folder`.
 #
 # ComfyUI files models by role (`models/vae`, `models/text_encoders`,
 # `models/clip`) and the launchers that front it mirror the layout, so the role
 # is sitting in the path of nearly every file on a real shelf. That is a better
-# signal than anything the header carries here: a VAE and a text encoder are
-# ordinary tensor bundles with no marker to find, and their parameter counts
+# signal than anything the header carries here: a text encoder, and a VAE whose
+# layout `_VAE_TENSORS` does not know, are ordinary tensor bundles with no
+# marker to find, and their parameter counts
 # straddle the checkpoint threshold from both sides.
 #
 # Only genuinely different words belong here - the normaliser already folds
 # spacing and case, so a `text_encoders` entry covers `TextEncoders` too.
+#
+# `unet` and `diffusion_models` hold a bare diffusion model, which is what a
+# Flux or Wan graph loads where an SD graph loads a checkpoint, so they name
+# `checkpoint`. A `.safetensors` there usually clears the parameter count
+# anyway; a `.gguf` has no count to clear and would otherwise read `unknown`.
 #
 # Deliberately absent, each for its own reason:
 #
@@ -123,6 +160,17 @@ _ROLE_FOLDERS: dict[str, str] = {
     "clip": FILE_TEXT_ENCODER,
     "textencoder": FILE_TEXT_ENCODER,
     "textencoders": FILE_TEXT_ENCODER,
+    "unet": FILE_CHECKPOINT,
+    "unets": FILE_CHECKPOINT,
+    "diffusionmodels": FILE_CHECKPOINT,
+    "controlnet": FILE_CONTROLNET,
+    "controlnets": FILE_CONTROLNET,
+    # ComfyUI's `upscale_models/`, and A1111's and Forge's per-architecture
+    # folders.
+    "upscalemodels": FILE_UPSCALER,
+    "esrgan": FILE_UPSCALER,
+    "realesrgan": FILE_UPSCALER,
+    "swinir": FILE_UPSCALER,
 }
 
 # Parameter count above which a marker-free file is a base checkpoint rather
@@ -140,6 +188,29 @@ _ROLE_FOLDERS: dict[str, str] = {
 # Parameter count, not file size: size is confounded in both directions, since
 # quantisation shrinks a checkpoint and a high rank inflates an adapter.
 _CHECKPOINT_MIN_PARAMS = 1_000_000_000
+
+# Share of the parameters one dtype must hold for `quant` to name it. Below
+# this the file is `mixed`, which is a real answer rather than a failure.
+_QUANT_MAJORITY = 0.5
+
+QUANT_MIXED = "mixed"
+
+# CLIP's tokenizer vocabulary, which is what tells a CLIP text encoder's token
+# table from any other embedding of the same width.
+_CLIP_VOCAB = 49408
+_CLIP_WIDTHS = {768: "clip_l", 1024: "clip_h", 1280: "clip_g"}
+
+# T5's and UMT5's vocabularies. Only the XXL width is named: it is the one
+# every current image and video model loads, and a smaller T5 is not a
+# support file anybody has on a shelf.
+_T5_VOCABS = {32128: "t5", 256384: "umt5"}
+_T5_XXL_WIDTH = 4096
+
+# The token table of a decoder-only language model in the Hugging Face layout:
+# the Qwen 2.5-VL, Gemma, Llama and Mistral encoders newer image models load.
+# No diffusion model keeps a tensor by this name at the top level, and a
+# checkpoint bundling one keeps it under a prefix.
+_LM_TOKEN_TABLE = "model.embed_tokens.weight"
 
 
 @dataclass(frozen=True)
@@ -159,9 +230,9 @@ class AdapterInfo:
             unrecognised LyCORIS variant reads as "an adapter whose kind we do
             not know" rather than being mistaken for a checkpoint.
         file_kind: What the file is: ``"adapter"``, ``"vae"``,
-            ``"text_encoder"``, ``"checkpoint"`` or ``"unknown"``. Never
-            guesses checkpoint from the absence of markers alone; see
-            :func:`classify_model_file`.
+            ``"text_encoder"``, ``"controlnet"``, ``"upscaler"``, ``"checkpoint"`` or
+            ``"unknown"``. Never guesses checkpoint from the absence of markers
+            alone; see :func:`classify_model_file`.
         param_count: Total parameters, summed from the tensor shapes already in
             the header. Exact and free, unlike file size which quantisation and
             rank both confound.
@@ -169,12 +240,25 @@ class AdapterInfo:
         base_model: Trainer-reported base model. **Free text** (``zimage``,
             ``krea2``, ``minimax_h3`` seen in the wild), not a closed set.
         trigger_words: Tags recovered from ``ss_tag_frequency``.
-        display_name: Trainer-reported name, if any.
+        display_name: Trainer-reported name, if any: ``ss_output_name``,
+            ``name``, then the SAI ``modelspec.title``.
+        architecture: The SAI ``modelspec.architecture`` declaration
+            (``stable-diffusion-xl-v1-base/lora``), verbatim. Evidence for
+            :func:`~pixlstash.utils.known_base_models.identify`, never shown.
+        trained_on: kohya's ``ss_sd_model_name``, the checkpoint the file was
+            trained against. A **filename** (``animagineXLV31_v31.safetensors``),
+            so it is matched as one.
         training_step: Step the checkpoint was saved at.
         training_epoch: Epoch the checkpoint was saved at.
         trained_by: Producing software, e.g. ``"ai-toolkit 0.9.11"``.
         has_metadata: Whether the file carried a ``__metadata__`` block with
             anything beyond the mandatory ``format`` key.
+        family: The architecture the tensors show, for the support files
+            whose layout says it (see :func:`family_from_header`), else
+            ``None``.
+        quant: The dtype holding most of the parameters, or ``"mixed"``.
+        weights_id: Digest of the tensor names and shapes, dtype excluded, so
+            two clean casts of one model share it.
     """
 
     kind: str
@@ -185,10 +269,15 @@ class AdapterInfo:
     base_model: Optional[str] = None
     trigger_words: list[str] = field(default_factory=list)
     display_name: Optional[str] = None
+    architecture: Optional[str] = None
+    trained_on: Optional[str] = None
     training_step: Optional[int] = None
     training_epoch: Optional[int] = None
     trained_by: Optional[str] = None
     has_metadata: bool = False
+    family: Optional[str] = None
+    quant: Optional[str] = None
+    weights_id: Optional[str] = None
 
 
 def read_safetensors_header(path: str) -> Optional[dict]:
@@ -308,6 +397,18 @@ def has_adapter_markers(tensor_names) -> bool:
     return False
 
 
+def has_controlnet_markers(tensor_names) -> bool:
+    """Return whether *tensor_names* contain a tensor only a ControlNet has."""
+    return any(
+        isinstance(name, str) and _CONTROLNET_RE.search(name) for name in tensor_names
+    )
+
+
+def has_vae_markers(tensor_names) -> bool:
+    """Return whether *tensor_names* hold both halves of an autoencoder."""
+    return _VAE_TENSORS.issubset(tensor_names)
+
+
 def count_parameters(header: dict) -> int:
     """Return the total parameter count implied by a safetensors *header*.
 
@@ -323,21 +424,161 @@ def count_parameters(header: dict) -> int:
         Sum over tensors of the product of each shape, or 0 when nothing is
         measurable. A scalar tensor (empty shape) counts as one parameter.
     """
-    total = 0
+    return sum(_shape_size(entry) for _name, entry in _tensor_entries(header))
+
+
+def _tensor_entries(header: dict):
+    """Yield ``(name, entry)`` for every tensor in *header*, metadata skipped."""
     for key, entry in header.items():
-        if key == "__metadata__" or not isinstance(entry, dict):
-            continue
-        shape = entry.get("shape")
-        if not isinstance(shape, list):
-            continue
-        count = 1
-        for dim in shape:
-            if not isinstance(dim, int) or isinstance(dim, bool) or dim < 0:
-                count = 0
-                break
-            count *= dim
-        total += count
-    return total
+        if key != "__metadata__" and isinstance(entry, dict):
+            yield key, entry
+
+
+def _valid_shape(entry) -> Optional[list[int]]:
+    """Return the entry's shape when every dimension is a non-negative int.
+
+    *entry* comes from an untrusted header, so anything but a dict is ``None``.
+    """
+    if not isinstance(entry, dict):
+        return None
+    shape = entry.get("shape")
+    if not isinstance(shape, list) or not all(
+        isinstance(dim, int) and not isinstance(dim, bool) and dim >= 0 for dim in shape
+    ):
+        return None
+    return shape
+
+
+def _shape_size(entry: dict) -> int:
+    """Parameters in one tensor entry, 0 when its shape is unusable."""
+    shape = _valid_shape(entry)
+    return 0 if shape is None else math.prod(shape)
+
+
+def quant_from_header(header: dict) -> Optional[str]:
+    """Return the dtype most of the parameters are stored at.
+
+    **Weighted by parameter count, not by tensor count.** A model with 300 fp32
+    norm tensors and 200 fp8 weight tensors is fp8, and counting tensors gets
+    that backwards. When no dtype holds a majority the answer is ``"mixed"``.
+
+    The filename is never consulted: ``fp8_e4m3fn_scaled`` and ``nvfp4_awq``
+    are real names, and the column code reasons over must come from the header.
+    The limit is the header's: an AWQ-style pack stores its weights in ``I32``
+    or ``U8`` containers, and that container is what this reports.
+
+    Args:
+        header: Parsed safetensors header.
+
+    Returns:
+        The dtype lowercased (``f16``, ``bf16``, ``f8_e4m3``, ``i32`` …),
+        ``"mixed"``, or ``None`` when no tensor declares a usable dtype and
+        shape.
+    """
+    by_dtype: Counter[str] = Counter()
+    for _name, entry in _tensor_entries(header):
+        dtype = entry.get("dtype")
+        if isinstance(dtype, str) and dtype:
+            by_dtype[dtype.lower()] += _shape_size(entry)
+    total = by_dtype.total()
+    if not total:
+        return None
+    dtype, count = by_dtype.most_common(1)[0]
+    return dtype if count > total * _QUANT_MAJORITY else QUANT_MIXED
+
+
+def weights_id_from_header(header: dict) -> Optional[str]:
+    """Return a digest that is the same for one model at any precision.
+
+    SHA-256 over the sorted ``(tensor name, shape)`` pairs, **dtype excluded**,
+    so two clean casts of one model share it where ``sha256`` differs by
+    construction. A repack does not: ``umt5_xxl_fp8_e4m3fn_scaled`` carries
+    scale tensors its bf16 twin lacks, so the two get different ids. That is
+    correct (they are not interchangeable), and it means this groups some quant
+    sets rather than all of them.
+
+    Args:
+        header: Parsed safetensors header.
+
+    Returns:
+        Lowercase hex, or ``None`` for a header with no tensors.
+    """
+    pairs = sorted(
+        (name, _valid_shape(entry) or []) for name, entry in _tensor_entries(header)
+    )
+    if not pairs:
+        return None
+    blob = json.dumps(pairs, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def family_from_header(header: dict) -> Optional[str]:
+    """Return the architecture a support file's tensors show, or ``None``.
+
+    For the files that carry no ``base_model`` - every downloaded VAE and text
+    encoder, which are the files the question "can I delete this" is about.
+    Each rule reads one tensor at the **top level** of the file, never under a
+    prefix: a full checkpoint bakes a VAE in as ``first_stage_model.decoder…``
+    and its encoders under ``conditioner.embedders…``, and matching those would
+    file a whole SDXL checkpoint as a VAE.
+
+    * ``decoder.conv_in.weight`` takes the latent channels in: ``vae_4ch`` is
+      the SD 1.5 / SDXL autoencoder, ``vae_16ch`` the FLUX / SD 3.5 one.
+    * A CLIP token table (49,408 rows) gives the width: ``clip_l`` (768),
+      ``clip_h`` (1024), ``clip_g`` (1280).
+    * A T5 or UMT5 token table at width 4096: ``t5_xxl`` / ``umt5_xxl``.
+
+    The vocabulary is architecture, not compatibility, and deliberately not the
+    base-model families of :mod:`pixlstash.utils.known_base_models`: a 4-channel
+    VAE serves SD 1.5 and SDXL alike, so naming it after either would be a
+    guess. Unrecognised layouts (Qwen and Gemma encoders, 3D video VAEs) return
+    ``None``, which says nothing rather than something wrong.
+
+    Args:
+        header: Parsed safetensors header.
+
+    Returns:
+        One of the tokens above, or ``None``.
+    """
+    conv_in = _valid_shape(header.get("decoder.conv_in.weight"))
+    if conv_in is not None and len(conv_in) == 4:
+        return f"vae_{conv_in[1]}ch"
+    return _text_encoder_family(header)
+
+
+def has_text_encoder_markers(header: dict) -> bool:
+    """Return whether *header* holds a text encoder's token table.
+
+    A CLIP, T5 or UMT5 one as :func:`family_from_header` reads it, or a
+    language model's (:data:`_LM_TOKEN_TABLE`), which names no family. At the
+    top level only: a checkpoint keeps its encoders under a prefix, which never
+    matches.
+    """
+    if _text_encoder_family(header) is not None:
+        return True
+    table = _valid_shape(header.get(_LM_TOKEN_TABLE))
+    return table is not None and len(table) == 2
+
+
+def _text_encoder_family(header: dict) -> Optional[str]:
+    """``clip_l``/``clip_h``/``clip_g``/``t5_xxl``/``umt5_xxl``, or ``None``."""
+    for name in (
+        "text_model.embeddings.token_embedding.weight",
+        "token_embedding.weight",
+    ):
+        table = _valid_shape(header.get(name))
+        if table is not None and len(table) == 2 and table[0] == _CLIP_VOCAB:
+            return _CLIP_WIDTHS.get(table[1])
+    for name in ("shared.weight", "encoder.embed_tokens.weight"):
+        table = _valid_shape(header.get(name))
+        if (
+            table is not None
+            and len(table) == 2
+            and table[0] in _T5_VOCABS
+            and table[1] == _T5_XXL_WIDTH
+        ):
+            return f"{_T5_VOCABS[table[0]]}_xxl"
+    return None
 
 
 def _normalise_folder(name: str) -> str:
@@ -350,7 +591,7 @@ def _normalise_folder(name: str) -> str:
 
 
 def role_from_folder(path: str) -> Optional[str]:
-    """Return the component role the file's own directory names, or ``None``.
+    """Return the ``file_kind`` the file's own directory names, or ``None``.
 
     Only the directory the file sits in is consulted, never an ancestor: a
     registered folder may itself be called ``vae`` (someone can register
@@ -362,8 +603,8 @@ def role_from_folder(path: str) -> Optional[str]:
         path: Path to the model file. May be relative or absolute.
 
     Returns:
-        ``"vae"``, ``"text_encoder"``, or ``None`` when the directory names no
-        role we recognise - which is the answer for a flat folder of mixed
+        ``"vae"``, ``"text_encoder"``, ``"controlnet"``, ``"upscaler"``,
+        ``"checkpoint"``, or ``None`` when the directory names no role we recognise - which is the answer for a flat folder of mixed
         downloads and must never be read as "not a VAE".
     """
     folder = os.path.basename(os.path.dirname(path))
@@ -372,7 +613,9 @@ def role_from_folder(path: str) -> Optional[str]:
     return _ROLE_FOLDERS.get(_normalise_folder(folder))
 
 
-def classify_model_file(tensor_names, param_count: int, path: str = "") -> str:
+def classify_model_file(
+    tensor_names, param_count: int, path: str = "", header: Optional[dict] = None
+) -> str:
     """Return what a file *is*, from its tensor names, parameter count and location.
 
     The rule is deliberately asymmetric, and the order below is the ranking of
@@ -382,20 +625,29 @@ def classify_model_file(tensor_names, param_count: int, path: str = "") -> str:
        the file cannot strip without breaking, so nothing overrides them - not
        a parameter count and not a directory. This is what keeps an all-in-one
        checkpoint dropped in someone's ``Lora/`` folder from being filed as a
-       LoRA.
-    2. **The directory**, when it names a role. A VAE and a text encoder carry
-       no marker to find, so the layout the user (or their launcher) already
+       LoRA. ControlNet markers (:func:`has_controlnet_markers`) come next, on
+       the same footing: a ControlNet in ``diffusion_models/`` is a ControlNet.
+       So do VAE markers (:func:`has_vae_markers`), which is what files a VAE
+       downloaded into a flat folder as a VAE, and a text encoder's token
+       table (:func:`has_text_encoder_markers`), which is what keeps a T5
+       downloaded there from clearing the checkpoint threshold.
+    2. **The directory**, when it names a role. A text encoder of a layout
+       :func:`has_text_encoder_markers` does not know (a T5 of another width) carries no
+       marker to find, nor does a VAE of a layout :data:`_VAE_TENSORS` does not
+       know (a Wan one), so the layout the user (or their launcher) already
        maintains is the best evidence there is. It outranks the parameter count
        because the parameter count is *wrong* for both: they sit either side of
        a threshold that was only ever meant to separate adapters from base
-       models.
+       models. ``unet/`` and ``diffusion_models/`` name ``checkpoint``, which
+       is what files a ``.gguf`` (no parameter count at all) as a base model.
     3. **The parameter count**, for a marker-free file in a folder that says
        nothing. A count no adapter reaches asserts checkpoint.
 
     Everything else is ``"unknown"``, which the shelf shows as unknown and lets
     the user correct. ``unknown`` must never be rendered or stored as
-    checkpoint: a marker-free file too small to be a base model is most likely
-    an adapter format we have not met yet.
+    checkpoint: a marker-free file too small to be a base model, outside a
+    folder that says otherwise, is most likely an adapter format we have not
+    met yet.
 
     Args:
         tensor_names: Iterable of tensor keys from the header.
@@ -403,13 +655,21 @@ def classify_model_file(tensor_names, param_count: int, path: str = "") -> str:
         path: Where the file lives. Optional - omitting it drops rule 2 and
             leaves the pre-existing behaviour, which is what a caller holding
             only a header should get.
+        header: The parsed header, for the shapes a token table is told by.
+            Optional: a file with no header to read has no table either.
 
     Returns:
-        ``"adapter"``, ``"vae"``, ``"text_encoder"``, ``"checkpoint"`` or
-        ``"unknown"``.
+        ``"adapter"``, ``"vae"``, ``"text_encoder"``, ``"controlnet"``,
+        ``"upscaler"``, ``"checkpoint"`` or ``"unknown"``.
     """
     if has_adapter_markers(tensor_names):
         return FILE_ADAPTER
+    if has_controlnet_markers(tensor_names):
+        return FILE_CONTROLNET
+    if has_vae_markers(tensor_names):
+        return FILE_VAE
+    if header is not None and has_text_encoder_markers(header):
+        return FILE_TEXT_ENCODER
     role = role_from_folder(path) if path else None
     if role is not None:
         return role
@@ -478,6 +738,22 @@ def _decode_json_object(raw, label: str) -> dict:
     return {}
 
 
+def _metadata_text(metadata: dict, *keys: str) -> Optional[str]:
+    """The first of *keys* holding a non-blank value, as bounded text.
+
+    The value comes from an untrusted header, so it is coerced to ``str`` and
+    cut at :data:`_MAX_METADATA_TEXT` rather than trusted to be a short string.
+    """
+    for key in keys:
+        value = metadata.get(key)
+        if value is None or isinstance(value, (dict, list)):
+            continue
+        text = str(value).strip()
+        if text:
+            return text[:_MAX_METADATA_TEXT]
+    return None
+
+
 def _coerce_int(value) -> Optional[int]:
     """Return *value* as an int, or ``None`` if it is not one."""
     try:
@@ -519,8 +795,8 @@ def describe_adapter(path: str) -> Optional[AdapterInfo]:
 
     training = _decode_json_object(metadata.get("training_info"), "training_info")
 
-    base_model = metadata.get("ss_base_model_version") or None
-    display_name = metadata.get("ss_output_name") or metadata.get("name") or None
+    base_model = _metadata_text(metadata, "ss_base_model_version")
+    display_name = _metadata_text(metadata, "ss_output_name", "name", "modelspec.title")
 
     # `format` is mandatory and says nothing about the model, so a header
     # carrying only that is "no metadata" as far as the shelf is concerned.
@@ -532,15 +808,20 @@ def describe_adapter(path: str) -> Optional[AdapterInfo]:
         kind=detect_adapter_kind(tensor_names),
         tensor_count=len(tensor_names),
         is_adapter=has_adapter_markers(tensor_names),
-        file_kind=classify_model_file(tensor_names, param_count, path),
+        file_kind=classify_model_file(tensor_names, param_count, path, header),
         param_count=param_count,
-        base_model=str(base_model) if base_model else None,
+        base_model=base_model,
         trigger_words=_trigger_words_from_tag_frequency(
             metadata.get("ss_tag_frequency")
         ),
-        display_name=str(display_name) if display_name else None,
+        display_name=display_name,
+        architecture=_metadata_text(metadata, "modelspec.architecture"),
+        trained_on=_metadata_text(metadata, "ss_sd_model_name"),
         training_step=_coerce_int(training.get("step")),
         training_epoch=_coerce_int(training.get("epoch")),
         trained_by=trained_by,
         has_metadata=bool(informative),
+        family=family_from_header(header),
+        quant=quant_from_header(header),
+        weights_id=weights_id_from_header(header),
     )

@@ -38,9 +38,11 @@
  * so nothing here has to survive one.
  */
 import { computed, onUnmounted, ref, watch } from "vue";
-import { VCheckbox, VIcon, VSelect, VTextField } from "vuetify/components";
+import { VCheckbox, VIcon, VSelect } from "vuetify/components";
 import AppButton from "../widgets/AppButton.vue";
+import AppInput from "../widgets/AppInput.vue";
 import AppDialog from "../widgets/AppDialog.vue";
+import Tooltip from "../widgets/Tooltip.vue";
 import { useLibrariesStore } from "../../stores/useLibrariesStore";
 import { useOperationStore } from "../../stores/useOperationStore";
 import {
@@ -60,12 +62,12 @@ import { errorDetail } from "../../utils/apiError";
 /**
  * Four folder levels, one per facet, and the width the row is drawn to.
  *
- * The builder must not wrap up to four levels at the dialog's 620px. The
- * budget: 620 - 2x24 dialog padding = 572px of content; three separators at
- * ~7px and six 4px gaps take ~45px, leaving ~527px, so each level gets a 120px
- * flex basis (4 x 120 + 45 = 525 <= 572) and grows into the slack, landing at
- * ~131px per column. Of that, Vuetify's field spends ~8px inset either side
- * and ~28px on the chevron, leaving ~88px for the label.
+ * The builder must not wrap up to four levels at the dialog's 720px (`lg`).
+ * The budget: 720 - 2x16 dialog padding = 688px of content; three separators
+ * at ~7px and six 4px gaps take ~45px, leaving ~643px, so each level gets a
+ * 120px flex basis (4 x 120 + 45 = 525 <= 688) and grows into the slack,
+ * landing at ~160px per column. Of that, Vuetify's field spends ~8px inset
+ * either side and ~28px on the chevron, leaving ~116px for the label.
  *
  * That is enough because **the widest label and the most levels cannot happen
  * together.** A facet may not appear twice, so four levels means one facet
@@ -600,7 +602,7 @@ function netDelta(row) {
 <template>
   <AppDialog
     :open="open"
-    :width="620"
+    size="lg"
     :title="migrating ? `Moving onto ${layoutText}` : 'Choose a layout'"
     :persistent="migrating"
     @close="emit('close')"
@@ -613,9 +615,15 @@ function netDelta(row) {
 
     <template v-else-if="loadError">
       <p class="layout-dlg__error">
-        <v-icon size="15">mdi-alert-outline</v-icon> {{ loadError }}
+        <v-icon size="16">mdi-alert-outline</v-icon> {{ loadError }}
       </p>
-      <AppButton variant="secondary" size="sm" :loading="loading" @click="load">
+      <AppButton
+        variant="secondary"
+        size="sm"
+        class="layout-dlg__retry"
+        :loading="loading"
+        @click="load"
+      >
         Try again
       </AppButton>
     </template>
@@ -689,79 +697,85 @@ function netDelta(row) {
           hide-details
           :disabled="migrating"
         />
-        <v-text-field
-          :model-value="unfiled"
-          density="compact"
-          variant="outlined"
-          hide-details
-          class="layout-unfiled__name"
-          aria-label="Folder for unassigned pictures"
-          title="Where a picture with no project, person, set or tag is written"
-          :disabled="migrating"
-          @update:model-value="setUnfiled"
-        />
+        <Tooltip
+          text="Where a picture with no project, person, set or tag is written"
+        >
+          <template #activator="{ props: tipProps }">
+            <AppInput
+              v-bind="tipProps"
+              :model-value="unfiled"
+              mono
+              class="layout-unfiled__name"
+              aria-label="Folder for unassigned pictures"
+              :disabled="migrating"
+              @update:model-value="setUnfiled"
+            />
+          </template>
+        </Tooltip>
       </div>
 
       <template v-if="isOn">
         <p class="layout-filing">{{ filingHint }}</p>
-        <div class="layout-tree__head">
-          <span>{{
-            migrating ? "Filling in" : "Your folders, as this layout draws them"
-          }}</span>
-          <span>have · change</span>
-        </div>
-        <div
-          class="layout-tree"
-          role="table"
-          aria-label="Folder preview: name, pictures now, change"
-        >
-          <div
-            v-for="row in treeRows"
-            :key="row.path || '/'"
-            class="layout-tree__row"
-            :class="{ 'layout-tree__row--new': row.is_new }"
-            role="row"
-          >
-            <span
-              class="layout-tree__name"
-              role="cell"
-              :style="treeIndent(row.indent)"
-              :title="row.title"
-            >
-              <v-icon size="14">mdi-folder-outline</v-icon>
-              <span class="layout-tree__path">
-                <span v-if="row.crumbs" class="layout-tree__crumbs"
-                  >{{ row.crumbs }} /&nbsp;</span
-                >
-                <span class="layout-tree__label">{{ row.name }}</span>
-              </span>
-              <span v-if="row.is_new" class="layout-tree__badge">new</span>
-            </span>
-            <span class="layout-tree__have" role="cell">{{
-              row.is_new ? "—" : (row.have || 0).toLocaleString()
+        <div class="layout-tree-wrap">
+          <div class="layout-tree__head">
+            <span>{{
+              migrating ? "Filling in" : "Your folders, as this layout draws them"
             }}</span>
-            <span
-              class="layout-tree__delta"
-              role="cell"
-              :class="{
-                'layout-tree__delta--in': netDelta(row) > 0,
-                'layout-tree__delta--out': netDelta(row) < 0,
-                'layout-tree__delta--none': netDelta(row) === 0,
-              }"
-            >
-              <template v-if="netDelta(row) > 0"
-                >+{{ netDelta(row).toLocaleString() }}</template
-              >
-              <template v-else-if="netDelta(row) < 0"
-                >−{{ Math.abs(netDelta(row)).toLocaleString() }}</template
-              >
-              <template v-else>unchanged</template>
-            </span>
+            <span>have · change</span>
           </div>
-          <div v-if="!treeRows.length" class="layout-tree__row" role="row">
-            <span class="layout-tree__more" role="cell">
-              {{ previewing ? "Reading your folders…" : "No folders to draw." }}
-            </span>
+          <div
+            class="layout-tree"
+            role="table"
+            aria-label="Folder preview: name, pictures now, change"
+          >
+            <div
+              v-for="row in treeRows"
+              :key="row.path || '/'"
+              class="layout-tree__row"
+              :class="{ 'layout-tree__row--new': row.is_new }"
+              role="row"
+            >
+              <span
+                class="layout-tree__name"
+                role="cell"
+                :style="treeIndent(row.indent)"
+              >
+                <Tooltip :text="row.title" activator="parent" />
+                <v-icon size="16">mdi-folder-outline</v-icon>
+                <span class="layout-tree__path">
+                  <span v-if="row.crumbs" class="layout-tree__crumbs"
+                    >{{ row.crumbs }} /&nbsp;</span
+                  >
+                  <span class="layout-tree__label">{{ row.name }}</span>
+                </span>
+                <span v-if="row.is_new" class="layout-tree__badge">new</span>
+              </span>
+              <span class="layout-tree__have" role="cell">{{
+                row.is_new ? "—" : (row.have || 0).toLocaleString()
+              }}</span>
+              <span
+                class="layout-tree__delta"
+                role="cell"
+                :class="{
+                  'layout-tree__delta--in': netDelta(row) > 0,
+                  'layout-tree__delta--out': netDelta(row) < 0,
+                  'layout-tree__delta--none': netDelta(row) === 0,
+                }"
+              >
+                <template v-if="netDelta(row) > 0"
+                  >+{{ netDelta(row).toLocaleString() }}</template
+                >
+                <template v-else-if="netDelta(row) < 0"
+                  >−{{ Math.abs(netDelta(row)).toLocaleString() }}</template
+                >
+                <template v-else>unchanged</template>
+              </span>
+            </div>
+            <div v-if="!treeRows.length" class="layout-tree__row" role="row">
+              <span class="layout-tree__more" role="cell">
+                {{ previewing ? "Reading your folders…" : "No folders to draw." }}
+              </span>
+            </div>
           </div>
         </div>
 
@@ -886,7 +900,7 @@ function netDelta(row) {
               Keep layout, move nothing
             </AppButton>
             <AppButton
-              variant="primary_green"
+              variant="primary"
               size="sm"
               icon-left="folder-move-outline"
               :disabled="!canMove"
@@ -906,17 +920,22 @@ function netDelta(row) {
   font-size: var(--text-xs);
   line-height: var(--leading-snug);
   color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
-  margin: 0 0 var(--space-5);
+  margin: 0;
 }
 
 .layout-dlg__error {
   font-size: var(--text-xs);
-  color: rgb(var(--v-theme-error));
-  margin: var(--space-3) 0 0;
+  color: rgb(var(--v-theme-surface-error));
+  margin: 0;
+}
+
+/* The body is a stretching flex column; a button keeps its own width. */
+.layout-dlg__retry {
+  align-self: flex-start;
 }
 
 /* ---- the level builder ---------------------------------------------------
-   Four levels on one line at 620px. See MAX_LEVELS in the script for the
+   Four levels on one line at 720px. See MAX_LEVELS in the script for the
    width budget; the basis is what holds the four together and what makes a
    narrower box wrap tidily instead of overflowing. */
 .layout-levels {
@@ -929,7 +948,6 @@ function netDelta(row) {
      one, two and three filled levels, 1 at four. */
   align-items: stretch;
   gap: var(--space-2);
-  margin-bottom: var(--space-5);
 }
 
 .layout-levels--frozen {
@@ -1008,17 +1026,10 @@ function netDelta(row) {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  margin: var(--space-3) 0 var(--space-5);
 }
 
 .layout-unfiled__name {
   flex: 0 1 180px;
-}
-
-.layout-unfiled__name :deep(.v-field__input) {
-  padding-inline: var(--space-3);
-  min-height: 34px;
-  font-size: var(--text-sm);
 }
 
 /* ---- what files a picture ------------------------------------------------ */
@@ -1026,16 +1037,25 @@ function netDelta(row) {
   font-size: var(--text-xs);
   line-height: var(--leading-snug);
   color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
-  margin: 0 0 var(--space-3);
+  margin: 0;
 }
 
 /* ---- the tree ------------------------------------------------------------ */
+/* The head labels the tree, so it sits closer than the body's gap. Never
+   shrunk: the tree scrolls itself, so in the body's flex column it would
+   otherwise be squeezed before the body scrolls. */
+.layout-tree-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
 .layout-tree__head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: var(--space-4);
-  margin: 0 0 var(--space-2);
   font-size: var(--text-2xs);
   letter-spacing: var(--tracking-label);
   text-transform: uppercase;
@@ -1102,7 +1122,7 @@ function netDelta(row) {
   letter-spacing: var(--tracking-label);
   text-transform: uppercase;
   font-weight: var(--weight-medium);
-  color: rgb(var(--v-theme-primary));
+  color: rgb(var(--v-theme-on-surface));
   border: 1px solid rgb(var(--v-theme-primary));
   border-radius: var(--radius-pill);
   padding: 0 var(--space-2);
@@ -1120,12 +1140,9 @@ function netDelta(row) {
   font-weight: var(--weight-medium);
 }
 
-.layout-tree__delta--in {
-  color: rgb(var(--v-theme-primary));
-}
-
+.layout-tree__delta--in,
 .layout-tree__delta--out {
-  color: rgb(var(--v-theme-accent));
+  color: rgb(var(--v-theme-on-surface));
 }
 
 .layout-tree__delta--none {
@@ -1143,7 +1160,7 @@ function netDelta(row) {
 /* ---- flags and the disclosure -------------------------------------------- */
 .layout-flags {
   list-style: none;
-  margin: var(--space-3) 0 0;
+  margin: 0;
   padding: 0;
   display: flex;
   flex-wrap: wrap;
@@ -1161,11 +1178,10 @@ function netDelta(row) {
 }
 
 .layout-flags :deep(.v-icon) {
-  color: rgb(var(--v-theme-warning));
+  color: rgb(var(--v-theme-surface-warning));
 }
 
 .layout-never {
-  margin-top: var(--space-4);
   border-top: 1px solid rgb(var(--v-theme-divider));
   padding-top: var(--space-3);
   font-size: var(--text-xs);

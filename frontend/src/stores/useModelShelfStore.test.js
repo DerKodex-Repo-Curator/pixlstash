@@ -20,9 +20,9 @@ const listEngines = vi.fn();
 // would answer the unclassified request with adapter rows and make every list
 // here look duplicated.
 const listUnclassified = vi.fn();
-// Same split again, for the two support kinds. One double serves both: they are
+// Same split again, for the support kinds. One double serves them all: they are
 // one checkbox and one row bucket, so a test that wants support rows wants them
-// without caring which of the two requests carried them.
+// without caring which of the requests carried them.
 const listSupport = vi.fn();
 
 const editModels = vi.fn();
@@ -30,6 +30,13 @@ const listBaseModelCompletions = vi.fn();
 const forgetModels = vi.fn();
 const deleteModels = vi.fn();
 const setAdapterAttachments = vi.fn();
+const fetchWorkflowSets = vi.fn();
+const createWorkflowSet = vi.fn();
+const deleteWorkflowSet = vi.fn();
+const setWorkflowSetDeclines = vi.fn();
+const setWorkflowSetsHidden = vi.fn();
+const setModelsHidden = vi.fn();
+const addWorkflowSetMembers = vi.fn();
 const setModelIcon = vi.fn();
 const clearModelIcons = vi.fn();
 
@@ -38,7 +45,7 @@ vi.mock("../api/modelShelf", () => ({
   listAdapters: (...args) => {
     if (args[0]?.fileKind === "engine") return listEngines(...args);
     if (args[0]?.fileKind === "unknown") return listUnclassified(...args);
-    if (args[0]?.fileKind === "vae" || args[0]?.fileKind === "text_encoder") {
+    if (["vae", "text_encoder", "controlnet", "upscaler"].includes(args[0]?.fileKind)) {
       return listSupport(...args);
     }
     return listAdapters(...args);
@@ -49,6 +56,19 @@ vi.mock("../api/modelShelf", () => ({
   forgetModels: (...args) => forgetModels(...args),
   deleteModels: (...args) => deleteModels(...args),
   setAdapterAttachments: (...args) => setAdapterAttachments(...args),
+  fetchWorkflowSets: (...args) => fetchWorkflowSets(...args),
+  createWorkflowSet: (...args) => createWorkflowSet(...args),
+  deleteWorkflowSet: (...args) => deleteWorkflowSet(...args),
+  setWorkflowSetDeclines: (...args) => setWorkflowSetDeclines(...args),
+  setWorkflowSetsHidden: (...args) => setWorkflowSetsHidden(...args),
+  setModelsHidden: (...args) => setModelsHidden(...args),
+  addWorkflowSetMembers: (...args) => addWorkflowSetMembers(...args),
+}));
+
+const mergeModelCopies = vi.fn();
+
+vi.mock("../api/modelFiles", () => ({
+  mergeModelCopies: (...args) => mergeModelCopies(...args),
 }));
 
 vi.mock("../api/modelIcons", () => ({
@@ -61,11 +81,13 @@ import {
   assignReceipt,
   COLUMN_KEYS,
   deleteReceipt,
+  mergeReceipt,
   editReceipt,
   forgetReceipt,
   useModelShelfStore,
 } from "./useModelShelfStore";
 import { useNoticeStore } from "./useNoticeStore";
+import { useOperationStore } from "./useOperationStore";
 
 /** One row of the shape `/adapters` really returns (see the fixture probe). */
 function adapter(overrides = {}) {
@@ -84,15 +106,81 @@ function adapter(overrides = {}) {
   };
 }
 
+/**
+ * Put the store on the ROW LIST, which is the screen these suites are about.
+ *
+ * Since #1438 the DEFAULT axis is the set grid, and it is a different screen
+ * over the same models: `selectedRows`, `selectVisible` and `modelsBehind` all
+ * read the rows THAT screen draws, so a test that seeds `store.rows` and never
+ * says which screen it is on is asking the grid about a list it does not draw.
+ * `ModelShelf.test.js` makes the same choice in `mountDefaultShelf`, and for the
+ * same reason: a new test lands on the list without having to know this.
+ */
+function onTheRowList() {
+  useModelShelfStore().setView({ groupBy: "none" });
+}
+
+/** The set keys the active library hides, as the doubles' server holds them. */
+let hiddenOnServer = new Set();
+let modelsHiddenOnServer = new Set();
+
 beforeEach(() => {
   setActivePinia(createPinia());
   window.localStorage.clear();
+  // What the server holds as this library's hidden set keys (#1869). The store
+  // reads it from the set payload and writes it through `setWorkflowSetsHidden`,
+  // so this stands in for the hub row rather than any browser storage.
+  hiddenOnServer = new Set();
+  setWorkflowSetsHidden.mockReset().mockImplementation(async (keys, hidden) => {
+    for (const key of keys) {
+      if (hidden) hiddenOnServer.add(key);
+      else hiddenOnServer.delete(key);
+    }
+    return [...hiddenOnServer];
+  });
+  // And the models it hides: the hub's `model_hidden` rows for this library.
+  modelsHiddenOnServer = new Set();
+  setModelsHidden.mockReset().mockImplementation(async (ids, hidden) => {
+    for (const id of ids) {
+      if (hidden) modelsHiddenOnServer.add(id);
+      else modelsHiddenOnServer.delete(id);
+    }
+    return [...modelsHiddenOnServer];
+  });
   listAdapters.mockReset().mockResolvedValue([]);
   listCheckpoints.mockReset().mockResolvedValue([]);
   listEngines.mockReset().mockResolvedValue([]);
   listUnclassified.mockReset().mockResolvedValue([]);
   listSupport.mockReset().mockResolvedValue([]);
   listBaseModelCompletions.mockReset().mockResolvedValue([]);
+  fetchWorkflowSets.mockReset().mockResolvedValue({
+    combinations: [],
+    no_set: [],
+  });
+});
+
+describe("models arriving from the Downloads folder", () => {
+  it("raises the sidebar tag and badges the arrival on a shelf already read", async () => {
+    const store = useModelShelfStore();
+    listAdapters.mockResolvedValue([adapter({ id: 1 })]);
+    await store.fetchRows();
+    listAdapters.mockResolvedValue([adapter({ id: 1 }), adapter({ id: 2 })]);
+
+    store.onModelsArrived();
+    await vi.waitFor(() => expect(store.loading).toBe(false));
+
+    expect(store.unseenArrivals).toBe(true);
+    expect(listAdapters).toHaveBeenCalledTimes(2);
+    expect(store.visibleRows.find((r) => r.id === 2)?.isNew).toBe(true);
+    expect(store.visibleRows.find((r) => r.id === 1)?.isNew).toBe(false);
+  });
+
+  it("reads nothing for a shelf never opened, where every row would be new", () => {
+    const store = useModelShelfStore();
+    store.onModelsArrived();
+    expect(store.unseenArrivals).toBe(true);
+    expect(listAdapters).not.toHaveBeenCalled();
+  });
 });
 
 describe("defaults", () => {
@@ -388,29 +476,47 @@ describe("the badge", () => {
 });
 
 describe("the support block", () => {
-  it("puts both kinds in one bucket from two requests", async () => {
-    // One checkbox, two `file_kind`s. The route takes a single kind, so the
-    // block is two requests, and a reader deciding what to keep sees one list.
+  it("puts every kind in one bucket from one request each", async () => {
+    // One checkbox, four `file_kind`s. The route takes a single kind, so the
+    // block is four requests, and a reader deciding what to keep sees one list.
     const store = useModelShelfStore();
     listSupport
       .mockResolvedValueOnce([adapter({ id: 1, file_kind: "vae", kind: null })])
       .mockResolvedValueOnce([
         adapter({ id: 2, file_kind: "text_encoder", kind: null }),
+      ])
+      .mockResolvedValueOnce([
+        adapter({ id: 5, file_kind: "controlnet", kind: null }),
+      ])
+      .mockResolvedValueOnce([
+        adapter({ id: 7, file_kind: "upscaler", kind: null }),
       ]);
 
     await store.fetchRows();
 
-    expect(store.rows.map((r) => r.id)).toEqual([1, 2]);
+    expect(store.rows.map((r) => r.id)).toEqual([1, 2, 5, 7]);
+    expect(listSupport.mock.calls.map(([args]) => args.fileKind)).toEqual([
+      "vae",
+      "text_encoder",
+      "controlnet",
+      "upscaler",
+    ]);
   });
 
   it("replaces only its own rows when it refetches", async () => {
-    // `blockOf` has to map BOTH kinds to `support`, or a refetch leaves the
+    // `blockOf` has to map EVERY kind to `support`, or a refetch leaves the
     // kind it forgot about behind as a duplicate.
     const store = useModelShelfStore();
     listSupport
       .mockResolvedValueOnce([adapter({ id: 1, file_kind: "vae", kind: null })])
       .mockResolvedValueOnce([
         adapter({ id: 2, file_kind: "text_encoder", kind: null }),
+      ])
+      .mockResolvedValueOnce([
+        adapter({ id: 5, file_kind: "controlnet", kind: null }),
+      ])
+      .mockResolvedValueOnce([
+        adapter({ id: 7, file_kind: "upscaler", kind: null }),
       ]);
     await store.fetchRows();
 
@@ -418,10 +524,16 @@ describe("the support block", () => {
       .mockResolvedValueOnce([adapter({ id: 3, file_kind: "vae", kind: null })])
       .mockResolvedValueOnce([
         adapter({ id: 4, file_kind: "text_encoder", kind: null }),
+      ])
+      .mockResolvedValueOnce([
+        adapter({ id: 6, file_kind: "controlnet", kind: null }),
+      ])
+      .mockResolvedValueOnce([
+        adapter({ id: 8, file_kind: "upscaler", kind: null }),
       ]);
     await store.fetchRows();
 
-    expect(store.rows.map((r) => r.id)).toEqual([3, 4]);
+    expect(store.rows.map((r) => r.id)).toEqual([3, 4, 6, 8]);
   });
 
   it("asks for nothing when the box is off", async () => {
@@ -717,9 +829,13 @@ describe("grouping", () => {
   });
 
   it("still renders one group when nothing is grouped, so the list has one shape", async () => {
+    // `none` is no longer the default axis (#1438), so it is chosen here: the
+    // one-group shape is what keeps the flat list and the banded list from
+    // being two copies of the row markup, and that still has to hold.
     listAdapters.mockResolvedValue([adapter()]);
     const store = useModelShelfStore();
     await store.fetchRows();
+    store.setView({ groupBy: "none" });
     expect(store.view.groupBy).toBe("none");
     expect(store.groups.length).toBe(1);
     expect(store.groups[0].label).toBe("");
@@ -865,17 +981,70 @@ describe("the view is remembered", () => {
       JSON.stringify({ v: 99, groupBy: "folder", sortKey: "name" }),
     );
     const store = useModelShelfStore();
-    expect(store.view.groupBy).toBe("none");
+    expect(store.view.groupBy).toBe("workflow_set");
     expect(store.view.sortKey).toBe("added_at");
+  });
+
+  it("migrates a blob from before the set grid instead of discarding it", () => {
+    // The default of `groupBy` changed, and nothing else in the blob did. A
+    // version 1 blob could only ever say `none`, so that field is not evidence
+    // of a choice and is the one thing not carried forward; the widths, the
+    // collapsed groups, the sort and the folder layout are exactly what the
+    // reader set and survive. The first version of #1438 bumped the version and
+    // threw all of it away for a change to one field.
+    window.localStorage.setItem(
+      "pixlstash:modelShelfView",
+      JSON.stringify({
+        v: 1,
+        groupBy: "none",
+        sortKey: "name",
+        sortDirection: "asc",
+        folderLayout: "alpha",
+        columnWidths: { kind: 120, base: 84, size: 74, date: 96 },
+        collapsed: { base_model: ["sdxl"] },
+      }),
+    );
+
+    const store = useModelShelfStore();
+
+    expect(store.view.groupBy).toBe("workflow_set");
+    expect(store.view.sortKey).toBe("name");
+    expect(store.view.sortDirection).toBe("asc");
+    expect(store.view.folderLayout).toBe("alpha");
+    expect(store.view.columnWidths.kind).toBe(120);
+    store.setView({ groupBy: "base_model" });
+    expect(store.isCollapsed("sdxl")).toBe(true);
+  });
+
+  it("still discards a blob from a version it does not know", () => {
+    // The migration table names the versions this build can read. A future shape
+    // change that leaves itself out of it falls through to the defaults whole,
+    // which is what a bump is for.
+    window.localStorage.setItem(
+      "pixlstash:modelShelfView",
+      JSON.stringify({
+        v: 99,
+        sortKey: "name",
+        columnWidths: { kind: 120 },
+        collapsed: { base_model: ["sdxl"] },
+      }),
+    );
+
+    const store = useModelShelfStore();
+
+    expect(store.view.sortKey).toBe("added_at");
+    expect(store.view.columnWidths.kind).toBe(64);
+    store.setView({ groupBy: "base_model" });
+    expect(store.isCollapsed("sdxl")).toBe(false);
   });
 
   it("refuses a grouping or sort key it does not recognise", () => {
     window.localStorage.setItem(
       "pixlstash:modelShelfView",
-      JSON.stringify({ v: 1, groupBy: "colour", sortKey: "vibes" }),
+      JSON.stringify({ v: 2, groupBy: "colour", sortKey: "vibes" }),
     );
     const store = useModelShelfStore();
-    expect(store.view.groupBy).toBe("none");
+    expect(store.view.groupBy).toBe("workflow_set");
     expect(store.view.sortKey).toBe("added_at");
   });
 });
@@ -990,6 +1159,8 @@ describe("the column widths", () => {
 });
 
 describe("stacks are atomic", () => {
+  beforeEach(onTheRowList);
+
   /** A three-step run plus one loose adapter. */
   function shelfWithARun() {
     const store = useModelShelfStore();
@@ -1156,9 +1327,50 @@ describe("stacks are atomic", () => {
     expect(store.selectedRows.map((r) => r.id)).toEqual([1, 3]);
     expect(store.selectedModelIds).toEqual([1, 3]);
   });
+
+  it("hands the verbs the Models rail's selection while the rail has one", () => {
+    // The rail lists each file by itself, so a step of a run is that file and
+    // not the run: Delete there must not take the two steps nobody picked.
+    const store = shelfWithARun();
+    store.setRailSelection([2]);
+    expect(store.selectedRows.map((r) => r.id)).toEqual([2]);
+    expect(store.selectedModelIds).toEqual([2]);
+    // With the display fields the gates read, as every other screen's rows.
+    expect(store.selectedRows[0].locState).toBe("present");
+  });
+
+  it("holds one model selection at a time, the shelf's or the rail's", () => {
+    const store = shelfWithARun();
+    store.selectFromClick(4, {}, [1, 4]);
+    store.setRailSelection([2]);
+    expect(store.selectedIds.size).toBe(0);
+    expect(store.selectedRows.map((r) => r.id)).toEqual([2]);
+
+    // A shelf click takes it back, in the same breath: a row drag reads the
+    // selection straight after making it.
+    store.selectFromClick(4, {}, [1, 4]);
+    expect(store.railSelection).toBeNull();
+    expect(store.selectedRows.map((r) => r.id)).toEqual([4]);
+
+    // Clearing the shelf's selection is not a pick: clicking a set card does
+    // it, and the models selected in the rail to add to that set are still
+    // meant.
+    store.setRailSelection([2]);
+    store.clearSelection();
+    expect(store.selectedRows.map((r) => r.id)).toEqual([2]);
+  });
+
+  it("leaves the shelf's selection alone when the rail reports none", () => {
+    const store = shelfWithARun();
+    store.selectFromClick(4, {}, [1, 4]);
+    store.setRailSelection([]);
+    expect(store.selectedRows.map((r) => r.id)).toEqual([4]);
+  });
 });
 
 describe("the verbs", () => {
+  beforeEach(onTheRowList);
+
   beforeEach(() => {
     editModels.mockReset();
     forgetModels.mockReset();
@@ -1213,6 +1425,8 @@ describe("the verbs", () => {
 });
 
 describe("Assign", () => {
+  beforeEach(onTheRowList);
+
   beforeEach(() => {
     setAdapterAttachments.mockReset().mockResolvedValue({ attachments: [] });
     listAdapters.mockResolvedValue([]);
@@ -1314,6 +1528,41 @@ describe("Assign", () => {
     expect(setAdapterAttachments.mock.calls[0][0]).toBe("a".repeat(64));
   });
 
+  it("assigns every model in a ticked stack, not just its cover", async () => {
+    // A fully-selected stack is ONE selected row carrying the cover's id and
+    // hash; the picker is handed member ids and each member keeps its own
+    // attachments in the union.
+    const store = useModelShelfStore();
+    store.rows = [
+      adapter({ id: 1, stack_id: 9, stack_position: 0 }),
+      adapter({
+        id: 2,
+        sha256: "b".repeat(64),
+        stack_id: 9,
+        stack_position: 1,
+        attachments: [{ entity_type: "set", entity_id: 3 }],
+      }),
+    ];
+    store.selectVisible();
+    expect(store.selectedRows).toHaveLength(1);
+
+    await store.setAttachment({
+      entityType: "character",
+      entityId: 4,
+      entityName: "Alice",
+      subjectIds: ["1", "2"],
+    });
+
+    expect(setAdapterAttachments).toHaveBeenCalledTimes(2);
+    expect(setAdapterAttachments).toHaveBeenCalledWith("a".repeat(64), [
+      { entity_type: "character", entity_id: 4 },
+    ]);
+    expect(setAdapterAttachments).toHaveBeenCalledWith("b".repeat(64), [
+      { entity_type: "set", entity_id: 3 },
+      { entity_type: "character", entity_id: 4 },
+    ]);
+  });
+
   it("reports the ones that landed when some of the N calls fail", async () => {
     // N calls means a partial failure is an outcome, not an error: reporting
     // only the failure would send the reader back to re-run the verb on rows
@@ -1346,6 +1595,8 @@ describe("Assign", () => {
 });
 
 describe("the thumbnail verb", () => {
+  beforeEach(onTheRowList);
+
   beforeEach(() => {
     setModelIcon.mockReset().mockResolvedValue({ icon_sha256: "a".repeat(64) });
     clearModelIcons.mockReset().mockResolvedValue({ cleared: [] });
@@ -1429,8 +1680,18 @@ describe("the thumbnail verb", () => {
     const store = useModelShelfStore();
     store.rows = [
       adapter({ id: 1, stack_id: 9, stack_position: 0 }),
-      adapter({ id: 2, sha256: "b".repeat(64), stack_id: 9, stack_position: 1 }),
-      adapter({ id: 3, sha256: "c".repeat(64), stack_id: 9, stack_position: 2 }),
+      adapter({
+        id: 2,
+        sha256: "b".repeat(64),
+        stack_id: 9,
+        stack_position: 1,
+      }),
+      adapter({
+        id: 3,
+        sha256: "c".repeat(64),
+        stack_id: 9,
+        stack_position: 2,
+      }),
     ];
     store.selectVisible();
     expect(store.selectedRows).toHaveLength(1);
@@ -1490,6 +1751,8 @@ describe("the thumbnail verb", () => {
 });
 
 describe("the receipts", () => {
+  beforeEach(onTheRowList);
+
   it("names the columns it wrote, because there is no undo to inspect", () => {
     expect(editReceipt(12, { base_model: "FLUX.2" })).toBe(
       "Set the base model on 12 models.",
@@ -1581,6 +1844,8 @@ describe("the receipts", () => {
 });
 
 describe("what a verb may reach", () => {
+  beforeEach(onTheRowList);
+
   it("drops a selected row that the filters stop showing", () => {
     // Load-bearing: `selectedRows` reads `visibleRows`, not `rows`. A verb must
     // never act on something the reader cannot see, and with no undo behind any
@@ -2043,6 +2308,8 @@ describe("what the base-model field completes against", () => {
 });
 
 describe("deleting from disk", () => {
+  beforeEach(onTheRowList);
+
   it("sends every member of the selection and says where the files went", async () => {
     const store = useModelShelfStore();
     store.rows = [adapter({ id: 1 })];
@@ -2237,6 +2504,42 @@ describe("duplicate copies", () => {
     expect(useModelShelfStore().filters.duplicatesOnly).toBe(false);
   });
 
+  it("narrows by the shown name or the filename, ignoring case", async () => {
+    listAdapters.mockResolvedValue([
+      adapter({ id: 1 }),
+      adapter({
+        id: 2,
+        display_name: null,
+        filename: "Other_Thing_v2.safetensors",
+      }),
+    ]);
+    const store = useModelShelfStore();
+    await store.fetchRows();
+
+    await store.setFilters({ name: "   " });
+    expect(store.activeCount).toBe(0);
+    expect(store.visibleRows.length).toBe(2);
+    await store.setFilters({ name: "  CYANwood " });
+    expect(store.visibleRows.map((r) => r.id)).toEqual([1]);
+    expect(store.activeCount).toBe(1);
+    // The filename, for someone typing what is on disk.
+    await store.setFilters({ name: "other_thing_V2" });
+    expect(store.visibleRows.map((r) => r.id)).toEqual([2]);
+
+    // A search is not remembered across a reload, and typing one writes
+    // nothing to storage.
+    const writes = vi.spyOn(Storage.prototype, "setItem");
+    await store.setFilters({ name: "cyan" });
+    expect(writes).not.toHaveBeenCalled();
+    writes.mockRestore();
+    setActivePinia(createPinia());
+    expect(useModelShelfStore().filters.name).toBe("");
+
+    await store.resetFilters();
+    expect(store.filters.name).toBe("");
+    expect(store.visibleRows.length).toBe(2);
+  });
+
   it("keeps the count when the folder axis narrows a draw to one copy", async () => {
     listAdapters.mockResolvedValue([
       adapter({
@@ -2254,6 +2557,72 @@ describe("duplicate copies", () => {
     // a fact about the file, not about the group it is drawn under.
     expect(store.groups[0].rows[0].locations.length).toBe(1);
     expect(store.groups[0].rows.map((r) => r.copies)).toEqual([2]);
+  });
+
+  it("names each copy's draw for its own file, in name order", async () => {
+    // Byte-identical files under three names are ONE model whose `filename` is
+    // whichever the scanner met first (#1270).
+    listAdapters.mockResolvedValue([
+      adapter({
+        id: 1,
+        display_name: null,
+        filename: "ae.sft",
+        locations: [
+          { state: "present", folder_path: "/m", relpath: "ae.sft" },
+          {
+            state: "present",
+            folder_path: "/m",
+            relpath: "vae/ae.safetensors",
+          },
+          {
+            state: "present",
+            folder_path: "/m",
+            relpath: "zImageTurbo_vae.st",
+          },
+        ],
+      }),
+      adapter({ id: 2, display_name: null, filename: "b.st" }),
+    ]);
+    const store = useModelShelfStore();
+    await store.fetchRows();
+    store.setView({ groupBy: "folder", sortKey: "name", sortDirection: "asc" });
+    const drawn = store.groups[0].rows;
+    // `b.st`'s copy is `a.st`, so its draw sorts first although its model's
+    // own name sorts last.
+    expect(drawn.map((r) => r.filename)).toEqual([
+      "a.st",
+      "ae.sft",
+      "ae.safetensors",
+      "zImageTurbo_vae.st",
+    ]);
+    expect(drawn.map((r) => r.name.text)).toEqual([
+      "a",
+      "ae",
+      "ae",
+      "zImageTurbo vae",
+    ]);
+    // The model itself still carries one filename; only the draws differ.
+    expect(store.visibleRows.find((r) => r.id === 1).filename).toBe("ae.sft");
+  });
+
+  it("keeps a name somebody gave on every copy's draw", async () => {
+    listAdapters.mockResolvedValue([
+      adapter({
+        locations: [
+          { state: "present", folder_path: "/m", relpath: "a.st" },
+          { state: "present", folder_path: "/n", relpath: "other.st" },
+        ],
+      }),
+    ]);
+    const store = useModelShelfStore();
+    await store.fetchRows();
+    store.setView({ groupBy: "folder" });
+    const drawn = store.groups.flatMap((g) => g.rows);
+    expect(drawn.map((r) => r.filename)).toEqual(["a.st", "other.st"]);
+    expect(drawn.map((r) => r.name.text)).toEqual([
+      "Cyanwood Style",
+      "Cyanwood Style",
+    ]);
   });
 
   it("draws two copies in one folder under two keys, not one key twice", async () => {
@@ -2280,5 +2649,1683 @@ describe("duplicate copies", () => {
       "qwen_3_4b.st",
       "zimage_te.st",
     ]);
+  });
+});
+
+describe("mergeCopies", () => {
+  it("sends the keeper the reader chose and re-reads the row it kept", async () => {
+    // The row is NOT removed from the list: the model is still on the shelf with
+    // one fewer copy, so the list is re-read rather than the row taken out of it.
+    listAdapters.mockResolvedValue({ models: [] });
+    listCheckpoints.mockResolvedValue({ models: [] });
+    listEngines.mockResolvedValue({ models: [] });
+    listUnclassified.mockResolvedValue({ models: [] });
+    listSupport.mockResolvedValue({ models: [] });
+    mergeModelCopies.mockResolvedValue({
+      merged: [7],
+      files_removed: 1,
+      permanent: false,
+      dry_run: false,
+      trash_name: "Trash",
+      comfyui_reads: [],
+      refused: [],
+    });
+    const store = useModelShelfStore();
+    const keep = [{ model_id: 7, folder_id: 2, relpath: "b.safetensors" }];
+
+    expect(await store.mergeCopies(keep)).toBe(true);
+    expect(mergeModelCopies).toHaveBeenCalledWith(keep, { permanent: false });
+    // The refetch is the "re-reads" half of the title, and it is asserted rather
+    // than assumed: the row survives a merge with one fewer copy, so the list has
+    // to be re-read or the copy count on screen stays wrong until the next visit.
+    expect(listAdapters).toHaveBeenCalled();
+    expect(useNoticeStore().notices.at(-1).text).toContain("Kept one copy");
+  });
+
+  it("says so when the call fails and keeps the shelf as it was", async () => {
+    mergeModelCopies.mockRejectedValue(new Error("nope"));
+    const store = useModelShelfStore();
+    expect(
+      await store.mergeCopies([
+        { model_id: 7, folder_id: 2, relpath: "b.safetensors" },
+      ]),
+    ).toBe(false);
+    expect(useNoticeStore().notices.at(-1).level).toBe("error");
+  });
+
+  it("makes no call with nothing to merge", async () => {
+    mergeModelCopies.mockClear();
+    const store = useModelShelfStore();
+    expect(await store.mergeCopies([])).toBe(false);
+    expect(mergeModelCopies).not.toHaveBeenCalled();
+  });
+});
+
+describe("mergeReceipt", () => {
+  it("leads with what was kept, because that is what a merge is", () => {
+    // A reader who has just removed a copy of a 20 GB checkpoint needs to know
+    // the model is still there, or this reads like the delete they did not ask
+    // for. Asserted whole, because a receipt nobody finishes reading is not a
+    // receipt: the whole point of the wording is that it is one short line.
+    expect(mergeReceipt(1, [], false, "Trash", 1)).toBe(
+      "Kept one copy of 1 model. The spare copy is in your Trash.",
+    );
+  });
+
+  it("names where the bytes went, and names no place on a permanent one", () => {
+    expect(mergeReceipt(1, [], true, "Trash", 2)).toBe(
+      "Kept one copy of 1 model. 2 spare copies are deleted.",
+    );
+    expect(mergeReceipt(1, [], true, "Trash", 2)).not.toContain("Trash");
+  });
+
+  it("tells the two refusals this route owns apart", () => {
+    // "The copy you chose is gone" is the refusal that saved the reader from a
+    // redownload; "only one copy" is a duplicate list that was a minute old.
+    // Rolling them together would leave them guessing which happened.
+    expect(
+      mergeReceipt(
+        0,
+        [{ id: 1, reason: "keeper_not_present" }],
+        false,
+        "Trash",
+      ),
+    ).toContain("The copy you chose to keep is gone");
+    expect(
+      mergeReceipt(0, [{ id: 1, reason: "not_a_duplicate" }], false, "Trash"),
+    ).toContain("already had only one copy");
+  });
+
+  it("says plainly when two names turned out to be one file", () => {
+    // The symlink refusal, which reads as nonsense ("nothing was removed")
+    // without a sentence of its own.
+    expect(
+      mergeReceipt(
+        0,
+        [{ id: 1, reason: "keeper_is_that_copy" }],
+        false,
+        "Trash",
+      ),
+    ).toContain("two names for one file");
+  });
+
+  it("reports a reason it has never seen as kept rather than dropping it", () => {
+    const text = mergeReceipt(
+      0,
+      [{ id: 1, reason: "sundered" }],
+      false,
+      "Trash",
+    );
+    expect(text).toContain("left alone");
+  });
+});
+
+describe("the workflow sets", () => {
+  /** Two adapters on the shelf; one has run in a recipe and one has not. */
+  function shelfWithASet() {
+    listAdapters.mockResolvedValue([
+      adapter({ id: 1, sha256: "a".repeat(64), filename: "used.st" }),
+      adapter({ id: 2, sha256: "b".repeat(64), filename: "never.st" }),
+    ]);
+    fetchWorkflowSets.mockResolvedValue({
+      combinations: [
+        {
+          key: "1",
+          models: [{ id: 1, name: "used.st", kind: "checkpoint" }],
+          recipes: 3,
+          picture_count: 12,
+          covers: [],
+        },
+      ],
+      no_set: [2],
+    });
+    return useModelShelfStore();
+  }
+
+  it("reads the sets once, however many times something asks", async () => {
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    await store.loadWorkflowSets();
+    expect(fetchWorkflowSets).toHaveBeenCalledTimes(1);
+    // With the rows in hand, so "once" is not standing in for "the payload was
+    // never used": the second call found the first one's answer, not an empty
+    // grid.
+    expect(store.setGroups).toHaveLength(1);
+  });
+
+  it("discards a read the reader has already overtaken", async () => {
+    // The epoch guard. A `force` read fired while an earlier one is in flight
+    // must win whatever order they resolve in - a session reset or a scan is
+    // what fires the second, and landing the stale answer over it puts the
+    // previous credential's or the pre-scan sets back on screen. Deleting the
+    // guard left the whole store suite green (#1479 review).
+    const store = shelfWithASet();
+    await store.fetchRows();
+
+    let releaseFirst;
+    fetchWorkflowSets.mockImplementationOnce(
+      () => new Promise((resolve) => (releaseFirst = resolve)),
+    );
+    const stale = store.loadWorkflowSets();
+    fetchWorkflowSets.mockResolvedValue({
+      combinations: [
+        {
+          key: "9",
+          models: [{ id: 1, name: "used.st", kind: "checkpoint" }],
+          recipes: 1,
+          picture_count: 99,
+          covers: [],
+        },
+      ],
+      no_set: [],
+    });
+    await store.loadWorkflowSets({ force: true });
+    // Now let the OVERTAKEN request answer, with the older payload.
+    releaseFirst({ combinations: [], no_set: [] });
+    await stale;
+
+    expect(store.workflowSets.combinations.map((c) => c.key)).toEqual(["9"]);
+    expect(store.setsLoaded).toBe(true);
+  });
+
+  it("drops a second read made while the first is still on the wire", async () => {
+    // Reachable: the grid asks on mount and the dialog asks when it opens, and
+    // each request is a window over every kept picture in the vault.
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await Promise.all([store.loadWorkflowSets(), store.loadWorkflowSets()]);
+    expect(fetchWorkflowSets).toHaveBeenCalledTimes(1);
+  });
+
+  it("finds a set that reached the shelf through a run's second step", async () => {
+    // **`visibleRows` is not a list of models.** A run is drawn as its cover, so
+    // a stacked row's `id` is the cover's and the rest live in `memberIds`.
+    // Matching a combination's members on `row.id` alone dropped every set that
+    // reached the shelf through any other step, so the grid's empty state
+    // claimed no picture recorded it.
+    listAdapters.mockResolvedValue([
+      adapter({
+        id: 1,
+        sha256: "a".repeat(64),
+        filename: "cover.st",
+        stack_id: 9,
+      }),
+      adapter({
+        id: 2,
+        sha256: "b".repeat(64),
+        filename: "step-two.st",
+        stack_id: 9,
+      }),
+      adapter({
+        id: 3,
+        sha256: "c".repeat(64),
+        filename: "lonely.st",
+        stack_id: 9,
+      }),
+    ]);
+    fetchWorkflowSets.mockResolvedValue({
+      combinations: [
+        {
+          key: "2",
+          models: [{ id: 2, name: "step-two.st", kind: "checkpoint" }],
+          recipes: 2,
+          picture_count: 500,
+          covers: [],
+        },
+      ],
+      no_set: [3],
+    });
+    const store = useModelShelfStore();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+
+    // One drawn row, three models behind it.
+    expect(store.visibleRows.map((row) => row.id)).toEqual([1]);
+    expect(store.visibleRows[0].memberIds).toEqual([1, 2, 3]);
+
+    expect(store.visibleCombinations).toHaveLength(1);
+    expect(store.setGroups[0].card.pictures).toBe(500);
+  });
+
+  it("draws a card per base model and none for the models with no set", async () => {
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+
+    expect(store.setGroups.map((group) => group.card.name)).toEqual([
+      "used.st",
+    ]);
+    expect(store.setGroups[0].card.pictures).toBe(12);
+  });
+
+  it("does not refetch the sets when a filter refetches the rows", async () => {
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    // `refetch: true` is what a `Show` checkbox passes, so this really does
+    // re-run the row query: the sets must NOT ride along with it, or every tick
+    // costs a window over every picture in the vault.
+    await store.setFilters({ checkpoints: false }, { refetch: true });
+    expect(fetchWorkflowSets).toHaveBeenCalledTimes(1);
+  });
+
+  it("does refetch after a scan, because a scan can add a model", async () => {
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    await store.fetchRows({ markNew: true });
+    expect(fetchWorkflowSets).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves a card out when Show hides every one of its members", async () => {
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    expect(store.visibleCombinations).toHaveLength(1);
+
+    await store.setFilters({ adapters: false });
+
+    expect(store.visibleCombinations).toEqual([]);
+  });
+
+  it("answers Works with from the whole payload, not from what Show draws", async () => {
+    listAdapters.mockResolvedValue([adapter({ id: 1, filename: "a.st" })]);
+    fetchWorkflowSets.mockResolvedValue({
+      combinations: [
+        {
+          key: "1,2",
+          models: [
+            { id: 1, name: "a.st", kind: "checkpoint" },
+            { id: 2, name: "b.st", kind: "vae" },
+          ],
+          recipes: 4,
+          picture_count: 9,
+          covers: [],
+        },
+      ],
+      no_set: [],
+    });
+    const store = useModelShelfStore();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    // Untick the block the anchor is in: the grid now draws no card at all, and
+    // the question "what has this file run with" is unchanged by that. Reading
+    // the grid's own narrowed list here would answer it with silence.
+    await store.setFilters({ adapters: false });
+    expect(store.visibleCombinations).toEqual([]);
+
+    const { companions, recipes } = store.worksWithModel(1);
+
+    expect(companions.map((c) => c.name)).toEqual(["b.st"]);
+    expect(recipes).toBe(4);
+  });
+
+  it("reports a failed read and leaves the last payload standing", async () => {
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    fetchWorkflowSets.mockRejectedValue(new Error("hub is busy"));
+
+    await store.loadWorkflowSets({ force: true });
+
+    expect(store.setsError).toContain("hub is busy");
+    expect(store.visibleCombinations).toHaveLength(1);
+  });
+
+  it("opens one stack at a time and closes the one that is open", async () => {
+    const store = shelfWithASet();
+    store.toggleSet("1,2");
+    expect(store.openSetKey).toBe("1,2");
+    store.toggleSet("3,4");
+    expect(store.openSetKey).toBe("3,4");
+    store.toggleSet("3,4");
+    expect(store.openSetKey).toBe("");
+  });
+
+  it("forgets the sets when the credential changes", async () => {
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    store.resetForSession();
+    expect(store.workflowSets.combinations).toEqual([]);
+    expect(store.setsLoaded).toBe(false);
+    await store.loadWorkflowSets();
+    expect(fetchWorkflowSets).toHaveBeenCalledTimes(2);
+  });
+
+  it("groups every combination under its own base model, off one payload", async () => {
+    listAdapters.mockResolvedValue([
+      adapter({ id: 1, sha256: "a".repeat(64), filename: "ckpt.st" }),
+      adapter({ id: 2, sha256: "b".repeat(64), filename: "vae.st" }),
+      adapter({ id: 3, sha256: "c".repeat(64), filename: "lora.st" }),
+    ]);
+    fetchWorkflowSets.mockResolvedValue({
+      combinations: [
+        {
+          key: "1,2",
+          models: [
+            { id: 1, name: "ckpt.st", kind: "checkpoint" },
+            { id: 2, name: "vae.st", kind: "vae" },
+          ],
+          recipes: 5,
+          picture_count: 20,
+          covers: [],
+        },
+        {
+          key: "1,2,3",
+          models: [
+            { id: 1, name: "ckpt.st", kind: "checkpoint" },
+            { id: 2, name: "vae.st", kind: "vae" },
+            { id: 3, name: "lora.st", kind: "adapter" },
+          ],
+          recipes: 2,
+          picture_count: 5,
+          covers: [],
+        },
+      ],
+      no_set: [],
+    });
+    const store = useModelShelfStore();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+
+    // Two combinations, ONE base model: one card, whose tray holds all three
+    // models, with both combinations' evidence summed onto it.
+    expect(store.setGroups).toHaveLength(1);
+    expect(store.setGroups[0].models.map((m) => m.name)).toEqual([
+      "ckpt.st",
+      "vae.st",
+      "lora.st",
+    ]);
+    expect(store.setGroups[0].card.facts).toEqual([
+      "3 models",
+      "7 recipes",
+      "25 pictures",
+    ]);
+    // The LoRA carries its OWN evidence rather than the group's.
+    const lora = store.setGroups[0].models.find((m) => m.name === "lora.st");
+    expect([lora.recipes, lora.pictures]).toEqual([2, 5]);
+    expect(fetchWorkflowSets).toHaveBeenCalledTimes(1);
+  });
+
+  it("remembers how the tray draws its models between visits", () => {
+    const store = useModelShelfStore();
+    expect(store.view.trayView).toBe("grid");
+    store.setView({ trayView: "list" });
+    setActivePinia(createPinia());
+    expect(useModelShelfStore().view.trayView).toBe("list");
+  });
+
+  /**
+   * A checkpoint the row list shows and a VAE it does not, both in one tray.
+   *
+   * The shape `setGridModelIds` exists for: a combination survives `Show` on any
+   * one visible member and is then drawn WHOLE, so unticking the support files
+   * takes the VAE off the row list and leaves it on the card.
+   */
+  async function shelfWithAHiddenCompanion() {
+    listCheckpoints.mockResolvedValue([
+      adapter({
+        id: 1,
+        sha256: "a".repeat(64),
+        filename: "ckpt.st",
+        file_kind: "checkpoint",
+        kind: null,
+      }),
+    ]);
+    // `/adapters` is one route serving both support kinds, so the double has to
+    // answer `vae` and `text_encoder` differently or the VAE arrives twice.
+    listSupport.mockImplementation((args) =>
+      Promise.resolve(
+        args?.fileKind === "vae"
+          ? [
+              adapter({
+                id: 2,
+                sha256: "b".repeat(64),
+                filename: "vae.st",
+                file_kind: "vae",
+                kind: null,
+              }),
+            ]
+          : [],
+      ),
+    );
+    fetchWorkflowSets.mockResolvedValue({
+      combinations: [
+        {
+          key: "1,2",
+          models: [
+            { id: 1, name: "ckpt.st", kind: "checkpoint" },
+            { id: 2, name: "vae.st", kind: "vae" },
+          ],
+          recipes: 2,
+          picture_count: 4,
+          covers: [],
+        },
+      ],
+      no_set: [],
+    });
+    const store = useModelShelfStore();
+    // The default axis, said out loud: these are the grid's own assertions.
+    store.setView({ groupBy: "workflow_set" });
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    return store;
+  }
+
+  it("only counts a tray's models as actionable while its tray is open", async () => {
+    const store = await shelfWithAHiddenCompanion();
+    expect([...store.setGridModelIds].sort()).toEqual([1]);
+
+    store.setFilters({ support: false });
+    expect(store.visibleRows.map((r) => r.id)).toEqual([1]);
+    // Open the card: its hidden companion is now visibly represented in the
+    // tray and is safe to select.
+    store.toggleSet("model:1");
+    expect([...store.setGridModelIds].sort()).toEqual([1, 2]);
+
+    // Closing it removes the only representation of the companion again.
+    store.toggleSet("model:1");
+    expect([...store.setGridModelIds].sort()).toEqual([1]);
+  });
+
+  it("hands the verbs a model picked off a card the row list is hiding", async () => {
+    const store = await shelfWithAHiddenCompanion();
+    store.setFilters({ support: false });
+    store.toggleSet("model:1");
+    store.toggleSelected(2);
+
+    // `selectedRows` is built from `visibleRows`, which does not hold it - so
+    // without the grid's own reach the click would tick a row the bar then
+    // could not see, and every verb would be aimed at nothing.
+    expect(store.selectedRows.map((r) => r.id)).toEqual([2]);
+    // Wearing the shape a listed row has, because the verbs read these fields:
+    // `name` is `modelName`'s `{text, state}` pair and not the raw column, and
+    // the location state is reduced. A raw `rows` entry has neither.
+    expect(store.selectedRows[0].name).toMatchObject({
+      text: "Cyanwood Style",
+    });
+    expect(store.selectedRows[0].locState).toBe("present");
+  });
+
+  it("takes that reach away again the moment the row list is back", async () => {
+    // The invariant the row list rests on: a verb may only ever act on
+    // something the reader can SEE, and off the grid they cannot see it.
+    const store = await shelfWithAHiddenCompanion();
+    store.setFilters({ support: false });
+    store.toggleSet("model:1");
+    store.toggleSelected(2);
+    expect(store.selectedRows).toHaveLength(1);
+
+    store.setView({ groupBy: "none" });
+    expect(store.selectedRows).toHaveLength(0);
+  });
+
+  it("arms no verb over a model the grid draws nowhere", async () => {
+    // The hazard the hidden verb bar used to stand in for. A selection survives
+    // an axis switch on purpose, so a reader can Ctrl+A the row list, switch to
+    // the grid and find the bar still offering Delete over 1,800 models that
+    // screen shows none of. `selectedRows` reads the rows the SCREEN draws, so
+    // the offer goes with the screen.
+    const store = await shelfWithAHiddenCompanion();
+    store.setView({ groupBy: "none" });
+    store.selectVisible();
+    expect(store.selectedRows.map((r) => r.id).sort()).toEqual([1, 2]);
+
+    // A model on no card at all: `no_set` is not drawn on the grid.
+    fetchWorkflowSets.mockResolvedValue({ combinations: [], no_set: [1, 2] });
+    await store.loadWorkflowSets({ force: true });
+    store.setView({ groupBy: "workflow_set" });
+
+    expect(store.selectedRows).toEqual([]);
+    // And the ids are still held, so going back offers them again.
+    expect([...store.selectedIds].sort()).toEqual([1, 2]);
+    store.setView({ groupBy: "none" });
+    expect(store.selectedRows.map((r) => r.id).sort()).toEqual([1, 2]);
+  });
+
+  it("refuses Select all shown rather than clearing what is held", async () => {
+    // A key that says "select" must never be a silent clear. The guard used to
+    // sit at one caller and read `visibleRows`, which is the row list's list -
+    // so on the grid it passed and `selectVisible` then emptied the selection.
+    // The pill's own button never had the guard at all.
+    const store = await shelfWithAHiddenCompanion();
+    store.setView({ groupBy: "none" });
+    store.selectVisible();
+    expect([...store.selectedIds].sort()).toEqual([1, 2]);
+
+    fetchWorkflowSets.mockResolvedValue({ combinations: [], no_set: [] });
+    await store.loadWorkflowSets({ force: true });
+    store.setView({ groupBy: "workflow_set" });
+    expect(store.setGridRows).toEqual([]);
+    // The row list still holds two rows, which is exactly what the old guard
+    // was reading when it let this through.
+    expect(store.visibleRows).toHaveLength(2);
+
+    store.selectVisible();
+    expect([...store.selectedIds].sort()).toEqual([1, 2]);
+  });
+
+  it("takes ONE file from a card, though that file is a step of a run", async () => {
+    // **A card is one model and stands for that model alone.** An earlier draft
+    // folded runs here, on the reasoning that a run is atomic: the effect was
+    // that clicking one card lit up every other card built on the same run, and
+    // a verb aimed at the set in front of the reader reached files in sets they
+    // were not looking at. The grid's question is *what is in THIS workflow
+    // set*, and a card names exactly one file in it.
+    //
+    // Two cards on one run, which is the shape that made it visible: a recipe
+    // names step two, another names step one.
+    listAdapters.mockResolvedValue([
+      adapter({ id: 1, sha256: "a".repeat(64), stack_id: 7, stack_position: 0 }),
+      adapter({ id: 2, sha256: "b".repeat(64), stack_id: 7, stack_position: 1 }),
+    ]);
+    fetchWorkflowSets.mockResolvedValue({
+      combinations: [
+        {
+          key: "2",
+          models: [{ id: 2, name: "step-two.st", kind: "checkpoint" }],
+          recipes: 1,
+          picture_count: 1,
+          covers: [],
+        },
+        {
+          key: "1",
+          models: [{ id: 1, name: "step-one.st", kind: "checkpoint" }],
+          recipes: 1,
+          picture_count: 1,
+          covers: [],
+        },
+      ],
+      no_set: [],
+    });
+    const store = useModelShelfStore();
+    store.setView({ groupBy: "workflow_set" });
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+
+    // Two cards, and two rows behind them: the grid does not fold the run.
+    expect(store.setGroups).toHaveLength(2);
+    expect(store.setGridRows.map((r) => r.id).sort()).toEqual([1, 2]);
+    expect(store.setGridRows.every((r) => !r.memberIds)).toBe(true);
+
+    store.selectFromClick(2, {}, [1, 2]);
+
+    // Asserted on identity, not on a count: the point is that the OTHER card's
+    // model did not come with it, which a length of 1 would not tell you.
+    expect([...store.selectedIds]).toEqual([2]);
+    expect(store.selectedRows.map((r) => r.id)).toEqual([2]);
+    expect(store.selectedModelIds).toEqual([2]);
+    expect(store.isSelected(1)).toBe(false);
+
+    // And the row list still takes the run whole, which is where the reader can
+    // actually see that it is one.
+    store.setView({ groupBy: "none" });
+    store.selectFromClick(1, {}, [1]);
+    expect([...store.selectedIds].sort()).toEqual([1, 2]);
+  });
+
+  it("answers Select all shown with the grid's models, on the grid", async () => {
+    const store = await shelfWithAHiddenCompanion();
+    store.setFilters({ support: false });
+    store.toggleSet("model:1");
+
+    store.selectVisible();
+    expect([...store.selectedIds].sort()).toEqual([1, 2]);
+
+    // And with the row list's own answer, on the row list.
+    store.setView({ groupBy: "none" });
+    store.selectVisible();
+    expect([...store.selectedIds]).toEqual([1]);
+  });
+});
+
+describe("sets from pictures are hidden, never deleted", () => {
+  const checkpoint = { id: 1, name: "base.st", kind: "checkpoint" };
+  const lora = { id: 2, name: "style.st", kind: "adapter" };
+
+  /** One set from pictures: a checkpoint that ran with one LoRA. */
+  function shelfWithASet(handMade = []) {
+    listAdapters.mockResolvedValue([
+      adapter({ id: 1, sha256: "a".repeat(64), filename: "base.st" }),
+      adapter({ id: 2, sha256: "b".repeat(64), filename: "style.st" }),
+    ]);
+    // Answered when asked, as the hub is: a read after a hide or an undo sees
+    // what the server holds then, not what it held when the shelf was built.
+    fetchWorkflowSets.mockImplementation(async () => ({
+      combinations: [
+        {
+          key: "1+2",
+          models: [checkpoint, lora],
+          recipes: 2,
+          picture_count: 5,
+          covers: [],
+          // What the server answers once a hand-made set holds both.
+          covered_by: handMade.length ? [handMade[0].id] : [],
+        },
+      ],
+      no_set: [],
+      hand_made: handMade,
+      hidden_sets: [...hiddenOnServer],
+    }));
+    return useModelShelfStore();
+  }
+
+  function member(model, sha) {
+    return { ...model, sha256: sha, slot: "checkpoint", on_shelf: true };
+  }
+
+  it("takes only the hand-made sets the grid draws on Select all", async () => {
+    // A hidden hand-made set leaves the grid (#1869), so Select all must not
+    // take it: Delete would otherwise delete a set the reader cannot see.
+    hiddenOnServer.add("hand:7");
+    const store = shelfWithASet([
+      {
+        id: 7,
+        name: "seven",
+        declined: [],
+        members: [member(checkpoint, "a".repeat(64))],
+      },
+      {
+        id: 8,
+        name: "eight",
+        declined: [],
+        members: [member(lora, "b".repeat(64))],
+      },
+    ]);
+    store.setView({ groupBy: "workflow_set" });
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    expect(store.handMadeGroups.map((group) => group.set.id)).toEqual([8]);
+
+    store.selectVisible();
+    expect([...store.selectedSetIds]).toEqual([8]);
+  });
+
+  it("narrows the hand-made cards by name, and only the grid's", async () => {
+    const store = shelfWithASet([
+      {
+        id: 7,
+        name: "Seven Up",
+        declined: [],
+        members: [member(checkpoint, "a".repeat(64))],
+      },
+      {
+        id: 8,
+        name: "eight",
+        declined: [],
+        members: [member(lora, "b".repeat(64))],
+      },
+      {
+        id: 9,
+        name: "nine",
+        declined: [],
+        members: [
+          member({ id: 99, name: "Lonely_Ink.safetensors" }, "c".repeat(64)),
+        ],
+      },
+    ]);
+    store.setView({ groupBy: "workflow_set" });
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    const drawn = () => store.handMadeGroups.map((group) => group.set.id);
+
+    // By a member's filename: only set 8 holds `style.st`.
+    store.setFilters({ name: "sTyLe.st" });
+    expect(drawn()).toEqual([8]);
+    // By the set's own name.
+    store.setFilters({ name: "seven" });
+    expect(drawn()).toEqual([7]);
+    // The rail and the set chooser still offer every set.
+    expect(store.shownHandMadeSets.map((set) => set.id)).toEqual([7, 8, 9]);
+    // By the name a member's card shows when the shelf has no row for it (its
+    // block not fetched): set 9's member is not among the rows.
+    store.setFilters({ name: "LONELY ink" });
+    expect(drawn()).toEqual([9]);
+    store.setFilters({ name: "" });
+    expect(drawn()).toEqual([7, 8, 9]);
+  });
+
+  it("hides a set, remembers it, and draws it again on request", async () => {
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    const [group] = store.setGroups;
+    expect(group.key).toBe("model:1");
+
+    store.hideSets([group]);
+    await flush();
+    expect(store.setGroups).toHaveLength(0);
+    expect(store.hiddenSetCount).toBe(1);
+    expect(setWorkflowSetsHidden).toHaveBeenCalledWith(["model:1"], true);
+    expect([...hiddenOnServer]).toEqual(["model:1"]);
+
+    store.showHiddenSets = true;
+    expect(store.setGroups.map((g) => [g.key, g.card.hidden])).toEqual([
+      ["model:1", true],
+    ]);
+
+    store.unhideSets([store.setGroups[0]]);
+    await flush();
+    store.showHiddenSets = false;
+    expect(store.setGroups.map((g) => g.key)).toEqual(["model:1"]);
+    expect(store.hiddenSetCount).toBe(0);
+    expect([...hiddenOnServer]).toEqual([]);
+  });
+
+  it("hides a hand-made set the same way, under its own key", async () => {
+    const store = shelfWithASet([handSet(7)]);
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    expect(store.handMadeGroups.map((g) => g.key)).toEqual(["hand:7"]);
+
+    store.hideSets([store.handMadeGroups[0]]);
+    await flush();
+    expect(store.handMadeGroups).toHaveLength(0);
+    expect(store.hiddenSetCount).toBe(1);
+    expect(setWorkflowSetsHidden).toHaveBeenCalledWith(["hand:7"], true);
+
+    // Shown again: drawn, dimmed, and the eye reverts.
+    store.showHiddenSets = true;
+    expect(store.handMadeGroups.map((g) => [g.key, g.card.hidden])).toEqual([
+      ["hand:7", true],
+    ]);
+  });
+
+  it("toggles a selection: hides what is shown, shows again once all are hidden", async () => {
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    store.showHiddenSets = true;
+
+    store.toggleHiddenSets(store.setGroups);
+    await flush();
+    expect(store.setGroups.map((g) => g.hidden)).toEqual([true]);
+
+    store.toggleHiddenSets(store.setGroups);
+    await flush();
+    expect(store.setGroups.map((g) => g.hidden)).toEqual([false]);
+  });
+
+  it("raises no hide receipt when the write did not land", async () => {
+    // The receipt claims the hide happened and arms an Undo, so it must wait
+    // for the PUT: over a refused write it would offer to undo nothing.
+    useOperationStore().setLocalReceiptHost(true);
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    setWorkflowSetsHidden.mockRejectedValueOnce(new Error("put refused"));
+
+    store.toggleHiddenSets(store.setGroups);
+    await flush();
+    expect(store.setGroups.map((g) => g.key)).toEqual(["model:1"]);
+    expect(store.hiddenSetCount).toBe(0);
+    expect(useNoticeStore().notices.at(-1)).toMatchObject({ level: "error" });
+    expect(useOperationStore().receipt).toBe(null);
+  });
+
+  it("drops a hidden card's head from the selection, so Undo re-arms nothing", async () => {
+    useOperationStore().setLocalReceiptHost(true);
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    store.setView({ groupBy: "workflow_set" });
+    store.toggleSelected(1);
+    expect(store.selectedRows.map((r) => r.id)).toEqual([1]);
+
+    store.toggleHiddenSets(store.setGroups);
+    await flush();
+    expect([...store.selectedIds]).toEqual([]);
+    await useOperationStore().takeLocalReceiptAction();
+    expect(store.setGroups.map((g) => g.key)).toEqual(["model:1"]);
+    expect(store.selectedRows).toEqual([]);
+
+    // Drawn dimmed instead, the card stays on screen and stays selected, so
+    // Show again can follow.
+    store.toggleSelected(1);
+    store.showHiddenSets = true;
+    store.toggleHiddenSets(store.setGroups);
+    await flush();
+    expect(store.setGroups.map((g) => g.hidden)).toEqual([true]);
+    expect([...store.selectedIds]).toEqual([1]);
+  });
+
+  it("reopens the tray a hide closed when the hide is undone", async () => {
+    useOperationStore().setLocalReceiptHost(true);
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    store.toggleSet("model:1");
+    store.hideSets([store.setGroups[0]]);
+    await flush();
+    expect(store.openSetKey).toBe("");
+    await useOperationStore().takeLocalReceiptAction();
+    expect(store.openSetKey).toBe("model:1");
+  });
+
+  /** A promise its test answers by hand, when the answer's place matters. */
+  function deferred() {
+    let resolve;
+    const promise = new Promise((done) => (resolve = done));
+    return { promise, resolve };
+  }
+
+  it("undoes a hide on the server and on screen", async () => {
+    useOperationStore().setLocalReceiptHost(true);
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    store.hideSets([store.setGroups[0]]);
+    await flush();
+    expect([...hiddenOnServer]).toEqual(["model:1"]);
+
+    await useOperationStore().takeLocalReceiptAction();
+    expect([...hiddenOnServer]).toEqual([]);
+    expect(store.setGroups.map((g) => g.key)).toEqual(["model:1"]);
+    expect(store.hiddenSetCount).toBe(0);
+  });
+
+  it("takes a hidden hand-made set out of the set selection", async () => {
+    const store = shelfWithASet([handSet(7)]);
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    store.setView({ groupBy: "workflow_set" });
+    store.selectSet(7);
+    expect([...store.selectedSetIds]).toEqual([7]);
+
+    store.hideSets([store.handMadeGroups[0]]);
+    await flush();
+    expect([...store.selectedSetIds]).toEqual([]);
+  });
+
+  it("hiding an open hand-made tray never deletes that set", async () => {
+    useOperationStore().setLocalReceiptHost(true);
+    const store = await openOn([handSet(7)]);
+    store.hideSets([store.handMadeGroups[0]]);
+    await flush();
+    await flush();
+    expect(store.openSetKey).toBe("");
+    expect(deleteWorkflowSet).not.toHaveBeenCalled();
+    expect(store.handMadeSets.map((set) => set.id)).toEqual([7]);
+    expect([...hiddenOnServer]).toEqual(["hand:7"]);
+  });
+
+  it("turning Show them off over a hidden hand-made tray never deletes it", async () => {
+    const store = await openOn([handSet(7)]);
+    store.showHiddenSets = true;
+    store.hideSets([store.handMadeGroups[0]]);
+    await flush();
+    expect(store.openSetKey).toBe("hand:7");
+
+    // The grid drops the hidden card, which closes its tray on the way out.
+    store.showHiddenSets = false;
+    await flush();
+    await flush();
+    expect(store.openSetKey).toBe("");
+    expect(deleteWorkflowSet).not.toHaveBeenCalled();
+    expect([...hiddenOnServer]).toEqual(["hand:7"]);
+  });
+
+  it("applies the later hide's answer when the earlier one lands last", async () => {
+    // Uncovered, so the set from pictures stays on the grid beside the hand-made one.
+    const store = await openOn([handSet(7)], []);
+    const first = deferred();
+    const second = deferred();
+    setWorkflowSetsHidden
+      .mockReset()
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+
+    store.hideSets([store.setGroups[0]]);
+    store.hideSets([store.handMadeGroups[0]]);
+    second.resolve(["model:1", "hand:7"]);
+    await flush();
+    first.resolve(["model:1"]);
+    await flush();
+    expect(store.hiddenSetCount).toBe(2);
+  });
+
+  it("keeps a hide that lands while a set read is on the wire", async () => {
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    const answer = deferred();
+    // The read is served before the hide, and answers after it.
+    fetchWorkflowSets.mockImplementationOnce(() => answer.promise);
+    const reading = store.loadWorkflowSets({ force: true });
+
+    store.hideSets([store.setGroups[0]]);
+    await flush();
+    expect(store.hiddenSetCount).toBe(1);
+    // The same set, served before the hide: its own list says nothing hidden.
+    answer.resolve({
+      combinations: [
+        { key: "1+2", models: [checkpoint, lora], recipes: 2, covers: [] },
+      ],
+      no_set: [],
+      hidden_sets: [],
+    });
+    await reading;
+    expect(store.hiddenSetCount).toBe(1);
+    expect(store.setsLoading).toBe(false);
+  });
+
+  it("drops a hide answered after the session was reset", async () => {
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    const answer = deferred();
+    setWorkflowSetsHidden
+      .mockReset()
+      .mockImplementationOnce(() => answer.promise);
+
+    store.hideSets([store.setGroups[0]]);
+    store.resetForSession();
+    // The new session reads its own rows and sets, with nothing hidden.
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    answer.resolve(["model:1"]);
+    await flush();
+    expect(store.setGroups.map((g) => g.key)).toEqual(["model:1"]);
+    expect(store.hiddenSetCount).toBe(0);
+  });
+
+  it("removes the retired per-browser hide list when the store starts", async () => {
+    window.localStorage.setItem(
+      "pixlstash:modelShelfHiddenSets",
+      JSON.stringify(["model:1"]),
+    );
+    useModelShelfStore();
+    expect(window.localStorage.getItem("pixlstash:modelShelfHiddenSets")).toBe(
+      null,
+    );
+  });
+
+  it("starts the store when clearing the retired list throws", async () => {
+    const remove = vi
+      .spyOn(Storage.prototype, "removeItem")
+      .mockImplementation(() => {
+        throw new Error("test-storage-denied");
+      });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(() => useModelShelfStore()).not.toThrow();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("could not clear"),
+        expect.any(Error),
+      );
+    } finally {
+      remove.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it("reports a twin check that throws instead of rejecting unhandled", async () => {
+    const store = await openOn([handSet(7)]);
+    // Naming the set reads the shelf rows; one it cannot read throws there,
+    // outside any write's own error handling.
+    const naming = vi
+      .spyOn(store.rows, "map")
+      .mockImplementation(() => {
+        throw new Error("test-naming-failure");
+      });
+    store.toggleSet("hand:7");
+    await flush();
+    naming.mockRestore();
+    await flush();
+    expect(deleteWorkflowSet).not.toHaveBeenCalled();
+    expect(useNoticeStore().notices.at(-1)).toMatchObject({ level: "error" });
+  });
+
+  it("keeps a hidden set hidden in a new session, from the server's answer", async () => {
+    // The key lives on the server (#1869), not in this browser: a fresh store
+    // reads it back off the set payload.
+    hiddenOnServer.add("model:1");
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    expect(store.setGroups).toHaveLength(0);
+    expect(store.hiddenSetCount).toBe(1);
+  });
+
+  it("keeps the precision a member's and an offered model's name has lost", async () => {
+    listAdapters.mockResolvedValue([
+      adapter({ id: 1, sha256: "a".repeat(64), filename: "Qwen3VL_4b_bf16.st", display_name: null, quant: "bf16" }),
+      adapter({ id: 2, sha256: "b".repeat(64), filename: "Qwen3VL_4b_fp8_scaled.st", display_name: null, quant: "fp8" }),
+    ]);
+    const encoder = { name: "x", kind: "text_encoder", slot: "text_encoder" };
+    fetchWorkflowSets.mockResolvedValue({
+      combinations: [],
+      no_set: [],
+      hand_made: [
+        {
+          id: 7,
+          name: null,
+          declined: [],
+          members: [
+            { ...encoder, id: 1, sha256: "a".repeat(64), on_shelf: true },
+            {
+              ...encoder,
+              id: null,
+              sha256: "c".repeat(64),
+              on_shelf: false,
+              label: "Qwen3VL_4b_Q4_K_M.gguf",
+            },
+            {
+              ...encoder,
+              id: null,
+              sha256: "d".repeat(64),
+              on_shelf: false,
+              label: "RealVis fp16",
+            },
+          ],
+          offer: {
+            head_id: 1,
+            head_name: "x",
+            models: [{ ...encoder, id: 2, sha256: "b".repeat(64) }],
+          },
+        },
+      ],
+    });
+    const store = useModelShelfStore();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+
+    const [set] = store.handMadeSets;
+    // One name three times over: the quant is all that tells them apart.
+    expect(set.members.map((m) => [m.name, m.quant])).toEqual([
+      ["Qwen3VL 4b", "bf16"],
+      ["Qwen3VL 4b", "q4_k_m"],
+      // A label that is no filename is kept whole, so it gets no badge too.
+      ["RealVis fp16", null],
+    ]);
+    expect(set.offer.models.map((m) => [m.name, m.quant])).toEqual([
+      ["Qwen3VL 4b", "fp8"],
+    ]);
+  });
+
+  /** A hand-made set; `extra` adds members beyond the twin's two. */
+  function handSet(id, extra = [], others = {}) {
+    return {
+      id,
+      name: null,
+      declined: [],
+      members: [
+        member(checkpoint, "a".repeat(64)),
+        member(lora, "b".repeat(64)),
+        ...extra,
+      ],
+      ...others,
+    };
+  }
+
+  /** The store with `sets` on the hub, its first one's tray open. */
+  async function openOn(sets, coveredBy = sets.map((set) => set.id)) {
+    const store = shelfWithASet(sets);
+    fetchWorkflowSets.mockResolvedValue({
+      ...(await fetchWorkflowSets()),
+      combinations: [
+        {
+          key: "1+2",
+          models: [checkpoint, lora],
+          recipes: 2,
+          picture_count: 5,
+          covers: [],
+          covered_by: coveredBy,
+        },
+      ],
+    });
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    store.toggleSet(`hand:${sets[0].id}`);
+    await flush();
+    deleteWorkflowSet.mockReset().mockImplementation(async (id) => {
+      fetchWorkflowSets.mockResolvedValue({
+        combinations: [
+          { key: "1+2", models: [checkpoint, lora], recipes: 2, covers: [] },
+        ],
+        no_set: [],
+        hand_made: sets.filter((set) => set.id !== id),
+        // The refetch an undo runs reads the hidden list back off the server,
+        // so the double answers with what the hub now holds (#1869).
+        hidden_sets: [...hiddenOnServer],
+      });
+      return { deleted: sets.find((set) => set.id === id) };
+    });
+    return store;
+  }
+
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it("swaps a hand-made re-creation for the set from pictures when its tray closes", async () => {
+    hiddenOnServer.add("model:1");
+    useOperationStore().setLocalReceiptHost(true);
+    const store = await openOn([handSet(7, [], { declined: ["c".repeat(64)] })]);
+    // Open, it is being built: nothing gives way yet.
+    expect(deleteWorkflowSet).not.toHaveBeenCalled();
+
+    store.toggleSet("hand:7");
+    await flush();
+    await flush();
+
+    expect(deleteWorkflowSet).toHaveBeenCalledWith(7);
+    expect(store.handMadeSets).toHaveLength(0);
+    // Shown, unhidden, and opened, instead of the hand-made one.
+    expect(store.setGroups.map((g) => g.key)).toEqual(["model:1"]);
+    expect(store.hiddenSetCount).toBe(0);
+    expect(store.openSetKey).toBe("model:1");
+
+    // Undo brings the set back with what it kept out, and re-hides the twin.
+    createWorkflowSet.mockReset().mockResolvedValue({ id: 9 });
+    setWorkflowSetDeclines.mockReset().mockResolvedValue({});
+    const operations = useOperationStore();
+    expect(operations.receipt.summary).toContain("so that set is shown instead");
+    await operations.takeLocalReceiptAction();
+    expect(createWorkflowSet).toHaveBeenCalledTimes(1);
+    expect(setWorkflowSetDeclines).toHaveBeenCalledWith(9, ["c".repeat(64)]);
+    expect(store.hiddenSetCount).toBe(1);
+  });
+
+  it("leaves a set holding anything more than the set from pictures", async () => {
+    const extra = member({ id: 3, name: "x.st", kind: "vae" }, "d".repeat(64));
+    const store = await openOn([handSet(8, [extra])]);
+    store.toggleSet("hand:8");
+    await flush();
+    expect(deleteWorkflowSet).not.toHaveBeenCalled();
+  });
+
+  it("leaves a set holding anything less than the set from pictures", async () => {
+    const set = handSet(8);
+    set.members = set.members.slice(0, 1);
+    const store = await openOn([set], []);
+    store.toggleSet("hand:8");
+    await flush();
+    expect(deleteWorkflowSet).not.toHaveBeenCalled();
+  });
+
+  it("leaves a set alone until the payload says it covers the twin", async () => {
+    const store = await openOn([handSet(7)], []);
+    store.toggleSet("hand:7");
+    await flush();
+    expect(deleteWorkflowSet).not.toHaveBeenCalled();
+  });
+
+  it("hides nothing when the payload carries no hidden sets at all", async () => {
+    // An older payload, or a library that hides nothing: the store draws every
+    // set rather than treating a missing field as "hide everything".
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    expect(store.hiddenSetCount).toBe(0);
+    expect(store.setGroups.map((g) => g.key)).toEqual(["model:1"]);
+  });
+
+  it("decides on the membership after an add still on the wire", async () => {
+    const store = await openOn([handSet(7)]);
+    const extra = member({ id: 3, name: "x.st", kind: "vae" }, "d".repeat(64));
+    let land;
+    addWorkflowSetMembers
+      .mockReset()
+      .mockImplementation(() => new Promise((resolve) => (land = resolve)));
+    const adding = store.addToHandMadeSet(store.handMadeSets[0], [
+      { model_id: 3 },
+    ]);
+    // Closed before the add answers, while the snapshot is still the twin.
+    store.toggleSet("hand:7");
+    await flush();
+    fetchWorkflowSets.mockResolvedValue({
+      ...(await fetchWorkflowSets()),
+      hand_made: [handSet(7, [extra])],
+    });
+    land({ added: ["d".repeat(64)], set: handSet(7, [extra]) });
+    await adding;
+    await flush();
+    await flush();
+    expect(deleteWorkflowSet).not.toHaveBeenCalled();
+  });
+
+  it("reports a write that throws before it returns a promise", async () => {
+    const store = shelfWithASet();
+    createWorkflowSet.mockReset().mockImplementation(() => {
+      throw new Error("test-sync-failure");
+    });
+    await expect(store.createHandMadeSet({})).resolves.toBeNull();
+    expect(useNoticeStore().notices.at(-1).level).toBe("error");
+  });
+
+  it("waits out a write that starts while it is already waiting", async () => {
+    const store = await openOn([handSet(7)]);
+    const extra = member({ id: 3, name: "x.st", kind: "vae" }, "d".repeat(64));
+    const lands = [];
+    addWorkflowSetMembers
+      .mockReset()
+      .mockImplementation(() => new Promise((resolve) => lands.push(resolve)));
+    const first = store.addToHandMadeSet(store.handMadeSets[0], [
+      { model_id: 2 },
+    ]);
+    store.toggleSet("hand:7");
+    await flush();
+    // A second add starts while the check waits on the first.
+    const second = store.addToHandMadeSet(store.handMadeSets[0], [
+      { model_id: 3 },
+    ]);
+    lands[0]({ added: [], set: handSet(7) });
+    await first;
+    await flush();
+    fetchWorkflowSets.mockResolvedValue({
+      ...(await fetchWorkflowSets()),
+      hand_made: [handSet(7, [extra])],
+    });
+    lands[1]({ added: ["d".repeat(64)], set: handSet(7, [extra]) });
+    await second;
+    await flush();
+    await flush();
+    expect(deleteWorkflowSet).not.toHaveBeenCalled();
+  });
+
+  it("never moves the view off a set opened while the swap was deciding", async () => {
+    const store = await openOn([handSet(7), { id: 5, name: "B", members: [] }], [7]);
+    // From A straight to B: A gives way, B stays open and is not swapped.
+    store.toggleSet("hand:5");
+    await flush();
+    await flush();
+    expect(deleteWorkflowSet).toHaveBeenCalledTimes(1);
+    expect(deleteWorkflowSet).toHaveBeenCalledWith(7);
+    expect(store.openSetKey).toBe("hand:5");
+  });
+
+  it("redoes the swap: unhidden and opened again", async () => {
+    hiddenOnServer.add("model:1");
+    useOperationStore().setLocalReceiptHost(true);
+    const store = await openOn([handSet(7)]);
+    store.toggleSet("hand:7");
+    await flush();
+    await flush();
+    const restored = handSet(9);
+    createWorkflowSet.mockReset().mockImplementation(async () => {
+      // An IMPLEMENTATION, not a resolved value: the undo hides the twin AFTER
+      // this answers, and the refetch that follows the undo must read the list
+      // back off the double's server as it stands then, not as it stood here.
+      fetchWorkflowSets.mockImplementation(async () => ({
+        combinations: [
+          {
+            key: "1+2",
+            models: [checkpoint, lora],
+            recipes: 2,
+            covers: [],
+            covered_by: [9],
+          },
+        ],
+        no_set: [],
+        hand_made: [restored],
+        hidden_sets: [...hiddenOnServer],
+      }));
+      return restored;
+    });
+    const operations = useOperationStore();
+    await operations.takeLocalReceiptAction();
+    // Undone: hidden again, as it was before the swap.
+    expect([...hiddenOnServer]).toEqual(["model:1"]);
+
+    await operations.takeLocalReceiptAction();
+    await flush();
+    expect(deleteWorkflowSet).toHaveBeenLastCalledWith(9);
+    expect(store.hiddenSetCount).toBe(0);
+    expect(store.openSetKey).toBe("model:1");
+  });
+
+  it("leaves a set alone when another set also covers the twin", async () => {
+    // Deleting it would not bring the set from pictures back on screen.
+    const store = await openOn([handSet(7), handSet(6)]);
+    store.toggleSet("hand:7");
+    await flush();
+    expect(deleteWorkflowSet).not.toHaveBeenCalled();
+  });
+
+  it("clones a set from pictures into a set of the owner's, marked as one", async () => {
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    createWorkflowSet.mockReset().mockResolvedValue({ id: 9, members: [] });
+
+    await store.cloneSetFromPictures(store.setGroups[0]);
+
+    expect(createWorkflowSet).toHaveBeenCalledWith({
+      cloned: true,
+      members: [
+        { model_id: 1, slot: "checkpoint" },
+        { model_id: 2, slot: "lora" },
+      ],
+    });
+    expect(store.openSetKey).toBe("hand:9");
+  });
+
+  it("clones a diffusion-file head as the checkpoint, and never an engine", async () => {
+    const store = shelfWithASet();
+    createWorkflowSet.mockReset().mockResolvedValue({ id: 9, members: [] });
+    await store.cloneSetFromPictures({
+      head: { id: 1 },
+      models: [
+        { id: 1, kind: "unknown" },
+        { id: 4, kind: "engine" },
+        { id: 2, kind: "vae" },
+      ],
+    });
+    expect(createWorkflowSet).toHaveBeenCalledWith({
+      cloned: true,
+      members: [
+        { model_id: 1, slot: "checkpoint" },
+        { model_id: 2, slot: "vae" },
+      ],
+    });
+
+    // A set named after a file the shelf does not hold has nothing to clone.
+    createWorkflowSet.mockClear();
+    await store.cloneSetFromPictures({ head: { missing: true }, models: [] });
+    expect(createWorkflowSet).not.toHaveBeenCalled();
+  });
+
+  it("keeps a cloned set that still matches the set from pictures", async () => {
+    // The same set as the swap test above, but for the mark.
+    const store = await openOn([handSet(7, [], { cloned: true })]);
+    store.toggleSet("hand:7");
+    await flush();
+    await flush();
+    expect(deleteWorkflowSet).not.toHaveBeenCalled();
+    expect(store.handMadeSets.map((set) => set.id)).toEqual([7]);
+  });
+
+  it("makes one clone when the button is pressed twice", async () => {
+    const store = shelfWithASet();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    createWorkflowSet.mockReset().mockResolvedValue({ id: 9, members: [] });
+    const [group] = store.setGroups;
+    await Promise.all([
+      store.cloneSetFromPictures(group),
+      store.cloneSetFromPictures(group),
+    ]);
+    expect(createWorkflowSet).toHaveBeenCalledTimes(1);
+    // Free again once the first has answered.
+    await store.cloneSetFromPictures(group);
+    expect(createWorkflowSet).toHaveBeenCalledTimes(2);
+  });
+
+  it("copies a clone as a clone, and a set made by hand as one made by hand", async () => {
+    const store = shelfWithASet();
+    createWorkflowSet.mockReset().mockResolvedValue({ id: 9, members: [] });
+    await store.duplicateHandMadeSet(handSet(7, [], { cloned: true }));
+    expect(createWorkflowSet.mock.calls[0][0].cloned).toBe(true);
+    await store.duplicateHandMadeSet(handSet(8));
+    expect(createWorkflowSet.mock.calls[1][0]).not.toHaveProperty("cloned");
+  });
+
+  it("puts a deleted clone back as a clone", async () => {
+    useOperationStore().setLocalReceiptHost(true);
+    const set = handSet(7, [], { cloned: true });
+    const store = await openOn([set]);
+    await store.deleteHandMadeSets([set]);
+    createWorkflowSet.mockReset().mockResolvedValue({ id: 9 });
+    await useOperationStore().takeLocalReceiptAction();
+    expect(createWorkflowSet).toHaveBeenCalledWith(
+      expect.objectContaining({ cloned: true }),
+    );
+  });
+});
+
+describe("a model is hidden in this library", () => {
+  const checkpoint = { id: 1, name: "base.st", kind: "checkpoint" };
+  const lora = { id: 2, name: "style.st", kind: "adapter" };
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  /** A checkpoint and a LoRA that ran together, as the server holds them now. */
+  function shelf({ handMade = [] } = {}) {
+    const flagged = (row) => ({
+      ...row,
+      hidden: modelsHiddenOnServer.has(row.id),
+    });
+    listCheckpoints.mockImplementation(async () => [
+      flagged(
+        adapter({
+          id: 1,
+          sha256: "a".repeat(64),
+          file_kind: "checkpoint",
+          filename: "base.st",
+          display_name: "Base",
+        }),
+      ),
+    ]);
+    listAdapters.mockImplementation(async () => [
+      flagged(
+        adapter({
+          id: 2,
+          sha256: "b".repeat(64),
+          filename: "style.st",
+          display_name: "Style",
+        }),
+      ),
+    ]);
+    fetchWorkflowSets.mockImplementation(async () => ({
+      combinations: [
+        {
+          key: "1+2",
+          models: [checkpoint, lora],
+          recipes: 2,
+          picture_count: 5,
+          covers: [],
+          covered_by: [],
+        },
+      ],
+      no_set: [],
+      hand_made: handMade,
+      set_checks: [{ combo_key: "1,2", verdict: "yes", suspects: [] }],
+      hidden_sets: [],
+      hidden_models: [...modelsHiddenOnServer],
+    }));
+    return useModelShelfStore();
+  }
+
+  it("leaves the row list, the offered rows and the tray, and comes back on request", async () => {
+    const store = shelf();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    const row = () => store.rows.find((r) => r.id === 2);
+
+    await store.toggleHiddenModels([row()]);
+
+    expect(setModelsHidden).toHaveBeenCalledWith([2], true);
+    expect(store.visibleRows.map((r) => r.id)).toEqual([1]);
+    expect(store.offeredRows.map((r) => r.id)).toEqual([1]);
+    // The card stays (its head is shown), the tray loses the member, and the
+    // owner's verdict on the whole set is still the card's.
+    expect(store.setGroups.map((g) => g.key)).toEqual(["model:1"]);
+    expect(store.setGroups[0].models.map((m) => m.id)).toEqual([1]);
+    expect(store.setGroups[0].card.verdict).toBe("yes");
+    // Nothing was removed: the row is still known, only not listed.
+    expect(store.rows.map((r) => r.id).sort()).toEqual([1, 2]);
+    expect(store.activeCount).toBe(0);
+
+    store.setFilters({ showHidden: true });
+    expect(store.activeCount).toBe(1);
+    expect(store.visibleRows.map((r) => [r.id, r.hidden])).toEqual([
+      [2, true],
+      [1, false],
+    ]);
+    expect(store.setGroups[0].models.map((m) => [m.id, m.hidden])).toEqual([
+      [1, undefined],
+      [2, true],
+    ]);
+
+    // Every one selected is hidden, so the same verb shows it again.
+    await store.toggleHiddenModels([row()]);
+    expect(setModelsHidden).toHaveBeenLastCalledWith([2], false);
+    store.setFilters({ showHidden: false });
+    expect(store.visibleRows.map((r) => r.id).sort()).toEqual([1, 2]);
+  });
+
+  it("takes the card with it when the hidden model is the one the set is named after", async () => {
+    const store = shelf();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+
+    await store.toggleHiddenModels([store.rows.find((r) => r.id === 1)]);
+
+    expect(store.setGroups).toHaveLength(0);
+    // Not one of the hidden SETS: "Show them" under the grid is not its way back.
+    expect(store.hiddenSetCount).toBe(0);
+    store.setFilters({ showHidden: true });
+    expect(store.setGroups.map((g) => g.key)).toEqual(["model:1"]);
+  });
+
+  it("hides the selected models that are shown, and leaves a hidden one hidden", async () => {
+    modelsHiddenOnServer.add(2);
+    const store = shelf();
+    store.setFilters({ showHidden: true });
+    await store.fetchRows();
+
+    await store.toggleHiddenModels(store.rows);
+
+    expect(setModelsHidden).toHaveBeenCalledWith([1], true);
+    expect([...store.hiddenModelIds].sort()).toEqual([1, 2]);
+  });
+
+  it("reads the hide off the rows, and off the set payload for a row not read yet", async () => {
+    modelsHiddenOnServer.add(2);
+    const store = shelf();
+    await store.fetchRows();
+    expect(store.visibleRows.map((r) => r.id)).toEqual([1]);
+
+    // The set payload names a model no fetched block holds: the grid must still
+    // leave it out of a tray.
+    modelsHiddenOnServer.add(9);
+    await store.loadWorkflowSets();
+    expect([...store.hiddenModelIds].sort()).toEqual([2, 9]);
+
+    // And a later read that no longer flags it shows it again.
+    modelsHiddenOnServer.delete(2);
+    await store.fetchRows();
+    expect(store.visibleRows.map((r) => r.id).sort()).toEqual([1, 2]);
+  });
+
+  it("keeps a hide that landed while a read was out", async () => {
+    const store = shelf();
+    await store.fetchRows();
+    let release;
+    listAdapters.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          // Served before the hide: the row says it is shown.
+          release = () => resolve([adapter({ id: 2, hidden: false })]);
+        }),
+    );
+    const read = store.fetchRows();
+    await store.toggleHiddenModels([store.rows.find((r) => r.id === 2)]);
+    release();
+    await read;
+
+    expect([...store.hiddenModelIds]).toEqual([2]);
+  });
+
+  it("says so and changes nothing when the write fails", async () => {
+    const store = shelf();
+    await store.fetchRows();
+    setModelsHidden.mockRejectedValueOnce(new Error("offline"));
+    useOperationStore().setLocalReceiptHost(true);
+
+    await store.toggleHiddenModels([store.rows.find((r) => r.id === 2)]);
+
+    expect(store.visibleRows.map((r) => r.id).sort()).toEqual([1, 2]);
+    expect(useNoticeStore().notices.at(-1).level).toBe("error");
+    expect(useOperationStore().receipt).toBe(null);
+  });
+
+  it("raises a receipt whose Undo shows the model again", async () => {
+    const store = shelf();
+    await store.fetchRows();
+    useOperationStore().setLocalReceiptHost(true);
+
+    await store.toggleHiddenModels([store.rows.find((r) => r.id === 2)]);
+    expect(useOperationStore().receipt.summary).toBe(
+      'Hid "Style" in this library. No file was touched',
+    );
+
+    await useOperationStore().takeLocalReceiptAction();
+    await settle();
+    expect(setModelsHidden).toHaveBeenLastCalledWith([2], false);
+    expect(store.visibleRows.map((r) => r.id).sort()).toEqual([1, 2]);
+  });
+
+  it("drops a hidden model from the selection, so it does not come back lit", async () => {
+    const store = shelf();
+    store.setView({ groupBy: "none" });
+    await store.fetchRows();
+    store.toggleSelected(1);
+    store.toggleSelected(2);
+
+    await store.toggleHiddenModels([store.rows.find((r) => r.id === 2)]);
+
+    expect([...store.selectedIds]).toEqual([1]);
+  });
+
+  it("copies a set from pictures whole, a hidden member included", async () => {
+    // The copy has to cover the card's pictures, or the card stays on the
+    // grid beside its own copy: a hidden member is left off the tray, never
+    // out of the set.
+    createWorkflowSet.mockResolvedValue({ id: 30, members: [], declined: [] });
+    const store = shelf();
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    await store.toggleHiddenModels([store.rows.find((r) => r.id === 2)]);
+    const [group] = store.setGroups;
+    expect(group.models.map((m) => m.id)).toEqual([1]);
+
+    await store.cloneSetFromPictures(group);
+
+    expect(createWorkflowSet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        members: [
+          { model_id: 1, slot: "checkpoint" },
+          { model_id: 2, slot: "lora" },
+        ],
+      }),
+    );
+  });
+
+  it("offers a hand-made set no hidden model to merge in", async () => {
+    const offer = (models) => ({
+      head_id: 1,
+      head_name: "base.st",
+      models,
+      covers: [],
+      recipes: 1,
+      picture_count: 1,
+    });
+    const store = shelf({
+      handMade: [
+        {
+          id: 7,
+          name: "seven",
+          declined: [],
+          members: [
+            {
+              ...checkpoint,
+              sha256: "a".repeat(64),
+              slot: "checkpoint",
+              on_shelf: true,
+            },
+          ],
+          offer: offer([{ id: 2, name: "style.st", slot: "lora" }]),
+        },
+      ],
+    });
+    await store.fetchRows();
+    await store.loadWorkflowSets();
+    expect(store.handMadeSets[0].offer.models.map((m) => m.id)).toEqual([2]);
+
+    await store.toggleHiddenModels([store.rows.find((r) => r.id === 2)]);
+
+    // An offer of nothing but hidden models is no offer.
+    expect(store.handMadeSets[0].offer).toBe(null);
   });
 });

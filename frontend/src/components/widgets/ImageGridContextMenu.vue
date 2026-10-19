@@ -3,9 +3,10 @@
     <div
       v-if="visible"
       ref="menuRef"
-      class="image-ctx-menu"
-      :class="{ 'ctx-flip-sub': submenusFlip, 'image-ctx-menu--on-dark': onDark }"
+      class="image-ctx-menu ctx-menu"
+      :class="{ 'ctx-flip-sub': submenusFlip, 'ctx-menu--on-dark': onDark }"
       :style="menuStyle"
+      :data-tooltip-layer="tooltipSide"
       role="menu"
       aria-orientation="vertical"
       tabindex="-1"
@@ -30,11 +31,14 @@
           v-if="contextImage?.id"
           class="ctx-item"
           role="menuitem"
-          :title="`Save this ${overlayMediaNoun} to your device (${saveShortcutHint})`"
           :aria-keyshortcuts="saveAriaShortcut"
           @click="onAction('save-picture')"
         >
-          <v-icon class="ctx-icon" size="15">mdi-download</v-icon>
+          <Tooltip
+            :text="`Save this ${overlayMediaNoun} to your device (${saveShortcutHint})`"
+            activator="parent"
+          />
+          <v-icon class="ctx-icon">mdi-download</v-icon>
           <span>Save {{ overlayMediaNoun }}</span>
           <span class="ctx-shortcut" aria-hidden="true">{{ saveShortcutHint }}</span>
         </button>
@@ -42,28 +46,44 @@
           v-if="contextImage?.id"
           class="ctx-item"
           role="menuitem"
-          :title="`Choose where to save this ${overlayMediaNoun}`"
           @click="onAction('save-picture-as')"
         >
-          <v-icon class="ctx-icon" size="15">mdi-content-save-edit-outline</v-icon>
+          <Tooltip
+            :text="`Choose where to save this ${overlayMediaNoun}`"
+            activator="parent"
+          />
+          <v-icon class="ctx-icon">mdi-content-save-edit-outline</v-icon>
           Save {{ overlayMediaNoun }} as…
         </button>
-        <button
+        <!-- The slot form, so the reason span below keeps `aria-describedby`:
+             a parent-activated tip would overwrite it. -->
+        <Tooltip
           v-if="contextImage?.id"
-          class="ctx-item"
-          role="menuitem"
-          :disabled="contextImage?.copyAvailable !== true"
-          :title="copyPictureTitle"
-          :aria-keyshortcuts="copyAriaShortcut"
-          :aria-describedby="
-            contextImage?.copyAvailable === true ? undefined : overlayCopyReasonId
-          "
-          @click="onAction('copy-picture')"
+          :text="copyPictureTitle"
+          :describe="false"
         >
-          <v-icon class="ctx-icon" size="15">mdi-content-copy</v-icon>
-          <span>{{ copyPictureLabel }}</span>
-          <span class="ctx-shortcut" aria-hidden="true">{{ copyShortcutHint }}</span>
-        </button>
+          <template #activator="{ props: tipProps }">
+            <button
+              v-bind="tipProps"
+              class="ctx-item"
+              role="menuitem"
+              :disabled="contextImage?.copyAvailable !== true"
+              :aria-keyshortcuts="copyAriaShortcut"
+              :aria-describedby="
+                contextImage?.copyAvailable === true
+                  ? undefined
+                  : overlayCopyReasonId
+              "
+              @click="onAction('copy-picture')"
+            >
+              <v-icon class="ctx-icon">mdi-content-copy</v-icon>
+              <span>{{ copyPictureLabel }}</span>
+              <span class="ctx-shortcut" aria-hidden="true">{{
+                copyShortcutHint
+              }}</span>
+            </button>
+          </template>
+        </Tooltip>
         <span
           v-if="contextImage?.id && contextImage?.copyAvailable !== true"
           :id="overlayCopyReasonId"
@@ -73,6 +93,15 @@
         </span>
         <div class="ctx-sep" role="separator" />
         <template v-if="!isScrapheapView">
+          <template v-if="stackEdit">
+            <EditStackMenu
+              :target="stackEdit"
+              :read-only="isReadOnly"
+              order-only
+              @stack-move="onAction('stack-move', $event)"
+            />
+            <div class="ctx-sep" role="separator" />
+          </template>
           <!-- 1. Share -->
           <button
             v-if="contextImage?.id"
@@ -81,7 +110,7 @@
             :disabled="isReadOnly"
             @click="onAction('share-picture')"
           >
-            <v-icon class="ctx-icon" size="15">mdi-link-variant</v-icon>
+            <v-icon class="ctx-icon">mdi-link-variant</v-icon>
             Share picture
           </button>
           <!-- 2. Find similar faces -->
@@ -90,7 +119,6 @@
               v-if="contextClickedFace || contextImageFaces.length === 1"
               class="ctx-item"
               role="menuitem"
-              title="Find pictures with similar faces"
               @click="
                 onAction(
                   'find-similar-faces',
@@ -98,7 +126,11 @@
                 )
               "
             >
-              <v-icon class="ctx-icon" size="15">mdi-face-recognition</v-icon>
+              <Tooltip
+                text="Find pictures with similar faces"
+                activator="parent"
+              />
+              <v-icon class="ctx-icon">mdi-face-recognition</v-icon>
               Find similar faces
             </button>
             <div
@@ -109,9 +141,9 @@
               @focusin="openFaceSubmenu"
             >
               <button class="ctx-item" role="menuitem" aria-haspopup="menu">
-                <v-icon class="ctx-icon" size="15">mdi-face-recognition</v-icon>
+                <v-icon class="ctx-icon">mdi-face-recognition</v-icon>
                 Find similar faces
-                <v-icon class="ctx-arrow" size="14">mdi-chevron-right</v-icon>
+                <v-icon class="ctx-arrow">mdi-chevron-right</v-icon>
               </button>
               <div
                 v-if="findFacesSubmenuOpen"
@@ -139,24 +171,50 @@
             v-if="contextImage?.id"
             class="ctx-item"
             role="menuitem"
-            title="Find visually similar images"
             @click="onAction('reverse-image-search')"
           >
-            <v-icon class="ctx-icon" size="15">mdi-image-search-outline</v-icon>
+            <Tooltip text="Find visually similar images" activator="parent" />
+            <v-icon class="ctx-icon">mdi-image-search-outline</v-icon>
             Reverse image search
           </button>
-          <!-- 4. Segment -->
+          <!-- 4. Use this picture as the input of another workflow (#1406).
+               Acts on the overlay picture and closes the lightbox, which the
+               popup would otherwise open behind.
+
+               The name is true again since #1457: `POST /workflows/run` fills
+               a card's picture inputs, and one picture behaves like a
+               selection of one, so a workflow with one open picture input is
+               run ON this picture. A workflow that takes no picture still
+               opens, starting from this picture's recipe. -->
+          <button
+            v-if="comfyuiConfigured && contextImage?.id"
+            class="ctx-item"
+            role="menuitem"
+            :disabled="isReadOnly"
+            @click="delegateWith('use-as-input', contextImage?.id)"
+          >
+            <Tooltip
+              text="Run another workflow on this picture"
+              activator="parent"
+            />
+            <v-icon class="ctx-icon">mdi-sitemap-outline</v-icon>
+            Use as input for…
+          </button>
+          <!-- 5. Segment -->
           <button
             class="ctx-item"
             role="menuitem"
-            title="Detect objects and store bounding boxes"
             :disabled="!selectedImageIds.length || isReadOnly"
             @click="onAction('segment')"
           >
-            <v-icon class="ctx-icon" size="15">mdi-shape-outline</v-icon>
+            <Tooltip
+              text="Detect objects and store bounding boxes"
+              activator="parent"
+            />
+            <v-icon class="ctx-icon">mdi-shape-outline</v-icon>
             Segment
           </button>
-          <!-- 5. Restore from snapshot -->
+          <!-- 6. Restore from snapshot -->
           <div
             v-if="!isReadOnly && selectedImageIds.length >= 1"
             class="ctx-submenu-wrap"
@@ -170,9 +228,9 @@
               aria-haspopup="menu"
               :disabled="!selectedImageIds.length || isReadOnly"
             >
-              <v-icon class="ctx-icon" size="15">mdi-restore</v-icon>
+              <v-icon class="ctx-icon">mdi-restore</v-icon>
               Restore from snapshot
-              <v-icon class="ctx-arrow" size="14">mdi-chevron-right</v-icon>
+              <v-icon class="ctx-arrow">mdi-chevron-right</v-icon>
             </button>
             <div v-if="restoreSubmenuOpen" class="ctx-submenu" role="menu">
               <button
@@ -181,35 +239,41 @@
                 class="ctx-item"
                 role="menuitem"
                 :disabled="identicalSnapshotIds.has(cp.id)"
-                :title="
-                  identicalSnapshotIds.has(cp.id)
-                    ? 'Selection is identical to this snapshot'
-                    : undefined
-                "
                 @click="handleRestoreFromSnapshot(cp.id)"
               >
-                <v-icon class="ctx-icon" size="14">mdi-camera-outline</v-icon>
+                <Tooltip
+                  :text="
+                    identicalSnapshotIds.has(cp.id)
+                      ? 'Selection is identical to this snapshot'
+                      : ''
+                  "
+                  activator="parent"
+                />
+                <v-icon class="ctx-icon">mdi-camera-outline</v-icon>
                 {{ cp.label || cp.kind }}
                 <span class="ctx-default-pill">{{
                   cp.created_at ? formatSnapshotDate(cp.created_at) : ""
                 }}</span>
               </button>
               <button class="ctx-item" role="menuitem" @click="handleRestoreMore">
-                <v-icon class="ctx-icon" size="14">mdi-dots-horizontal</v-icon>
+                <v-icon class="ctx-icon">mdi-dots-horizontal</v-icon>
                 More…
               </button>
             </div>
           </div>
           <div class="ctx-sep" role="separator" />
-          <!-- 6. Delete (soft-delete → scrapheap; NOT permanent) -->
+          <!-- 7. Delete (soft-delete → scrapheap; NOT permanent) -->
           <button
             class="ctx-item ctx-item--danger"
             role="menuitem"
             :disabled="!selectedImageIds.length || isReadOnly || !!lockReason"
-            :title="lockReason || 'Move to the scrapheap'"
             @click="onAction('delete-selected')"
           >
-            <v-icon class="ctx-icon" size="15">mdi-delete</v-icon>
+            <Tooltip
+              :text="lockReason || 'Move to the scrapheap'"
+              activator="parent"
+            />
+            <v-icon class="ctx-icon">mdi-delete</v-icon>
             Delete
           </button>
         </template>
@@ -219,10 +283,13 @@
             class="ctx-item"
             role="menuitem"
             :disabled="!selectedImageIds.length || isReadOnly"
-            title="Restore this picture to the library"
             @click="onAction('remove-from-group')"
           >
-            <v-icon class="ctx-icon" size="15">mdi-backup-restore</v-icon>
+            <Tooltip
+              text="Restore this picture to the library"
+              activator="parent"
+            />
+            <v-icon class="ctx-icon">mdi-backup-restore</v-icon>
             Restore
           </button>
           <div class="ctx-sep" role="separator" />
@@ -230,10 +297,13 @@
             class="ctx-item ctx-item--danger"
             role="menuitem"
             :disabled="!selectedImageIds.length || isReadOnly"
-            title="Permanently delete - this cannot be undone"
             @click="onAction('delete-selected')"
           >
-            <v-icon class="ctx-icon" size="15">mdi-delete-forever</v-icon>
+            <Tooltip
+              text="Permanently delete - this cannot be undone"
+              activator="parent"
+            />
+            <v-icon class="ctx-icon">mdi-delete-forever</v-icon>
             Delete forever
           </button>
         </template>
@@ -245,83 +315,97 @@
       <template v-else>
       <!-- ── Set / Character / Project ─────────────────────────────── -->
       <template v-if="!isScrapheapView">
-        <AddToEntityControl
+        <Tooltip
           v-if="entityLists.canSeeProjects"
-          type="project"
-          placement="right"
-          :subject-ids="selectedImageIds"
-          :disabled="!selectedImageIds.length || !!groupingLockReason"
-          :title="groupingLockReason || undefined"
-          :readonly="isReadOnly"
-          @selected="onAction('set-project', $event)"
-        />
-        <AddToEntityControl
-          type="character"
-          placement="right"
-          allow-create
-          :subject-ids="selectedImageIds"
-          :disabled="!selectedImageIds.length || !!groupingLockReason"
-          :title="groupingLockReason || undefined"
-          :readonly="isReadOnly"
-          @added="onAction('add-to-character', $event)"
-          @removed="onAction('remove-from-character', $event)"
-          @create="delegateWith('create-character', $event)"
-        />
-        <AddToEntityControl
-          type="set"
-          placement="right"
-          :subject-ids="selectedImageIds"
-          :disabled="!selectedImageIds.length || !!groupingLockReason"
-          :title="groupingLockReason || undefined"
-          :readonly="isReadOnly"
-          :locked-set-ids="lockedSetIds"
-          @added="onAction('added-to-set', $event)"
-        />
+          :text="groupingLockReason || ''"
+        >
+          <template #activator="{ props: tipProps }">
+            <AddToEntityControl
+              v-bind="tipProps"
+              type="project"
+              placement="right"
+              :subject-ids="selectedImageIds"
+              :disabled="!selectedImageIds.length || !!groupingLockReason"
+              :readonly="isReadOnly"
+              @selected="onAction('set-project', $event)"
+            />
+          </template>
+        </Tooltip>
+        <Tooltip :text="groupingLockReason || ''">
+          <template #activator="{ props: tipProps }">
+            <AddToEntityControl
+              v-bind="tipProps"
+              type="character"
+              placement="right"
+              allow-create
+              :subject-ids="selectedImageIds"
+              :disabled="!selectedImageIds.length || !!groupingLockReason"
+              :readonly="isReadOnly"
+              @added="emit('add-to-character', $event)"
+              @removed="emit('remove-from-character', $event)"
+              @create="delegateWith('create-character', $event)"
+            />
+          </template>
+        </Tooltip>
+        <Tooltip :text="groupingLockReason || ''">
+          <template #activator="{ props: tipProps }">
+            <AddToEntityControl
+              v-bind="tipProps"
+              type="set"
+              placement="right"
+              :subject-ids="selectedImageIds"
+              :disabled="!selectedImageIds.length || !!groupingLockReason"
+              :readonly="isReadOnly"
+              :locked-set-ids="lockedSetIds"
+              @added="emit('added-to-set', $event)"
+            />
+          </template>
+        </Tooltip>
         <div class="ctx-sep" />
       </template>
 
-      <!-- ── Stack / Unstack ───────────────────────────────────────── -->
+      <!-- ── Stack ─────────────────────────────────────────────────────
+           Making stacks stays at the top level; everything that acts on a
+           stack that already exists is behind the one Edit stack ▸ row. -->
       <template v-if="!isScrapheapView">
         <button
-          v-if="showRemoveStackButton"
+          v-if="showCreateStackButton"
           class="ctx-item"
           :disabled="isReadOnly"
-          title="Remove selected images from their stack"
-          @click="onAction('remove-from-stack')"
-        >
-          <v-icon class="ctx-icon" size="15">mdi-layers-off</v-icon>
-          Unstack
-        </button>
-        <button
-          v-else-if="selectedImageIds.length > 1"
-          class="ctx-item"
-          :disabled="isReadOnly"
-          title="Create a stack from the selected images"
           @click="onAction('create-stack')"
         >
-          <v-icon class="ctx-icon" size="15">mdi-layers</v-icon>
+          <Tooltip
+            text="Create a stack from the selected images"
+            activator="parent"
+          />
+          <v-icon class="ctx-icon">mdi-layers</v-icon>
           Stack
-        </button>
-        <button
-          v-if="showUnstackMultipleButton"
-          class="ctx-item"
-          :disabled="isReadOnly"
-          title="Dissolve all selected stacks"
-          @click="onAction('dissolve-stacks')"
-        >
-          <v-icon class="ctx-icon" size="15">mdi-layers-off</v-icon>
-          Unstack all
         </button>
         <button
           v-if="showGroupStackButton"
           class="ctx-item"
           :disabled="isReadOnly"
-          title="Create stacks from selected likeness groups"
           @click="onAction('create-stacks-from-groups')"
         >
-          <v-icon class="ctx-icon" size="15">mdi-layers-plus</v-icon>
+          <Tooltip
+            text="Create stacks from selected likeness groups"
+            activator="parent"
+          />
+          <v-icon class="ctx-icon">mdi-layers-plus</v-icon>
           Stack groups
         </button>
+        <EditStackMenu
+          :target="stackEdit"
+          :read-only="isReadOnly"
+          :keep-cover-only-stack-count="keepCoverOnlyStackCount"
+          :keep-cover-only-lock-reason="keepCoverOnlyLockReason"
+          :selected-count="selectedCount"
+          @stack-move="onAction('stack-move', $event)"
+          @open-stack="onAction('open-stack')"
+          @remove-from-stack="onAction('remove-from-stack')"
+          @dissolve-stacks="onAction('dissolve-stacks')"
+          @keep-cover-only="onAction('keep-cover-only')"
+        />
         <div v-if="showAnyStackAction" class="ctx-sep" />
       </template>
 
@@ -329,11 +413,14 @@
       <template v-if="!isScrapheapView">
         <button
           class="ctx-item"
-          :title="lockReason || 'Tag selected (T)'"
           :disabled="!selectedImageIds.length || isReadOnly || !!lockReason"
           @click="delegate('open-tag-panel')"
         >
-          <v-icon class="ctx-icon" size="15">mdi-tag-plus</v-icon>
+          <Tooltip
+            :text="lockReason || 'Tag selected (T)'"
+            activator="parent"
+          />
+          <v-icon class="ctx-icon">mdi-tag-plus</v-icon>
           Tag
         </button>
         <div
@@ -344,23 +431,23 @@
         >
           <button
             class="ctx-item"
-            :title="lockReason || undefined"
             :disabled="!selectedImageIds.length || isReadOnly || !!lockReason"
           >
-            <v-icon class="ctx-icon" size="15">mdi-tag-outline</v-icon>
+            <Tooltip :text="lockReason || ''" activator="parent" />
+            <v-icon class="ctx-icon">mdi-tag-outline</v-icon>
             Tag automatically
-            <v-icon class="ctx-arrow" size="14">mdi-chevron-right</v-icon>
+            <v-icon class="ctx-arrow">mdi-chevron-right</v-icon>
           </button>
           <div v-if="autoTagSubmenuOpen" class="ctx-submenu">
             <button
               v-for="plugin in taggerPlugins"
               :key="plugin.name"
               class="ctx-item"
-              :title="lockReason || undefined"
               :disabled="!selectedImageIds.length || isReadOnly || !!lockReason"
               @click="onAction('auto-tag', { model: plugin.name })"
             >
-              <v-icon class="ctx-icon" size="15">mdi-tag-outline</v-icon>
+              <Tooltip :text="lockReason || ''" activator="parent" />
+              <v-icon class="ctx-icon">mdi-tag-outline</v-icon>
               {{ plugin.display_name || plugin.name }}
               <span v-if="plugin.default_enabled" class="ctx-default-pill"
                 >default</span
@@ -376,23 +463,23 @@
         >
           <button
             class="ctx-item"
-            :title="lockReason || undefined"
             :disabled="!selectedImageIds.length || isReadOnly || !!lockReason"
           >
-            <v-icon class="ctx-icon" size="15">mdi-text-box-outline</v-icon>
+            <Tooltip :text="lockReason || ''" activator="parent" />
+            <v-icon class="ctx-icon">mdi-text-box-outline</v-icon>
             Generate description
-            <v-icon class="ctx-arrow" size="14">mdi-chevron-right</v-icon>
+            <v-icon class="ctx-arrow">mdi-chevron-right</v-icon>
           </button>
           <div v-if="descriptionSubmenuOpen" class="ctx-submenu">
             <button
               v-for="plugin in captionerPlugins"
               :key="plugin.name"
               class="ctx-item"
-              :title="lockReason || undefined"
               :disabled="!selectedImageIds.length || isReadOnly || !!lockReason"
               @click="onAction('generate-description', { model: plugin.name })"
             >
-              <v-icon class="ctx-icon" size="15">mdi-text-box-outline</v-icon>
+              <Tooltip :text="lockReason || ''" activator="parent" />
+              <v-icon class="ctx-icon">mdi-text-box-outline</v-icon>
               {{ plugin.display_name || plugin.name }}
               <span v-if="plugin.default_enabled" class="ctx-default-pill"
                 >default</span
@@ -406,35 +493,57 @@
           :disabled="!selectedImageIds.length || isReadOnly"
           @click="delegate('open-plugin-panel')"
         >
-          <v-icon class="ctx-icon" size="15">mdi-tune-variant</v-icon>
+          <v-icon class="ctx-icon">mdi-tune-variant</v-icon>
           Filters
         </button>
+        <!-- The three run entries, mirrored word for word in SelectionMenu.vue
+             and asserted by frontend/e2e/specs/menu-parity.spec.js: all three
+             act on the SELECTION, so none is context-only. -->
         <button
           v-if="comfyuiConfigured"
           class="ctx-item"
-          title="Generate variants from this image"
-          :disabled="!contextImage || isReadOnly"
-          @click="delegateWith('open-remix-dialog', contextImage?.id)"
+          :disabled="!selectedImageIds.length || isReadOnly"
+          @click="delegate('make-more')"
         >
-          <v-icon class="ctx-icon" size="15">mdi-auto-fix</v-icon>
-          Generate variants…
+          <Tooltip
+            text="Run each picture's own recipe again, with a new seed"
+            activator="parent"
+          />
+          <v-icon class="ctx-icon">mdi-content-copy</v-icon>
+          Make more like these…
         </button>
         <button
           v-if="comfyuiConfigured"
           class="ctx-item"
           :disabled="!selectedImageIds.length || isReadOnly"
-          @click="delegate('open-comfyui-panel')"
+          @click="delegate('run-workflow')"
         >
-          <v-icon class="ctx-icon" size="15">mdi-robot</v-icon>
-          Edit with ComfyUI
+          <v-icon class="ctx-icon">mdi-sitemap-outline</v-icon>
+          Run a workflow on these…
+        </button>
+        <button
+          v-if="comfyuiConfigured"
+          class="ctx-item"
+          :disabled="!selectedImageIds.length || isReadOnly"
+          @click="delegate('edit-with-comfyui')"
+        >
+          <Tooltip
+            text="Change these pictures with a written instruction, using the Flux.2 Klein edit workflow"
+            activator="parent"
+          />
+          <v-icon class="ctx-icon">mdi-auto-fix</v-icon>
+          Edit with ComfyUI…
         </button>
         <button
           class="ctx-item"
-          title="Detect objects and store bounding boxes"
           :disabled="!selectedImageIds.length || isReadOnly"
           @click="onAction('segment')"
         >
-          <v-icon class="ctx-icon" size="15">mdi-shape-outline</v-icon>
+          <Tooltip
+            text="Detect objects and store bounding boxes"
+            activator="parent"
+          />
+          <v-icon class="ctx-icon">mdi-shape-outline</v-icon>
           Segment
         </button>
         <!-- Rotate in place: applied on click, no dialog and no confirmation.
@@ -445,19 +554,19 @@
         <button
           class="ctx-item"
           :disabled="!selectedImageIds.length || isReadOnly || !!rotateBlockReason"
-          :title="rotateLeftTitle"
           @click="onAction('rotate-left')"
         >
-          <v-icon class="ctx-icon" size="15">mdi-rotate-left</v-icon>
+          <Tooltip :text="rotateLeftTitle" activator="parent" />
+          <v-icon class="ctx-icon">mdi-rotate-left</v-icon>
           {{ rotateLeftLabel }}
         </button>
         <button
           class="ctx-item"
           :disabled="!selectedImageIds.length || isReadOnly || !!rotateBlockReason"
-          :title="rotateRightTitle"
           @click="onAction('rotate-right')"
         >
-          <v-icon class="ctx-icon" size="15">mdi-rotate-right</v-icon>
+          <Tooltip :text="rotateRightTitle" activator="parent" />
+          <v-icon class="ctx-icon">mdi-rotate-right</v-icon>
           {{ rotateRightLabel }}
         </button>
         <div class="ctx-sep" />
@@ -476,9 +585,9 @@
             class="ctx-item"
             :disabled="!selectedImageIds.length || isReadOnly"
           >
-            <v-icon class="ctx-icon" size="15">mdi-restore</v-icon>
+            <v-icon class="ctx-icon">mdi-restore</v-icon>
             Restore from snapshot
-            <v-icon class="ctx-arrow" size="14">mdi-chevron-right</v-icon>
+            <v-icon class="ctx-arrow">mdi-chevron-right</v-icon>
           </button>
           <div v-if="restoreSubmenuOpen" class="ctx-submenu">
             <button
@@ -486,21 +595,24 @@
               :key="cp.id"
               class="ctx-item"
               :disabled="identicalSnapshotIds.has(cp.id)"
-              :title="
-                identicalSnapshotIds.has(cp.id)
-                  ? 'Selection is identical to this snapshot'
-                  : undefined
-              "
               @click="handleRestoreFromSnapshot(cp.id)"
             >
-              <v-icon class="ctx-icon" size="14">mdi-camera-outline</v-icon>
+              <Tooltip
+                :text="
+                  identicalSnapshotIds.has(cp.id)
+                    ? 'Selection is identical to this snapshot'
+                    : ''
+                "
+                activator="parent"
+              />
+              <v-icon class="ctx-icon">mdi-camera-outline</v-icon>
               {{ cp.label || cp.kind }}
               <span class="ctx-default-pill">{{
                 cp.created_at ? formatSnapshotDate(cp.created_at) : ""
               }}</span>
             </button>
             <button class="ctx-item" @click="handleRestoreMore">
-              <v-icon class="ctx-icon" size="14">mdi-dots-horizontal</v-icon>
+              <v-icon class="ctx-icon">mdi-dots-horizontal</v-icon>
               More…
             </button>
           </div>
@@ -520,7 +632,6 @@
         <button
           v-if="contextClickedFace || contextImageFaces.length === 1"
           class="ctx-item"
-          title="Find pictures with similar faces"
           @click="
             onAction(
               'find-similar-faces',
@@ -528,7 +639,8 @@
             )
           "
         >
-          <v-icon class="ctx-icon" size="15">mdi-face-recognition</v-icon>
+          <Tooltip text="Find pictures with similar faces" activator="parent" />
+          <v-icon class="ctx-icon">mdi-face-recognition</v-icon>
           Find similar faces
         </button>
         <!-- Submenu to pick a face when not right-clicking on one -->
@@ -539,9 +651,9 @@
           @mouseleave="findFacesSubmenuOpen = false"
         >
           <button class="ctx-item">
-            <v-icon class="ctx-icon" size="15">mdi-face-recognition</v-icon>
+            <v-icon class="ctx-icon">mdi-face-recognition</v-icon>
             Find similar faces
-            <v-icon class="ctx-arrow" size="14">mdi-chevron-right</v-icon>
+            <v-icon class="ctx-arrow">mdi-chevron-right</v-icon>
           </button>
           <div v-if="findFacesSubmenuOpen" class="ctx-submenu ctx-face-submenu">
             <button
@@ -565,10 +677,10 @@
         <button
           class="ctx-item"
           :disabled="!selectedImageIds.length"
-          title="Find visually similar images"
           @click="onAction('reverse-image-search')"
         >
-          <v-icon class="ctx-icon" size="15">mdi-image-search-outline</v-icon>
+          <Tooltip text="Find visually similar images" activator="parent" />
+          <v-icon class="ctx-icon">mdi-image-search-outline</v-icon>
           Reverse image search
         </button>
         <div class="ctx-sep" />
@@ -581,7 +693,7 @@
           :disabled="isReadOnly"
           @click="onAction('share-picture')"
         >
-          <v-icon class="ctx-icon" size="15">mdi-link-variant</v-icon>
+          <v-icon class="ctx-icon">mdi-link-variant</v-icon>
           Share image
         </button>
         <button
@@ -590,30 +702,57 @@
           :disabled="isReadOnly"
           @click="onAction('remove-picture-shares')"
         >
-          <v-icon class="ctx-icon" size="15">mdi-link-variant-off</v-icon>
+          <v-icon class="ctx-icon">mdi-link-variant-off</v-icon>
           Remove all shares
         </button>
         <div class="ctx-sep" />
       </template>
 
-      <!-- ── Remove / Delete ───────────────────────────────────────────
-           The trailing danger group, ordered by escalating severity:
-           Keep cover only → Move to the Scrapheap → Delete forever. Keep cover
-           only is recoverable and touches only stacks; Delete moves the whole
-           selection; the scrapheap view's Delete destroys files. -->
-      <button
-        v-if="showKeepCoverOnly"
-        class="ctx-item ctx-item--danger"
-        :disabled="isReadOnly || !!keepCoverOnlyLockReason"
-        :title="
-          keepCoverOnlyLockReason ||
-          'Keep each selected stack\'s cover and move its other pictures to the Scrapheap'
-        "
-        @click="onAction('keep-cover-only')"
+      <!-- ── Move to library ───────────────────────────────────────────
+           Mirrored in SelectionMenu.vue. Absent rather than disabled with one
+           library: there is nowhere to move to and nothing to explain. -->
+      <template
+        v-if="!isReadOnly && !isScrapheapView && otherLibraries.length"
       >
-        <v-icon class="ctx-icon" size="15">{{ KEEP_COVER_ONLY_ICON }}</v-icon>
-        {{ keepCoverOnlyLabel }}
-      </button>
+        <div
+          class="ctx-submenu-wrap"
+          @mouseenter="selectedImageIds.length && (moveSubmenuOpen = true)"
+          @mouseleave="moveSubmenuOpen = false"
+        >
+          <button
+            class="ctx-item"
+            :disabled="!selectedImageIds.length"
+            aria-haspopup="true"
+            :aria-expanded="moveSubmenuOpen"
+            @click="moveSubmenuOpen = !moveSubmenuOpen"
+          >
+            <Tooltip
+              text="Copies the selection into another library and moves it to this library's Scrapheap. Tags, score and description go with it; people, sets, projects and stacks do not."
+              activator="parent"
+            />
+            <v-icon class="ctx-icon">mdi-folder-move-outline</v-icon>
+            Move to library
+            <v-icon class="ctx-arrow">mdi-chevron-right</v-icon>
+          </button>
+          <div v-if="moveSubmenuOpen" class="ctx-submenu">
+            <button
+              v-for="library in otherLibraries"
+              :key="library.uuid"
+              class="ctx-item"
+              :disabled="!selectedImageIds.length"
+              @click="onAction('move-to-library', library)"
+            >
+              <v-icon class="ctx-icon">mdi-image-multiple-outline</v-icon>
+              {{ library.name }}
+            </button>
+          </div>
+        </div>
+        <div class="ctx-sep" />
+      </template>
+
+      <!-- ── Remove / Delete ───────────────────────────────────────────
+           The trailing danger group. Keep cover only lives under Edit stack ▸,
+           next to the other actions on a stack. -->
       <button
         v-if="showRemoveButton"
         class="ctx-item ctx-item--danger"
@@ -625,10 +764,13 @@
       <button
         class="ctx-item ctx-item--danger"
         :disabled="!selectedImageIds.length || isReadOnly || !!lockReason"
-        :title="lockReason || 'Delete selected items (DEL)'"
         @click="onAction('delete-selected')"
       >
-        <v-icon class="ctx-icon" size="15">mdi-delete</v-icon>
+        <Tooltip
+          :text="lockReason || 'Delete selected items (DEL)'"
+          activator="parent"
+        />
+        <v-icon class="ctx-icon">mdi-delete</v-icon>
         {{ deleteButtonLabel }}
       </button>
       </template>
@@ -650,14 +792,13 @@ import { hashCompareSnapshot } from "../../api/snapshots";
 import { getCharacterName } from "../../api/characters";
 import { faceBoxColor } from "../../utils/utils.js";
 import { isApplePlatform } from "../../utils/shortcutHints.js";
-import {
-  KEEP_COVER_ONLY_ICON,
-  keepCoverOnlyMenuLabel,
-} from "../../utils/keepCoverOnly";
 import { ROTATE_CCW, ROTATE_CW, rotateMenuLabel } from "../../utils/rotate";
 import { useSnapshotsStore } from "../../stores/useSnapshotsStore";
 import { useEntityListsStore } from "../../stores/useEntityListsStore";
+import { useLibrariesStore } from "../../stores/useLibrariesStore";
 import AddToEntityControl from "./AddToEntityControl.vue";
+import EditStackMenu from "./EditStackMenu.vue";
+import Tooltip from "./Tooltip.vue";
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -674,8 +815,9 @@ const props = defineProps({
   scrapheapPicturesId: { type: String, required: true },
   backendUrl: { type: String, default: () => API_BASE_URL },
   comfyuiConfigured: { type: Boolean, default: false },
-  showRemoveFromStack: { type: Boolean, default: false },
-  selectedMultipleStackIds: { type: Array, default: () => [] },
+  // What the selection is as far as stacks go (see EditStackMenu's `target`),
+  // or null when it names no stack and there is no Edit stack row.
+  stackEdit: { type: Object, default: null },
   // How many collapsible stacks the selection names. The unit of Keep cover
   // only is the stack, so the item is offered only when the selection names at
   // least one, and its label counts stacks rather than echoing the tile count.
@@ -751,15 +893,20 @@ const emit = defineEmits([
   "set-project",
   "remove-from-stack",
   "dissolve-stacks",
+  "stack-move",
+  "open-stack",
   "create-stack",
   "create-stacks-from-groups",
   "remove-from-group",
   "keep-cover-only",
   "delete-selected",
+  "move-to-library",
   "open-tag-panel",
   "open-plugin-panel",
-  "open-comfyui-panel",
-  "open-remix-dialog",
+  "make-more",
+  "run-workflow",
+  "edit-with-comfyui",
+  "use-as-input",
   "segment",
   "auto-tag",
   "generate-description",
@@ -778,10 +925,12 @@ const menuRef = ref(null);
 const adjustedX = ref(props.x);
 const adjustedY = ref(props.y);
 const submenusFlip = ref(false);
+const tooltipSide = ref("top");
 const autoTagSubmenuOpen = ref(false);
 const descriptionSubmenuOpen = ref(false);
 const findFacesSubmenuOpen = ref(false);
 const restoreSubmenuOpen = ref(false);
+const moveSubmenuOpen = ref(false);
 const identicalSnapshotIds = ref(new Set());
 
 // Run token guards against rapid submenu toggles: when the watcher fires
@@ -825,6 +974,19 @@ const snapshotsStore = useSnapshotsStore();
 // so the Project row would open a flyout that lists nothing and POSTs a
 // membership read the server 403s. Omit the row instead of offering a dead one.
 const entityLists = useEntityListsStore();
+// Where the selection can be moved to: every library but the open one that is
+// on a drive that is plugged in. Empty for a share or read-only session, which
+// never loads the registry.
+const librariesStore = useLibrariesStore();
+const otherLibraries = computed(() =>
+  // `canManage` is the server's own answer to "is this session on the tier the
+  // library routes need", and the move is on that tier.
+  librariesStore.canManage
+    ? librariesStore.libraries.filter(
+        (library) => !library.is_active && library.is_reachable,
+      )
+    : [],
+);
 const recentSnapshots = computed(() =>
   snapshotsStore.snapshots.filter((cp) => cp.is_compatible).slice(0, 5),
 );
@@ -959,6 +1121,17 @@ async function clampPosition() {
   );
   // Flip submenus leftward when there is not enough room to the right for a ~185px submenu
   submenusFlip.value = newX + rect.width + 185 > window.innerWidth - 8;
+  // Row tips open on the left, away from right-opening sub-menus, when a
+  // widest tip fits there. Otherwise above the row: a sub-menu starts level
+  // with its row's top, so a tip above covers neither. The right side never
+  // works: sub-menus flip left exactly when it has no room.
+  const tipWidth = parseFloat(
+    getComputedStyle(document.documentElement).getPropertyValue(
+      "--tooltip-max-w",
+    ),
+  );
+  tooltipSide.value =
+    !submenusFlip.value && newX >= tipWidth + 16 ? "start" : "top";
 }
 
 // Element focused before the menu opened, so Escape / an action can return
@@ -967,16 +1140,19 @@ async function clampPosition() {
 // mouse-driven, focus-neutral behaviour).
 let previouslyFocused = null;
 
-// The Project / Person / Set triggers are `.ate-btn`, not `.ctx-item`. Left out
-// of this selector they were unreachable by arrow keys, which made assignment a
-// pointer-only action in the grid (#759).
+// The Project / Person / Set triggers are `.ate-btn` (in this flyout placement
+// also `.ctx-item`). Left out of this selector they were unreachable by arrow
+// keys, which made assignment a pointer-only action in the grid (#759).
 const MENU_ITEM_SELECTOR =
   ".ctx-item:not([disabled]), .ate-btn:not([disabled])";
 
-// A trigger's own flyout holds `.ate-item` buttons, never `.ate-btn`, so nothing
-// inside an open flyout can leak into this outer roving order.
+// A trigger's own flyout rows are `.ctx-item` as well (one row design), and the
+// flyout stays in the DOM while closed, so its rows are dropped here or they
+// would leak into this outer roving order.
 function menuItems() {
-  return Array.from(menuRef.value?.querySelectorAll(MENU_ITEM_SELECTOR) || []);
+  return Array.from(
+    menuRef.value?.querySelectorAll(MENU_ITEM_SELECTOR) || [],
+  ).filter((el) => !el.closest(".ate-menu"));
 }
 
 function focusFirstItem() {
@@ -1001,6 +1177,7 @@ watch(
       descriptionSubmenuOpen.value = false;
       findFacesSubmenuOpen.value = false;
       restoreSubmenuOpen.value = false;
+      moveSubmenuOpen.value = false;
       if (props.overlayMode && previouslyFocused) {
         try {
           previouslyFocused.focus();
@@ -1085,6 +1262,18 @@ async function onMenuKeydown(event) {
   event.stopPropagation();
 }
 
+// The Set and Person flyouts keep this menu open across toggles (#1262), but
+// the grid may answer one by dropping the pictures from view and clearing the
+// selection (Unassigned view, the person's own view, a set being viewed). A
+// menu over a selection that changed while it was open is stale, so close it.
+// Only while it stays visible: opening the menu changes the selection too.
+watch(
+  [() => props.visible, () => (props.selectedImageIds || []).join(",")],
+  ([visible, ids], [wasVisible, oldIds]) => {
+    if (visible && wasVisible && ids !== oldIds) emit("close");
+  },
+);
+
 watch([() => props.x, () => props.y], () => {
   adjustedX.value = props.x;
   adjustedY.value = props.y;
@@ -1122,15 +1311,11 @@ const deleteButtonLabel = computed(() =>
   isScrapheapView.value ? "Permanently delete" : "Delete",
 );
 
-const showRemoveStackButton = computed(
-  () => !isScrapheapView.value && props.showRemoveFromStack === true,
-);
-
-const showUnstackMultipleButton = computed(
+// A selection that is all one stack is edited, not stacked again.
+const showCreateStackButton = computed(
   () =>
-    !isScrapheapView.value &&
-    !showRemoveStackButton.value &&
-    props.selectedMultipleStackIds.length > 0,
+    selectedCount.value > 1 &&
+    !(props.stackEdit && props.stackEdit.kind !== "stacks"),
 );
 
 const showGroupStackButton = computed(
@@ -1138,21 +1323,6 @@ const showGroupStackButton = computed(
     !isScrapheapView.value &&
     selectedCount.value > 0 &&
     props.selectedSort === "LIKENESS_GROUPS",
-);
-
-// Offered only when the selection actually names a stack. Rendering it disabled
-// over a selection of loose pictures would advertise an action whose unit the
-// user has no way to satisfy from here; the stack actions above are gated the
-// same way.
-const showKeepCoverOnly = computed(
-  () => !isScrapheapView.value && props.keepCoverOnlyStackCount > 0,
-);
-
-const keepCoverOnlyLabel = computed(() =>
-  keepCoverOnlyMenuLabel({
-    stackCount: props.keepCoverOnlyStackCount,
-    selectedCount: selectedCount.value,
-  }),
 );
 
 const rotateLeftLabel = computed(() =>
@@ -1172,10 +1342,10 @@ const rotateRightTitle = computed(
 
 const showAnyStackAction = computed(
   () =>
-    showRemoveStackButton.value ||
-    (!isScrapheapView.value && selectedCount.value > 1) ||
-    showUnstackMultipleButton.value ||
-    showGroupStackButton.value,
+    !isScrapheapView.value &&
+    (showCreateStackButton.value ||
+      showGroupStackButton.value ||
+      !!props.stackEdit),
 );
 
 const pluginOptions = computed(() => {
@@ -1253,36 +1423,19 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+/* Surface and rows come from styles/context-menu.css (`.ctx-menu`); this only
+   places the teleported menu. */
 .image-ctx-menu {
   position: fixed;
   z-index: var(--z-overlay);
-  background: rgb(var(--v-theme-surface));
-  border: 1px solid rgba(var(--v-theme-on-surface), 0.14);
-  border-radius: var(--radius-md);
-  box-shadow: var(--elevation-3);
-  padding: var(--space-2) 0;
   min-width: 185px;
   max-width: 260px;
   user-select: none;
   outline: none;
 }
 
-/* Dark-surface skin used when the menu is invoked from the lightbox, which
-   sits on a dark backdrop in both themes. Item/separator overrides live in the
-   global styles/context-menu.css because the teleported node carries the plain
-   .ctx-* classes and this modifier as a global ancestor. */
-.image-ctx-menu--on-dark {
-  background: rgb(var(--v-theme-dark-surface));
-  border-color: rgba(var(--v-theme-on-dark-surface), 0.14);
-}
-
 .ctx-face-submenu {
   min-width: 160px;
-}
-
-.ctx-face-item {
-  gap: var(--space-3);
-  align-items: center;
 }
 
 .ctx-face-thumb {

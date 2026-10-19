@@ -8,6 +8,16 @@ Both callers go through :func:`purge_scrapheap_pictures`:
 2. the scheduled auto-purge (``ScrapheapRetentionPurgeTask``), which *always*
    passes ``include_protected=False``.
 
+**The hub reach is a step inside it, not a sibling** (implementation plan §B4).
+``deleted_file_log`` lives in the vault and ghosts live in the hub, so a purge
+that did not cross would leave a destroyed picture's thumbnail and prompt behind
+— a privacy defect, not a missing feature. :func:`purge_scrapheap_pictures`
+therefore calls
+:func:`~pixlstash.services.workflow_ghost_service.apply_purge_to_hub` between
+deleting the rows and removing the files, and everything that step destroys
+belongs to a picture this same call just destroyed or to an instance hash it just
+left uncovered.
+
 There is deliberately **no second destruction path**: the retention timer reuses
 the existing skip-protected branch, so a protected reference-folder original
 (``ReferenceFolder.allow_delete_file=False``) can only ever be destroyed by an
@@ -105,6 +115,13 @@ from pixlstash.database import DBPriority
 from pixlstash.db_models import Character, DeletedFileLog, Picture, ReferenceFolder
 from pixlstash.pixl_logging import get_logger
 from pixlstash.services.set_lock_service import locked_picture_ids
+from pixlstash.services.workflow_ghost_service import (
+    GhostPurgeContext,
+    apply_purge_to_hub,
+    collect_ghost_candidates_in_session,
+    enqueue_ghost_cascade_in_session,
+    surviving_instance_hashes_in_session,
+)
 from pixlstash.utils.image_processing.image_utils import ImageUtils
 from pixlstash.utils.path_utils import LibraryRootsUnavailable, path_is_within
 from pixlstash.utils.service.scope_table import scope_id_subquery
@@ -201,6 +218,12 @@ class ScrapheapPurgeOutcome:
     # are untouched - the caller drops their file removals on the strength of
     # this list.
     skipped_restored: list[int] = field(default_factory=list)
+    # The hub reach (§B4). How many picture ghosts this purge RETAINED under the
+    # user's ghost-retention setting, and how many it destroyed because the last
+    # picture covering their instance hash has just gone (the covered-ghost
+    # cascade). Both 0 for a vault with no hub attached.
+    ghosts_kept: int = 0
+    ghosts_cascaded: int = 0
 
 
 @dataclass(frozen=True)
@@ -252,27 +275,17 @@ class RetentionGuard:
 def _as_utc(value: Optional[datetime]) -> Optional[datetime]:
     """Normalise a possibly-naive datetime to an aware UTC datetime.
 
-    SQLite round-trips ``DateTime`` columns as naive values; the retention maths
-    compares them against ``datetime.now(timezone.utc)``, so a naive value is
-    interpreted as UTC (which is how every writer in this codebase stores it).
+    Database columns come back aware (``UTCDateTime``), but a caller may still
+    hand in a naive value (an operation-log record, a test); the retention maths
+    compares against ``datetime.now(timezone.utc)``, so a naive value is
+    interpreted as UTC (how the columns store it; rows once written in local
+    time, such as early watch-folder ``imported_at`` stamps, are read as UTC too).
     """
     if value is None:
         return None
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
-
-
-def _naive_utc(value: datetime) -> datetime:
-    """Drop the tzinfo from an aware UTC datetime for a SQL bind parameter.
-
-    SQLAlchemy's SQLite ``DateTime`` stores naive strings (the offset is dropped
-    on write), so every ``picture.deleted_at`` in the DB is naive UTC. Comparing
-    a column against an AWARE bind parameter would render a differently-shaped
-    literal and silently match nothing.
-    """
-    aware = _as_utc(value)
-    return aware.replace(tzinfo=None)
 
 
 def retention_rank(days: Optional[int]) -> float:
@@ -715,9 +728,9 @@ def _due_candidate_rows_in_session(
     across the whole batch, so paginating on the timestamp alone would skip or
     repeat rows inside such a group.
 
-    ``cutoff`` must be NAIVE UTC: SQLAlchemy's SQLite ``DateTime`` drops the
-    offset on write, so every stored ``deleted_at`` is naive and an aware bind
-    parameter would compare against a differently-formatted string.
+    ``cutoff`` must be aware: ``Picture.deleted_at`` is a ``UTCDateTime``
+    column, which converts the bind parameter to the stored naive-UTC form and
+    refuses a naive one.
     """
     query = select(
         Picture.id,
@@ -855,7 +868,7 @@ def find_due_retention_picture_ids_in_session(
         )
         due.append(int(row.id))
 
-    _scan_due_rows_in_session(session, _naive_utc(cutoff), limit, _record)
+    _scan_due_rows_in_session(session, _as_utc(cutoff), limit, _record)
     return due
 
 
@@ -898,7 +911,7 @@ def retention_impact_in_session(
         nonlocal count
         count += 1
 
-    _scan_due_rows_in_session(session, _naive_utc(cutoff), None, _count)
+    _scan_due_rows_in_session(session, _as_utc(cutoff), None, _count)
     return {
         "would_purge_count": count,
         "first_purge_at": first_purge_at.isoformat() if count else None,
@@ -1024,12 +1037,24 @@ def plan_and_purge_in_session(
     rolling the batch back if the two ever disagree. Read that docstring for the
     precise limits of the guarantee before relying on it.
 
+    It also takes the two reads the hub step needs, for the same reason: the
+    ghost material only exists while the rows do, and "is this instance still
+    covered" is only true once the DELETE has committed. Doing either outside
+    this submission would reintroduce the gap the rest of this function closes.
+
     Returns:
-        ``(plan, deleted_count, owned_path_shas, skipped_restored_ids)``.
+        ``(plan, deleted_count, owned_path_shas, skipped_restored_ids,
+        ghost_context)``.
     """
     rows = fetch_scrapheap_rows_in_session(session, ids)
     if not rows:
-        return ScrapheapPurgePlan(), 0, set(), set()
+        return (
+            ScrapheapPurgePlan(),
+            0,
+            set(),
+            set(),
+            GhostPurgeContext(candidates=[], surviving_instance_hashes=set()),
+        )
     no_delete_folder_ids = fetch_no_delete_folder_ids_in_session(session)
     # Unconditional: a locked picture-set freezes its members against EVERY
     # destruction path, manual delete-forever included. Looked up through the one
@@ -1040,10 +1065,24 @@ def plan_and_purge_in_session(
     plan = build_purge_plan(
         rows, no_delete_folder_ids, locked_ids, include_protected, retention_guard
     )
+    # Before the DELETE: the prompt, the hashes and the paths live on the rows
+    # that are about to stop existing.
+    candidates = collect_ghost_candidates_in_session(session, plan.picture_ids)
     deleted_count, owned_path_shas, skipped_restored = purge_rows_in_session(
         session, plan.picture_ids, plan.log_records
     )
-    return plan, deleted_count, owned_path_shas, skipped_restored
+    # After it, and only after it: a picture being destroyed must not be read as
+    # its own cover.
+    surviving = surviving_instance_hashes_in_session(
+        session, sorted({candidate.instance_hash for candidate in candidates})
+    )
+    return (
+        plan,
+        deleted_count,
+        owned_path_shas,
+        skipped_restored,
+        GhostPurgeContext(candidates=candidates, surviving_instance_hashes=surviving),
+    )
 
 
 def classify_delete_preview(
@@ -1623,12 +1662,14 @@ def purge_scrapheap_pictures(
     # DB-queue submission (see plan_and_purge_in_session): writes are serialised
     # on a single worker thread, so splitting them let a concurrent restore land
     # in the gap and turned the delete-by-id into a hard delete of live rows.
-    plan, deleted_count, owned_path_shas, skipped_restored = vault.db.run_task(
-        plan_and_purge_in_session,
-        ids,
-        include_protected,
-        retention_guard,
-        priority=DBPriority.IMMEDIATE,
+    plan, deleted_count, owned_path_shas, skipped_restored, ghost_context = (
+        vault.db.run_task(
+            plan_and_purge_in_session,
+            ids,
+            include_protected,
+            retention_guard,
+            priority=DBPriority.IMMEDIATE,
+        )
     )
     # Rows + ledger first, files second: a crash between the two leaves orphaned
     # files that MissingFilePurgeFinder/the reference scan already handle, while
@@ -1658,6 +1699,41 @@ def purge_scrapheap_pictures(
             continue
         removal_targets.append(target)
     purged_ids = [pid for pid in plan.picture_ids if pid not in skipped_restored]
+    # The hub reach (§B4). It runs HERE — after the rows are gone and before the
+    # files are removed — because a retained ghost copies the thumbnail off disk,
+    # and because a `deleted_file_log` entry in the vault says nothing about a
+    # ghost in the hub. It is a STEP INSIDE this function, never a second
+    # destruction path: everything it destroys belongs to a picture this call
+    # just destroyed, or to an instance hash that call left uncovered.
+    #
+    # File I/O, so it is off the DB worker thread on purpose.
+    ghosts_kept, ghosts_cascaded = apply_purge_to_hub(
+        vault.hub,
+        vault.library_uuid,
+        vault.image_root,
+        vault.ghost_retention,
+        ghost_context,
+        set(purged_ids),
+        recheck_surviving=lambda hashes: vault.db.run_task(
+            surviving_instance_hashes_in_session,
+            sorted(hashes),
+            priority=DBPriority.IMMEDIATE,
+        ),
+    )
+    if ghosts_kept:
+        # The DELETE above already queued these hashes, but a drain may have
+        # settled them before the ghosts were written, and another path may have
+        # removed their cover since the recheck. Queue them again so the cascade
+        # looks once more with the ghosts in place.
+        purged = set(purged_ids)
+        vault.db.run_task(
+            enqueue_ghost_cascade_in_session,
+            [
+                candidate.instance_hash
+                for candidate in ghost_context.candidates
+                if candidate.picture_id in purged
+            ],
+        )
     # Always the removal+reconcile pair, never the bare removal: the ledger rows
     # were committed above and assert file_removed=True, which stays a PREDICTION
     # until the files are actually gone. ``owned_path_shas`` scopes any later
@@ -1692,4 +1768,6 @@ def purge_scrapheap_pictures(
         retained_count=plan.retained_count,
         purged_ids=purged_ids,
         skipped_restored=sorted(skipped_restored),
+        ghosts_kept=ghosts_kept,
+        ghosts_cascaded=ghosts_cascaded,
     )

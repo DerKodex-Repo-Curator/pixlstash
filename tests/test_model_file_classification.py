@@ -19,16 +19,25 @@ import pytest
 from pixlstash.utils.adapter_header import (
     FILE_ADAPTER,
     FILE_CHECKPOINT,
+    FILE_CONTROLNET,
     FILE_TEXT_ENCODER,
     FILE_UNKNOWN,
+    FILE_UPSCALER,
     FILE_VAE,
     KIND_UNKNOWN,
     classify_model_file,
     count_parameters,
     describe_adapter,
     has_adapter_markers,
+    has_controlnet_markers,
+    has_vae_markers,
 )
-from pixlstash.utils.model_utils import clean_asset_name, derive_model_name
+from pixlstash.utils.model_utils import (
+    canonical_quant,
+    clean_asset_name,
+    derive_model_name,
+    quant_from_filename,
+)
 
 
 def _write_safetensors(path, tensors, metadata=None):
@@ -116,11 +125,124 @@ class TestFileClassification:
     def test_an_empty_file_is_unknown(self):
         assert classify_model_file([], param_count=0) == FILE_UNKNOWN
 
+    @pytest.mark.parametrize(
+        "tensor",
+        [
+            "controlnet_blocks.0.weight",  # SD3.5, Flux
+            "controlnet_x_embedder.weight",  # Flux
+            "controlnet_down_blocks.0.weight",  # diffusers SD, SDXL
+            "controlnet_cond_embedding.conv_in.weight",
+            "control_model.input_hint_block.0.weight",  # the original layout
+            "control_model.zero_convs.0.0.weight",
+        ],
+    )
+    def test_controlnet_tensors_beat_the_folder(self, tensor):
+        # Launchers file the big ones under `diffusion_models/`, which names a
+        # checkpoint; the tensors say what the file is.
+        assert (
+            classify_model_file(
+                [tensor], 2_200_000_000, "/home/me/DiffusionModels/cn.safetensors"
+            )
+            == FILE_CONTROLNET
+        )
+
+    @pytest.mark.parametrize(
+        "conv_in",
+        [
+            [512, 4, 3, 3],  # SD 1.5 / SDXL
+            [512, 16, 3, 3],  # FLUX / SD 3.5
+            [512, 16, 3, 3, 3],  # SeedVR2's 3D VAE
+        ],
+    )
+    def test_both_halves_of_an_autoencoder_make_a_vae_in_any_folder(
+        self, conv_in, tmp_path
+    ):
+        # A VAE downloaded into a flat folder: the folder says nothing, and the
+        # parameter count is far below a checkpoint's.
+        folder = tmp_path / "Downloads"
+        folder.mkdir()
+        path = _write_safetensors(
+            folder / "vae.safetensors",
+            {
+                "encoder.conv_in.weight": _tensor([128, 3, *conv_in[2:]]),
+                "decoder.conv_in.weight": _tensor(conv_in),
+            },
+        )
+        info = describe_adapter(path)
+        assert info is not None
+        assert info.file_kind == FILE_VAE
+
+    @pytest.mark.parametrize(
+        "names",
+        [
+            ["decoder.conv_in.weight"],  # one half only
+            [
+                "first_stage_model.encoder.conv_in.weight",  # baked into a checkpoint
+                "first_stage_model.decoder.conv_in.weight",
+            ],
+        ],
+    )
+    def test_anything_less_than_a_whole_top_level_vae_is_not_one(self, names):
+        assert not has_vae_markers(names)
+        assert classify_model_file(names, 40_000_000) == FILE_UNKNOWN
+
+    @pytest.mark.parametrize(
+        "header",
+        [
+            # flan-t5-xxl / t5xxl, encoder only: 4.9 B parameters
+            {"encoder.embed_tokens.weight": _tensor([32128, 4096])},
+            {"shared.weight": _tensor([256384, 4096])},  # umt5_xxl
+            {"text_model.embeddings.token_embedding.weight": _tensor([49408, 768])},
+            # Qwen 2.5-VL 7B, as Qwen-Image loads it
+            {"model.embed_tokens.weight": _tensor([152064, 3584])},
+        ],
+    )
+    def test_a_token_table_makes_a_text_encoder_at_checkpoint_scale(
+        self, header, tmp_path
+    ):
+        # A text encoder downloaded into a flat folder: the folder says
+        # nothing, and a T5's parameter count clears the checkpoint threshold.
+        folder = tmp_path / "Downloads"
+        folder.mkdir()
+        path = _write_safetensors(folder / "encoder.safetensors", header)
+        assert (
+            classify_model_file(list(header), 4_900_000_000, path, header)
+            == FILE_TEXT_ENCODER
+        )
+        info = describe_adapter(path)
+        assert info is not None
+        assert info.file_kind == FILE_TEXT_ENCODER
+
+    @pytest.mark.parametrize(
+        "table",
+        [
+            # SD3.5 bakes its T5 in under `text_encoders.`
+            ("text_encoders.t5xxl.transformer.shared.weight", [32128, 4096]),
+            # Lumina 2 bakes its Gemma in the same way
+            ("text_encoders.gemma2_2b.model.embed_tokens.weight", [256000, 2304]),
+        ],
+    )
+    def test_a_token_table_under_a_prefix_is_a_checkpoints_own(self, table):
+        header = {table[0]: _tensor(table[1])}
+        assert classify_model_file(list(header), 8_000_000_000, "", header) == (
+            FILE_CHECKPOINT
+        )
+
+    def test_a_checkpoint_is_not_a_controlnet(self):
+        names = [
+            "model.diffusion_model.input_blocks.0.0.weight",
+            "model.diffusion_model.joint_blocks.0.x_block.attn.qkv.weight",
+            "transformer_blocks.0.attn.to_q.weight",
+        ]
+        assert not has_controlnet_markers(names)
+        assert classify_model_file(names, 2_600_000_000) == FILE_CHECKPOINT
+
 
 class TestTheFolderNamesTheRole:
-    """The support kinds, which no header signal can assert.
+    """The support kinds, where no header signal asserts them.
 
-    A VAE and a text encoder carry no marker, and their parameter counts land on
+    A text encoder carries no marker, nor does a VAE of a layout the VAE
+    markers do not know, and their parameter counts land on
     both sides of the checkpoint threshold - a CLIP-L below it, a T5-XXL well
     above. The directory is what actually knows, because ComfyUI and the
     launchers that front it file models by role.
@@ -170,6 +292,41 @@ class TestTheFolderNamesTheRole:
                 path="/ComfyUI/models/clip/clip_l.safetensors",
             )
             == FILE_TEXT_ENCODER
+        )
+
+    @pytest.mark.parametrize("folder", ["unet", "UNets", "diffusion_models"])
+    def test_a_diffusion_model_folder_names_a_checkpoint_with_no_count(self, folder):
+        # A `.gguf` has no header read, so no parameter count: the folder is
+        # the only evidence, and without it the file read as `unknown` (#1607).
+        assert (
+            classify_model_file((), 0, path=f"/models/{folder}/Flux1-Dev-Q4_K_M.gguf")
+            == FILE_CHECKPOINT
+        )
+
+    @pytest.mark.parametrize("params", [361_000_000, 2_500_000_000])
+    @pytest.mark.parametrize("folder", ["controlnet", "ControlNet", "controlnets"])
+    def test_a_controlnet_folder_names_a_controlnet_of_any_size(self, folder, params):
+        # An SD 1.5 ControlNet sits below the checkpoint threshold and an SDXL
+        # one above it; filed as `checkpoint`, the shelf's hash routes refuse
+        # it and the PixlStash ControlNet Loader cannot fetch it.
+        assert (
+            classify_model_file(
+                ["control_model.input_blocks.0.0.weight"],
+                param_count=params,
+                path=f"/models/{folder}/canny.safetensors",
+            )
+            == FILE_CONTROLNET
+        )
+
+    @pytest.mark.parametrize(
+        "folder", ["upscale_models", "ESRGAN", "RealESRGAN", "SwinIR"]
+    )
+    def test_an_upscaler_folder_names_an_upscaler(self, folder):
+        # ComfyUI's layout and A1111's. A `.pth` has no header, so the folder
+        # is all there is.
+        assert (
+            classify_model_file((), 0, path=f"/models/{folder}/4x-UltraSharp.pth")
+            == FILE_UPSCALER
         )
 
     def test_markers_still_win_over_the_folder(self):
@@ -327,3 +484,121 @@ class TestDerivedName:
         assert clean_asset_name("JimmyVehicle_000002750.safetensors") == (
             "JimmyVehicle 000002750"
         )
+
+
+# (filename, the name a row shows, the canonical quant id or None).
+#
+# **One table, two assertions**: `derive_model_name` and `quant_from_filename`
+# run the same parser, so a vocabulary entry that strips a token without
+# badging it - or badges one it did not strip - fails here rather than on
+# somebody's shelf. Mirrored case for case in
+# `frontend/src/utils/modelShelf.test.js`, which is what the parity guarantee
+# between the two halves means.
+QUANT_VOCABULARY = [
+    # The float families, in both spellings each source writes them in.
+    ("model_fp32.safetensors", "model", "fp32"),
+    ("model_f32.safetensors", "model", "fp32"),
+    ("model_fp16.safetensors", "model", "fp16"),
+    ("z_image_turbo_bf16.safetensors", "z image turbo", "bf16"),
+    ("t5xxl_fp8_e4m3fn.safetensors", "t5xxl", "fp8_e4m3"),
+    ("clip_l_fp8_e5m2.safetensors", "clip l", "fp8_e5m2"),
+    ("model_fp8.safetensors", "model", "fp8"),
+    ("flux_nvfp4_awq.safetensors", "flux", "nvfp4"),
+    ("model_nf4.safetensors", "model", "nf4"),
+    ("model_int8.safetensors", "model", "int8"),
+    ("model_i4.safetensors", "model", "int4"),
+    # GGUF: the level IS the name, so it is kept whole and lowercased.
+    ("flux1-dev-Q4_K_M.gguf", "flux1 dev", "q4_k_m"),
+    ("Qwen_Image-Q6_K.gguf", "Qwen Image", "q6_k"),
+    ("flux_q8_0.gguf", "flux", "q8_0"),
+    # The I-quant family, which is most of what city96 publishes for Flux and
+    # Qwen-Image - i.e. the image-model GGUF this feature is actually for.
+    ("flux1-dev-IQ4_XS.gguf", "flux1 dev", "iq4_xs"),
+    ("flux1-dev-IQ3_M.gguf", "flux1 dev", "iq3_m"),
+    ("Qwen-Image-IQ2_XXS.gguf", "Qwen Image", "iq2_xxs"),
+    ("Qwen_Image-Q3_K_XL.gguf", "Qwen Image", "q3_k_xl"),
+    ("flux_iq4_nl.gguf", "flux", "iq4_nl"),
+    # Newer llama.cpp GGUF types use a TQ head or one unsegmented FP4 token.
+    ("model-TQ1_0.gguf", "model", "tq1_0"),
+    ("model-TQ2_0.gguf", "model", "tq2_0"),
+    ("model-MXFP4.gguf", "model", "mxfp4"),
+    # A modifier next to a real quant token goes with it.
+    ("umt5_xxl_fp8_e4m3fn_scaled.safetensors", "umt5 xxl", "fp8_e4m3"),
+    # Quant first, then training: real names put the quant last.
+    ("model-step00004500-fp16.safetensors", "model", "fp16"),
+    # Mixed case, because every shelf fixture in this repo is lowercase and a
+    # case-folding bug in the lookup would otherwise pass the whole suite.
+    ("Flux1-Dev-FP8_E4M3FN.safetensors", "Flux1 Dev", "fp8_e4m3"),
+    ("Clementine_BF16.safetensors", "Clementine", "bf16"),
+]
+
+# Names that must come back untouched. `scaled`, `fast`, `m`, `l`, `1` and `0`
+# are ordinary tokens in real model names, and this is the guard that keeps
+# them: a modifier may only be eaten when a genuine quant token is eaten with
+# it, and a GGUF level only as the tail of an explicit `q<n>` head.
+QUANT_NON_VOCABULARY = [
+    ("some_model_scaled.safetensors", "some model scaled"),
+    ("clementine_fast.safetensors", "clementine fast"),
+    ("clementine_m.safetensors", "clementine m"),
+    ("sdxl_1.safetensors", "sdxl 1"),
+    ("sd_xl_base_1.0.safetensors", "sd xl base 1.0"),
+    ("portrait_mix_v2.safetensors", "portrait mix v2"),
+    # A GGUF level only ever matches as the tail of an explicit `q<n>` or
+    # `iq<n>` head, so `xl` in a real name survives - and `XL` is in a great
+    # many of them.
+    ("juggernaut_xl_v9.safetensors", "juggernaut xl v9"),
+    ("Anything-XL.safetensors", "Anything XL"),
+]
+
+
+class TestQuantPostfix:
+    """The precision in a filename: stripped from the name, kept as a fact."""
+
+    @pytest.mark.parametrize("filename,name,quant", QUANT_VOCABULARY)
+    def test_the_name_loses_the_postfix(self, filename, name, quant):
+        assert derive_model_name(filename) == name
+
+    @pytest.mark.parametrize("filename,name,quant", QUANT_VOCABULARY)
+    def test_the_postfix_is_recovered_as_a_fact(self, filename, name, quant):
+        assert quant_from_filename(filename) == quant
+
+    @pytest.mark.parametrize("filename,name", QUANT_NON_VOCABULARY)
+    def test_a_modifier_alone_is_part_of_the_name(self, filename, name):
+        # Without the "at least one real quant token" guard,
+        # `some_model_scaled` silently becomes `some model`.
+        assert derive_model_name(filename) == name
+        assert quant_from_filename(filename) is None
+
+    def test_a_name_that_is_only_a_quant_derives_to_empty(self):
+        # The caller decides what to show; the shelf falls back to the
+        # filename and marks the row as carrying the file's own name.
+        assert derive_model_name("nvfp4_awq.safetensors") == ""
+        assert quant_from_filename("nvfp4_awq.safetensors") == "nvfp4"
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            # The header's dtype spellings, which are what `quant_from_header`
+            # returns. One vocabulary, or one card reads `f16` where the next
+            # reads `FP16` for the same precision.
+            ("f32", "fp32"),
+            ("f16", "fp16"),
+            ("bf16", "bf16"),
+            ("f8_e4m3", "fp8_e4m3"),
+            ("f8_e4m3fn", "fp8_e4m3"),
+            ("f8_e5m2", "fp8_e5m2"),
+            ("i32", "int32"),
+            ("i8", "int8"),
+            ("u8", "uint8"),
+            ("F8_E4M3", "fp8_e4m3"),
+            # A real header answer, and not a failure: no dtype has a majority.
+            ("mixed", "mixed"),
+            # Never seen here, shown verbatim rather than swallowed.
+            ("f64", "f64"),
+            (None, None),
+            ("", None),
+            ("   ", None),
+        ],
+    )
+    def test_both_sources_fold_into_one_vocabulary(self, raw, expected):
+        assert canonical_quant(raw) == expected

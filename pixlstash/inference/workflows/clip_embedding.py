@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Optional
 import numpy as np
 
 from pixlstash.pixl_logging import get_logger
+from pixlstash.utils.accelerator import is_accelerated
 
 if TYPE_CHECKING:
     from pixlstash.inference.engine import InferenceEngine
@@ -24,6 +25,14 @@ class ClipEmbeddingWorkflow:
     """
 
     # CLIP ViT-B-32: ~350 MB model (fp16), ~8 MB per image activation.
+    #
+    # These are **CUDA** measurements and are reused unchanged on Metal, where
+    # they are unverified - the same caveat WD14's figures carry in
+    # ``inference/vram_budget.py``. They are applied there anyway because an
+    # unverified conservative cap is strictly better than the flat 128 with no
+    # cap at all that a unified-memory machine got while these gates read
+    # ``== "cuda"``: on Apple Silicon the budget is the only thing between a
+    # batch estimate and the machine's own RAM. Measure before tightening.
     _CLIP_BASE_VRAM_MB = 350
     _CLIP_PER_IMAGE_VRAM_MB = 8
 
@@ -32,7 +41,7 @@ class ClipEmbeddingWorkflow:
 
     @property
     def device(self) -> str:
-        """Current inference device (``"cuda"`` or ``"cpu"``)."""
+        """Current inference device (``"cuda"``, ``"mps"`` or ``"cpu"``)."""
         return self._engine.device
 
     def is_ready(self) -> bool:
@@ -61,14 +70,33 @@ class ClipEmbeddingWorkflow:
         """
         return self._engine.clip_service.encode_image_batch(images, tensors=tensors)
 
+    def encode_query_image(self, image) -> Optional[np.ndarray]:
+        """Encode one uploaded likeness-search image, off the inference device.
+
+        Separate from :meth:`encode_images` because the caller, not the
+        workflow, knows which side of the comparison an image is on. The GPU
+        worker writes the stored picture embeddings and must keep the
+        accelerator; the *query* arrives on a request thread while the worker
+        is running, and on Metal that second thread is what crashes the
+        process, so this goes through ``InferenceEngine.query_services``.
+
+        Args:
+            image: The uploaded ``PIL.Image`` to search with.
+
+        Returns:
+            Float32 numpy array of shape ``(1, D)`` or ``None`` on failure.
+        """
+        with self._engine.query_services() as (clip, _sbert):
+            return clip.encode_image_batch([image])
+
     def suggested_batch_size(self) -> int:
         """Return the VRAM-budget-constrained batch size for a CLIP inference pass.
 
-        For GPU devices the size is capped by the VRAM budget; on CPU the maximum
-        of 128 images is returned unchanged.
+        On any accelerator the size is capped by the device-memory budget; on
+        CPU the maximum of 128 images is returned unchanged.
         """
         max_batch = 128
-        if self._engine.device == "cuda":
+        if is_accelerated(self._engine.device):
             max_batch = min(
                 max_batch,
                 self._engine.vram_budget.limited_batch_cap(
@@ -81,9 +109,12 @@ class ClipEmbeddingWorkflow:
     def estimated_vram_mb(self, image_count: int) -> int:
         """Return the incremental VRAM estimate for a batch of *image_count* images.
 
-        Returns 0 on CPU; on CUDA returns at least 64 MB.
+        Returns 0 on CPU; on any accelerator returns at least 64 MB. The task
+        runner reserves against this figure, so answering 0 on a device that is
+        really running CLIP books the work as free and lets the scheduler
+        overcommit the one pool a unified-memory machine has.
         """
-        if self._engine.device != "cuda":
+        if not is_accelerated(self._engine.device):
             return 0
         batch = min(max(1, int(image_count or 1)), 512)
         return int(max(64, self._CLIP_PER_IMAGE_VRAM_MB * batch))

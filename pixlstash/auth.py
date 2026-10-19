@@ -9,7 +9,7 @@ import time
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -19,6 +19,7 @@ from passlib.hash import bcrypt
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import or_
 from sqlmodel import Session, select
+from starlette.routing import compile_path
 
 from pixlstash.database import DBPriority, VaultDatabase
 from pixlstash.db_models import Character, PictureSet, Project, User, UserToken
@@ -86,10 +87,96 @@ RESTORE_ADMISSION_PREFIXES: tuple[str, ...] = (*AUTH_API_PREFIXES, "/share/")
 # treated as read-only, so a scope value is admitted by declaration rather than
 # by omission. ``ALL`` is absent on purpose: ``request.state.token_scope`` is
 # populated only for non-ALL scopes, so an owner token never reaches the check.
-# ``WRITE`` has no mint path (``create_token`` allowlists ``ALL``/``READ``); it
+# ``WRITE`` has no mint path (``create_token`` allowlists ``ALL``, ``READ`` and
+# ``COMFYUI``, which has its own check in the middleware and the gate); it
 # is named here so the shape the ``*_SCOPED`` route policies exist for keeps its
 # write-ness deliberately rather than by the old ``!= "READ"`` accident.
 WRITE_ENABLED_SCOPES: frozenset[str] = frozenset({"WRITE"})
+
+# The scope of the ComfyUI link key (#1811): the owner's access on the routes
+# in ``COMFYUI_SCOPE_ROUTES`` and no access to anything else. ComfyUI serves
+# its settings, key included, to anyone who can reach it, so the key is worth
+# only what the ComfyUI-PixlStash nodes call.
+COMFYUI_SCOPE = "COMFYUI"
+COMFYUI_SCOPE_REFUSAL = "This key only works for what ComfyUI's PixlStash nodes do."
+
+# Every route the ComfyUI-PixlStash pack calls, as ``(method, template)`` keys
+# of ``authz/registry.py::ROUTE_POLICIES``, and nothing else. ``GET /version``
+# is public and needs no entry. A route the pack starts calling is added here;
+# ``tests/test_architecture_guardrails.py::
+# test_the_comfyui_scope_admits_every_route_the_pack_calls`` fails until it is.
+#
+# Two places read it. The authz gate admits by the matched route's identity,
+# which is exact. The middleware below matches the path's shape before
+# routing, which is looser (``/pictures/{id}/{field}`` has the shape of
+# ``/pictures/import/status``) and is the layer that survives
+# ``AUTHZ_GATE_ENFORCING = False``.
+COMFYUI_SCOPE_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        # The pickers, through the pack's proxy.
+        ("GET", "/api/v1/projects"),
+        ("GET", "/api/v1/picture_sets"),
+        ("GET", "/api/v1/characters"),
+        ("GET", "/api/v1/sort_mechanisms"),
+        ("GET", "/api/v1/pictures"),
+        # The total beside "Everything" in the picture picker: the same
+        # filters and token scope as the list above, so it reveals less.
+        ("GET", "/api/v1/pictures/count"),
+        # The checkpoint picker's side panel: every recorded checkpoint name,
+        # so it can match subfolder names (`SDXL/x.safetensors`) by basename.
+        # The distinct values over what the key may already list above, plus
+        # the shelf names it already reads from /checkpoints and /adapters.
+        ("GET", "/api/v1/pictures/comfyui_models"),
+        ("GET", "/api/v1/pictures/thumbnails/{id}.webp"),
+        ("GET", "/api/v1/picture_sets/{id}/thumbnail"),
+        # A character's thumbnail is served by the field route.
+        ("GET", "/api/v1/characters/{id}/{field}"),
+        # The model shelf: lists, one record, its icon, and the file itself
+        # when ComfyUI does not have it (still local-owner-only).
+        ("GET", "/api/v1/adapters"),
+        ("GET", "/api/v1/adapters/{sha256}"),
+        ("GET", "/api/v1/adapters/{sha256}/file"),
+        ("GET", "/api/v1/checkpoints"),
+        ("GET", "/api/v1/models/workflow-sets"),
+        ("GET", "/api/v1/model-icons/{sha256}"),
+        # Open and save in ComfyUI, its people picker, and Convert for PixlStash.
+        ("GET", "/api/v1/workflows/{workflow_id}/graph"),
+        ("PUT", "/api/v1/workflows/{workflow_id}/graph"),
+        ("GET", "/api/v1/workflows/{workflow_id}/people"),
+        ("POST", "/api/v1/comfyui/workflows/convert"),
+        # The loader and search nodes.
+        ("GET", "/api/v1/pictures/search"),
+        ("GET", "/api/v1/pictures/{id}/metadata"),
+        ("GET", "/api/v1/pictures/{id}.{ext}"),
+        ("GET", "/api/v1/picture_sets/{id}/members"),
+        ("GET", "/api/v1/characters/{id}/reference_pictures"),
+        ("POST", "/api/v1/pictures/likeness-search"),
+        ("POST", "/api/v1/pictures/face-search"),
+        ("POST", "/api/v1/pictures/score_character_likeness"),
+        # The saver: import, then file the picture in a set or on a character.
+        ("POST", "/api/v1/pictures/import"),
+        ("GET", "/api/v1/pictures/import/status"),
+        ("POST", "/api/v1/picture_sets/{id}/members"),
+        ("POST", "/api/v1/characters/{character_id}/faces"),
+    }
+)
+_COMFYUI_SCOPE_SHAPES: tuple[tuple[str, re.Pattern], ...] = tuple(
+    (method, compile_path(template)[0])
+    for method, template in sorted(COMFYUI_SCOPE_ROUTES)
+)
+
+
+def comfyui_scope_admits(method: str, path: str) -> bool:
+    """Whether *path* has the shape of a route the ComfyUI scope admits.
+
+    The middleware's check, made before routing. The authz gate then admits
+    or refuses the route the request actually matched.
+    """
+    return any(
+        method == admitted and shape.fullmatch(path)
+        for admitted, shape in _COMFYUI_SCOPE_SHAPES
+    )
+
 
 # POST paths that are semantically read-only (large request bodies preclude GET).
 # These are exempted from the "block non-GET for READ tokens" check.
@@ -109,6 +196,8 @@ READ_SAFE_POST_PATHS: frozenset[str] = frozenset(
         "/api/v1/pictures/likeness-search",
         "/api/v1/pictures/face-search",
         "/api/v1/characters/likeness-search",
+        # Do NOT add /api/v1/pictures/{id}/text/read: it queues GPU work with no
+        # dedupe, and it is safe only because no resource-scoped token can POST.
     }
 )
 
@@ -134,8 +223,8 @@ READ_SAFE_POST_PATHS: frozenset[str] = frozenset(
 # ``tests/test_architecture_guardrails.py::
 # test_read_blocked_get_paths_name_declared_owner_class_gets``.
 #
-# Templated paths cannot be expressed in an exact-match frozenset and are a
-# recorded gap; see §16.3 in docs/backend_architecture.md.
+# Templated paths cannot be expressed in an exact-match frozenset; the prefixes
+# in ``READ_BLOCKED_GET_PREFIXES`` below hold them instead.
 READ_BLOCKED_GET_PATHS: frozenset[str] = frozenset(
     {
         "/api/v1/users/me/config",
@@ -225,13 +314,16 @@ READ_BLOCKED_GET_PATHS: frozenset[str] = frozenset(
         "/api/v1/model-folders/devices",
         "/api/v1/model-stacks/proposals",
         "/api/v1/models/base-models",
+        "/api/v1/models/workflow-sets",
         "/api/v1/moves/pending",
         "/api/v1/operations",
         "/api/v1/operations/undo-state",
         "/api/v1/pictures/import/status",
         "/api/v1/pictures/plugins",
+        "/api/v1/recipes",
         "/api/v1/reviews",
         "/api/v1/reviews/preview",
+        "/api/v1/server-config/ghost-retention",
         "/api/v1/server-config/scrapheap-retention",
         "/api/v1/server-config/scrapheap-retention/impact",
         "/api/v1/server-config/snapshots",
@@ -242,7 +334,53 @@ READ_BLOCKED_GET_PATHS: frozenset[str] = frozenset(
         "/api/v1/users/me/auth",
         "/api/v1/users/me/shared-resource-ids",
         "/api/v1/users/me/token",
+        "/api/v1/workflows",
+        # The looks the owner's pictures were made with (v1.12 F6): their
+        # prompts verbatim, across a whole stack. `/api/v1/recipes/` is in the
+        # prefix belt below and refuses this today, but a prefix is the
+        # templated half — an UNTEMPLATED owner-class GET is only held under
+        # the documented `AUTHZ_GATE_ENFORCING = False` rollback if its own
+        # path is in this frozenset, which is the rule
+        # `test_every_untemplated_owner_class_get_is_on_the_read_blocked_belt`
+        # derives rather than writes down.
+        "/api/v1/recipes/used",
+        # Whether the owner's ComfyUI has the ComfyUI-PixlStash node: it
+        # reaches the owner's ComfyUI, so the rollback must not hand it out.
+        "/api/v1/comfyui/pixlstash-node",
+        # Which ComfyUI holds a full-access token and the URL it calls.
+        "/api/v1/comfyui/link",
+        # Every stored workflow file by name: the workflow library's listing
+        # under another path, hidden workflows included.
+        "/api/v1/comfyui/workflows",
     }
+)
+
+# The templated half of the same belt. A GET whose path starts with one of these
+# is refused to every scoped token, so a templated owner-class route such as
+# ``/workflows/{workflow_id}/pictures`` survives the gate rollback too. A
+# prefix may only stand for routes that are ALL owner-class GETs:
+# ``tests/test_architecture_guardrails.py::
+# test_read_blocked_get_prefixes_cover_only_owner_class_gets`` fails the build
+# on a prefix that would also swallow a route a share token is meant to reach,
+# and ``tests/test_authz_host_capability_16_3.py::
+# test_every_untemplated_owner_class_get_is_on_the_read_blocked_belt`` on a
+# templated owner-class GET that no prefix covers.
+READ_BLOCKED_GET_PREFIXES: tuple[str, ...] = (
+    "/api/v1/adapters/",
+    "/api/v1/dedup/",
+    "/api/v1/model-folders/",
+    "/api/v1/model-icons/",
+    "/api/v1/models/",
+    "/api/v1/operations/",
+    "/api/v1/pictures/import/",
+    # A saved recipe is the owner's own prompt, and the only GET under this
+    # prefix is `/recipes/{id}/export`, which returns it verbatim (v1.12 B8).
+    # `GET /api/v1/recipes` itself has no trailing slash, so it is held by the
+    # untemplated set above rather than swallowed here.
+    "/api/v1/recipes/",
+    "/api/v1/reviews/",
+    "/api/v1/snapshots/",
+    "/api/v1/workflows/",
 )
 
 
@@ -379,11 +517,68 @@ def is_unscoped_owner_token(token: UserToken) -> bool:
     return token.scope == "ALL" and token.resource_type is None
 
 
+def token_may_cover_every_library(token: UserToken) -> bool:
+    """Return True for the kind of token the owner is allowed to widen.
+
+    Two kinds never are. A share link names a resource, and its ids mean a
+    different set, character or project in the next library. A source-bound
+    token (``bound_address`` set) with full access is a ComfyUI link key from
+    before #1811: anything on that machine can use it, so it is not widened.
+    The link key since then carries :data:`COMFYUI_SCOPE`, reaches only what
+    the nodes call, and may be.
+
+    The single spelling of that rule: what may be set, what is honoured, what
+    the refusal tells the caller and what the token list reports all ask it.
+    """
+    if token.resource_type is not None:
+        return False
+    return getattr(token, "bound_address", None) is None or token.scope == COMFYUI_SCOPE
+
+
+def token_follows_active_library(token: UserToken) -> bool:
+    """Return True when the owner has set *token* to cover every library.
+
+    The opt-out from the library pin (#1787). Honoured only on a token that
+    :func:`token_may_cover_every_library`: a row of any other kind carrying
+    the flag (which :meth:`AuthService.set_token_libraries` never writes)
+    stays pinned. Fails closed: anything but an explicit ``True`` is "pinned".
+    """
+    if getattr(token, "all_libraries", False) is not True:
+        return False
+    return token_may_cover_every_library(token)
+
+
+def token_covers_library(token: UserToken, library_uuid: Optional[str]) -> bool:
+    """Return True when *token* may be used while *library_uuid* is active.
+
+    A token works in the library it is stamped with, and nowhere else unless
+    :func:`token_follows_active_library`.
+
+    This is the single spelling of the pin. The request middleware, the authz
+    gate, the WebSocket handshake and the token login all ask it, so they
+    cannot drift apart.
+    """
+    if token_follows_active_library(token):
+        return True
+    return getattr(token, "library_uuid", None) == library_uuid
+
+
+# ``UserToken.bound_address`` of a source-bound token nothing has used yet (the
+# ComfyUI link token, between minting and its round-trip check). Until a
+# request binds it, it is good for exactly one request, :data:`TOKEN_BIND_CHECK`
+# (what the link check makes), and that request binds it to its own address.
+# A copy read off ComfyUI's settings in that window therefore buys a list of
+# sort orders, and binds the token to the wrong address, so ComfyUI's own
+# check is refused and the link is undone.
+TOKEN_BIND_PENDING = "pending"
+TOKEN_BIND_CHECK = ("GET", "/api/v1/sort_mechanisms")
+
+
 def is_token_expired(token: UserToken, now: Optional[datetime] = None) -> bool:
     """Return True when *token* has passed its ``expires_at`` timestamp.
 
     A token with no ``expires_at`` never expires. *now* defaults to the current
-    UTC time; ``expires_at`` is stored naive-UTC.
+    UTC time; ``expires_at`` reads back as aware UTC.
 
     The comparison is inclusive: a token whose ``expires_at`` is exactly *now*
     has expired. The two checks this replaced disagreed on that boundary, and
@@ -391,7 +586,7 @@ def is_token_expired(token: UserToken, now: Optional[datetime] = None) -> bool:
     """
     if token.expires_at is None:
         return False
-    return token.expires_at <= (now if now is not None else datetime.utcnow())
+    return token.expires_at <= (now if now is not None else datetime.now(timezone.utc))
 
 
 @dataclass
@@ -482,6 +677,11 @@ class AuthService:
         # Cache of recently-verified tokens: digest(token_value) → (UserToken, expiry_monotonic)
         # Avoids a bcrypt.verify() call on every authenticated request.
         self._token_cache: dict[str, tuple[UserToken, float]] = {}
+        # The last address each source-bound token was refused from, by
+        # ``public_id``, so the ComfyUI link status can say its key is being
+        # used from somewhere else (ComfyUI's address changed, or someone else
+        # has the key). In memory: the next refused call records it again.
+        self.bound_token_refusals: dict[str, str] = {}
         self._TOKEN_CACHE_TTL = 300.0  # seconds
         self._token_cache_lock = threading.Lock()
         # Revocation generation counter, bumped by every _flush_token_cache().
@@ -806,21 +1006,24 @@ class AuthService:
         replacement token between the match and this read, which would let a
         removed credential's session survive by answering to its successor.
         """
-        still_exists = self._db.run_task(
-            lambda session, pid=token_public_id: (
-                session.exec(
-                    select(UserToken).where(UserToken.public_id == pid)
-                ).first()
-                is not None
-            ),
+        token = self._db.run_task(
+            lambda session, pid=token_public_id: session.exec(
+                select(UserToken).where(UserToken.public_id == pid)
+            ).first(),
             priority=DBPriority.IMMEDIATE,
         )
-        if still_exists:
+        # The same ordering settles a token that was pinned to one library
+        # mid-login (set_token_libraries commits, then sweeps): a session
+        # registered with no pin is only right while its token still follows
+        # the active library.
+        with self._session_lock:
+            pinned = session_id in self._library_uuid_by_session
+        if token is not None and (pinned or token_follows_active_library(token)):
             return
         self._forget_session(session_id)
         self._logger.warning(
-            "Discarded a session for token %s: the token was removed while "
-            "the sign-in was in progress.",
+            "Discarded a session for token %s: the token was removed, or "
+            "pinned to one library, while the sign-in was in progress.",
             token_public_id,
         )
         raise HTTPException(status_code=401, detail="Invalid token")
@@ -1392,7 +1595,7 @@ class AuthService:
 
         # Read path, not the writer queue - see get_user (issue #651).
         tokens = self._db.run_immediate_read_task(fetch_candidates, user.id, prefix)
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         for token in tokens:
             if is_token_expired(token, now):
                 continue
@@ -1461,7 +1664,7 @@ class AuthService:
         def update_last_used(session: Session, tid: int):
             db_token = session.get(UserToken, tid)
             if db_token is not None:
-                db_token.last_used_at = datetime.utcnow()
+                db_token.last_used_at = datetime.now(timezone.utc)
                 session.add(db_token)
                 session.commit()
 
@@ -1499,6 +1702,67 @@ class AuthService:
                 exc,
             )
 
+    def source_refusal(
+        self, token: UserToken, client_ip: str, method: str, path: str
+    ) -> Optional[str]:
+        """Why *token* is refused from *client_ip*, or None when it is not.
+
+        Only a source-bound token (``bound_address`` set, today only the
+        ComfyUI link token) is ever refused here. A pending one is bound by
+        the request :data:`TOKEN_BIND_CHECK` names, to that request's address,
+        and refused for anything else.
+        """
+        bound = token.bound_address
+        if bound is None:
+            return None
+        if bound == TOKEN_BIND_PENDING:
+            if (method, path) != TOKEN_BIND_CHECK:
+                self._logger.warning(
+                    "Refused unbound link token %s for %s %s from %s: it is "
+                    "good only for the link check until that binds it.",
+                    token.public_id,
+                    method,
+                    path,
+                    client_ip,
+                )
+                return "This key is not linked yet."
+            bound = self._bind_token(token.id, client_ip)
+            if bound is None:
+                # Revoked while it was being bound (a concurrent unlink):
+                # nothing to bind, and no refusal worth recording.
+                return "This key is not linked yet."
+        if bound == client_ip:
+            return None
+        self.bound_token_refusals[token.public_id] = client_ip
+        self._logger.warning(
+            "Refused token %s from %s: it only works from %s, the address of "
+            "the ComfyUI it was linked to.",
+            token.public_id,
+            client_ip,
+            bound,
+        )
+        return "This key only works from the ComfyUI it was linked to."
+
+    def _bind_token(self, token_id: int, client_ip: str) -> Optional[str]:
+        """Bind a pending token to *client_ip*; return the address it is bound
+        to now, which is another one when a concurrent request won."""
+
+        def bind(session: Session):
+            token = session.get(UserToken, token_id)
+            if token is None:
+                return None
+            if token.bound_address == TOKEN_BIND_PENDING:
+                token.bound_address = client_ip
+                session.add(token)
+                session.commit()
+            return token.bound_address
+
+        bound = self._db.run_task(bind, priority=DBPriority.IMMEDIATE)
+        # The cached row still says pending.
+        self._flush_token_cache()
+        self._logger.info("Token id %s is bound to %s.", token_id, bound)
+        return bound
+
     def _user_id_from_bearer(self, request: Request) -> Optional[int]:
         """Validate a Bearer token from the Authorization header and return the user id."""
         auth_header = request.headers.get("Authorization", "")
@@ -1506,6 +1770,13 @@ class AuthService:
             return None
         token_value = auth_header[len("Bearer ") :]
         matched = self._token_from_value(token_value)
+        if matched is not None and self.source_refusal(
+            matched,
+            self._get_real_client_ip(request),
+            request.method,
+            request.url.path,
+        ):
+            return None
         if matched is not None:
             user = self.get_user()
             return user.id if user else None
@@ -1549,6 +1820,23 @@ class AuthService:
             return user_id
         raise HTTPException(status_code=401, detail=detail)
 
+    def is_unscoped_owner_request(self, request: Request) -> bool:
+        """Whether *request* carries a fully-unscoped owner credential.
+
+        The predicate behind :meth:`require_unscoped_owner`, for a route that
+        must **narrow** its answer rather than refuse it - a field that names
+        something outside the token's scope, on an otherwise in-scope resource.
+        It is the same spelling of the rule, so the two cannot drift.
+
+        It says nothing about whether the caller is authenticated at all:
+        ``require_user_id`` is what establishes that, and every data route is
+        already past it by the time a handler runs.
+        """
+        if getattr(request.state, "token_scope", None) is not None:
+            return False
+        matched_token = getattr(request.state, "matched_token", None)
+        return matched_token is None or matched_token.resource_type is None
+
     def require_unscoped_owner(
         self,
         request: Request,
@@ -1563,10 +1851,7 @@ class AuthService:
         outside the token's intended scope.
         """
         user_id = self.require_user_id(request)
-        if getattr(request.state, "token_scope", None) is not None:
-            raise HTTPException(status_code=403, detail=detail)
-        matched_token = getattr(request.state, "matched_token", None)
-        if matched_token is not None and matched_token.resource_type is not None:
+        if not self.is_unscoped_owner_request(request):
             raise HTTPException(status_code=403, detail=detail)
         return user_id
 
@@ -1645,7 +1930,17 @@ class AuthService:
                     matched = candidate
 
         if matched is not None:
-            if getattr(matched, "library_uuid", None) != self.active_library_uuid():
+            if not token_covers_library(matched, self.active_library_uuid()):
+                return None
+            if matched.scope == COMFYUI_SCOPE:
+                # No WebSocket is among the routes the scope admits.
+                return None
+            if self.source_refusal(
+                matched,
+                self._get_real_client_ip_ws(websocket),
+                "WEBSOCKET",
+                websocket.url.path,
+            ):
                 return None
             if (
                 is_unscoped_owner_token(matched)
@@ -1712,6 +2007,7 @@ class AuthService:
     def change_password(self, request: Request, payload) -> dict:
         self.ensure_secure_when_required(request)
         user = self.get_user_for_request(request)
+        self._refuse_bound_token(request, "change the password")
 
         self._validate_bcrypt_password_length(payload.current_password)
         self._validate_bcrypt_password_length(payload.new_password)
@@ -1781,11 +2077,50 @@ class AuthService:
         switched, so a share link would start serving different pictures and an
         automation would write into the wrong place. The hub column is NOT NULL,
         so a missing provider surfaces as a write error rather than as a token
-        that silently follows the active library.
+        that silently follows the active library. Following it is something the
+        owner asks for afterwards, per token (:meth:`set_token_libraries`); the
+        stamp is written regardless.
         """
         if self.library_uuid_provider is None:
             return None
         return self.library_uuid_provider()
+
+    @staticmethod
+    def _refuse_bound_token(request: Request, action: str) -> None:
+        """A source-bound token (the ComfyUI link token) never manages
+        credentials: a minted token or a password would work from anywhere and
+        outlive the link, and listing or revoking share tokens is the owner's
+        business, not ComfyUI's. Every token- and password-management method
+        calls this. A request with no ``state`` carried no token."""
+        matched = getattr(getattr(request, "state", None), "matched_token", None)
+        if matched is not None and matched.bound_address is not None:
+            raise HTTPException(
+                status_code=403,
+                detail=f"The ComfyUI link key cannot {action}.",
+            )
+
+    def _refuse_token_credential(self, request: Request) -> None:
+        """Refuse a caller that is a token, or a session a token signed in with.
+
+        Which libraries a token reaches is decided by the owner in person: a
+        password or desktop session. An agent holding a full-access token is
+        an "owner" to every other route, so without this it could be given
+        "this library only" and lift that itself, then switch library and
+        carry on - the pivot the pin exists to close. Exchanging the token for
+        a cookie first must not get round it, hence the session half.
+        """
+        matched = getattr(getattr(request, "state", None), "matched_token", None)
+        session_id = getattr(request, "cookies", {}).get("session_id")
+        with self._session_lock:
+            from_token = session_id in self._token_public_id_by_session
+        if matched is not None or from_token:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Only the owner's own session can change which libraries a "
+                    "token works in; a token cannot."
+                ),
+            )
 
     def create_token(
         self,
@@ -1797,6 +2132,7 @@ class AuthService:
         expires_at: Optional[datetime] = None,
         include_attachments: bool = False,
         watermark: bool = False,
+        bound_address: Optional[str] = None,
     ):
         self.ensure_secure_when_required(request)
         user_id = self.require_user_id(request)
@@ -1806,9 +2142,17 @@ class AuthService:
             raise HTTPException(
                 status_code=403, detail="Scoped tokens cannot create new tokens"
             )
+        self._refuse_bound_token(request, "create tokens")
 
-        if scope not in ("ALL", "READ"):
-            raise HTTPException(status_code=400, detail="scope must be 'ALL' or 'READ'")
+        if scope not in ("ALL", "READ", COMFYUI_SCOPE):
+            raise HTTPException(
+                status_code=400, detail="scope must be 'ALL', 'READ' or 'COMFYUI'"
+            )
+        if scope == COMFYUI_SCOPE and resource_type is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="A ComfyUI token cannot be restricted to a resource.",
+            )
         # A resource-scoped token must be READ. An ALL-scope token carrying a
         # resource_type is the F1/F3 footgun: the auth middleware only builds
         # ``request.state.token_scope`` for non-ALL scopes, so such a token would
@@ -1861,6 +2205,9 @@ class AuthService:
             and expires_at.second == 0
         ):
             expires_at = expires_at.replace(hour=23, minute=59, second=59)
+        # The column refuses a naive value; a client that sent no offset meant UTC.
+        if expires_at is not None and expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
 
         token_value = secrets.token_urlsafe(32)
         token_hash = bcrypt.hash(token_value)
@@ -1878,6 +2225,7 @@ class AuthService:
             expires_at: Optional[datetime],
             include_attachments: bool,
             watermark: bool,
+            bound_address: Optional[str],
         ):
             user = session.get(User, user_id)
             if user is None:
@@ -1887,7 +2235,7 @@ class AuthService:
                 library_uuid=self.active_library_uuid(),
                 token_hash=token_hash,
                 token_prefix=token_prefix,
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(timezone.utc),
                 description=desc,
                 scope=scope,
                 resource_type=resource_type,
@@ -1895,6 +2243,7 @@ class AuthService:
                 expires_at=expires_at,
                 include_attachments=include_attachments,
                 watermark=watermark,
+                bound_address=bound_address,
             )
             session.add(token)
             session.commit()
@@ -1913,12 +2262,14 @@ class AuthService:
             expires_at,
             include_attachments,
             watermark,
+            bound_address,
             priority=DBPriority.IMMEDIATE,
         )
 
         return {
             "token": token_value,
             "token_id": token.id,
+            "public_id": token.public_id,
             "scope": token.scope,
             "resource_type": token.resource_type,
             "resource_id": token.resource_id,
@@ -1935,50 +2286,77 @@ class AuthService:
             raise HTTPException(
                 status_code=403, detail="Scoped tokens cannot list tokens"
             )
+        self._refuse_bound_token(request, "list tokens")
 
         def fetch_tokens(session: Session, user_id: int):
-            tokens = session.exec(
+            return session.exec(
                 select(UserToken)
                 .where(UserToken.user_id == user_id)
                 .order_by(UserToken.created_at.desc())
             ).all()
-            result = []
-            for token in tokens:
-                resource_name = None
-                if token.resource_type == "character" and token.resource_id is not None:
-                    obj = session.get(Character, token.resource_id)
-                    resource_name = obj.name if obj else None
-                elif (
-                    token.resource_type == "picture_set"
-                    and token.resource_id is not None
-                ):
-                    obj = session.get(PictureSet, token.resource_id)
-                    resource_name = obj.name if obj else None
-                elif token.resource_type == "project" and token.resource_id is not None:
-                    obj = session.get(Project, token.resource_id)
-                    resource_name = obj.name if obj else None
-                result.append(
-                    {
-                        "id": token.id,
-                        "description": token.description,
-                        "scope": token.scope,
-                        "resource_type": token.resource_type,
-                        "resource_id": token.resource_id,
-                        "resource_name": resource_name,
-                        "expires_at": token.expires_at,
-                        "created_at": token.created_at,
-                        "last_used_at": token.last_used_at,
-                        "include_attachments": token.include_attachments,
-                        "watermark": token.watermark,
-                    }
-                )
-            return result
 
-        return self._db.run_task(fetch_tokens, user_id, priority=DBPriority.IMMEDIATE)
+        tokens = self._db.run_task(fetch_tokens, user_id, priority=DBPriority.IMMEDIATE)
+
+        # The tokens are in the hub; the sets, characters and projects they
+        # name are in the library. And only in *their* library: the same id is
+        # a different set in the next one, so a share link for a library that
+        # is not open is listed without a name rather than under a wrong one.
+        # Read through the request's lease when it has one, as the guest
+        # lookup in the middleware does, so a switch cannot land in between.
+        lease = getattr(getattr(request, "state", None), "library_lease", None)
+        active_uuid = lease.library_uuid if lease else self.active_library_uuid()
+        # Never the hub: it has none of these tables, and asking it is what
+        # used to take the whole list down.
+        vault_db = lease.db if lease else self.vault_db
+        models = {"character": Character, "picture_set": PictureSet, "project": Project}
+        named = [
+            token
+            for token in tokens
+            if token.resource_type in models
+            and token.resource_id is not None
+            and token.library_uuid == active_uuid
+        ]
+
+        def fetch_names(session: Session):
+            names = {}
+            for token in named:
+                obj = session.get(models[token.resource_type], token.resource_id)
+                if obj is not None:
+                    names[token.id] = obj.name
+            return names
+
+        names = {}
+        if named and vault_db is not None:
+            names = vault_db.run_immediate_read_task(fetch_names)
+        elif named:
+            self._logger.warning(
+                "No library database to read the names of %d share link(s) "
+                "from; listing them without names.",
+                len(named),
+            )
+        return [
+            {
+                "id": token.id,
+                "description": token.description,
+                "scope": token.scope,
+                "resource_type": token.resource_type,
+                "resource_id": token.resource_id,
+                "resource_name": names.get(token.id),
+                "expires_at": token.expires_at,
+                "created_at": token.created_at,
+                "last_used_at": token.last_used_at,
+                "include_attachments": token.include_attachments,
+                "watermark": token.watermark,
+                "all_libraries": token_follows_active_library(token),
+                "source_bound": token.bound_address is not None,
+            }
+            for token in tokens
+        ]
 
     def delete_token(self, request: Request, token_id: int):
         self.ensure_secure_when_required(request)
         user_id = self.require_user_id(request)
+        self._refuse_bound_token(request, "delete tokens")
 
         def remove_token(session: Session, user_id: int, token_id: int):
             token = session.get(UserToken, token_id)
@@ -2027,6 +2405,7 @@ class AuthService:
             raise HTTPException(
                 status_code=403, detail="Scoped tokens cannot modify tokens"
             )
+        self._refuse_bound_token(request, "change tokens")
 
         def _update(session: Session, user_id: int, token_id: int, watermark: bool):
             token = session.get(UserToken, token_id)
@@ -2045,6 +2424,85 @@ class AuthService:
         self._flush_token_cache()
         return {"status": "success", "id": token.id, "watermark": token.watermark}
 
+    def set_token_libraries(self, request: Request, token_id: int, all_libraries: bool):
+        """Set whether a token covers every library or only the active one.
+
+        ``all_libraries=True`` lifts the library pin: the token works in
+        whichever library is open, so an agent's token survives a switch
+        (#1787). ``False`` pins it again, to the library that is active now,
+        which is the one the owner is looking at when they say "only this
+        library".
+
+        Only a token that names no resource can be widened
+        (:func:`token_may_cover_every_library`). A share link's
+        ``resource_id`` means a different set, character or project in every
+        other library, so widening one would serve somebody else's pictures.
+        The ComfyUI link key can be: it reaches only what the nodes call.
+
+        Where it may be called from is the authz gate's business
+        (``LOCAL_OWNER_ONLY``: an unscoped owner on the local network). What
+        this method adds is that the caller is the owner's own session and not
+        a token: see :meth:`_refuse_token_credential`.
+        """
+        self.ensure_secure_when_required(request)
+        user_id = self.require_user_id(request)
+        self._refuse_bound_token(request, "change tokens")
+        self._refuse_token_credential(request)
+        active_uuid = self.active_library_uuid()
+
+        def _update(session: Session, user_id: int, token_id: int):
+            token = session.get(UserToken, token_id)
+            if token is None or token.user_id != user_id:
+                raise HTTPException(status_code=404, detail="Token not found")
+            if token.resource_type is not None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "A share link belongs to the library its pictures are "
+                        "in and cannot cover other libraries."
+                    ),
+                )
+            if not token_may_cover_every_library(token):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "This ComfyUI link key has full access and cannot "
+                        "cover other libraries. Link ComfyUI again first."
+                    ),
+                )
+            token.all_libraries = all_libraries
+            # No active library means no registry at all (a served request
+            # always has one, or library admission answers 503 first). Then
+            # there is nothing to pin to and the token keeps the stamp it has,
+            # which the hub column never lets be empty.
+            if not all_libraries and active_uuid is not None:
+                token.library_uuid = active_uuid
+            session.add(token)
+            session.commit()
+            session.refresh(token)
+            return token
+
+        token = self._db.run_task(
+            _update, user_id, token_id, priority=DBPriority.IMMEDIATE
+        )
+        self._logger.info(
+            "Token %s now covers %s.",
+            token.public_id,
+            "every library" if token.all_libraries else f"library {token.library_uuid}",
+        )
+        # A session this token created holds the reach the token had when it
+        # logged in, so end it rather than leave it wider than its credential.
+        # Then the cache, which still serves the row as it was (see delete_token
+        # for why both, and why in this order).
+        if token.public_id is not None:
+            self._drop_sessions_for_tokens((token.public_id,))
+        self._flush_token_cache()
+        return {
+            "status": "success",
+            "id": token.id,
+            "all_libraries": token.all_libraries,
+        }
+
     def revoke_tokens_for_resource(
         self,
         request: Request,
@@ -2060,6 +2518,7 @@ class AuthService:
             raise HTTPException(
                 status_code=403, detail="Scoped tokens cannot revoke tokens"
             )
+        self._refuse_bound_token(request, "revoke tokens")
 
         def _revoke(
             session: Session, user_id: int, rt: str, rid: int
@@ -2102,9 +2561,10 @@ class AuthService:
 
         if getattr(request.state, "token_scope", None) is not None:
             raise HTTPException(status_code=403, detail="Not allowed for scoped tokens")
+        self._refuse_bound_token(request, "list shared resources")
 
         def _fetch(session: Session, user_id: int, rt: str) -> list[int]:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             tokens = session.exec(
                 select(UserToken).where(
                     UserToken.user_id == user_id,
@@ -2131,12 +2591,13 @@ class AuthService:
 
         if getattr(request.state, "token_scope", None) is not None:
             raise HTTPException(status_code=403, detail="Not allowed for scoped tokens")
+        self._refuse_bound_token(request, "list shared resources")
 
         if not picture_ids:
             return {"shared_ids": []}
 
         def _fetch(session: Session, user_id: int, ids: list[int]) -> list[int]:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             id_set = set(ids)
             tokens = session.exec(
                 select(UserToken).where(
@@ -2233,20 +2694,25 @@ class AuthService:
             # is_token_expired). A narrower or expired token is refused with
             # the same status and body as an unrecognised one, so the response
             # does not tell the two apart.
+            # A source-bound token is never a login credential: the session
+            # it would mint works from any address.
             if (
                 matched_token is None
                 or is_token_expired(matched_token)
                 or not is_unscoped_owner_token(matched_token)
+                or matched_token.bound_address is not None
             ):
                 if matched_token is not None:
                     self._logger.warning(
                         "Refused a session for token id %s: logging in requires "
-                        "an unexpired, unrestricted owner token (scope=%s, "
-                        "resource_type=%s, expires_at=%s).",
+                        "an unexpired, unrestricted owner token not bound to one "
+                        "address (scope=%s, resource_type=%s, expires_at=%s, "
+                        "bound_address=%s).",
                         matched_token.id,
                         matched_token.scope,
                         matched_token.resource_type,
                         matched_token.expires_at,
+                        matched_token.bound_address,
                     )
                 raise HTTPException(status_code=401, detail="Invalid token")
             if matched_token.public_id is None:
@@ -2265,18 +2731,25 @@ class AuthService:
                 )
                 raise HTTPException(status_code=401, detail="Invalid token")
             session_token_public_id = matched_token.public_id
-            session_library_uuid = matched_token.library_uuid
-            if session_library_uuid != self.active_library_uuid():
+            if not token_covers_library(matched_token, self.active_library_uuid()):
                 raise HTTPException(
                     status_code=403,
                     detail="This token belongs to a library that is not currently active.",
                 )
+            # The session inherits the token's reach: pinned to the token's
+            # library, or, for a token that covers every library, following
+            # switches like a password session (None, exactly as theirs is).
+            session_library_uuid = (
+                None
+                if token_follows_active_library(matched_token)
+                else matched_token.library_uuid
+            )
 
             def update_token_last_used(session: Session, token_id: int):
                 db_token = session.get(UserToken, token_id)
                 if db_token is None:
                     return None
-                db_token.last_used_at = datetime.utcnow()
+                db_token.last_used_at = datetime.now(timezone.utc)
                 session.add(db_token)
                 session.commit()
                 return db_token
@@ -2507,21 +2980,46 @@ class AuthService:
 
                 if matched_token is not None:
                     lease = getattr(request.state, "library_lease", None)
-                    if (
-                        lease is not None
-                        and matched_token.library_uuid != lease.library_uuid
+                    if lease is not None and not token_covers_library(
+                        matched_token, lease.library_uuid
                     ):
+                        detail = "Token belongs to a different library"
+                        # The way out is the owner's to take, so only a token
+                        # that could be widened is told about it; a share link
+                        # or a ComfyUI key (bound to an address or of the
+                        # ComfyUI scope, and readable off ComfyUI) learns
+                        # nothing about how this server is set up.
+                        if (
+                            token_may_cover_every_library(matched_token)
+                            and matched_token.bound_address is None
+                            and matched_token.scope != COMFYUI_SCOPE
+                        ):
+                            detail += (
+                                ". Switch to that library, or let the token "
+                                "cover every library under API Tokens in "
+                                "the settings, signed in on the local network."
+                            )
+                        return JSONResponse(status_code=403, content={"detail": detail})
+                    refusal = self.source_refusal(
+                        matched_token,
+                        self._get_real_client_ip(request),
+                        request.method,
+                        request.url.path,
+                    )
+                    if refusal:
                         return JSONResponse(
-                            status_code=403,
-                            content={"detail": "Token belongs to a different library"},
+                            status_code=403, content={"detail": refusal}
                         )
                     user = self.get_user()
                     user_id = user.id if user else None
                     if user_id:
-                        # Block ALL-scope tokens from non-local IPs when require_local_for_write is enabled.
-                        if matched_token.scope == "ALL" and self._server_config.get(
-                            "require_local_for_write", True
-                        ):
+                        # Block tokens that can write (ALL, and the ComfyUI
+                        # scope's saver) from non-local IPs when
+                        # require_local_for_write is enabled.
+                        if matched_token.scope in (
+                            "ALL",
+                            COMFYUI_SCOPE,
+                        ) and self._server_config.get("require_local_for_write", True):
                             client_ip = self._get_real_client_ip(request)
                             if not is_local_ip(client_ip):
                                 return JSONResponse(
@@ -2543,8 +3041,10 @@ class AuthService:
                         # and thus bypass every object-scope guard while looking
                         # like an owner. Reject it fail-closed - the shape is
                         # invalid and unreachable through any supported flow.
+                        # The same for a ComfyUI-scope row: the gate makes it
+                        # the owner on its routes, resource or no resource.
                         if (
-                            matched_token.scope == "ALL"
+                            matched_token.scope in ("ALL", COMFYUI_SCOPE)
                             and matched_token.resource_type is not None
                         ):
                             return JSONResponse(
@@ -2624,12 +3124,15 @@ class AuthService:
                                     )
                             else:
                                 request.state.guest_session_id = None
-                                self._logger.info(
-                                    "[guest-scores] No valid guest_session cookie for %s (raw=%r, all_cookies=%r)",
-                                    request.url.path,
-                                    raw_gs,
-                                    list(request.cookies.keys()),
-                                )
+                                # Not for the ComfyUI key: it is no guest, and
+                                # its picker asks for a thumbnail a line.
+                                if matched_token.scope != COMFYUI_SCOPE:
+                                    self._logger.info(
+                                        "[guest-scores] No valid guest_session cookie for %s (raw=%r, all_cookies=%r)",
+                                        request.url.path,
+                                        raw_gs,
+                                        list(request.cookies.keys()),
+                                    )
 
                 if user_id is None:
                     self._logger.error(
@@ -2656,7 +3159,22 @@ class AuthService:
             # write-enabled. Fail closed: an unrecognised scope is read-only.
             # Paths in READ_SAFE_POST_PATHS use POST for body size but are semantically read-only.
             token_scope = getattr(request.state, "token_scope", None)
-            if token_scope is not None:
+            if token_scope is not None and token_scope.scope == COMFYUI_SCOPE:
+                # The ComfyUI key: its own routes and nothing else, whatever
+                # the method. The gate checks the route this resolves to.
+                # The path the router matches on, not ``request.url.path``,
+                # which a decoded ``#`` or ``?`` in the path cuts short.
+                if not comfyui_scope_admits(request.method, request.scope["path"]):
+                    self._logger.info(
+                        "Refused ComfyUI key %s for %s %s: not a route its scope admits.",
+                        getattr(request.state, "token_public_id", None),
+                        request.method,
+                        request.url.path,
+                    )
+                    return JSONResponse(
+                        status_code=403, content={"detail": COMFYUI_SCOPE_REFUSAL}
+                    )
+            elif token_scope is not None:
                 if token_scope.scope != "READ":
                     # ``READ`` is the only scope ``create_token`` will mint that
                     # reaches here, so anything else is a misconfigured row or a
@@ -2685,9 +3203,9 @@ class AuthService:
                 # Filesystem and user-settings reads are barred to every scoped
                 # token, write-enabled or not: the restriction is about what a
                 # narrow credential may *see*, not about what it may change.
-                if (
-                    request.method == "GET"
-                    and request.url.path in READ_BLOCKED_GET_PATHS
+                if request.method == "GET" and (
+                    request.url.path in READ_BLOCKED_GET_PATHS
+                    or request.url.path.startswith(READ_BLOCKED_GET_PREFIXES)
                 ):
                     return JSONResponse(
                         status_code=403,

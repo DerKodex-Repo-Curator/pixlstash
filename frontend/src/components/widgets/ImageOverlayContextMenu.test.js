@@ -39,11 +39,27 @@ const REQUIRED = {
   backendUrl: "http://x",
 };
 
+// The tooltip is stubbed to carry its text on the element it wraps or sits in:
+// the real one renders nothing until it opens, and needs Vuetify besides.
+const TooltipStub = {
+  name: "Tooltip",
+  props: ["text", "activator"],
+  template:
+    '<span class="tip" :data-text="text"><slot name="activator" :props="{}" /></span>',
+};
+
+/** The tooltip text a control carries, whether the tip sits inside or around it. */
+function tip(wrapper) {
+  const inner = wrapper.find(".tip");
+  if (inner.exists()) return inner.attributes("data-text");
+  return wrapper.element.parentElement?.dataset.text;
+}
+
 // v-icon isn't registered in the test app; stub it so the menu mounts. The menu
 // teleports to <body>, so stub teleport to render its content inline where the
 // wrapper can query it.
 const globalStubs = {
-  global: { stubs: { "v-icon": true, teleport: true } },
+  global: { stubs: { "v-icon": true, Tooltip: TooltipStub, teleport: true } },
 };
 
 function itemLabels(wrapper) {
@@ -74,6 +90,8 @@ describe("overlay-mode context menu - action set", () => {
         visible: true,
         selectedImageIds: [42],
         selectedCharacter: "ALL",
+        // The ComfyUI entry is fenced on this, as in the grid menu.
+        comfyuiConfigured: true,
         contextImage: {
           id: 42,
           format: "jpg",
@@ -100,8 +118,11 @@ describe("overlay-mode context menu - action set", () => {
     // Grid-only actions must NOT be present.
     expect(labels).not.toContain("Tag");
     expect(labels).not.toContain("Stack");
-    expect(labels).not.toContain("Edit with ComfyUI");
     expect(labels).not.toContain("Filters");
+    // Overlay mode DOES offer the picture as a workflow's input (#1406), and
+    // it is the only ComfyUI entry here: the grid menu's batch "Filters" and
+    // the tag/stack entries stay out.
+    expect(labels).toContain("Use as input for…");
     // The add-to-entity controls (project/character/set) are not rendered.
     expect(wrapper.findComponent({ name: "AddToEntityControl" }).exists()).toBe(
       false,
@@ -109,8 +130,47 @@ describe("overlay-mode context menu - action set", () => {
 
     // Dark-surface skin is applied.
     expect(wrapper.find(".image-ctx-menu").classes()).toContain(
-      "image-ctx-menu--on-dark",
+      "ctx-menu--on-dark",
     );
+  });
+
+  it("does not offer a workflow's input with no ComfyUI configured", () => {
+    const wrapper = mount(ImageGridContextMenu, {
+      props: {
+        ...REQUIRED,
+        overlayMode: true,
+        visible: true,
+        selectedImageIds: [42],
+        selectedCharacter: "ALL",
+        comfyuiConfigured: false,
+        contextImage: { id: 42, format: "jpg", faces: [] },
+      },
+      ...globalStubs,
+    });
+    expect(itemLabels(wrapper).join(" | ")).not.toContain("Use as input for…");
+  });
+
+  it("emits the picture's id when the input entry is chosen", async () => {
+    const wrapper = mount(ImageGridContextMenu, {
+      props: {
+        ...REQUIRED,
+        overlayMode: true,
+        visible: true,
+        selectedImageIds: [42],
+        selectedCharacter: "ALL",
+        comfyuiConfigured: true,
+        contextImage: { id: 42, format: "jpg", faces: [] },
+      },
+      ...globalStubs,
+    });
+    const entry = wrapper
+      .findAll("button.ctx-item")
+      .find((b) => b.text().includes("Use as input for"));
+    expect(entry).toBeTruthy();
+    await entry.trigger("click");
+    // `delegateWith` closes first, then emits on the next tick.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(wrapper.emitted("use-as-input")).toEqual([[42]]);
   });
 
   it("shows Find similar faces only when the picture has faces", () => {
@@ -269,7 +329,7 @@ describe("overlay-mode context menu - action set", () => {
       .findAll("button.ctx-item")
       .find((button) => button.text().includes("Copy picture"));
     expect(copy.attributes("disabled")).toBeDefined();
-    expect(copy.attributes("title")).toBe(reason);
+    expect(tip(copy)).toBe(reason);
     const reasonId = copy.attributes("aria-describedby");
     expect(wrapper.find(`#${reasonId}`).text()).toBe(reason);
   });

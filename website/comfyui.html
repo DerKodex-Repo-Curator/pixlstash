@@ -377,13 +377,48 @@
         <div class="section-header">
           <h2 class="section-title">See it in action</h2>
           <p class="section-subtitle">
-            Two short clips driving PixlStash from ComfyUI. Pull matching faces
-            out of your vault, and extend a vault image beyond its borders.
+            Install the nodes and link the two apps from PixlStash in one
+            click, then drive PixlStash from ComfyUI:
+            pull matching faces out of your library, and extend a library image
+            beyond its borders.
           </p>
         </div>
         <div class="features">
-          <!-- ComfyUI Face Search -->
+          <!-- Link from PixlStash (1.12) -->
           <div class="feature">
+            <div class="feature-text">
+              <span class="feature-number">New in 1.12</span>
+              <h2>One click installs these nodes</h2>
+              <p>
+                <strong
+                  >Settings › ComfyUI in PixlStash installs these nodes into
+                  your ComfyUI and links the two apps.</strong
+                >
+                It finds a ComfyUI running on this computer, installs the nodes,
+                restarts ComfyUI through ComfyUI-Manager and gives the nodes a
+                key of their own, so there is no token to copy. Then right-click a
+                person, choose Create with LoRA, and the new pictures come back
+                filed under them.
+              </p>
+              <p>
+                Open a workflow in ComfyUI from PixlStash and its loaders read
+                your model shelf. Press Ctrl+S, or use the PixlStash menu, and
+                the workflow is saved back to PixlStash as a new version.
+              </p>
+            </div>
+            <div class="video-card">
+              <video
+                src="assets/LinkingComfyUIAndCharacter.mp4"
+                autoplay
+                loop
+                muted
+                playsinline
+              ></video>
+            </div>
+          </div>
+
+          <!-- ComfyUI Face Search -->
+          <div class="feature feature--reverse">
             <div class="feature-text">
               <span class="feature-number">ComfyUI</span>
               <h2>Search faces from ComfyUI</h2>
@@ -405,7 +440,7 @@
           </div>
 
           <!-- ComfyUI Outpaint -->
-          <div class="feature feature--reverse">
+          <div class="feature">
             <div class="feature-text">
               <span class="feature-number">ComfyUI</span>
               <h2>Outpaint PixlStash images</h2>
@@ -433,9 +468,11 @@
         <div class="section-header">
           <h2 class="section-title">The nodes</h2>
           <p class="section-subtitle">
-            Connection credentials (URL and API token) are configured once in
-            <strong>ComfyUI Settings &gt; PixlStash</strong> and read by the
-            nodes at runtime. They never appear as node widgets or in saved
+            Linking ComfyUI from PixlStash's Settings › ComfyUI installs these
+            nodes and sets up their connection for you. Otherwise, install them
+            below and configure the connection (URL and API token) once in
+            <strong>ComfyUI Settings &gt; PixlStash</strong>. The nodes read it
+            at runtime. They never appear as node widgets or in saved
             workflow JSON.
           </p>
         </div>
@@ -485,6 +522,18 @@
               Uploads images and optionally assigns them to a project, set,
               and/or character. Supports embedded workflow metadata in PNG
               output and returns the IDs of successfully imported pictures.
+            </p>
+          </div>
+          <div class="feature-card">
+            <h3>
+              Video Saver
+              <span class="node-tag node-tag--write">write scope</span>
+            </h3>
+            <p>
+              ComfyUI's Save Video, saving to PixlStash: the same format, codec
+              and encoding options, with the video optionally filed under a
+              project, set or character. Can embed the workflow in the file.
+              <span class="node-req">Requires PixlStash v1.2+.</span>
             </p>
           </div>
         </div>
@@ -567,6 +616,136 @@
                 >Requires PixlStash v1.4+ and a running face-extraction
                 worker.</span
               >
+            </p>
+          </div>
+
+          <div class="shot">
+            <h4>
+              Picture Likeness Gate
+              <span class="node-tag node-tag--read">read scope</span>
+            </h4>
+            <button class="shot-image-btn" type="button">
+              <img
+                src="assets/ComfyPictureLikenessGate.jpg"
+                data-full="assets/ComfyPictureLikenessGate.jpg"
+                alt="PixlStash Picture Likeness Gate splitting a batch by likeness to a reference set, with the accepted and rejected pictures saved back to PixlStash"
+                loading="lazy"
+              />
+            </button>
+            <p>
+              The same split, judged on whole-picture likeness to a reference
+              set rather than a face. <code>combine</code> decides how the
+              set's members vote: <code>min</code> means match every member,
+              <code>max</code> means match any.
+              <span class="node-req">Requires PixlStash v1.4+.</span>
+            </p>
+          </div>
+        </div>
+
+        <div class="section-header" style="margin-top: 36px">
+          <h2 class="section-title" style="font-size: 1.4rem">
+            Model shelf loaders
+          </h2>
+          <p class="section-subtitle">
+            Pick models from your PixlStash model shelf in a thumbnail grid
+            instead of a dropdown of hundreds of filenames. Each loader has the
+            same inputs and outputs as its ComfyUI built-in, so it drops
+            straight into an existing graph. Files are used in place when
+            ComfyUI and PixlStash share a disk, and fetched once and cached
+            otherwise (checkpoints must be readable locally). The shelf needs
+            an owner token.
+          </p>
+        </div>
+
+        <div class="shot-grid">
+          <div class="shot">
+            <h4>Pick by picture, not by filename</h4>
+            <div class="shot-image-pair">
+              <button class="shot-image-btn" type="button">
+                <img
+                  src="assets/ComfyCheckpointPicker.jpg"
+                  data-full="assets/ComfyCheckpointPicker.jpg"
+                  alt="The PixlStash Checkpoints picker in ComfyUI: a searchable grid of checkpoints, each with its base model's icon"
+                  loading="lazy"
+                />
+              </button>
+              <button class="shot-image-btn" type="button">
+                <img
+                  src="assets/ComfyAdapterPicker.jpg"
+                  data-full="assets/ComfyAdapterPicker.jpg"
+                  alt="The PixlStash Adapters picker in ComfyUI listing the people who have a LoRA for this workflow, each with their trigger word"
+                  loading="lazy"
+                />
+              </button>
+            </div>
+            <p>
+              Every loader opens the same grid, searchable by name, filename or
+              trigger word. For LoRAs, <strong>People who fit</strong> lists the
+              people with an adapter for the workflow's base model, by face,
+              with a choice when more than one of theirs fits.
+            </p>
+          </div>
+
+          <div class="shot">
+            <h4>Adapter (LoRA) Loader</h4>
+            <button class="shot-image-btn" type="button">
+              <img
+                src="assets/ComfyAdapterLoader.jpg"
+                data-full="assets/ComfyAdapterLoader.jpg"
+                alt="A ComfyUI graph with the PixlStash Checkpoint, Character, CLIP and Adapter (LoRA) Loaders, the adapter node showing the picked LoRA's thumbnail"
+                loading="lazy"
+              />
+            </button>
+            <p>
+              Applies a LoRA from the shelf and adds a
+              <code>trigger_words</code> output. Wire in a Set or Character
+              Loader to see only their adapters, and <code>base_model</code>
+              narrows the grid to one family: <em>Krea 2</em> shows the Krea 2,
+              Raw and Turbo adapters alike.
+              <span class="node-req">Requires PixlStash v1.10+.</span>
+            </p>
+          </div>
+        </div>
+
+        <div class="feature-grid" style="margin-top: 18px">
+          <div class="feature-card">
+            <h3>Multi Adapter (LoRA) Loader</h3>
+            <p>
+              Several LoRAs in one node, one row each with its picture, its
+              person, its trigger word and two strengths, applied top to bottom
+              as chained loaders would be. Set <code>show</code> to
+              <em>People who fit</em> to pick people instead of files. Up to
+              eight rows.
+              <span class="node-req">Requires PixlStash v1.12+.</span>
+            </p>
+          </div>
+          <div class="feature-card">
+            <h3>Checkpoint, VAE and CLIP Loaders</h3>
+            <p>
+              A checkpoint, a VAE, or one or two text encoders off the shelf,
+              each showing the model's name and icon on the node. The
+              Checkpoint and CLIP loaders also read <code>.gguf</code> files,
+              through a bundled copy of ComfyUI-GGUF.
+              <span class="node-req">Requires PixlStash v1.10+.</span>
+            </p>
+          </div>
+          <div class="feature-card">
+            <h3>ControlNet and Upscale Model Loaders</h3>
+            <p>
+              A ControlNet, or an upscaler such as <code>4x-UltraSharp</code>
+              (<code>.pth</code> or <code>.safetensors</code>), off the shelf,
+              so a workflow no longer needs the file in ComfyUI's own folder.
+              <span class="node-req">Requires PixlStash v1.12+.</span>
+            </p>
+          </div>
+          <div class="feature-card">
+            <h3>Workflow Set Loader</h3>
+            <p>
+              Loads one of your workflow sets in one node: its checkpoint, with
+              the set's text encoders and VAE in place of the checkpoint's own.
+              Wire it into an Adapter Loader and that loader's grid shows only
+              the set's LoRAs.
+              <span class="node-req">Requires PixlStash v1.12+.</span>
             </p>
           </div>
         </div>
@@ -755,13 +934,37 @@
           <h2 class="section-title">Install the nodes</h2>
           <p class="section-subtitle">
             Add the PixlStash nodes to your ComfyUI install, then point them at
-            your vault.
+            your library.
           </p>
         </div>
 
         <div class="install-grid">
+          <div class="install-card">
+            <h3>From PixlStash (easiest)</h3>
+            <button class="shot-image-btn" type="button">
+              <img
+                src="assets/ConnectComfyUI.jpg"
+                data-full="assets/ConnectComfyUI.jpg"
+                alt="PixlStash's Connect ComfyUI dialog with four checks passed: reach ComfyUI, PixlStash nodes installed, link the two apps, check both directions"
+                loading="lazy"
+              />
+            </button>
+            <div class="method-steps">
+              <div class="step">
+                <span class="step-label">Settings › ComfyUI › Connect</span>
+                <p class="step-note">
+                  With ComfyUI running on the same computer, PixlStash 1.12
+                  finds it, <strong>installs the nodes</strong>, restarts
+                  ComfyUI through
+                  ComfyUI Manager and links the two apps. No URL or token to
+                  enter.
+                </p>
+              </div>
+            </div>
+          </div>
+
           <div class="install-card" id="install-manager">
-            <h3>Via ComfyUI Manager (recommended)</h3>
+            <h3>Via ComfyUI Manager</h3>
             <button class="shot-image-btn" type="button">
               <img
                 src="assets/ComfyInstallation.jpg"

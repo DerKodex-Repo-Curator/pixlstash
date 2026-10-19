@@ -267,7 +267,7 @@
           "ai-toolkit run import with sample images and version history",
           "Two-way ComfyUI integration with tagged round-trip",
           "Tagger plugin API, with a published catalogue including a Moondream2 captioner and an OpenAI-compatible vision API captioner",
-          "NVIDIA CUDA, experimental AMD ROCm, or CPU inference",
+          "NVIDIA CUDA, experimental AMD ROCm, Apple Silicon, or CPU inference",
           "All inference runs locally, no cloud API"
         ]
       }
@@ -384,6 +384,16 @@
             <p>
               Locate objects inside a picture rather than only naming them, for
               crops and region work.
+            </p>
+            <p class="ai-card__model">Florence-2</p>
+          </div>
+          <div class="ai-card">
+            <h3>Text in pictures</h3>
+            <p>
+              Documents, receipts and screenshots are read in the background,
+              and every search also matches their text, forgiving the odd
+              misread letter. Click a word in the viewer to find it on the
+              picture.
             </p>
             <p class="ai-card__model">Florence-2</p>
           </div>
@@ -549,6 +559,14 @@
             </p>
           </div>
           <div class="ai-card">
+            <h3>Workflows and recipes</h3>
+            <p>
+              The ComfyUI workflows behind your pictures become a library of
+              cards you can run again, and every picture shows the recipe that
+              made it. Create with LoRA on a person makes new pictures of them.
+            </p>
+          </div>
+          <div class="ai-card">
             <h3>Model shelf</h3>
             <p>
               Checkpoints and adapters in one place, with the folders they live
@@ -577,6 +595,7 @@
             <p>
               Hardware is detected on install and GPU acceleration is offered as
               an optional download: NVIDIA CUDA, or experimental AMD ROCm.
+              Apple Silicon Macs use their own GPU.
             </p>
           </div>
           <div class="ai-card">
@@ -636,7 +655,7 @@
               <tr>
                 <th scope="row">Text in images (OCR)</th>
                 <td class="yes">Yes</td>
-                <td>No</td>
+                <td class="yes">Yes</td>
               </tr>
               <tr>
                 <th scope="row">Automatic tagging</th>

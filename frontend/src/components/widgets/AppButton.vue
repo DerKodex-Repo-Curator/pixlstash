@@ -6,13 +6,29 @@
       'app-btn',
       `app-btn--${variant}`,
       `app-btn--${size}`,
-      { 'app-btn--icon-only': iconOnly, 'app-btn--loading': loading },
+      {
+        'app-btn--icon-only': iconOnly,
+        'app-btn--loading': loading,
+        'app-btn--block': block,
+        'app-btn--on-dark': onDark,
+      },
     ]"
     :disabled="disabled || loading"
     :aria-busy="loading ? 'true' : undefined"
-    :title="title"
+    :aria-label="iconOnly && tooltip ? tooltip : undefined"
     :aria-keyshortcuts="keyShortcut"
   >
+    <!-- One string, both jobs: an icon-only button's tooltip is also its
+         name, so the two cannot drift. An explicit `aria-label` still wins
+         (fallthrough attrs override this binding) where they differ on
+         purpose; on a labelled button the tip describes instead. -->
+    <Tooltip
+      v-if="tooltip"
+      :text="tooltip"
+      activator="parent"
+      :location="tooltipLocation"
+      :describe="!iconOnly"
+    />
     <!-- `icon` overrides `iconLeft` for the rare glyph that is not in mdi (the
          ai-toolkit mark). Loading still wins over both: a spinner replacing the
          icon is how this button says it is busy, whichever glyph it wears. -->
@@ -37,16 +53,25 @@
 </template>
 
 <script setup>
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, ref } from "vue";
 import { VIcon } from "vuetify/components";
+import { useRefocusAfterLoading } from "../../utils/dom";
+import Tooltip from "./Tooltip.vue";
 
 const props = defineProps({
-  // primary (amber accent) | primary_green (olive) | secondary (neutral) |
-  // danger (error) | ghost (transparent)
+  // primary (amber accent, the key action) | secondary (neutral) |
+  // outline (bordered, no fill) | danger (error) | ghost (transparent) |
+  // save (teal, the verb that keeps unsaved changes).
+  // Amber acts, olive selects: there is no olive button.
   variant: { type: String, default: "secondary" },
   size: { type: String, default: "md" }, // md | sm
   iconLeft: { type: String, default: "" },
   iconOnly: { type: Boolean, default: false },
+  // Full width of its container, for a panel-width key action.
+  block: { type: Boolean, default: false },
+  // On a ground that stays dark in both themes: the lightbox, a scrim over a
+  // picture, a dark-surface card (docs/design/buttons.md, "The on-dark context").
+  onDark: { type: Boolean, default: false },
   disabled: { type: Boolean, default: false },
   // Pending / in-flight. NOT the same thing as `disabled`: "working", not "not
   // allowed" (visual-language.md §11). Forces the button disabled so a second
@@ -54,7 +79,10 @@ const props = defineProps({
   // spinner, and leaves the label alone. There is deliberately no loading-text
   // prop: the label is the accessible name and must not change mid-flight.
   loading: { type: Boolean, default: false },
-  title: { type: String, default: "" },
+  // The tip, and an icon-only button's accessible name (docs/design/buttons.md,
+  // "Tooltips"). Never a native `title`: that reaches neither keyboard nor touch.
+  tooltip: { type: String, default: "" },
+  tooltipLocation: { type: String, default: "top" },
   // The visible shortcut affordance from the dialog keyboard contract:
   // "enter" wears ↵ and "esc" wears Esc; any other single key (e.g. "s" on
   // the dedup Keep separate) wears its own uppercase label. A shortcut shown
@@ -81,23 +109,7 @@ const keyShortcut = computed(() =>
 );
 
 const rootEl = ref(null);
-let refocusWhenDone = false;
-
-// A natively-disabled button cannot hold focus, so the browser drops focus to
-// <body>, stranding a keyboard user who would have to tab all the way back to
-// where they were once the request settles.
-watch(
-  () => props.loading,
-  (isLoading) => {
-    if (isLoading) {
-      refocusWhenDone = rootEl.value === document.activeElement;
-      return;
-    }
-    if (!refocusWhenDone) return;
-    refocusWhenDone = false;
-    nextTick(() => rootEl.value?.focus());
-  },
-);
+useRefocusAfterLoading(() => props.loading, rootEl);
 
 /**
  * Put the keyboard on this button.
@@ -123,34 +135,68 @@ defineExpose({ focus });
   font-family: var(--font-ui);
   font-weight: var(--weight-medium);
   border: 1px solid transparent;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sm);
   white-space: nowrap;
   transition:
     background var(--dur-1) var(--ease-standard),
     border-color var(--dur-1) var(--ease-standard),
     color var(--dur-1) var(--ease-standard),
-    filter var(--dur-1) var(--ease-standard);
+    background-image var(--dur-1) var(--ease-standard);
 }
 
 .app-btn--md {
-  height: 27px;
+  height: var(--control-h);
   padding: 0 var(--space-5);
   font-size: var(--text-base);
 }
 
 .app-btn--sm {
-  height: 23px;
+  height: var(--control-h-sm);
   padding: 0 var(--space-4);
   font-size: var(--text-sm);
 }
 
 .app-btn--icon-only.app-btn--md {
-  width: 27px;
+  width: var(--control-h);
   padding: 0;
 }
 .app-btn--icon-only.app-btn--sm {
-  width: 23px;
+  width: var(--control-h-sm);
   padding: 0;
+}
+
+.app-btn--block {
+  display: flex;
+  width: 100%;
+}
+
+/* ON DARK: the ground stays dark in both themes, so the theme's own values are
+   the light theme's wrong ones there. The context swaps the tokens the variants
+   read wherever a token exists: the bright amber (#1413), the
+   dark-surface ink for the quiet and outlined labels, the hover wash and the
+   focus ring. Custom properties holding var() resolve where they are declared,
+   so `--hover-wash`, `--hover-neutral` and `--focus-stroke` are restated here
+   rather than inherited from the theme root. The neutral fill is the ink at
+   16%, which is the dark theme's own `cancel-button` to within a shade. */
+.app-btn--on-dark {
+  --v-theme-accent: var(--v-theme-dark-surface-accent);
+  --v-theme-on-surface: var(--v-theme-on-dark-surface);
+  --v-theme-cancel-button-text: var(--v-theme-on-dark-surface);
+  --hover-wash: rgba(var(--v-theme-on-dark-surface), 0.16);
+  --hover-neutral: linear-gradient(
+    rgba(var(--v-theme-on-dark-surface), 0.16),
+    rgba(var(--v-theme-on-dark-surface), 0.16)
+  );
+  --focus-stroke: rgb(var(--v-theme-on-dark-surface));
+  --focus-ring-inset: inset 0 0 0 var(--focus-width) var(--focus-stroke);
+}
+/* The neutral fill and the outline have no theme token to remap onto: their
+   dark-ground values are washes of the ink, so they are set here. */
+.app-btn--on-dark.app-btn--secondary {
+  background-color: rgba(var(--v-theme-on-dark-surface), 0.16);
+}
+.app-btn--on-dark.app-btn--outline {
+  border-color: rgba(var(--v-theme-on-dark-surface), 0.28);
 }
 
 /* Both spellings of "not allowed" fade the same way. `aria-disabled`, not the
@@ -180,46 +226,60 @@ defineExpose({ focus });
   cursor: progress;
 }
 
-/* Primary - amber accent, the key action. */
+/* Primary - amber accent, the key action. A filled control's hover darkens
+   the fill 20% (`--hover-shade`, a background-image), which leaves the label
+   alone and lifts white on amber from 4.75 to 6.74:1 (light) and 3.41 to
+   5.01:1 (dark). */
 .app-btn--primary {
-  background: rgb(var(--v-theme-accent));
+  background-color: rgb(var(--v-theme-accent));
   color: rgb(var(--v-theme-on-accent));
 }
-.app-btn--primary:not(:disabled):not([aria-disabled="true"]):hover {
-  filter: brightness(1.08);
+.app-btn--primary:not(:disabled):not([aria-disabled="true"]):hover,
+.app-btn--save:not(:disabled):not([aria-disabled="true"]):hover,
+.app-btn--danger:not(:disabled):not([aria-disabled="true"]):hover {
+  background-image: var(--hover-shade);
 }
 
-/* Primary green - olive primary, used for create/import affordances. */
-.app-btn--primary_green {
-  background: rgb(var(--v-theme-primary));
-  color: rgb(var(--v-theme-on-primary));
-}
-.app-btn--primary_green:not(:disabled):not([aria-disabled="true"]):hover {
-  filter: brightness(1.08);
-}
-
-/* Secondary - neutral, bordered. The Cancel partner. */
+/* Secondary - neutral. The Cancel partner. Its hover lightens in dark and
+   darkens in light (`--hover-neutral`): a darkened grey on a dark panel vanishes. */
 .app-btn--secondary {
-  background: rgb(var(--v-theme-cancel-button));
+  background-color: rgb(var(--v-theme-cancel-button));
   color: rgb(var(--v-theme-cancel-button-text));
 }
 .app-btn--secondary:not(:disabled):not([aria-disabled="true"]):hover {
-  filter: brightness(1.08);
+  background-image: var(--hover-neutral);
+}
+
+/* Outline - the neutral without a fill, for page surfaces: queue rows, cards,
+   in-grid trays (a toolbar takes AppBarButton). Inside a dialog or popover the neutral is the
+   filled `secondary` instead (buttons.md, #1673). */
+.app-btn--outline {
+  background: transparent;
+  color: rgb(var(--v-theme-on-surface));
+  border-color: rgb(var(--v-theme-border));
+}
+.app-btn--outline:not(:disabled):not([aria-disabled="true"]):hover {
+  background: var(--hover-wash);
 }
 
 /* Danger: destructive. `on-error`, not a hardcoded #fff. Both themes author
-   `error: #b54538` with `on-error: #f7f1ea`, the warm near-white, at 4.83:1;
-   main.js says "(same value in both themes)" on that very line. The comment
-   here previously claimed the pair flipped to the warm near-black in dark,
-   which was never true of `error` (it is true of `warning`, whose fill IS
-   brighter in dark). Recorded because a stale contrast note is the kind of
+   `error: #b0392b` with `on-error: #f7f1ea`, the warm near-white, at 5.40:1:
+   every status fill is one value in both themes. The comment here once
+   claimed the pair flipped to the warm near-black in dark, which was never
+   true of `error` (only `warning` takes a dark label). Recorded because a stale contrast note is the kind of
    thing that gets "corrected" by changing the value instead of the note. */
 .app-btn--danger {
-  background: rgb(var(--v-theme-error));
+  background-color: rgb(var(--v-theme-error));
   color: rgb(var(--v-theme-on-error));
 }
-.app-btn--danger:not(:disabled):not([aria-disabled="true"]):hover {
-  filter: brightness(1.08);
+
+/* Save - teal, the verb that keeps what is not saved yet. Teal means that and
+   nothing else on a button (visual-language.md §4), so this is never a second
+   key action: amber stays the one per surface, and the two sit together in
+   the Workflow tab's footer. `on-tertiary` on the fill is 4.85:1. */
+.app-btn--save {
+  background-color: rgb(var(--v-theme-tertiary));
+  color: rgb(var(--v-theme-on-tertiary));
 }
 
 /* Ghost - transparent, recedes until hovered. */

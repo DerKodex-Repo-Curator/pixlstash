@@ -32,8 +32,10 @@ the refused token is live.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -43,12 +45,14 @@ from urllib.parse import quote
 
 import pytest
 from fastapi.testclient import TestClient
+from send2trash import TrashPermissionError
 from sqlmodel import Session, delete
 
 from pixlstash.authz.policy import AccessPolicy
 from pixlstash.authz.registry import ROUTE_POLICIES
 from pixlstash.database import DBPriority
 from pixlstash.db_models.adapter_attachment import AdapterAttachment
+from pixlstash.db_models.picture import Picture
 from pixlstash.routes import model_files as model_files_routes
 from pixlstash.routes import model_folders as model_folders_routes
 from pixlstash.routes import model_shelf as model_shelf_routes
@@ -57,10 +61,17 @@ from pixlstash.routes.model_imports import (
     sample_path_within,
 )
 from pixlstash.routes.model_shelf import MAX_ATTACHMENTS_PER_MODEL
+from pixlstash.services.model_kind_suggestions import (
+    loader_offers,
+    may_refile_by_name,
+)
 from pixlstash.server import Server
-from pixlstash.services import builtin_models
+from pixlstash.services import builtin_caches, builtin_models, comfyui_service
+from pixlstash.services import model_shelf_service, model_workflow_sets
 from pixlstash.services.model_folder_scanner import ModelFolderScanner
+from pixlstash.utils.image_processing.image_utils import ImageUtils
 from pixlstash.services.model_mover import SHELF_IO_LOCK
+from pixlstash.services import workflow_set_verdicts as verdicts
 from tests.authz_guard import assert_real_route, no_spa_fallback  # noqa: F401
 from tests.network_vectors import LAN_IPV4
 from tests.test_model_folder_scanner import write_adapter, write_checkpoint
@@ -76,6 +87,23 @@ _SHELF_ROUTES = (
     ("GET", "/api/v1/adapters/{sha256}"),
     ("GET", "/api/v1/checkpoints"),
     ("GET", "/api/v1/models/base-models"),
+    ("POST", "/api/v1/models/companions"),
+    ("PUT", "/api/v1/models/hidden"),
+    ("GET", "/api/v1/models/workflow-sets"),
+    ("POST", "/api/v1/models/workflow-sets"),
+    ("PATCH", "/api/v1/models/workflow-sets/{set_id}"),
+    ("DELETE", "/api/v1/models/workflow-sets/{set_id}"),
+    ("POST", "/api/v1/models/workflow-sets/{set_id}/members"),
+    ("POST", "/api/v1/models/workflow-sets/{set_id}/members/remove"),
+    ("PUT", "/api/v1/models/workflow-sets/{set_id}/declines"),
+    ("PUT", "/api/v1/models/workflow-sets/hidden"),
+    ("PUT", "/api/v1/models/workflow-sets/verdicts/{combo_key}"),
+    ("DELETE", "/api/v1/models/workflow-sets/verdicts/{combo_key}"),
+    ("PUT", "/api/v1/models/workflow-sets/verdicts/{combo_key}/members/{model_id}"),
+    (
+        "DELETE",
+        "/api/v1/models/workflow-sets/verdicts/{combo_key}/members/{model_id}",
+    ),
 )
 
 
@@ -196,10 +224,26 @@ _SEED_MODELS = (
 def _seed_hub(server) -> dict[str, int]:
     """Write the shelf tables from scratch. Returns filename -> model.id."""
     with server.hub.transaction() as conn:
+        # Sets first: their members reference `model`, so a set left by one
+        # test would block the model wipe (or hide a row from the next test,
+        # the hide keyed by a key that is stable across tests).
+        conn.execute("DELETE FROM model_workflow_set_member")
+        conn.execute("DELETE FROM model_workflow_set_decline")
+        conn.execute("DELETE FROM model_workflow_set")
+        conn.execute("DELETE FROM workflow_set_hidden")
         # Both children of `model` before the parent: foreign keys are on for
         # the hub, so a leftover row aborts the wipe rather than lingering.
         conn.execute("DELETE FROM model_file")
         conn.execute("DELETE FROM model_capability")
+        # ComfyUI runs name model ids, and the ids are about to be reissued.
+        conn.execute("DELETE FROM comfyui_history_model")
+        # The owner's set verdicts are keyed by model ids too. AUTOINCREMENT
+        # never reissues one, but a verdict left by one test must not be
+        # served to the next.
+        conn.execute("DELETE FROM model_set_verdict")
+        conn.execute("DELETE FROM model_set_member_verdict")
+        # A hide is keyed by a model id too, and must not reach the next test.
+        conn.execute("DELETE FROM model_hidden")
         conn.execute("DELETE FROM model")
         conn.execute("DELETE FROM model_folder")
         conn.execute("DELETE FROM adapter_stack")
@@ -301,6 +345,9 @@ def shelf_env():
         r = owner.post(f"{API}/picture_sets", json={"name": "Shelf Set"})
         assert r.status_code in {200, 201}, r.text
         set_id = r.json()["picture_set"]["id"]
+
+        # Before any test writes a picture: see `_quiesce_background_work`.
+        _quiesce_background_work(server)
 
         yield SimpleNamespace(
             server=server, owner=owner, character_id=character_id, set_id=set_id
@@ -415,6 +462,48 @@ def test_base_model_filter_carries_not_set_as_an_explicit_value(shelf_env):
     assert _names(r.json()["adapters"]) == {"alice.safetensors"}
 
 
+def test_the_family_filter_takes_every_base_model_in_the_family(shelf_env):
+    """``base_model_family`` narrows to what fits, not to one spelling: Krea 2
+    covers Raw and Turbo, named by the family, its label or a member."""
+    ids = shelf_env.model_ids
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute(
+            "UPDATE model SET base_model = 'Krea 2 Turbo' WHERE id = ?",
+            (ids["alice.safetensors"],),
+        )
+        conn.execute(
+            "UPDATE model SET base_model = 'krea 2 RAW' WHERE id = ?",
+            (ids["bob.safetensors"],),
+        )
+    try:
+        rows = shelf_env.owner.get(f"{API}/adapters").json()["adapters"]
+        labels = {row["filename"]: row["base_model_family_label"] for row in rows}
+        assert labels["alice.safetensors"] == labels["bob.safetensors"] == "Krea 2"
+        assert labels["dana.safetensors"] is None
+        for value in ("krea2", "Krea 2", "Krea 2 Turbo"):
+            r = shelf_env.owner.get(
+                f"{API}/adapters", params={"base_model_family": value}
+            )
+            assert r.status_code == 200, r.text
+            assert _names(r.json()["adapters"]) == {
+                "alice.safetensors",
+                "bob.safetensors",
+            }, value
+        r = shelf_env.owner.get(
+            f"{API}/adapters", params={"base_model_family": "not a family"}
+        )
+        assert r.json()["adapters"] == []
+    finally:
+        with shelf_env.server.hub.transaction() as conn:
+            for name, base in (
+                ("alice.safetensors", "SDXL 1.0"),
+                ("bob.safetensors", "Flux.1 dev"),
+            ):
+                conn.execute(
+                    "UPDATE model SET base_model = ? WHERE id = ?", (base, ids[name])
+                )
+
+
 def test_base_model_completions_carry_the_shipped_labels_and_the_users_own(
     shelf_env,
 ):
@@ -461,10 +550,27 @@ def test_unknown_is_neither_adapter_nor_checkpoint_by_default(shelf_env):
     assert _names(r.json()["adapters"]) == {"mystery.safetensors"}
 
 
+def test_the_checkpoint_list_says_which_shelf_its_ids_are_of(shelf_env):
+    """A row id means nothing on another PixlStash, so the list names the
+    shelf beside it (#1912): one id, made once and the same from then on."""
+    first = shelf_env.owner.get(f"{API}/checkpoints").json()["shelf"]
+    assert re.fullmatch(r"[0-9a-f]{32}", first), first
+    assert shelf_env.owner.get(f"{API}/checkpoints").json()["shelf"] == first
+    assert model_shelf_service.shelf_uuid(shelf_env.server.hub) == first
+    rows = shelf_env.server.hub.fetchall("SELECT uuid FROM shelf_identity")
+    assert [row["uuid"] for row in rows] == [first]
+
+
 def test_checkpoint_cannot_be_requested_from_the_adapter_block(shelf_env):
     r = shelf_env.owner.get(f"{API}/adapters", params={"file_kind": "checkpoint"})
     assert r.status_code == 400, r.text
     assert "GET /checkpoints" in r.text
+
+
+def test_the_adapter_block_serves_upscalers(shelf_env):
+    # The pack's Upscale Model Loader browses and fetches them through it.
+    r = shelf_env.owner.get(f"{API}/adapters", params={"file_kind": "upscaler"})
+    assert r.status_code == 200, r.text
 
 
 def test_unhashed_checkpoint_is_listed_and_addressed_by_id(shelf_env):
@@ -477,6 +583,9 @@ def test_unhashed_checkpoint_is_listed_and_addressed_by_id(shelf_env):
     unhashed = by_name["huge_unhashed.safetensors"]
     assert unhashed["sha256"] is None
     assert unhashed["id"] == shelf_env.model_ids["huge_unhashed.safetensors"]
+    # The hash worker owes this one a digest; a row that has one is owed nothing.
+    assert unhashed["hash_pending"] is True
+    assert by_name["base_xl.safetensors"]["hash_pending"] is False
 
 
 def test_checkpoint_hash_is_not_served_by_the_adapter_detail_route(shelf_env):
@@ -643,9 +752,2136 @@ def test_unauthenticated_is_refused_on_every_shelf_route(shelf_env):
         )
 
 
+def test_rows_carry_the_header_facts_and_fold_family_from_the_base_model(shelf_env):
+    """`family` follows a corrected base model; `quant` is folded on the way out.
+
+    The column holds whichever source wrote it - the header's own dtype
+    (`f16`) for a `.safetensors`, the filename's precision (`fp16`) for a
+    `.gguf` - and the response serves the ONE canonical id either way, or a
+    row scanned before today would read `f16` beside one scanned after it
+    reading `FP16` for the same precision.
+    """
+    alice = shelf_env.model_ids["alice.safetensors"]
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute(
+            "UPDATE model SET family = 'vae_4ch', quant = 'f16', weights_id = 'w' "
+            "WHERE id = ?",
+            (alice,),
+        )
+
+    rows = {
+        row["id"]: row
+        for row in shelf_env.owner.get(f"{API}/adapters").json()["adapters"]
+    }
+
+    assert rows[alice]["family"] == "sdxl"
+    assert (rows[alice]["quant"], rows[alice]["weights_id"]) == ("fp16", "w")
+    dana = rows[shelf_env.model_ids["dana.safetensors"]]
+    assert (dana["family"], dana["quant"], dana["weights_id"]) == (None, None, None)
+
+
+def test_companions_answers_the_owner_and_refuses_a_share_token(shelf_env):
+    """Both directions on the one POST read. The route is exercised in depth in
+    `tests/test_workflow_library.py`; this pins that it resolves and is gated."""
+    alice = shelf_env.model_ids["alice.safetensors"]
+    body = {"ids": [alice]}
+
+    r = shelf_env.owner.post(f"{API}/models/companions", json=body)
+    assert r.status_code == 200, r.text
+    answer = r.json()
+    assert isinstance(answer.pop("unrecorded"), int)
+    assert answer == {
+        "orphaned": [],
+        "shared": [],
+        "unknown": [],
+        "in_use": [],
+        "no_evidence": [alice],
+    }
+
+    token = _mint(
+        shelf_env.owner,
+        "companions character token",
+        resource_type="character",
+        resource_id=shelf_env.character_id,
+    )
+    client = _bearer(shelf_env.server, token)
+    assert client.get(f"{API}/pictures").status_code == 200
+    r = client.post(f"{API}/models/companions", json=body)
+    assert r.status_code == 403, r.text
+    assert (
+        TestClient(shelf_env.server.api)
+        .post(f"{API}/models/companions", json=body)
+        .status_code
+        == 401
+    )
+
+
+# ---------------------------------------------------------------------------
+# The set grid's read (#1438), end to end through the route.
+#
+# Seeded at the TABLES rather than by importing a picture, because what needs
+# exercising here is the route's own mapping - `_cover_strip`, the cache-buster
+# and the service-dict-to-schema hop - and an import would spend a scan and a
+# hash to reach the same three rows. The grouping itself is exercised against
+# real graphs in `tests/test_workflow_library.py`.
+# ---------------------------------------------------------------------------
+
+
+def _quiesce_background_work(server):
+    """Take every work finder out of the planner and let the pipeline settle.
+
+    A shared server is warm, and ``MissingComfyUIExtractionFinder`` looks for
+    exactly the rows the workflow-set tests below hand-write: it re-reads the
+    (nonexistent) files and blanks ``workflow_structural_hash``, which is what a
+    set's picture count is grouped by - so a card came back with one picture
+    instead of two, intermittently, depending on whether the sweep had landed. The
+    planner thread and the task runner keep running.
+
+    Lifted from ``tests/test_saved_recipes.py``, which needs it for the same rows
+    and the same reason.
+    """
+    planner = server.vault._work_planner
+    task_types = list(server.vault._planner_work_finders)
+    for task_type in task_types:
+        server.vault._planner_work_finders.pop(task_type)
+    removed = planner.detach_finders(task_types)
+
+    runner = server.vault._task_runner
+    runner.cancel_pending_tasks()
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline:
+        with runner._active_task_lock:
+            active = list(runner._active_tasks.values())
+        if not active:
+            return removed
+        time.sleep(0.05)
+    raise AssertionError(
+        f"background work did not settle within 60s; still running: {active}"
+    )
+
+
+def _seed_recipe(server, structural_hash: str, assets: list[tuple[str, str]]) -> None:
+    """One recipe on the hub, naming *assets* as ``(widget_name, filename)``."""
+    with server.hub.transaction() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO workflow_topology "
+            "(topology_hash, hash_version, node_count, first_seen_at) "
+            "VALUES (?, 'v1', 3, '2026-09-01T00:00:00Z')",
+            (f"topo-{structural_hash}",),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO workflow_recipe "
+            "(structural_hash, topology_hash, hash_version, node_count, first_seen_at) "
+            "VALUES (?, ?, 'v1', 3, '2026-09-01T00:00:00Z')",
+            (structural_hash, f"topo-{structural_hash}"),
+        )
+        conn.executemany(
+            "INSERT OR IGNORE INTO workflow_recipe_asset "
+            "(structural_hash, widget_name, normalized_filename) VALUES (?, ?, ?)",
+            [(structural_hash, widget, name) for widget, name in assets],
+        )
+
+
+# One counter for the whole module, so every seeded picture gets a path of its
+# own. Two pictures of one recipe sharing a `file_path` is the kind of fixture
+# that passes until something downstream dedupes on it.
+_SEEDED_PICTURES = itertools.count(1)
+
+
+def _seed_picture(server, structural_hash: str, **fields) -> int:
+    """One kept picture made by *structural_hash*, with the bitmap fields the
+    cover URL's cache key is computed from."""
+
+    def insert(session: Session):
+        picture = Picture(
+            file_path=f"{structural_hash}-{next(_SEEDED_PICTURES)}.png",
+            deleted=False,
+            workflow_structural_hash=structural_hash,
+            **fields,
+        )
+        session.add(picture)
+        session.commit()
+        return picture.id
+
+    return server.vault.db.run_task(insert, priority=DBPriority.IMMEDIATE)
+
+
+def _wipe_recipes(server) -> None:
+    with server.hub.transaction() as conn:
+        for table in (
+            "workflow_recipe_asset",
+            "workflow_recipe",
+            "workflow_topology_core",
+            "workflow_topology",
+        ):
+            conn.execute(f"DELETE FROM {table}")
+
+    def wipe(session: Session):
+        session.exec(delete(Picture))
+        session.commit()
+
+    server.vault.db.run_task(wipe, priority=DBPriority.IMMEDIATE)
+
+
+def test_workflow_sets_answers_the_owner_and_refuses_a_share_token(shelf_env):
+    """Both directions on the read behind the set grid. The grouping itself is
+    exercised in depth in `tests/test_workflow_library.py`; this pins that the
+    route resolves, is gated, and draws the models no recipe names.
+
+    The seeded shelf has no pictures and no recipes, so every model is in no
+    set - which is the honesty rule's own case: nothing is omitted for lacking
+    a pairing.
+    """
+    r = shelf_env.owner.get(f"{API}/models/workflow-sets")
+    assert r.status_code == 200, r.text
+    answer = r.json()
+    assert answer["combinations"] == []
+    assert set(answer["no_set"]) == set(shelf_env.model_ids.values())
+
+    token = _mint(
+        shelf_env.owner,
+        "workflow sets character token",
+        resource_type="character",
+        resource_id=shelf_env.character_id,
+    )
+    client = _bearer(shelf_env.server, token)
+    assert client.get(f"{API}/pictures").status_code == 200
+    # **Which layer refused, named.** A 403 here is the READ-token belt's
+    # (`auth.py`'s `READ_BLOCKED_GET_PATHS`), which runs ahead of routing - so it
+    # answers the same way for a path that does not exist, and on its own this
+    # assertion would pass against a renamed route. `assert_real_route` is what
+    # makes it a refusal of THIS route rather than of nothing. The gate holds it
+    # independently (proven by mutation, #1479 security review) and
+    # `test_every_shelf_route_is_declared_owner_only` is what pins the tier.
+    assert_real_route(shelf_env.server.api, "GET", "/api/v1/models/workflow-sets")
+    assert client.get(f"{API}/models/workflow-sets").status_code == 403
+    assert (
+        TestClient(shelf_env.server.api).get(f"{API}/models/workflow-sets").status_code
+        == 401
+    )
+
+
+def test_workflow_sets_serves_the_whole_card_through_the_route(shelf_env):
+    """**The route's own mapping, executed.** Everything below the service is
+    shape: `_cover_strip` builds the thumbnail URL and its cache-buster, and the
+    handler copies a dict of Python into three Pydantic models. A test that only
+    ever sees `combinations: []` exercises none of it, so a renamed key would be
+    a 500 in front of the reader and a green suite here.
+    """
+    ids = shelf_env.model_ids
+    # One of PixlStash's own downloads, for the `no_set` exclusion below. Added
+    # here rather than to `_SEED_MODELS`, so no other test's counts move.
+    with shelf_env.server.hub.transaction() as conn:
+        engine_id = conn.execute(
+            "INSERT INTO model (file_kind, kind, sha256, filename, provenance, "
+            "created_at) VALUES ('engine', 'tagger', ?, 'wd-tagger.onnx', "
+            "'internal', '2026-08-08T00:00:00Z')",
+            (_h("enginetagger"),),
+        ).lastrowid
+    try:
+        _seed_recipe(
+            shelf_env.server,
+            "sh-base",
+            [
+                ("ckpt_name", "base_xl.safetensors"),
+                ("lora_name", "alice.safetensors"),
+            ],
+        )
+        # Two pictures, so the count is not 1 by accident, and different scores
+        # so the cover order is a real ordering rather than insertion order.
+        best = _seed_picture(
+            shelf_env.server,
+            "sh-base",
+            score=5,
+            thumbnail_width=320,
+            thumbnail_height=240,
+            orientation=1,
+        )
+        worst = _seed_picture(
+            shelf_env.server,
+            "sh-base",
+            score=1,
+            thumbnail_width=64,
+            thumbnail_height=64,
+        )
+
+        r = shelf_env.owner.get(f"{API}/models/workflow-sets")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert len(body["combinations"]) == 1
+        card = body["combinations"][0]
+
+        # The key, and the member list in the server's own order: the checkpoint
+        # names the set, the adapter comes last.
+        assert card["key"] == ",".join(
+            str(i)
+            for i in sorted([ids["base_xl.safetensors"], ids["alice.safetensors"]])
+        )
+        assert [(m["name"], m["kind"]) for m in card["models"]] == [
+            ("Base XL", "checkpoint"),
+            ("Alice", "adapter"),
+        ]
+        assert card["models"][0]["filename"] == "base_xl.safetensors"
+        assert card["models"][0]["file_size"] == 9000
+        assert all(m["ambiguous"] is False for m in card["models"])
+        assert (card["recipes"], card["picture_count"]) == (1, 2)
+
+        # The covers: the higher-scored picture first, each carrying the SAME
+        # cache key the picture grid's own tiles use - so a cover the browser
+        # holds is not fetched twice and a regenerated one is not served stale.
+        #
+        # **Data, not a path.** This route deliberately serves no URL: an
+        # `<img src>` never reaches the client's Axios interceptor, so a path
+        # built here arrives with no API base and no share token and the browser
+        # asks the page origin for a route it does not serve. The client builds it
+        # with `pictureThumbnailUrl`, the one place that path is spelled.
+        assert [c["picture_id"] for c in card["covers"]] == [best, worst]
+        best_path = shelf_env.server.vault.db.run_task(
+            lambda session: session.get(Picture, best).file_path,
+            priority=DBPriority.IMMEDIATE,
+        )
+        assert card["covers"][0]["version"] == ImageUtils.thumbnail_cache_version(
+            320, 240, 1, file_path=best_path
+        )
+        assert card["covers"][1]["version"]
+        assert "url" not in card["covers"][0]
+
+        # Every model NOT in the set - and no engine. PixlStash's own downloads
+        # can never appear in a generation graph, so "no picture was made with
+        # this" is not an unproven claim about a tagger, it is a false one; the
+        # card that states it must not be padded with them.
+        assert ids["mystery.safetensors"] in body["no_set"]
+        assert ids["base_xl.safetensors"] not in body["no_set"]
+        assert engine_id not in body["no_set"]
+    finally:
+        _wipe_recipes(shelf_env.server)
+        with shelf_env.server.hub.transaction() as conn:
+            conn.execute("DELETE FROM model WHERE id = ?", (engine_id,))
+
+
+def test_workflow_sets_orders_the_strongest_evidence_first(shelf_env):
+    """The grid opens on the combinations the library leans on, so the order is
+    part of the contract rather than whatever the dict iterated as."""
+    try:
+        for name, pictures in (("sh-small", 1), ("sh-big", 4)):
+            _seed_recipe(shelf_env.server, name, [("ckpt_name", "base_xl.safetensors")])
+            # A second asset apiece, so the two are different combinations.
+            _seed_recipe(
+                shelf_env.server,
+                name,
+                [
+                    (
+                        "lora_name",
+                        f"{'alice' if name == 'sh-big' else 'dana'}.safetensors",
+                    )
+                ],
+            )
+            for _ in range(pictures):
+                _seed_picture(shelf_env.server, name, score=3)
+
+        body = shelf_env.owner.get(f"{API}/models/workflow-sets").json()
+
+        assert [c["picture_count"] for c in body["combinations"]] == [4, 1]
+    finally:
+        _wipe_recipes(shelf_env.server)
+
+
+def test_workflow_sets_flags_a_member_two_shelf_rows_answer_to(shelf_env):
+    """A filename-only match is drawn, and said to be one. The route has to
+    carry the flag out: a card that dropped it would claim a certainty the
+    recipe does not have."""
+    try:
+        # Two shelf rows recording the same basename. `model.filename` rather
+        # than `model_file.relpath`, because that table is keyed
+        # `(model_folder_id, relpath)` and so cannot hold the collision twice in
+        # one folder - while `recipe_asset_index` reads both, which is exactly
+        # why the ambiguity is reachable at all.
+        with shelf_env.server.hub.transaction() as conn:
+            conn.executemany(
+                "UPDATE model SET filename = 'twin.safetensors' WHERE id = ?",
+                [
+                    (shelf_env.model_ids["alice.safetensors"],),
+                    (shelf_env.model_ids["dana.safetensors"],),
+                ],
+            )
+        # With a checkpoint: a set with no base model is not served.
+        _seed_recipe(
+            shelf_env.server,
+            "sh-twin",
+            [("ckpt_name", "base_xl.safetensors"), ("lora_name", "twin.safetensors")],
+        )
+        _seed_picture(shelf_env.server, "sh-twin", score=3)
+
+        body = shelf_env.owner.get(f"{API}/models/workflow-sets").json()
+
+        card = body["combinations"][0]
+        base = shelf_env.model_ids["base_xl.safetensors"]
+        twins = [m for m in card["models"] if m["id"] != base]
+        assert {m["name"] for m in twins} == {"Alice", "Dana"}
+        assert all(m["ambiguous"] is True for m in twins)
+    finally:
+        _wipe_recipes(shelf_env.server)
+
+
+def _seed_run(server, prompt_id: str, model_ids) -> None:
+    """One finished ComfyUI run, as `record_comfyui_history` stores it (#1518)."""
+    with server.hub.transaction() as conn:
+        conn.executemany(
+            "INSERT INTO comfyui_history_model (prompt_id, model_id) VALUES (?, ?)",
+            [(prompt_id, model_id) for model_id in model_ids],
+        )
+
+
+def _key(*model_ids) -> str:
+    return ",".join(str(m) for m in sorted(model_ids))
+
+
+def _vae_and_encoder(shelf_env) -> tuple[int, int]:
+    """A VAE and a text encoder beside the seeded checkpoint; the next test's
+    seed wipes them with every other model row."""
+    return (
+        _add_model(shelf_env, "vae", "sdxl_vae.safetensors", _h("vaefile")),
+        _add_model(shelf_env, "text_encoder", "clip_l.safetensors", _h("clipfile")),
+    )
+
+
+def test_workflow_sets_serve_a_set_that_only_ran_in_comfyui(shelf_env):
+    """#1565: a checkpoint + VAE + text encoder no picture was made with, but
+    that ComfyUI ran, is a set with no cover - not three files in `no_set`."""
+    ckpt = shelf_env.model_ids["base_xl.safetensors"]
+    vae, encoder = _vae_and_encoder(shelf_env)
+    _seed_run(shelf_env.server, "run-1", [ckpt, vae, encoder])
+
+    body = shelf_env.owner.get(f"{API}/models/workflow-sets").json()
+
+    card = {c["key"]: c for c in body["combinations"]}[_key(ckpt, vae, encoder)]
+    assert (card["picture_count"], card["recipes"], card["history_runs"]) == (0, 0, 1)
+    assert card["covers"] == []
+    assert card["models"][0]["id"] == ckpt
+    assert not {ckpt, vae, encoder} & set(body["no_set"])
+
+
+def test_workflow_sets_count_runs_apart_from_recipes(shelf_env):
+    ckpt = shelf_env.model_ids["base_xl.safetensors"]
+    vae, encoder = _vae_and_encoder(shelf_env)
+    try:
+        _seed_recipe(
+            shelf_env.server,
+            "hr-both",
+            [
+                ("ckpt_name", "base_xl.safetensors"),
+                ("vae_name", "sdxl_vae.safetensors"),
+                ("clip_name", "clip_l.safetensors"),
+            ],
+        )
+        _seed_picture(shelf_env.server, "hr-both", score=3)
+        for prompt_id in ("run-a", "run-b"):
+            _seed_run(shelf_env.server, prompt_id, [ckpt, vae, encoder])
+
+        body = shelf_env.owner.get(f"{API}/models/workflow-sets").json()
+
+        card = {c["key"]: c for c in body["combinations"]}[_key(ckpt, vae, encoder)]
+        assert (card["recipes"], card["history_runs"], card["picture_count"]) == (
+            1,
+            2,
+            1,
+        )
+    finally:
+        _wipe_recipes(shelf_env.server)
+
+
+def test_workflow_sets_never_mark_a_run_ambiguous(shelf_env):
+    """A run was resolved to exact ids when it was stored, so it carries no
+    doubt - even while a recipe makes one of its members' basenames a guess."""
+    ids = shelf_env.model_ids
+    try:
+        with shelf_env.server.hub.transaction() as conn:
+            conn.executemany(
+                "UPDATE model SET filename = 'twin.safetensors' WHERE id = ?",
+                [(ids["alice.safetensors"],), (ids["dana.safetensors"],)],
+            )
+        _seed_recipe(
+            shelf_env.server,
+            "hr-twin",
+            [("ckpt_name", "base_xl.safetensors"), ("lora_name", "twin.safetensors")],
+        )
+        _seed_picture(shelf_env.server, "hr-twin", score=3)
+        _seed_run(
+            shelf_env.server,
+            "run-exact",
+            [ids["base_xl.safetensors"], ids["alice.safetensors"]],
+        )
+
+        body = shelf_env.owner.get(f"{API}/models/workflow-sets").json()
+
+        by_key = {c["key"]: c for c in body["combinations"]}
+        twin = by_key[
+            _key(
+                ids["base_xl.safetensors"],
+                ids["alice.safetensors"],
+                ids["dana.safetensors"],
+            )
+        ]
+        assert all(
+            m["ambiguous"]
+            for m in twin["models"]
+            if m["id"] != ids["base_xl.safetensors"]
+        )
+        run = by_key[_key(ids["base_xl.safetensors"], ids["alice.safetensors"])]
+        assert [m["ambiguous"] for m in run["models"]] == [False, False]
+    finally:
+        _wipe_recipes(shelf_env.server)
+
+
+def test_workflow_sets_skip_a_run_member_the_shelf_forgot(shelf_env):
+    """The history row outlived its model: the run counts for what is left,
+    and a run of nothing left is no set at all."""
+    ckpt = shelf_env.model_ids["base_xl.safetensors"]
+    gone = max(shelf_env.model_ids.values()) + 1000
+    _seed_run(shelf_env.server, "run-partial", [ckpt, gone])
+    _seed_run(shelf_env.server, "run-empty", [gone])
+
+    body = shelf_env.owner.get(f"{API}/models/workflow-sets").json()
+
+    by_key = {c["key"]: c for c in body["combinations"]}
+    assert by_key[_key(ckpt)]["history_runs"] == 1
+    assert all(gone not in {m["id"] for m in c["models"]} for c in body["combinations"])
+
+
+def test_workflow_sets_order_run_only_sets_by_their_runs(shelf_env):
+    ids = shelf_env.model_ids
+    base = ids["base_xl.safetensors"]
+    _seed_run(shelf_env.server, "run-once", [base, ids["dana.safetensors"]])
+    for n in range(2):
+        _seed_run(shelf_env.server, f"run-often-{n}", [base, ids["bob.safetensors"]])
+
+    body = shelf_env.owner.get(f"{API}/models/workflow-sets").json()
+
+    keys = [c["key"] for c in body["combinations"]]
+    assert keys.index(_key(base, ids["bob.safetensors"])) < keys.index(
+        _key(base, ids["dana.safetensors"])
+    )
+
+
+def test_workflow_sets_order_a_run_only_set_after_every_pictured_one(shelf_env):
+    ids = shelf_env.model_ids
+    try:
+        _seed_recipe(
+            shelf_env.server,
+            "hr-pictured",
+            [("ckpt_name", "base_xl.safetensors"), ("lora_name", "alice.safetensors")],
+        )
+        _seed_picture(shelf_env.server, "hr-pictured", score=3)
+        # More runs than the pictured set has anything: still second.
+        for n in range(3):
+            _seed_run(
+                shelf_env.server,
+                f"run-{n}",
+                [ids["base_xl.safetensors"], ids["dana.safetensors"]],
+            )
+
+        body = shelf_env.owner.get(f"{API}/models/workflow-sets").json()
+
+        assert [c["key"] for c in body["combinations"]] == [
+            _key(ids["base_xl.safetensors"], ids["alice.safetensors"]),
+            _key(ids["base_xl.safetensors"], ids["dana.safetensors"]),
+        ]
+    finally:
+        _wipe_recipes(shelf_env.server)
+
+
+# ---------------------------------------------------------------------------
+# Hand-made workflow sets (#1520)
+# ---------------------------------------------------------------------------
+
+
+def _wipe_sets(server) -> None:
+    with server.hub.transaction() as conn:
+        conn.execute("DELETE FROM model_workflow_set_member")
+        conn.execute("DELETE FROM model_workflow_set_decline")
+        conn.execute("DELETE FROM model_workflow_set")
+        conn.execute("DELETE FROM workflow_set_hidden")
+
+
+def _new_set(shelf_env, **body) -> dict:
+    r = shelf_env.owner.post(f"{API}/models/workflow-sets", json=body)
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def _hand_made(shelf_env) -> dict[int, dict]:
+    r = shelf_env.owner.get(f"{API}/models/workflow-sets")
+    assert r.status_code == 200, r.text
+    return {entry["id"]: entry for entry in r.json()["hand_made"]}
+
+
+def _add_model(shelf_env, file_kind, filename, sha256, **columns) -> int:
+    with shelf_env.server.hub.transaction() as conn:
+        return conn.execute(
+            "INSERT INTO model (file_kind, kind, sha256, filename, display_name, "
+            "provenance, created_at) VALUES (?, ?, ?, ?, ?, 'external', "
+            "'2026-08-08T00:00:00Z')",
+            (
+                file_kind,
+                columns.get("kind"),
+                sha256,
+                filename,
+                columns.get("display_name"),
+            ),
+        ).lastrowid
+
+
+def test_hand_made_set_routes_answer_the_owner_and_refuse_tokens(shelf_env):
+    """Both directions on every set mutator, each against a route that exists."""
+    ids = shelf_env.model_ids
+    try:
+        made = _new_set(shelf_env, members=[{"model_id": ids["alice.safetensors"]}])
+        set_id = made["id"]
+        routes = (
+            ("POST", "/api/v1/models/workflow-sets", None, {"json": {}}),
+            (
+                "PUT",
+                "/api/v1/models/workflow-sets/hidden",
+                None,
+                {"json": {"keys": ["hand:1"], "hidden": True}},
+            ),
+            (
+                "PUT",
+                "/api/v1/models/hidden",
+                None,
+                {"json": {"ids": [ids["alice.safetensors"]], "hidden": True}},
+            ),
+            (
+                "PATCH",
+                f"/api/v1/models/workflow-sets/{set_id}",
+                "/api/v1/models/workflow-sets/{set_id}",
+                {"json": {"name": "x"}},
+            ),
+            (
+                "POST",
+                f"/api/v1/models/workflow-sets/{set_id}/members",
+                "/api/v1/models/workflow-sets/{set_id}/members",
+                {"json": {"members": [{"model_id": ids["bob.safetensors"]}]}},
+            ),
+            (
+                "POST",
+                f"/api/v1/models/workflow-sets/{set_id}/members/remove",
+                "/api/v1/models/workflow-sets/{set_id}/members/remove",
+                {"json": {"sha256": [ADAPTER_WITH_BASE_2]}},
+            ),
+            (
+                "PUT",
+                f"/api/v1/models/workflow-sets/{set_id}/declines",
+                "/api/v1/models/workflow-sets/{set_id}/declines",
+                {"json": {"sha256": [ADAPTER_WITH_BASE_2]}},
+            ),
+            (
+                "DELETE",
+                f"/api/v1/models/workflow-sets/{set_id}",
+                "/api/v1/models/workflow-sets/{set_id}",
+                {},
+            ),
+        )
+        scoped = _bearer(
+            shelf_env.server,
+            _mint(
+                shelf_env.owner,
+                "hand-made sets character token",
+                resource_type="character",
+                resource_id=shelf_env.character_id,
+            ),
+        )
+        unscoped = _bearer(
+            shelf_env.server, _mint(shelf_env.owner, "hand-made sets read token")
+        )
+        anon = TestClient(shelf_env.server.api)
+        for client in (scoped, unscoped):
+            assert client.get(f"{API}/pictures").status_code == 200
+        for method, path, template, kwargs in routes:
+            assert_real_route(shelf_env.server.api, method, path, template or "")
+            for client in (scoped, unscoped):
+                r = client.request(method, path, **kwargs)
+                assert r.status_code == 403, f"{method} {path}: {r.status_code}"
+            r = anon.request(method, path, **kwargs)
+            assert r.status_code == 401, f"{method} {path}: {r.status_code}"
+            # The positive control, last, so DELETE runs after the refusals.
+            r = shelf_env.owner.request(method, path, **kwargs)
+            assert r.status_code in (200, 201), f"{method} {path}: {r.text}"
+        assert set_id not in _hand_made(shelf_env)
+    finally:
+        _wipe_sets(shelf_env.server)
+
+
+def test_hiding_a_workflow_set_is_the_librarys_own_answer(shelf_env, monkeypatch):
+    """A hidden set is per-library (#1869): the same hub, another library, and
+    the set is still on the grid - and the key the grid hides it under is the
+    set's own, whether it was computed or hand-made."""
+    server = shelf_env.server
+    here = server.vault.library_uuid
+    assert here
+
+    made = _new_set(shelf_env, name="Hidden here")
+    hand_key = f"hand:{made['id']}"
+    other_key = _key(*shelf_env.model_ids.values())
+
+    r = shelf_env.owner.put(
+        f"{API}/models/workflow-sets/hidden",
+        json={"keys": [hand_key, other_key], "hidden": True},
+    )
+    assert r.status_code == 200, r.text
+    assert set(r.json()["hidden_sets"]) == {hand_key, other_key}
+    # The list route carries it, so the grid draws the hide without a second read.
+    assert set(
+        shelf_env.owner.get(f"{API}/models/workflow-sets").json()["hidden_sets"]
+    ) == {hand_key, other_key}
+
+    # Showing one leaves the other alone, and the answer is this library's alone.
+    r = shelf_env.owner.put(
+        f"{API}/models/workflow-sets/hidden",
+        json={"keys": [hand_key], "hidden": False},
+    )
+    assert r.json()["hidden_sets"] == [other_key]
+    monkeypatch.setattr(server.vault, "_library_uuid", _h("another-library"))
+    assert (
+        shelf_env.owner.get(f"{API}/models/workflow-sets").json()["hidden_sets"] == []
+    )
+
+
+def _hidden_flags(shelf_env) -> dict[int, bool]:
+    """``model.id`` -> the ``hidden`` flag its row is served with, every list."""
+    owner = shelf_env.owner
+    rows = [
+        *owner.get(f"{API}/adapters").json()["adapters"],
+        *owner.get(f"{API}/checkpoints").json()["checkpoints"],
+    ]
+    return {row["id"]: row["hidden"] for row in rows}
+
+
+def test_hiding_a_model_is_the_librarys_own_answer(shelf_env, monkeypatch):
+    """A hidden model is per library: its row says so in the library that hid
+    it and nowhere else, the row is still served (a recipe that uses it must
+    be able to name it), and showing it again is the same call."""
+    server = shelf_env.server
+    assert server.vault.library_uuid
+    alice = shelf_env.model_ids["alice.safetensors"]
+    base = shelf_env.model_ids["base_xl.safetensors"]
+    bob = shelf_env.model_ids["bob.safetensors"]
+    assert not any(_hidden_flags(shelf_env).values())
+
+    # An id that names no model is skipped, not refused, and writes no row.
+    r = shelf_env.owner.put(
+        f"{API}/models/hidden", json={"ids": [alice, base, 999_999], "hidden": True}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["hidden_models"] == sorted([alice, base])
+    flags = _hidden_flags(shelf_env)
+    assert (flags[alice], flags[base], flags[bob]) == (True, True, False)
+    # The set payload carries the whole list, so the grid needs no second read.
+    sets = shelf_env.owner.get(f"{API}/models/workflow-sets").json()
+    assert sets["hidden_models"] == sorted([alice, base])
+
+    # Showing one leaves the other hidden.
+    r = shelf_env.owner.put(
+        f"{API}/models/hidden", json={"ids": [alice], "hidden": False}
+    )
+    assert r.json()["hidden_models"] == [base]
+    flags = _hidden_flags(shelf_env)
+    assert (flags[alice], flags[base]) == (False, True)
+
+    # Another library on the same hub hides nothing of this one's.
+    monkeypatch.setattr(server.vault, "_library_uuid", _h("another-library"))
+    assert not any(_hidden_flags(shelf_env).values())
+    sets = shelf_env.owner.get(f"{API}/models/workflow-sets").json()
+    assert sets["hidden_models"] == []
+
+
+def test_a_model_hide_with_no_library_writes_nothing(shelf_env):
+    """There is no library to hide it in, so nothing is written."""
+    hub = shelf_env.server.hub
+    alice = shelf_env.model_ids["alice.safetensors"]
+    assert model_shelf_service.set_models_hidden(hub, None, [alice], True) == []
+    assert hub.fetchall("SELECT 1 FROM model_hidden") == []
+
+
+def test_forgetting_a_model_forgets_every_librarys_hide_of_it(shelf_env):
+    """A model id is never reissued, so the row would name nothing."""
+    hub = shelf_env.server.hub
+    here = shelf_env.server.vault.library_uuid
+    alice = shelf_env.model_ids["alice.safetensors"]
+    bob = shelf_env.model_ids["bob.safetensors"]
+    for library in (here, _h("another-library")):
+        model_shelf_service.set_models_hidden(hub, library, [alice, bob], True)
+    _set_states(shelf_env, alice, "missing")
+
+    r = shelf_env.owner.post(f"{API}/models/forget", json={"ids": [alice]})
+    assert r.json()["forgotten"] == [alice], r.text
+
+    left = hub.fetchall("SELECT DISTINCT model_id FROM model_hidden")
+    assert [row["model_id"] for row in left] == [bob]
+
+
+def test_a_set_hide_with_no_library_or_no_keys_writes_nothing(shelf_env):
+    """No library hides nothing, and no keys is a question: both answer the
+    library's current list and leave every row where it was."""
+    hub = shelf_env.server.hub
+    here = shelf_env.server.vault.library_uuid
+    held = "hand:held-set"
+    assert model_workflow_sets.set_sets_hidden(hub, here, [held], True) == [held]
+    rows_before = [
+        tuple(row)
+        for row in hub.fetchall("SELECT library_uuid, set_key FROM workflow_set_hidden")
+    ]
+
+    assert model_workflow_sets.set_sets_hidden(hub, None, [held], True) == []
+    assert model_workflow_sets.set_sets_hidden(hub, None, [held], False) == []
+    assert model_workflow_sets.set_sets_hidden(hub, here, [], False) == [held]
+    assert model_workflow_sets.set_sets_hidden(hub, here, [], True) == [held]
+
+    rows_after = [
+        tuple(row)
+        for row in hub.fetchall("SELECT library_uuid, set_key FROM workflow_set_hidden")
+    ]
+    assert rows_after == rows_before == [(here, held)]
+
+
+def test_deleting_a_hand_made_set_forgets_its_hide(shelf_env):
+    """A set's id is AUTOINCREMENT, never reused, so a stale hide row is dead
+    state - and it goes with the set rather than naming nothing."""
+    server = shelf_env.server
+    made = _new_set(shelf_env, name="Soon gone")
+    key = f"hand:{made['id']}"
+    r = shelf_env.owner.put(
+        f"{API}/models/workflow-sets/hidden", json={"keys": [key], "hidden": True}
+    )
+    assert r.status_code == 200, r.text
+    # The row the delete is meant to forget is really there first, or the
+    # `is None` below would pass on a hide that never landed.
+    assert server.hub.fetchone(
+        "SELECT 1 FROM workflow_set_hidden WHERE set_key = ?", (key,)
+    )
+
+    assert (
+        shelf_env.owner.delete(f"{API}/models/workflow-sets/{made['id']}").status_code
+        == 200
+    )
+    assert (
+        server.hub.fetchone(
+            "SELECT 1 FROM workflow_set_hidden WHERE set_key = ?", (key,)
+        )
+        is None
+    )
+
+
+def test_an_empty_unnamed_set_is_a_set(shelf_env):
+    try:
+        made = _new_set(shelf_env, name="   ")
+        assert made["name"] is None
+        assert made["members"] == []
+        assert made["incomplete"] is True
+        assert made["checkpoint_ids"] == []
+        assert (made["picture_count"], made["recipes"], made["covers"]) == (0, 0, [])
+        assert _hand_made(shelf_env)[made["id"]] == made
+    finally:
+        _wipe_sets(shelf_env.server)
+
+
+def test_members_take_their_slot_from_their_kind_and_sort_by_name(shelf_env):
+    """Mixed case on purpose: `ALPHA` must sort after `Alice`, not before."""
+    ids = shelf_env.model_ids
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute(
+            "UPDATE model SET display_name = 'ALPHA' WHERE id = ?",
+            (ids["dana.safetensors"],),
+        )
+    try:
+        made = _new_set(
+            shelf_env,
+            name="Night shots",
+            members=[
+                {"model_id": ids["dana.safetensors"]},
+                {"model_id": ids["mystery.safetensors"]},
+                {"model_id": ids["alice.safetensors"]},
+                {"model_id": ids["base_xl.safetensors"]},
+            ],
+        )
+        assert [(m["name"], m["slot"]) for m in made["members"]] == [
+            ("Base XL", "checkpoint"),
+            ("Alice", "lora"),
+            ("ALPHA", "lora"),
+            ("mystery.safetensors", "other"),
+        ]
+        assert made["checkpoint_ids"] == [ids["base_xl.safetensors"]]
+        assert made["incomplete"] is False
+        alice = made["members"][1]
+        assert alice == {
+            "sha256": ADAPTER_WITH_BASE,
+            "slot": "lora",
+            "label": "Alice",
+            "on_shelf": True,
+            "id": ids["alice.safetensors"],
+            "name": "Alice",
+            "filename": "alice.safetensors",
+            "kind": "adapter",
+            "base_model": "SDXL 1.0",
+            "file_size": 1000,
+        }
+    finally:
+        _wipe_sets(shelf_env.server)
+
+
+def test_an_unclassified_file_may_be_the_checkpoint_and_a_lora_may_not(shelf_env):
+    ids = shelf_env.model_ids
+    try:
+        made = _new_set(
+            shelf_env,
+            members=[{"model_id": ids["mystery.safetensors"], "slot": "checkpoint"}],
+        )
+        assert made["checkpoint_ids"] == [ids["mystery.safetensors"]]
+        r = shelf_env.owner.post(
+            f"{API}/models/workflow-sets",
+            json={
+                "members": [
+                    {"model_id": ids["alice.safetensors"], "slot": "checkpoint"}
+                ]
+            },
+        )
+        assert r.status_code == 409, r.text
+        assert set(_hand_made(shelf_env)) == {made["id"]}
+    finally:
+        _wipe_sets(shelf_env.server)
+
+
+def test_an_engine_an_unhashed_file_and_an_unknown_id_are_refused(shelf_env):
+    engine = _add_model(
+        shelf_env, "engine", "wd-tagger.onnx", _h("enginetagger"), kind="tagger"
+    )
+    try:
+        refusals = (
+            (engine, 409, "wd-tagger.onnx isn't a model file a workflow loads."),
+            (shelf_env.model_ids["huge_unhashed.safetensors"], 409, None),
+            (999_999, 404, None),
+        )
+        for model_id, status, detail in refusals:
+            r = shelf_env.owner.post(
+                f"{API}/models/workflow-sets",
+                json={"name": "doomed", "members": [{"model_id": model_id}]},
+            )
+            assert r.status_code == status, r.text
+            if detail:
+                assert r.json()["detail"] == detail
+        # All or nothing: no set was left behind by any refusal.
+        assert _hand_made(shelf_env) == {}
+    finally:
+        _wipe_sets(shelf_env.server)
+        with shelf_env.server.hub.transaction() as conn:
+            conn.execute("DELETE FROM model WHERE id = ?", (engine,))
+
+
+def test_adding_twice_is_a_no_op_and_a_second_checkpoint_joins(shelf_env):
+    ids = shelf_env.model_ids
+    try:
+        set_id = _new_set(
+            shelf_env, members=[{"model_id": ids["base_xl.safetensors"]}]
+        )["id"]
+        url = f"{API}/models/workflow-sets/{set_id}/members"
+        alice = {"members": [{"model_id": ids["alice.safetensors"]}]}
+
+        r = shelf_env.owner.post(url, json=alice)
+        assert r.status_code == 200, r.text
+        assert r.json()["added"] == [ADAPTER_WITH_BASE]
+        r = shelf_env.owner.post(url, json=alice)
+        assert r.status_code == 200, r.text
+        assert r.json()["added"] == []
+        assert len(r.json()["set"]["members"]) == 2
+
+        # A two-model workflow (a Wan 2.2 high/low pair) loads two (#1690).
+        r = shelf_env.owner.post(
+            url,
+            json={
+                "members": [
+                    {"model_id": ids["mystery.safetensors"], "slot": "checkpoint"}
+                ]
+            },
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["added"] == [UNKNOWN_HASH]
+        made = _hand_made(shelf_env)[set_id]
+        assert sorted(made["checkpoint_ids"]) == sorted(
+            [ids["base_xl.safetensors"], ids["mystery.safetensors"]]
+        )
+        assert [m["slot"] for m in made["members"]].count("checkpoint") == 2
+    finally:
+        _wipe_sets(shelf_env.server)
+
+
+def test_removing_members_reports_them_and_keeps_an_emptied_set(shelf_env):
+    ids = shelf_env.model_ids
+    try:
+        set_id = _new_set(
+            shelf_env,
+            members=[
+                {"model_id": ids["base_xl.safetensors"]},
+                {"model_id": ids["alice.safetensors"]},
+            ],
+        )["id"]
+        url = f"{API}/models/workflow-sets/{set_id}/members/remove"
+
+        r = shelf_env.owner.post(url, json={"sha256": [CHECKPOINT_HASHED.upper()]})
+        assert r.status_code == 200, r.text
+        assert r.json()["removed"] == [
+            {"sha256": CHECKPOINT_HASHED, "slot": "checkpoint", "label": "Base XL"}
+        ]
+        assert r.json()["set"]["incomplete"] is True
+
+        r = shelf_env.owner.post(
+            url, json={"sha256": [ADAPTER_WITH_BASE, ADAPTER_NO_BASE]}
+        )
+        assert [m["sha256"] for m in r.json()["removed"]] == [ADAPTER_WITH_BASE]
+        assert r.json()["set"]["members"] == []
+        assert set_id in _hand_made(shelf_env)
+
+        assert (
+            shelf_env.owner.post(
+                f"{API}/models/workflow-sets/999999/members/remove",
+                json={"sha256": [ADAPTER_WITH_BASE]},
+            ).status_code
+            == 404
+        )
+        # A string that cannot be a digest is refused, not silently ignored.
+        assert (
+            shelf_env.owner.post(url, json={"sha256": ["not-a-digest"]}).status_code
+            == 422
+        )
+    finally:
+        _wipe_sets(shelf_env.server)
+
+
+def test_a_set_is_renamed_and_its_name_cleared(shelf_env):
+    try:
+        set_id = _new_set(shelf_env, name="first")["id"]
+        url = f"{API}/models/workflow-sets/{set_id}"
+
+        r = shelf_env.owner.patch(url, json={"name": "  Night shots  "})
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] == "Night shots"
+        r = shelf_env.owner.patch(url, json={"name": None})
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] is None
+        assert _hand_made(shelf_env)[set_id]["name"] is None
+
+        assert (
+            shelf_env.owner.patch(
+                f"{API}/models/workflow-sets/999999", json={"name": "x"}
+            ).status_code
+            == 404
+        )
+    finally:
+        _wipe_sets(shelf_env.server)
+
+
+def test_undo_puts_a_member_back_even_after_its_file_was_re_kinded(shelf_env):
+    """The sha256 form restores a member as it was. Re-applying the kind rules
+    there refused a checkpoint the owner had since re-kinded, rolled back the
+    whole re-post and lost the set (#1520 review)."""
+    ids = shelf_env.model_ids
+    server = shelf_env.server
+    ckpt = ids["base_xl.safetensors"]
+    sha = hashlib.sha256(b"Base XL re-kinded").hexdigest()
+    before = server.hub.fetchone(
+        "SELECT sha256, file_kind, kind FROM model WHERE id = ?", (ckpt,)
+    )
+    with server.hub.transaction() as conn:
+        conn.execute("UPDATE model SET sha256 = ? WHERE id = ?", (sha, ckpt))
+    try:
+        set_id = _new_set(shelf_env, members=[{"model_id": ckpt}])["id"]
+        snapshot = shelf_env.owner.delete(
+            f"{API}/models/workflow-sets/{set_id}"
+        ).json()["deleted"]
+        with server.hub.transaction() as conn:
+            conn.execute(
+                "UPDATE model SET file_kind = 'adapter', kind = 'lora' WHERE id = ?",
+                (ckpt,),
+            )
+
+        restored = _new_set(
+            shelf_env,
+            members=[
+                {"sha256": m["sha256"], "slot": m["slot"], "label": m["label"]}
+                for m in snapshot["members"]
+            ],
+        )
+
+        assert [(m["sha256"], m["slot"]) for m in restored["members"]] == [
+            (sha, "checkpoint")
+        ]
+    finally:
+        _wipe_sets(server)
+        with server.hub.transaction() as conn:
+            conn.execute(
+                "UPDATE model SET sha256 = ?, file_kind = ?, kind = ? WHERE id = ?",
+                (before["sha256"], before["file_kind"], before["kind"], ckpt),
+            )
+
+
+def test_a_deleted_set_comes_back_whole_from_its_snapshot(shelf_env):
+    """Undo is a re-post of the snapshot, and a member whose file has left the
+    shelf since is put back as not on shelf, then reconnects by hash."""
+    ids = shelf_env.model_ids
+    server = shelf_env.server
+    # Real digests here: the sha256 member form accepts hex only, and the
+    # module's readable stand-ins are not.
+    ckpt_sha = hashlib.sha256(b"base xl").hexdigest()
+    alice_sha = hashlib.sha256(b"alice").hexdigest()
+    with server.hub.transaction() as conn:
+        conn.executemany(
+            "UPDATE model SET sha256 = ? WHERE id = ?",
+            [
+                (ckpt_sha, ids["base_xl.safetensors"]),
+                (alice_sha, ids["alice.safetensors"]),
+            ],
+        )
+    try:
+        set_id = _new_set(
+            shelf_env,
+            name="Portraits",
+            members=[
+                {"model_id": ids["base_xl.safetensors"]},
+                {"model_id": ids["alice.safetensors"]},
+            ],
+        )["id"]
+
+        r = shelf_env.owner.delete(f"{API}/models/workflow-sets/{set_id}")
+        assert r.status_code == 200, r.text
+        snapshot = r.json()["deleted"]
+        assert snapshot["id"] == set_id and snapshot["name"] == "Portraits"
+        assert set_id not in _hand_made(shelf_env)
+        # The shelf is untouched by a set delete.
+        assert server.hub.fetchone(
+            "SELECT id FROM model WHERE id = ?", (ids["alice.safetensors"],)
+        )
+        assert (
+            shelf_env.owner.delete(f"{API}/models/workflow-sets/{set_id}").status_code
+            == 404
+        )
+
+        # Alice leaves the shelf before the undo.
+        with server.hub.transaction() as conn:
+            conn.execute(
+                "DELETE FROM model_file WHERE model_id = ?",
+                (ids["alice.safetensors"],),
+            )
+            conn.execute("DELETE FROM model WHERE id = ?", (ids["alice.safetensors"],))
+
+        restored = _new_set(
+            shelf_env,
+            name=snapshot["name"],
+            members=[
+                {"sha256": m["sha256"], "slot": m["slot"], "label": m["label"]}
+                for m in snapshot["members"]
+            ],
+        )
+        assert restored["id"] != set_id
+        by_sha = {m["sha256"]: m for m in restored["members"]}
+        assert by_sha[ckpt_sha]["on_shelf"] is True
+        assert restored["checkpoint_ids"] == [ids["base_xl.safetensors"]]
+        gone = by_sha[alice_sha]
+        assert (gone["on_shelf"], gone["id"], gone["name"], gone["kind"]) == (
+            False,
+            None,
+            "Alice",
+            None,
+        )
+        assert (gone["slot"], gone["label"]) == ("lora", "Alice")
+
+        back = _add_model(
+            shelf_env, "adapter", "alice.safetensors", alice_sha, kind="lora"
+        )
+        member = next(
+            m
+            for m in _hand_made(shelf_env)[restored["id"]]["members"]
+            if m["sha256"] == alice_sha
+        )
+        assert (member["on_shelf"], member["id"]) == (True, back)
+    finally:
+        _wipe_sets(server)
+
+
+def test_a_cloned_set_says_so_and_its_snapshot_keeps_the_mark(shelf_env):
+    """The mark is what lets a copy of a set from pictures stay while it still
+    matches that set, so it is served and comes back with a delete's snapshot."""
+    try:
+        made = _new_set(shelf_env, name="Copy", cloned=True)
+        assert made["cloned"] is True
+        plain = _new_set(shelf_env, name="By hand")
+        assert plain["cloned"] is False
+        listed = _hand_made(shelf_env)
+        assert (listed[made["id"]]["cloned"], listed[plain["id"]]["cloned"]) == (
+            True,
+            False,
+        )
+        r = shelf_env.owner.delete(f"{API}/models/workflow-sets/{made['id']}")
+        assert r.status_code == 200, r.text
+        assert r.json()["deleted"]["cloned"] is True
+    finally:
+        _wipe_sets(shelf_env.server)
+
+
+def test_a_set_covers_the_combinations_it_holds_and_leaves_no_set(shelf_env):
+    """Covered means EVERY model of the combination is on the set: one extra
+    model is enough to leave a combination uncovered."""
+    ids = shelf_env.model_ids
+    server = shelf_env.server
+    try:
+        _seed_recipe(
+            server,
+            "hm-held",
+            [("ckpt_name", "base_xl.safetensors"), ("lora_name", "alice.safetensors")],
+        )
+        _seed_recipe(
+            server,
+            "hm-extra",
+            [
+                ("ckpt_name", "base_xl.safetensors"),
+                ("lora_name", "alice.safetensors"),
+                ("lora_name", "dana.safetensors"),
+            ],
+        )
+        held = [
+            _seed_picture(
+                server,
+                "hm-held",
+                score=score,
+                thumbnail_width=64,
+                thumbnail_height=64,
+            )
+            for score in (2, 4)
+        ]
+        _seed_picture(server, "hm-extra", score=5)
+
+        portraits = _new_set(
+            shelf_env,
+            members=[
+                {"model_id": ids["base_xl.safetensors"]},
+                {"model_id": ids["alice.safetensors"]},
+            ],
+        )["id"]
+        loners = _new_set(
+            shelf_env, members=[{"model_id": ids["mystery.safetensors"]}]
+        )["id"]
+
+        body = shelf_env.owner.get(f"{API}/models/workflow-sets").json()
+        by_key = {c["key"]: c for c in body["combinations"]}
+        held_key = ",".join(
+            str(i)
+            for i in sorted([ids["base_xl.safetensors"], ids["alice.safetensors"]])
+        )
+        assert by_key[held_key]["covered_by"] == [portraits]
+        extra = [c for c in body["combinations"] if c["key"] != held_key]
+        assert [c["covered_by"] for c in extra] == [[]]
+
+        sets = {entry["id"]: entry for entry in body["hand_made"]}
+        assert (sets[portraits]["picture_count"], sets[portraits]["recipes"]) == (2, 1)
+        assert [c["picture_id"] for c in sets[portraits]["covers"]] == held[::-1]
+        assert sets[loners]["picture_count"] == 0
+        # Newest first.
+        assert [entry["id"] for entry in body["hand_made"]] == [loners, portraits]
+
+        assert ids["mystery.safetensors"] not in body["no_set"]
+        assert ids["bob.safetensors"] in body["no_set"]
+    finally:
+        _wipe_sets(server)
+        _wipe_recipes(server)
+
+
+def test_a_set_holding_the_support_files_does_not_take_a_missing_base_set(shelf_env):
+    """Pictures made on a checkpoint the shelf lacks are not credited to a
+    hand-made set that merely holds the same LoRA: they keep their own card,
+    named after the missing file."""
+    server, ids = shelf_env.server, shelf_env.model_ids
+    try:
+        _seed_recipe(
+            server,
+            "hm-gone",
+            [
+                ("ckpt_name", "not-here.safetensors"),
+                ("lora_name", "alice.safetensors"),
+            ],
+        )
+        _seed_picture(server, "hm-gone", score=3)
+        holder = _new_set(shelf_env, members=[{"model_id": ids["alice.safetensors"]}])[
+            "id"
+        ]
+
+        body = shelf_env.owner.get(f"{API}/models/workflow-sets").json()
+
+        (gone,) = [c for c in body["combinations"] if c["missing"]]
+        assert [m["name"] for m in gone["missing"]] == ["not-here.safetensors"]
+        assert gone["covered_by"] == []
+        sets = {entry["id"]: entry for entry in body["hand_made"]}
+        assert sets[holder]["picture_count"] == 0
+    finally:
+        _wipe_sets(server)
+        _wipe_recipes(server)
+
+
+def _declines(shelf_env, set_id, sha256s) -> dict:
+    r = shelf_env.owner.put(
+        f"{API}/models/workflow-sets/{set_id}/declines", json={"sha256": sha256s}
+    )
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def _offered(entry) -> list[tuple[str, str, int, int]]:
+    return [
+        (m["name"], m["slot"], m["picture_count"], m["recipes"])
+        for m in entry["offer"]["models"]
+    ]
+
+
+def test_a_near_miss_is_offered_kept_separate_and_merged(shelf_env):
+    """#1523: the pictures of the set's own checkpoint that used models it
+    lacks are offered, not joined. Keep separate is remembered per model and
+    undone by putting the old list back; the merge is the ordinary add."""
+    ids = shelf_env.model_ids
+    server = shelf_env.server
+    try:
+        _seed_recipe(
+            server,
+            "om-held",
+            [("ckpt_name", "base_xl.safetensors"), ("lora_name", "alice.safetensors")],
+        )
+        _seed_recipe(
+            server,
+            "om-near",
+            [
+                ("ckpt_name", "base_xl.safetensors"),
+                ("lora_name", "alice.safetensors"),
+                ("lora_name", "dana.safetensors"),
+            ],
+        )
+        _seed_recipe(
+            server,
+            "om-far",
+            [("ckpt_name", "base_xl.safetensors"), ("lora_name", "bob.safetensors")],
+        )
+        # A recipe with no picture in THIS library: the offer is a hub fact.
+        _seed_recipe(
+            server,
+            "om-elsewhere",
+            [
+                ("ckpt_name", "base_xl.safetensors"),
+                ("model_name", "mystery.safetensors"),
+            ],
+        )
+        for recipe, count in (("om-held", 2), ("om-near", 3), ("om-far", 1)):
+            for _ in range(count):
+                _seed_picture(server, recipe)
+
+        set_id = _new_set(
+            shelf_env,
+            members=[
+                {"model_id": ids["base_xl.safetensors"]},
+                {"model_id": ids["alice.safetensors"]},
+            ],
+        )["id"]
+        entry = _hand_made(shelf_env)[set_id]
+        # Joined: only the pictures every model of which is in the set.
+        assert entry["picture_count"] == 2
+        assert entry["offer"]["head_id"] == ids["base_xl.safetensors"]
+        assert (entry["offer"]["picture_count"], entry["offer"]["recipes"]) == (4, 3)
+        assert _offered(entry) == [
+            ("Dana", "lora", 3, 1),
+            ("Bob", "lora", 1, 1),
+            ("mystery.safetensors", "other", 0, 1),
+        ]
+        assert len(entry["offer"]["covers"]) == 3
+        assert (entry["declined"], entry["kept_separate"]) == ([], 0)
+
+        # Keep separate for Dana alone: the rest of the offer stands.
+        body = _declines(shelf_env, set_id, [ADAPTER_NO_BASE_2])
+        assert body["previous"] == []
+        assert body["set"]["declined"] == [ADAPTER_NO_BASE_2]
+        assert body["set"]["kept_separate"] == 3
+        assert [m[0] for m in _offered(body["set"])] == ["Bob", "mystery.safetensors"]
+        # Survives a fresh read: nothing about it lives in the client.
+        assert _hand_made(shelf_env)[set_id]["declined"] == [ADAPTER_NO_BASE_2]
+
+        # Undo is the previous list put back.
+        body = _declines(shelf_env, set_id, [])
+        assert body["previous"] == [ADAPTER_NO_BASE_2]
+        assert len(body["set"]["offer"]["models"]) == 3
+
+        # Merge: add what was offered, and the pictures join.
+        r = shelf_env.owner.post(
+            f"{API}/models/workflow-sets/{set_id}/members",
+            json={
+                "members": [
+                    {"model_id": m["id"], "slot": m["slot"]}
+                    for m in entry["offer"]["models"]
+                ]
+            },
+        )
+        assert r.status_code == 200, r.text
+        merged = r.json()["set"]
+        assert merged["picture_count"] == 6
+        assert merged["offer"] is None
+        body = shelf_env.owner.get(f"{API}/models/workflow-sets").json()
+        assert all(c["covered_by"] == [set_id] for c in body["combinations"])
+        # The offer read every library's recipes; the route still serves only
+        # this library's: the pictureless "om-elsewhere" combination and the
+        # hub-wide list stay on the server.
+        assert "hub_combinations" not in body
+        assert len(body["combinations"]) == 3
+    finally:
+        _wipe_sets(server)
+        _wipe_recipes(server)
+
+
+def test_a_set_holding_one_of_two_namesakes_is_not_offered_the_other(shelf_env):
+    """A recipe naming a text encoder by basename reaches every shelf row of
+    that name. A set holding one of them holds the file the recipe ran with:
+    it is not offered the namesake, and the recipe's pictures join it."""
+    ids = shelf_env.model_ids
+    server = shelf_env.server
+    twins = [
+        _add_model(shelf_env, "text_encoder", "qwen3vl_4b.safetensors", sha)
+        for sha in ("e1" * 32, "e2" * 32)
+    ]
+    try:
+        _seed_recipe(
+            server,
+            "twin-te",
+            [
+                ("ckpt_name", "base_xl.safetensors"),
+                ("clip_name", "qwen3vl_4b.safetensors"),
+            ],
+        )
+        _seed_picture(server, "twin-te")
+        set_id = _new_set(
+            shelf_env,
+            members=[
+                {"model_id": ids["base_xl.safetensors"]},
+                {"model_id": twins[0]},
+            ],
+        )["id"]
+
+        entry = _hand_made(shelf_env)[set_id]
+        assert entry["offer"] is None
+        assert entry["picture_count"] == 1
+    finally:
+        _wipe_sets(server)
+        _wipe_recipes(server)
+        with server.hub.transaction() as conn:
+            conn.executemany("DELETE FROM model WHERE id = ?", [(i,) for i in twins])
+
+
+def test_a_namesake_reached_through_a_copy_name_is_not_offered(shelf_env):
+    """A row answers to its copies' basenames too, so two models with
+    different stored filenames can both be reached by one recipe name. The
+    namesake is the resolver's grouping, not a filename match."""
+    ids = shelf_env.model_ids
+    server = shelf_env.server
+    own = _add_model(shelf_env, "text_encoder", "qwen3vl_4b.safetensors", "e3" * 32)
+    alias = _add_model(
+        shelf_env, "text_encoder", "qwen3vl_4b_old.safetensors", "e4" * 32
+    )
+    with server.hub.transaction() as conn:
+        conn.execute(
+            "INSERT INTO model_file (model_id, model_folder_id, relpath, state, "
+            "seen_at) VALUES (?, 1, 'copies/qwen3vl_4b.safetensors', 'present', "
+            "'2026-08-09T00:00:00Z')",
+            (alias,),
+        )
+    try:
+        _seed_recipe(
+            server,
+            "alias-te",
+            [
+                ("ckpt_name", "base_xl.safetensors"),
+                ("clip_name", "qwen3vl_4b.safetensors"),
+            ],
+        )
+        _seed_picture(server, "alias-te")
+        set_id = _new_set(
+            shelf_env,
+            members=[{"model_id": ids["base_xl.safetensors"]}, {"model_id": own}],
+        )["id"]
+
+        entry = _hand_made(shelf_env)[set_id]
+        assert entry["offer"] is None
+        assert entry["picture_count"] == 1
+    finally:
+        _wipe_sets(server)
+        _wipe_recipes(server)
+        with server.hub.transaction() as conn:
+            conn.execute("DELETE FROM model_file WHERE model_id = ?", (alias,))
+            conn.executemany("DELETE FROM model WHERE id = ?", [(own,), (alias,)])
+
+
+@pytest.mark.parametrize("held_twin", [0, 1])
+def test_a_set_on_either_checkpoint_namesake_is_offered_what_it_lacks(
+    shelf_env, held_twin
+):
+    """Two checkpoints one recipe name reaches: the pictures' set is keyed on
+    whichever comes first, and a set holding either one is its own. It is
+    offered the LoRA it lacks, never the other checkpoint."""
+    ids = shelf_env.model_ids
+    server = shelf_env.server
+    twins = [
+        _add_model(shelf_env, "checkpoint", "twin_ckpt.safetensors", sha)
+        for sha in ("c1" * 32, "c2" * 32)
+    ]
+    try:
+        _seed_recipe(
+            server,
+            "twin-ckpt",
+            [
+                ("ckpt_name", "twin_ckpt.safetensors"),
+                ("lora_name", "alice.safetensors"),
+                ("lora_name", "dana.safetensors"),
+            ],
+        )
+        _seed_picture(server, "twin-ckpt")
+        set_id = _new_set(
+            shelf_env,
+            members=[
+                {"model_id": twins[held_twin]},
+                {"model_id": ids["alice.safetensors"]},
+            ],
+        )["id"]
+
+        entry = _hand_made(shelf_env)[set_id]
+        assert entry["offer"] is not None
+        assert [m[0] for m in _offered(entry)] == ["Dana"]
+    finally:
+        _wipe_sets(server)
+        _wipe_recipes(server)
+        with server.hub.transaction() as conn:
+            conn.executemany("DELETE FROM model WHERE id = ?", [(i,) for i in twins])
+
+
+def test_one_pictures_set_is_offered_to_the_set_needing_fewest_models(shelf_env):
+    """A set with no checkpoint is offered a pictures' set holding all of its
+    models, and the checkpoint lands in its Checkpoint slot. Once another set
+    needs fewer models added for the same pictures, the offer moves there."""
+    ids = shelf_env.model_ids
+    server = shelf_env.server
+    try:
+        _seed_recipe(
+            server,
+            "fw-near",
+            [
+                ("ckpt_name", "base_xl.safetensors"),
+                ("lora_name", "alice.safetensors"),
+                ("lora_name", "dana.safetensors"),
+            ],
+        )
+        _seed_picture(server, "fw-near")
+
+        dana_only = _new_set(
+            shelf_env, members=[{"model_id": ids["dana.safetensors"]}]
+        )["id"]
+        # Incomplete, and nothing in any recipe: no offer.
+        stray = _new_set(shelf_env, members=[{"model_id": ids["bob.safetensors"]}])[
+            "id"
+        ]
+        sets = _hand_made(shelf_env)
+        assert sets[dana_only]["offer"]["head_id"] == ids["base_xl.safetensors"]
+        assert _offered(sets[dana_only]) == [
+            ("Base XL", "checkpoint", 1, 1),
+            ("Alice", "lora", 1, 1),
+        ]
+        assert sets[stray]["offer"] is None
+
+        closer = _new_set(
+            shelf_env,
+            members=[
+                {"model_id": ids["base_xl.safetensors"]},
+                {"model_id": ids["alice.safetensors"]},
+            ],
+        )["id"]
+        sets = _hand_made(shelf_env)
+        assert _offered(sets[closer]) == [("Dana", "lora", 1, 1)]
+        assert sets[dana_only]["offer"] is None
+
+        # Kept separate there, it comes back to the other set.
+        _declines(shelf_env, closer, [ADAPTER_NO_BASE_2])
+        sets = _hand_made(shelf_env)
+        assert sets[closer]["offer"] is None
+        assert sets[dana_only]["offer"]["head_id"] == ids["base_xl.safetensors"]
+    finally:
+        _wipe_sets(server)
+        _wipe_recipes(server)
+
+
+def test_a_two_checkpoint_set_is_offered_each_checkpoints_pictures(shelf_env):
+    """#1690: a set holding a two-model workflow's pair is offered the near
+    misses of either checkpoint, and a second checkpoint a near miss used
+    lands in the Checkpoint slot, not Other."""
+    ids = shelf_env.model_ids
+    server = shelf_env.server
+    _add_model(
+        shelf_env,
+        "checkpoint",
+        "refiner_xl.safetensors",
+        _h("refinerfile"),
+        display_name="Refiner XL",
+    )
+    try:
+        _seed_recipe(
+            server,
+            "tc-pair",
+            [
+                ("ckpt_name", "base_xl.safetensors"),
+                ("ckpt_name", "refiner_xl.safetensors"),
+            ],
+        )
+        _seed_recipe(
+            server,
+            "tc-second",
+            [
+                ("unet_name", "mystery.safetensors"),
+                ("lora_name", "dana.safetensors"),
+            ],
+        )
+        _seed_picture(server, "tc-pair")
+        _seed_picture(server, "tc-second")
+
+        single = _new_set(
+            shelf_env, members=[{"model_id": ids["base_xl.safetensors"]}]
+        )["id"]
+        assert _offered(_hand_made(shelf_env)[single]) == [
+            ("Refiner XL", "checkpoint", 1, 1)
+        ]
+        _wipe_sets(server)
+
+        pair = _new_set(
+            shelf_env,
+            members=[
+                {"model_id": ids["base_xl.safetensors"]},
+                {"model_id": ids["mystery.safetensors"], "slot": "checkpoint"},
+            ],
+        )["id"]
+        entry = _hand_made(shelf_env)[pair]
+        # Base XL's near miss and the second checkpoint's are both offers; one
+        # set takes one at a time, the one needing fewest models.
+        assert entry["offer"]["head_id"] in (
+            ids["base_xl.safetensors"],
+            ids["mystery.safetensors"],
+        )
+        r = shelf_env.owner.post(
+            f"{API}/models/workflow-sets/{pair}/members",
+            json={
+                "members": [
+                    {"model_id": m["id"], "slot": m["slot"]}
+                    for m in entry["offer"]["models"]
+                ]
+            },
+        )
+        assert r.status_code == 200, r.text
+        # The other checkpoint's pictures are offered next.
+        follow = r.json()["set"]["offer"]
+        assert follow is not None
+        assert {entry["offer"]["head_id"], follow["head_id"]} == {
+            ids["base_xl.safetensors"],
+            ids["mystery.safetensors"],
+        }
+    finally:
+        _wipe_sets(server)
+        _wipe_recipes(server)
+
+
+def test_a_run_only_near_miss_is_not_offered(shelf_env):
+    """#1565: the offer is worded in pictures and recipes, so a combination
+    only ComfyUI ran is covered like any other but never offered."""
+    ids = shelf_env.model_ids
+    server = shelf_env.server
+    try:
+        _seed_run(
+            server, "run-near", [ids["base_xl.safetensors"], ids["dana.safetensors"]]
+        )
+        _seed_run(server, "run-held", [ids["base_xl.safetensors"]])
+        set_id = _new_set(
+            shelf_env, members=[{"model_id": ids["base_xl.safetensors"]}]
+        )["id"]
+
+        body = shelf_env.owner.get(f"{API}/models/workflow-sets").json()
+
+        assert {e["id"]: e for e in body["hand_made"]}[set_id]["offer"] is None
+        by_key = {c["key"]: c for c in body["combinations"]}
+        assert by_key[_key(ids["base_xl.safetensors"])]["covered_by"] == [set_id]
+        assert (
+            by_key[_key(ids["base_xl.safetensors"], ids["dana.safetensors"])][
+                "covered_by"
+            ]
+            == []
+        )
+    finally:
+        _wipe_sets(server)
+
+
+def test_declines_refuse_an_unknown_set_and_a_short_digest(shelf_env):
+    r = shelf_env.owner.put(
+        f"{API}/models/workflow-sets/999999/declines", json={"sha256": []}
+    )
+    assert r.status_code == 404, r.text
+    try:
+        set_id = _new_set(shelf_env)["id"]
+        r = shelf_env.owner.put(
+            f"{API}/models/workflow-sets/{set_id}/declines", json={"sha256": ["ab"]}
+        )
+        assert r.status_code == 422, r.text
+        # A deleted set takes its declines with it (the hub enforces the key).
+        _declines(shelf_env, set_id, [ADAPTER_NO_BASE_2])
+        r = shelf_env.owner.delete(f"{API}/models/workflow-sets/{set_id}")
+        assert r.status_code == 200, r.text
+        assert (
+            shelf_env.server.hub.fetchone(
+                "SELECT COUNT(*) AS n FROM model_workflow_set_decline WHERE set_id = ?",
+                (set_id,),
+            )["n"]
+            == 0
+        )
+    finally:
+        _wipe_sets(shelf_env.server)
+
+
 # ===========================================================================
 # model_folder CRUD + rescan (shelf plan B5, part 2)
 # ===========================================================================
+
+
+# ===========================================================================
+# Workflow sets: PixlStash's check and the owner's verdicts
+# (docs/ideas/workflow-set-verdicts.md)
+# ===========================================================================
+
+
+def test_check_state_follows_the_spec_table_at_every_boundary():
+    """Pure: every state, and each threshold just above and just below."""
+    state = verdicts.check_state
+    # (together, checked, passing, awaiting, scorer running)
+    assert state(0, 0, 0, 0, True) == "none"
+    assert state(4, 1, 1, 3, True) == "pending"
+    # Nothing left that the scorer could ever score: not pending forever.
+    assert state(4, 3, 3, 0, True) == "pass"
+    # Still to score, but no scorer: says what it has, never "pending".
+    assert state(4, 0, 0, 4, False) == "unavailable"
+    # Kept but never checkable (no prompt, or -1.0): unavailable, not pending.
+    assert state(2, 0, 0, 0, True) == "unavailable"
+    assert state(5, 2, 2, 0, True) == "too_few"
+    assert state(5, 3, 0, 0, True) == "fail"
+    # The pass share is >= half: exactly half passes, one short of it fails.
+    assert state(10, 4, 2, 0, True) == "pass"
+    assert state(10, 5, 2, 0, True) == "fail"
+    assert state(10, 3, 2, 0, True) == "pass"
+    assert state(10, 3, 1, 0, True) == "fail"
+
+
+def test_a_suspect_needs_every_threshold_and_each_one_alone_refuses_it():
+    """Pure: the baseline sits ON every threshold; each case below misses
+    exactly one of them by one."""
+    suspect = verdicts.is_suspect
+    # with 3/5 = 60 % failing, without 1/5 = 20 %: a 40-point gap, 3 failures.
+    assert suspect(3, 5, 1, 5)
+    # Fewer than 5 pictures with it (3/4 = 75 % vs 20 %: the gap is not why).
+    assert not suspect(3, 4, 1, 5)
+    # Fewer than 5 without it (3/5 vs 0/4: 60 points, still refused).
+    assert not suspect(3, 5, 0, 4)
+    # Only 2 failures with it (2/5 = 40 % vs 0/5: 40 points, still refused).
+    assert not suspect(2, 5, 0, 5)
+    # A 39-point gap: 60 % vs 21 %; 20 % is the 40-point boundary again.
+    assert not suspect(3, 5, 21, 100)
+    assert suspect(3, 5, 20, 100)
+
+
+def test_combo_key_is_the_sorted_ids_and_only_that_spelling_is_accepted():
+    assert verdicts.combo_key([12, 3, 7]) == "3,7,12"
+    assert verdicts.combo_key({7, 12, 3}) == verdicts.combo_key((3, 12, 7, 3))
+    assert verdicts.parse_combo_key("3,7,12") == [3, 7, 12]
+    for bad in ("7,3", "3,3", "03,7", "", "3,,7", "a", "3, 7", "-1", "0"):
+        with pytest.raises(ValueError):
+            verdicts.parse_combo_key(bad)
+
+
+def test_set_checks_sum_every_recipe_holding_the_whole_set():
+    """Pure: evidence is the recipes whose models include ALL the members
+    (more is fine), a suspect compares those against the recipes holding every
+    other member but not it, and a verdict reads its exact key only."""
+    # Base 1 with LoRA 2 fails; base 1 alone, and base 1 with LoRA 3, pass.
+    recipe_models = {
+        "with-2": {1, 2},
+        "with-2-and-3": {1, 2, 3},
+        "base-only": {1},
+        "with-3": {1, 3},
+        "another-library": {1, 2},
+    }
+    evidence = {
+        # (kept, checked, passing, awaiting)
+        "with-2": (6, 5, 1, 0),
+        "with-2-and-3": (2, 2, 0, 0),
+        "base-only": (6, 6, 5, 0),
+        "with-3": (1, 1, 1, 0),
+        # "another-library" made no kept picture here: absent.
+    }
+    checks = {
+        check["combo_key"]: check
+        for check in verdicts.set_checks(
+            [{2, 1}, [1, 2], {1, 2, 3}, set()],
+            recipe_models,
+            evidence,
+            {"1,2": "no", "1,2,3": "yes"},
+            {"1,2": {1: "not_problem"}, "1,2,3": {2: "problem"}},
+            scorer_available=True,
+        )
+    }
+    # One entry per distinct set; the empty one is no set.
+    assert set(checks) == {"1,2", "1,2,3"}
+
+    pair = checks["1,2"]
+    assert pair["member_ids"] == [1, 2]
+    assert pair["evidence"] == {"together": 8, "checked": 7, "passing": 1}
+    assert pair["check"] == "fail"
+    assert pair["verdict"] == "no"
+    # LoRA 2: 6 of 7 fail with it, 1 of 7 without it (base-only + with-3).
+    assert pair["suspects"] == [
+        {
+            "model_id": 2,
+            "with_failed": 6,
+            "with_total": 7,
+            "without_failed": 1,
+            "without_total": 7,
+            "verdict": None,
+        }
+    ]
+    # Base 1 is no suspect (there is nothing "with 2, without 1"), but the
+    # owner's answer about it is still served: counts moving never drop one.
+    assert pair["member_verdicts"] == [{"model_id": 1, "verdict": "not_problem"}]
+
+    triple = checks["1,2,3"]
+    assert triple["evidence"] == {"together": 2, "checked": 2, "passing": 0}
+    assert triple["check"] == "too_few"
+    # The members changed, so the pair's "no" is not this set's verdict.
+    assert triple["verdict"] == "yes"
+    assert triple["suspects"] == []  # 2 checked: below every suspect floor
+    assert triple["member_verdicts"] == [{"model_id": 2, "verdict": "problem"}]
+
+
+def test_suspects_are_served_biggest_gap_first():
+    """Pure: 9 of 10 fail with all three. Without LoRA 2, 2 of 5 fail (a
+    50-point gap); without LoRA 3, none do (90 points), so 3 leads."""
+    (check,) = verdicts.set_checks(
+        [{1, 2, 3}],
+        {"all": {1, 2, 3}, "no-2": {1, 3}, "no-3": {1, 2}},
+        {"all": (10, 10, 1, 0), "no-2": (5, 5, 3, 0), "no-3": (5, 5, 5, 0)},
+        {},
+        {},
+        scorer_available=True,
+    )
+    assert [s["model_id"] for s in check["suspects"]] == [3, 2]
+
+
+def test_a_changed_member_set_has_no_verdict_and_the_old_one_is_kept():
+    checks = verdicts.set_checks(
+        [{1, 2, 3}],
+        {"r": {1, 2, 3}},
+        {"r": (1, 1, 1, 0)},
+        {"1,2": "yes"},
+        {"1,2": {2: "problem"}},
+        scorer_available=True,
+    )
+    assert checks[0]["verdict"] is None
+    assert checks[0]["member_verdicts"] == []
+
+
+def _scored(server, structural_hash: str, scores) -> list[int]:
+    """One picture per score: a float is its prompt match, ``"unscored"`` a
+    picture with a prompt not scored yet, ``"no prompt"`` one with none."""
+    ids = []
+    for score in scores:
+        fields = {"comfyui_positive_prompt": "a cat on a sofa"}
+        if score == "no prompt":
+            fields = {}
+        elif score != "unscored":
+            fields["prompt_match"] = score
+        ids.append(_seed_picture(server, structural_hash, **fields))
+    return ids
+
+
+def _checks(shelf_env) -> dict[str, dict]:
+    r = shelf_env.owner.get(f"{API}/models/workflow-sets")
+    assert r.status_code == 200, r.text
+    return {check["combo_key"]: check for check in r.json()["set_checks"]}
+
+
+def _adapter_row(shelf_env, filename: str) -> dict:
+    rows = shelf_env.owner.get(f"{API}/adapters").json()["adapters"]
+    return next(row for row in rows if row["filename"] == filename)
+
+
+def test_only_what_the_scorer_will_pick_up_is_awaiting(shelf_env):
+    """A prompted, unscored picture without an image embedding is never
+    scored, so it must not hold its sets pending forever."""
+    server = shelf_env.server
+    try:
+        _seed_picture(server, "sh-await", comfyui_positive_prompt="a cat")
+        _seed_picture(
+            server,
+            "sh-await",
+            comfyui_positive_prompt="a cat",
+            image_embedding=b"\x00" * 8,
+        )
+        evidence = server.vault.db.run_immediate_read_task(verdicts.recipe_evidence)
+        # (kept, checked, passing, awaiting)
+        assert evidence["sh-await"] == (2, 0, 0, 1)
+    finally:
+        _wipe_recipes(server)
+
+
+def test_the_grid_serves_each_cards_check_and_the_verdicts_round_trip(shelf_env):
+    """Through the route: the card's members are the union of its
+    combinations, the counts skip the unscorable, and every verdict written is
+    read back where the frontend looks for it, then cleared."""
+    ids = shelf_env.model_ids
+    base, alice = ids["base_xl.safetensors"], ids["alice.safetensors"]
+    try:
+        _seed_recipe(
+            shelf_env.server,
+            "sh-alice",
+            [("ckpt_name", "base_xl.safetensors"), ("lora_name", "alice.safetensors")],
+        )
+        # 3 pass, 1 fails, 1 failed to score (-1), 1 has no prompt: 6 kept,
+        # 4 checked, 3 passing. The scorer is detached in this module, so the
+        # unscored one cannot make it pending.
+        _scored(
+            shelf_env.server,
+            "sh-alice",
+            [0.9, 0.95, 0.8, 0.1, -1.0, "no prompt"],
+        )
+        _seed_recipe(
+            shelf_env.server, "sh-base", [("ckpt_name", "base_xl.safetensors")]
+        )
+        _scored(shelf_env.server, "sh-base", [0.9])
+
+        key = verdicts.combo_key([base, alice])
+        check = _checks(shelf_env)[key]
+        assert check["member_ids"] == sorted([base, alice])
+        assert check["evidence"] == {"together": 6, "checked": 4, "passing": 3}
+        assert check["check"] == "pass"
+        assert check["verdict"] is None
+        assert check["suspects"] == []
+
+        url = f"{API}/models/workflow-sets/verdicts/{key}"
+        r = shelf_env.owner.put(url, json={"verdict": "yes"})
+        assert r.status_code == 200, r.text
+        assert r.json() == {"combo_key": key, "verdict": "yes", "previous": None}
+        r = shelf_env.owner.put(url, json={"verdict": "no"})
+        assert r.json()["previous"] == "yes"
+        assert _checks(shelf_env)[key]["verdict"] == "no"
+
+        member_url = f"{url}/members/{alice}"
+        r = shelf_env.owner.put(member_url, json={"verdict": "problem"})
+        assert r.status_code == 200, r.text
+        assert r.json() == {
+            "combo_key": key,
+            "model_id": alice,
+            "verdict": "problem",
+            "previous": None,
+        }
+        assert _checks(shelf_env)[key]["member_verdicts"] == [
+            {"model_id": alice, "verdict": "problem"}
+        ]
+        # The model's own card, on the list and on the detail, names the set
+        # base model first.
+        mark = {"combo_key": key, "names": ["Base XL", "Alice"], "verdict": "problem"}
+        assert _adapter_row(shelf_env, "alice.safetensors")["set_verdicts"] == [mark]
+        detail = shelf_env.owner.get(f"{API}/adapters/{ADAPTER_WITH_BASE}").json()
+        assert detail["set_verdicts"] == [mark]
+        # A member's answer marks THAT model, not the others in the set.
+        assert _adapter_row(shelf_env, "bob.safetensors")["set_verdicts"] == []
+
+        r = shelf_env.owner.delete(member_url)
+        assert r.json()["previous"] == "problem"
+        assert r.json()["verdict"] is None
+        assert _adapter_row(shelf_env, "alice.safetensors")["set_verdicts"] == []
+        r = shelf_env.owner.delete(url)
+        assert r.json() == {"combo_key": key, "verdict": None, "previous": "no"}
+        assert _checks(shelf_env)[key]["verdict"] is None
+    finally:
+        _wipe_recipes(shelf_env.server)
+
+
+def test_a_card_whose_members_change_has_no_verdict_and_keeps_the_old_row(
+    shelf_env,
+):
+    ids = shelf_env.model_ids
+    base, alice, dana = (
+        ids["base_xl.safetensors"],
+        ids["alice.safetensors"],
+        ids["dana.safetensors"],
+    )
+    try:
+        _seed_recipe(
+            shelf_env.server,
+            "sh-alice",
+            [("ckpt_name", "base_xl.safetensors"), ("lora_name", "alice.safetensors")],
+        )
+        _scored(shelf_env.server, "sh-alice", [0.9])
+        old = verdicts.combo_key([base, alice])
+        url = f"{API}/models/workflow-sets/verdicts/{old}"
+        assert shelf_env.owner.put(url, json={"verdict": "yes"}).status_code == 200
+
+        # Dana joins the card: a second combination under the same base.
+        _seed_recipe(
+            shelf_env.server,
+            "sh-dana",
+            [("ckpt_name", "base_xl.safetensors"), ("lora_name", "dana.safetensors")],
+        )
+        _scored(shelf_env.server, "sh-dana", [0.9])
+        checks = _checks(shelf_env)
+        new = verdicts.combo_key([base, alice, dana])
+        assert old not in checks
+        assert checks[new]["verdict"] is None
+        # No picture used all three together: the spec's "no evidence" state.
+        assert checks[new]["check"] == "none"
+        # Nothing auto-clears: the old combination's answer is still stored.
+        assert (
+            shelf_env.server.hub.fetchone(
+                "SELECT verdict FROM model_set_verdict WHERE combo_key = ?", (old,)
+            )["verdict"]
+            == "yes"
+        )
+    finally:
+        _wipe_recipes(shelf_env.server)
+
+
+def test_a_suspect_member_is_served_with_its_counts(shelf_env):
+    """Base alone passes; with Alice it fails. Alice is the suspect, the base
+    is not, and the owner's answer rides on the suspect entry."""
+    ids = shelf_env.model_ids
+    base, alice = ids["base_xl.safetensors"], ids["alice.safetensors"]
+    try:
+        _seed_recipe(
+            shelf_env.server,
+            "sh-alice",
+            [("ckpt_name", "base_xl.safetensors"), ("lora_name", "alice.safetensors")],
+        )
+        _scored(shelf_env.server, "sh-alice", [0.1, 0.1, 0.1, 0.1, 0.9])
+        _seed_recipe(
+            shelf_env.server, "sh-base", [("ckpt_name", "base_xl.safetensors")]
+        )
+        _scored(shelf_env.server, "sh-base", [0.9, 0.9, 0.9, 0.9, 0.1])
+        key = verdicts.combo_key([base, alice])
+        assert (
+            shelf_env.owner.put(
+                f"{API}/models/workflow-sets/verdicts/{key}/members/{alice}",
+                json={"verdict": "not_problem"},
+            ).status_code
+            == 200
+        )
+        check = _checks(shelf_env)[key]
+        assert check["check"] == "fail"
+        assert check["suspects"] == [
+            {
+                "model_id": alice,
+                "with_failed": 4,
+                "with_total": 5,
+                "without_failed": 1,
+                "without_total": 5,
+                "verdict": "not_problem",
+            }
+        ]
+    finally:
+        _wipe_recipes(shelf_env.server)
+
+
+def test_a_verdict_refuses_a_key_it_cannot_store_and_a_model_not_in_it(shelf_env):
+    ids = shelf_env.model_ids
+    base, alice, bob = (
+        ids["base_xl.safetensors"],
+        ids["alice.safetensors"],
+        ids["bob.safetensors"],
+    )
+    root = f"{API}/models/workflow-sets/verdicts"
+    unsorted = f"{max(base, alice)},{min(base, alice)}"
+    for path in (f"{root}/{unsorted}", f"{root}/{base},{base}", f"{root}/x"):
+        r = shelf_env.owner.put(path, json={"verdict": "yes"})
+        assert r.status_code == 422, f"{path}: {r.status_code} {r.text}"
+    key = verdicts.combo_key([base, alice])
+    # A verdict word from the other vocabulary is a 422 too.
+    assert (
+        shelf_env.owner.put(f"{root}/{key}", json={"verdict": "problem"}).status_code
+        == 422
+    )
+    # Bob is on the shelf but not in the set; 999999 is not on the shelf.
+    r = shelf_env.owner.put(f"{root}/{key}/members/{bob}", json={"verdict": "problem"})
+    assert r.status_code == 404, r.text
+    r = shelf_env.owner.put(f"{root}/{base},999999", json={"verdict": "yes"})
+    assert r.status_code == 404, r.text
+    assert shelf_env.server.hub.fetchall("SELECT * FROM model_set_verdict") == []
+    assert shelf_env.server.hub.fetchall("SELECT * FROM model_set_member_verdict") == []
+    # An answer naming a model that left the shelf can still be cleared.
+    gone = f"{base},999999"
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute("INSERT INTO model_set_verdict VALUES (?, 'yes', 'then')", (gone,))
+        conn.execute(
+            "INSERT INTO model_set_member_verdict VALUES (?, 999999, 'problem', 'then')",
+            (gone,),
+        )
+    r = shelf_env.owner.delete(f"{root}/{gone}/members/999999")
+    assert r.status_code == 200, r.text
+    assert r.json()["previous"] == "problem"
+    r = shelf_env.owner.delete(f"{root}/{gone}")
+    assert r.status_code == 200, r.text
+    assert r.json()["previous"] == "yes"
+    assert shelf_env.server.hub.fetchall("SELECT * FROM model_set_verdict") == []
+    assert shelf_env.server.hub.fetchall("SELECT * FROM model_set_member_verdict") == []
+
+
+def test_verdict_routes_answer_the_owner_and_refuse_tokens(shelf_env):
+    """Both directions on all four verdict routes, each against a real route,
+    with an in-scope read in front of every refusal."""
+    ids = shelf_env.model_ids
+    base, alice = ids["base_xl.safetensors"], ids["alice.safetensors"]
+    key = verdicts.combo_key([base, alice])
+    set_path = f"/api/v1/models/workflow-sets/verdicts/{key}"
+    member_path = f"{set_path}/members/{alice}"
+    set_template = "/api/v1/models/workflow-sets/verdicts/{combo_key}"
+    member_template = f"{set_template}/members/{{model_id}}"
+    routes = (
+        ("PUT", set_path, set_template, {"json": {"verdict": "yes"}}),
+        ("PUT", member_path, member_template, {"json": {"verdict": "problem"}}),
+        ("DELETE", member_path, member_template, {}),
+        ("DELETE", set_path, set_template, {}),
+    )
+    scoped = _bearer(
+        shelf_env.server,
+        _mint(
+            shelf_env.owner,
+            "verdicts character token",
+            resource_type="character",
+            resource_id=shelf_env.character_id,
+        ),
+    )
+    unscoped = _bearer(shelf_env.server, _mint(shelf_env.owner, "verdicts read token"))
+    anon = TestClient(shelf_env.server.api)
+    for client in (scoped, unscoped):
+        assert client.get(f"{API}/pictures").status_code == 200
+    for method, path, template, kwargs in routes:
+        assert_real_route(shelf_env.server.api, method, path, template)
+        for client in (scoped, unscoped):
+            r = client.request(method, path, **kwargs)
+            assert r.status_code == 403, f"{method} {path}: {r.status_code}"
+        r = anon.request(method, path, **kwargs)
+        assert r.status_code == 401, f"{method} {path}: {r.status_code}"
+        r = shelf_env.owner.request(method, path, **kwargs)
+        assert r.status_code == 200, f"{method} {path}: {r.text}"
+    # The refusals wrote nothing: only the owner's PUTs did, and the DELETEs
+    # took them out again.
+    assert shelf_env.server.hub.fetchall("SELECT * FROM model_set_verdict") == []
+    for client in (scoped, unscoped):
+        assert client.get(f"{API}/models/workflow-sets").status_code == 403
 
 
 def _new_folder_path(tmp_root: str, name: str) -> str:
@@ -775,6 +3011,163 @@ def test_the_filesystem_root_is_refused(shelf_env):
     assert "PixlStash data folder" in r.json()["detail"], r.text
 
 
+class _FolderPaths:
+    """``requests.get`` stand-in answering ComfyUI's ``/internal/folder_paths``."""
+
+    def __init__(self, folder_paths: dict):
+        self.folder_paths = folder_paths
+        self.urls: list[str] = []
+
+    def __call__(self, url, timeout=None, allow_redirects=True, proxies=None):
+        assert allow_redirects is False, "a redirect names a host nobody vetted"
+        assert proxies == comfyui_service.NO_PROXY
+        self.urls.append(url)
+        return SimpleNamespace(status_code=200, json=lambda: self.folder_paths)
+
+
+def test_comfyui_model_roots_collapse_categories_to_their_root(monkeypatch):
+    """Two categories under one parent make that parent the root; a category
+    alone keeps itself, so a ``loras:`` entry pointing at a home folder does not
+    put the whole home folder on the shelf. ``custom_nodes`` names the install."""
+    fake = _FolderPaths(
+        {
+            "checkpoints": ["/comfy/models/checkpoints"],
+            "loras": ["/comfy/models/loras", "/data/my-loras"],
+            "vae": ["/comfy/models/vae", "/comfy/models/vae/extra"],
+            "custom_nodes": ["/comfy/custom_nodes"],
+            "configs": "not a list",
+        }
+    )
+    monkeypatch.setattr(comfyui_service.requests, "get", fake)
+    assert comfyui_service.comfyui_model_roots("http://comfy:8188") == [
+        "/comfy/models",
+        "/data/my-loras",
+    ]
+    assert fake.urls == ["http://comfy:8188/internal/folder_paths"]
+
+
+def test_comfyui_model_roots_group_by_category_not_by_folder_count(monkeypatch):
+    """Two folders of one category under a parent are not a models root: the
+    parent is somebody's home or data drive. A Windows ComfyUI's paths group
+    the same way on any backend."""
+    fake = _FolderPaths(
+        {
+            "loras": ["/home/me/loras-a", "/home/me/loras-b"],
+            "checkpoints": ["C:\\ComfyUI\\models\\checkpoints"],
+            "vae": ["C:\\ComfyUI\\models\\vae"],
+        }
+    )
+    monkeypatch.setattr(comfyui_service.requests, "get", fake)
+    assert comfyui_service.comfyui_model_roots("http://comfy:8188/") == [
+        "/home/me/loras-a",
+        "/home/me/loras-b",
+        "C:\\ComfyUI\\models",
+    ]
+    assert fake.urls == ["http://comfy:8188/internal/folder_paths"]
+
+
+def test_comfyui_model_roots_is_empty_when_comfyui_cannot_be_asked(monkeypatch):
+    def refuse(url, **kwargs):
+        raise comfyui_service.requests.ConnectionError("refused")
+
+    monkeypatch.setattr(comfyui_service.requests, "get", refuse)
+    assert comfyui_service.comfyui_model_roots("http://comfy:8188") == []
+
+
+def test_saving_a_comfyui_url_puts_its_model_folder_on_the_shelf(
+    shelf_env, tmp_path, monkeypatch
+):
+    """The connect gesture registers ComfyUI's models root as a user folder and
+    queues its scan. A path ComfyUI reports that this machine cannot see is
+    skipped, not an error: the URL save still succeeds."""
+    models = tmp_path / "ComfyUI" / "models"
+    for category in ("checkpoints", "loras"):
+        (models / category).mkdir(parents=True)
+    fake = _FolderPaths(
+        {
+            "checkpoints": [str(models / "checkpoints")],
+            "loras": [str(models / "loras"), str(tmp_path / "not-here" / "x" / "y")],
+        }
+    )
+    monkeypatch.setattr(comfyui_service.requests, "get", fake)
+
+    def registered() -> dict[str, dict]:
+        r = shelf_env.owner.get(f"{API}/model-folders")
+        assert r.status_code == 200, r.text
+        return {row["path"]: row for row in r.json()["folders"]}
+
+    root = os.path.realpath(str(models))
+    try:
+        r = shelf_env.owner.patch(
+            f"{API}/users/me/config", json={"comfyui_url": "http://127.0.0.1:18188/"}
+        )
+        assert r.status_code == 200, r.text
+        deadline = time.monotonic() + 10
+        while root not in registered() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        folders = registered()
+        assert root in folders, folders
+        assert fake.urls == ["http://127.0.0.1:18188/internal/folder_paths"]
+        assert folders[root]["kind"] == "user"
+        assert folders[root]["scan_status"] is not None, folders[root]
+        assert not any("not-here" in path for path in folders), folders
+    finally:
+        shelf_env.owner.patch(f"{API}/users/me/config", json={"comfyui_url": None})
+
+
+def test_only_a_comfyui_on_this_computer_names_model_folders(shelf_env, monkeypatch):
+    """The paths are ComfyUI's own filesystem's. From another host they name
+    directories on a machine this is not, so they are not even asked for."""
+    fake = _FolderPaths({"checkpoints": ["/home/me/models/checkpoints"]})
+    monkeypatch.setattr(comfyui_service.requests, "get", fake)
+    for elsewhere in ("http://8.8.8.8:8188/", f"http://{LAN_IPV4}:8188/"):
+        assert (
+            model_folders_routes.register_comfyui_model_folders(
+                shelf_env.server, elsewhere
+            )
+            == []
+        )
+    assert fake.urls == []
+
+
+def test_the_home_folder_from_comfyui_is_never_put_on_the_shelf(
+    shelf_env, tmp_path, monkeypatch
+):
+    """Two categories directly under the home folder collapse to the home
+    folder itself: a scan of everything the person owns. Nothing else refuses
+    it (``/`` is already refused for containing the library), so this rule is
+    the one under test. HOME points at a stand-in so a failure cannot walk the
+    real one."""
+    home = tmp_path / "home"
+    for name in ("checkpoints", "loras"):
+        (home / name).mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    fake = _FolderPaths(
+        {"checkpoints": [str(home / "checkpoints")], "loras": [str(home / "loras")]}
+    )
+    monkeypatch.setattr(comfyui_service.requests, "get", fake)
+    before = {
+        row["path"]
+        for row in shelf_env.owner.get(f"{API}/model-folders").json()["folders"]
+    }
+    try:
+        assert (
+            model_folders_routes.register_comfyui_model_folders(
+                shelf_env.server, "http://127.0.0.1:18188"
+            )
+            == []
+        )
+    finally:
+        after = {
+            row["path"]: row["id"]
+            for row in shelf_env.owner.get(f"{API}/model-folders").json()["folders"]
+        }
+        for path, folder_id in after.items():
+            if path not in before:
+                shelf_env.owner.delete(f"{API}/model-folders/{folder_id}")
+    assert set(after) == before, after
+
+
 def test_the_vault_data_folder_is_refused(shelf_env):
     r = shelf_env.owner.post(
         f"{API}/model-folders", json={"path": shelf_env.server.vault.image_root}
@@ -827,6 +3220,100 @@ def test_folder_list_counts_copies_and_reports_the_seeded_folder(shelf_env):
     assert r.status_code == 200, r.text
     folders = {row["path"]: row for row in r.json()["folders"]}
     assert folders["/models/loras"]["file_count"] == len(_SEED_MODELS)
+
+
+def _folder_tools(shelf_env) -> dict[str, object]:
+    r = shelf_env.owner.get(f"{API}/model-folders")
+    assert r.status_code == 200, r.text
+    return {row["path"]: row["tool"] for row in r.json()["folders"]}
+
+
+def test_the_huggingface_cache_is_ours_only_while_it_holds_only_our_repos(
+    shelf_env, tmp_path, monkeypatch
+):
+    """The cache is shared with every other tool on the machine, so one repo
+    PixlStash did not download is enough to make it HuggingFace's."""
+    cache = tmp_path / "hf-cache"
+    cache.mkdir()
+    monkeypatch.setenv(builtin_caches.HUGGINGFACE_CACHE_DIR_ENV, str(cache))
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute(
+            "INSERT INTO model_folder (id, path, kind, owner, movable, created_at) "
+            "VALUES (7, ?, 'foreign', 'pixlstash', 'fixed', "
+            "'2026-08-16T00:00:00Z')",
+            (str(cache),),
+        )
+    # Holding nothing yet is not evidence that it is ours.
+    assert _folder_tools(shelf_env)[str(cache)] == "HuggingFace"
+
+    with shelf_env.server.hub.transaction() as conn:
+        engine = conn.execute(
+            "INSERT INTO model (file_kind, filename, provenance, created_at) "
+            "VALUES ('engine', 'ours', 'builtin', '2026-08-16T00:00:00Z')"
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO model_file (model_id, model_folder_id, relpath, state, "
+            "seen_at) VALUES (?, 7, 'models--ours', 'present', "
+            "'2026-08-16T00:00:00Z')",
+            (engine,),
+        )
+    assert _folder_tools(shelf_env)[str(cache)] == "PixlStash"
+
+    with shelf_env.server.hub.transaction() as conn:
+        theirs = conn.execute(
+            "INSERT INTO model (file_kind, filename, provenance, created_at) "
+            "VALUES ('checkpoint', 'theirs', 'builtin', '2026-08-16T00:00:00Z')"
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO model_file (model_id, model_folder_id, relpath, state, "
+            "seen_at) VALUES (?, 7, 'models--theirs', 'present', "
+            "'2026-08-16T00:00:00Z')",
+            (theirs,),
+        )
+    assert _folder_tools(shelf_env)[str(cache)] == "HuggingFace"
+
+
+def test_a_stability_matrix_models_folder_is_labelled_through_its_symlink(
+    shelf_env, tmp_path, monkeypatch
+):
+    """StabilityMatrix's ``Models`` is often a symlink to a bigger drive, and a
+    folder is registered at its resolved path, so the library alone would miss
+    it. Its ComfyUI package's folders sit inside the library itself."""
+    library = tmp_path / "StabilityMatrix"
+    comfy_models = library / "Packages" / "ComfyUI" / "models"
+    comfy_models.mkdir(parents=True)
+    drive = tmp_path / "drive" / "StabilityMatrix"
+    drive.mkdir(parents=True)
+    (library / "Models").symlink_to(drive, target_is_directory=True)
+    config = tmp_path / "config" / "StabilityMatrix"
+    config.mkdir(parents=True)
+    (config / "library.json").write_text(json.dumps({"LibraryPath": str(library)}))
+    monkeypatch.setattr(
+        model_folders_routes, "user_config_dir", lambda *a, **k: str(config)
+    )
+
+    for path, kind in (
+        (str(library / "Models"), "user"),
+        (str(comfy_models), "user"),
+        (_new_folder_path(str(tmp_path), "loras"), "user"),
+        (_new_folder_path(str(tmp_path), "runs"), "source"),
+    ):
+        r = shelf_env.owner.post(
+            f"{API}/model-folders", json={"path": path, "kind": kind}
+        )
+        assert r.status_code == 200, r.text
+
+    tools = _folder_tools(shelf_env)
+    assert tools[os.path.realpath(drive)] == "StabilityMatrix"
+    assert tools[os.path.realpath(comfy_models)] == "StabilityMatrix"
+    assert tools[os.path.realpath(tmp_path / "loras")] is None
+    assert tools[os.path.realpath(tmp_path / "runs")] == "ai-toolkit"
+
+    # A relative library path would resolve against the server's working
+    # directory, so it labels nothing rather than the wrong folders.
+    (config / "library.json").write_text(json.dumps({"LibraryPath": "StabilityMatrix"}))
+    monkeypatch.chdir(tmp_path)
+    assert _folder_tools(shelf_env)[os.path.realpath(comfy_models)] is None
 
 
 def test_patch_changes_the_bind_path_but_never_the_registered_path(shelf_env):
@@ -901,6 +3388,154 @@ def test_rescan_skips_a_source_folder(shelf_env, tmp_path):
     r = shelf_env.owner.post(f"{API}/model-folders/{folder_id}/rescan")
     assert r.status_code == 202, r.text
     assert r.json()["status"] == "skipped"
+
+
+def test_one_downloads_folder_is_taken_from_and_never_scanned(shelf_env, tmp_path):
+    """The Downloads folder is watched, not catalogued: its models are moved
+    into the default folder, so a scan or a destination there means nothing."""
+    r = shelf_env.owner.post(
+        f"{API}/model-folders",
+        json={"path": _new_folder_path(str(tmp_path), "dl"), "kind": "downloads"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert (body["kind"], body["movable"], body["is_default"]) == (
+        "downloads",
+        "external",
+        False,
+    )
+    # The owner's own folder, labelled by its kind: no tool chip, and above all
+    # not "PixlStash", which a downloads row would get by falling through.
+    assert body["tool"] is None, body
+    folder_id = body["id"]
+
+    r = shelf_env.owner.post(
+        f"{API}/model-folders",
+        json={"path": _new_folder_path(str(tmp_path), "dl2"), "kind": "downloads"},
+    )
+    assert r.status_code == 409, r.text
+    # The positive control: the refusal is about the kind, not the path.
+    r = shelf_env.owner.post(
+        f"{API}/model-folders", json={"path": _new_folder_path(str(tmp_path), "dl2")}
+    )
+    assert r.status_code == 200, r.text
+
+    r = shelf_env.owner.post(f"{API}/model-folders/{folder_id}/rescan")
+    assert r.json()["status"] == "skipped", r.text
+    r = shelf_env.owner.patch(
+        f"{API}/model-folders/{folder_id}", json={"is_default": True}
+    )
+    assert r.status_code == 400, r.text
+
+
+def test_a_downloads_folder_that_loses_a_race_is_a_409(
+    shelf_env, tmp_path, monkeypatch
+):
+    """Another registration landing between the route's check and its insert
+    is refused by the hub's index and reported as the same 409, not a 500."""
+    rival = _new_folder_path(str(tmp_path), "rival")
+    real_conflicts = model_folders_routes._validate_folder_conflicts
+
+    def rival_lands_first(server, path):
+        real_conflicts(server, path)
+        with server.hub.transaction() as conn:
+            conn.execute(
+                "INSERT INTO model_folder (path, kind, movable, created_at) "
+                "VALUES (?, 'downloads', 'external', '2026-10-14T00:00:00Z')",
+                (rival,),
+            )
+
+    monkeypatch.setattr(
+        model_folders_routes, "_validate_folder_conflicts", rival_lands_first
+    )
+    r = shelf_env.owner.post(
+        f"{API}/model-folders",
+        json={"path": _new_folder_path(str(tmp_path), "mine"), "kind": "downloads"},
+    )
+    assert r.status_code == 409, r.text
+    assert "Downloads folder is already set" in r.json()["detail"]
+    rows = shelf_env.owner.get(f"{API}/model-folders").json()["folders"]
+    assert [row["path"] for row in rows if row["kind"] == "downloads"] == [rival]
+
+
+def test_exactly_one_folder_is_the_default_and_it_moves(shelf_env, tmp_path):
+    """Marking a folder unmarks the last one; unmarking hands it back."""
+    ids = [
+        shelf_env.owner.post(
+            f"{API}/model-folders",
+            json={"path": _new_folder_path(str(tmp_path), name)},
+        ).json()["id"]
+        for name in ("first", "second")
+    ]
+
+    def defaults():
+        rows = shelf_env.owner.get(f"{API}/model-folders").json()["folders"]
+        return [row["id"] for row in rows if row["is_default"]]
+
+    # The seeded hub has no managed store, so nothing is the default yet.
+    assert defaults() == []
+    for folder_id in (ids[0], ids[1]):
+        r = shelf_env.owner.patch(
+            f"{API}/model-folders/{folder_id}", json={"is_default": True}
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["is_default"] is True
+        assert defaults() == [folder_id]
+
+    r = shelf_env.owner.patch(
+        f"{API}/model-folders/{ids[1]}", json={"is_default": False}
+    )
+    assert r.status_code == 200, r.text
+    assert defaults() == []
+
+
+def test_a_patch_whose_second_write_fails_moves_no_default(shelf_env, tmp_path):
+    """The default flag and the other fields commit together: a write that
+    fails part-way (simulated by a trigger) leaves the default where it was."""
+    folder_id = shelf_env.owner.post(
+        f"{API}/model-folders", json={"path": _new_folder_path(str(tmp_path), "t")}
+    ).json()["id"]
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute(
+            "CREATE TRIGGER test_refuse_delete_after_import BEFORE UPDATE OF "
+            "delete_after_import ON model_folder BEGIN "
+            "SELECT RAISE(ABORT, 'simulated write failure'); END"
+        )
+    try:
+        with pytest.raises(Exception, match="simulated write failure"):
+            shelf_env.owner.patch(
+                f"{API}/model-folders/{folder_id}",
+                json={"is_default": True, "delete_after_import": True},
+            )
+    finally:
+        with shelf_env.server.hub.transaction() as conn:
+            conn.execute("DROP TRIGGER IF EXISTS test_refuse_delete_after_import")
+    rows = shelf_env.owner.get(f"{API}/model-folders").json()["folders"]
+    assert [row["id"] for row in rows if row["is_default"]] == []
+
+
+def test_a_refused_patch_changes_nothing(shelf_env, tmp_path):
+    """A body that is refused in part is refused whole: the default does not
+    move when the host path beside it is rejected, nor onto a folder that
+    cannot be one."""
+    folder_id = shelf_env.owner.post(
+        f"{API}/model-folders", json={"path": _new_folder_path(str(tmp_path), "f")}
+    ).json()["id"]
+    r = shelf_env.owner.patch(
+        f"{API}/model-folders/{folder_id}",
+        json={"is_default": True, "host_path": "relative/path"},
+    )
+    assert r.status_code == 400, r.text
+    source_id = shelf_env.owner.post(
+        f"{API}/model-folders",
+        json={"path": _new_folder_path(str(tmp_path), "src"), "kind": "source"},
+    ).json()["id"]
+    r = shelf_env.owner.patch(
+        f"{API}/model-folders/{source_id}", json={"is_default": True}
+    )
+    assert r.status_code == 400, r.text
+    rows = shelf_env.owner.get(f"{API}/model-folders").json()["folders"]
+    assert [row["id"] for row in rows if row["is_default"]] == []
 
 
 def test_unknown_folder_id_is_404_on_every_mutator(shelf_env):
@@ -1106,31 +3741,38 @@ def test_a_rescan_is_a_task_with_progress_a_denominator_and_one_scan_per_folder(
     assert r.status_code == 202, r.text
     task_id = r.json()["task_id"]
     assert task_id, r.text
-    assert started.wait(30), "the submitted task never reached the scanner"
+    try:
+        assert started.wait(30), "the submitted task never reached the scanner"
 
-    # The task runner owns it. Not a thread this route spawned and forgot.
-    assert ran_on[0].startswith("vault-task-runner"), ran_on
+        # The task runner owns it. Not a thread this route spawned and forgot.
+        assert ran_on[0].startswith("vault-task-runner"), ran_on
 
-    lane = shelf_env.owner.get(f"{API}/workers/progress").json()["workers"][
-        "ModelFolderScanTask"
-    ]
-    assert lane["running"] is True, lane
-    # The denominator is known before the first (potentially multi-GB) hash,
-    # which is the whole point of materialising the walk.
-    assert (lane["total"], lane["current"]) == (3, 0), lane
+        lane = shelf_env.owner.get(f"{API}/workers/progress").json()["workers"][
+            "ModelFolderScanTask"
+        ]
+        assert lane["running"] is True, lane
+        # The denominator is known before the first (potentially multi-GB) hash,
+        # which is the whole point of materialising the walk.
+        assert (lane["total"], lane["current"]) == (3, 0), lane
 
-    # One scan per folder: the second press is refused and told which task is
-    # already doing the work, rather than reading the same bytes again.
-    again = shelf_env.owner.post(f"{API}/model-folders/{folder_id}/rescan")
-    assert again.status_code == 202, again.text
-    assert again.json() == {
-        "status": "already_running",
-        "id": folder_id,
-        "task_id": task_id,
-    }
+        # One scan per folder: the second press is refused and told which task is
+        # already doing the work, rather than reading the same bytes again.
+        again = shelf_env.owner.post(f"{API}/model-folders/{folder_id}/rescan")
+        assert again.status_code == 202, again.text
+        assert again.json() == {
+            "status": "already_running",
+            "id": folder_id,
+            "task_id": task_id,
+        }
+    finally:
+        # Inside the try, so an assertion that fires still releases the held
+        # scan instead of parking a TaskRunner slot on release.wait(30). The
+        # wait for it to settle belongs in here too: released but unawaited,
+        # the scan is still running on the same progress lane the next test
+        # reads.
+        release.set()
+        row = _await_scan(shelf_env, folder_id)
 
-    release.set()
-    row = _await_scan(shelf_env, folder_id)
     assert row["scan_status"] == "completed", row
     assert row["scan_error"] is None, row
     assert row["file_count"] == 3, row
@@ -1534,7 +4176,10 @@ def test_sorting_by_an_aggregate_is_still_two_hub_queries(shelf_env):
     # tally is asserted to be an exact number, so a naming change that matched
     # nothing would fail loudly rather than pass silently.
     #
-    # That number is three: the rows, the locations, and the capabilities. What
+    # That number is five: the rows, the locations, the capabilities, the
+    # owner's member verdicts for the cards' marks (one read while nobody has
+    # answered, as here; a second for the names once someone has), and the
+    # models this library hides. What
     # this test actually guards is that the tally does not MOVE WITH THE ROW
     # COUNT, which is why both sides are compared as well as pinned - a whole-
     # page query added on purpose changes the constant, a per-row lookup breaks
@@ -1586,7 +4231,7 @@ def test_sorting_by_an_aggregate_is_still_two_hub_queries(shelf_env):
         r = shelf_env.owner.get(f"{API}/adapters", params={"sort": "size"})
         assert r.status_code == 200, r.text
         assert len(r.json()["adapters"]) == 24
-        assert len(calls) == with_four_rows == 3, (
+        assert len(calls) == with_four_rows == 5, (
             f"{len(calls)} hub queries for 24 rows vs {with_four_rows} for 4 - "
             "the list has grown a per-row lookup"
         )
@@ -3141,6 +5786,228 @@ def test_an_explicit_null_clears_the_column(shelf_env):
     assert _model_row(shelf_env, alice)["base_model"] is None
 
 
+def _adapter(shelf_env, sha256: str) -> dict:
+    r = shelf_env.owner.get(f"{API}/adapters/{sha256}")
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_trigger_words_are_set_across_a_selection_and_served_as_a_list(shelf_env):
+    """One training run's checkpoints share a trigger, so this verb is a bulk
+    one. Blanks and repeats are dropped; the order the owner gave is kept."""
+    alice = shelf_env.model_ids["alice.safetensors"]
+    bob = shelf_env.model_ids["bob.safetensors"]
+
+    r = shelf_env.owner.patch(
+        f"{API}/models",
+        json={"ids": [alice, bob], "trigger_words": [" ohwx ", "", "woman", "ohwx"]},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json() == {"updated": sorted([alice, bob]), "fields": ["trigger_words"]}
+
+    for sha256 in (ADAPTER_WITH_BASE, ADAPTER_WITH_BASE_2):
+        served = _adapter(shelf_env, sha256)
+        assert served["trigger_words"] == ["ohwx", "woman"]
+        assert served["trigger_words_source"] == "recorded"
+    assert _model_row(shelf_env, alice)["display_name"] == "Alice", (
+        "an unmentioned column was written"
+    )
+    # Untouched rows say nothing rather than an empty default of some kind.
+    untouched = _adapter(shelf_env, ADAPTER_NO_BASE)
+    assert untouched["trigger_words"] == []
+    assert untouched["trigger_words_source"] is None
+
+
+@pytest.mark.parametrize("cleared", [[], ["  "]])
+def test_an_empty_list_is_stored_as_no_trigger_word_not_left_for_a_scan(
+    shelf_env, cleared
+):
+    """Not every LoRA has a trigger word, so "none" is an answer. The scanner
+    upserts ``COALESCE(model.trigger_words, excluded…)``: stored as NULL, the
+    next scan would put the header's tag table straight back."""
+    alice = shelf_env.model_ids["alice.safetensors"]
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute(
+            "UPDATE model SET trigger_words = ? WHERE id = ?",
+            ('["portrait", "solo"]', alice),
+        )
+    assert _adapter(shelf_env, ADAPTER_WITH_BASE)["trigger_words"] == [
+        "portrait",
+        "solo",
+    ]
+
+    r = shelf_env.owner.patch(
+        f"{API}/models", json={"ids": [alice], "trigger_words": cleared}
+    )
+    assert r.status_code == 200, r.text
+    assert _model_row(shelf_env, alice)["trigger_words"] == "[]"
+    served = _adapter(shelf_env, ADAPTER_WITH_BASE)
+    assert served["trigger_words"] == []
+    assert served["trigger_words_source"] is None
+
+
+def test_a_model_with_no_trigger_word_takes_its_persons_name(shelf_env):
+    """The default is served, never stored: it has to follow the assignment.
+    A set is not a subject, and a recorded word always wins."""
+    server = shelf_env.server
+    alice = shelf_env.model_ids["alice.safetensors"]
+    _attach(server, ADAPTER_WITH_BASE, "character", shelf_env.character_id)
+    # A set carrying the person's own row id: ids are per table, and reading
+    # this one as a character would hand a set's LoRA that person's name.
+    _attach(server, ADAPTER_WITH_BASE_2, "set", shelf_env.character_id)
+    # An attachment whose person is gone names nobody.
+    _attach(server, ADAPTER_NO_BASE, "character", 999999)
+
+    rows = {
+        row["filename"]: (row["trigger_words"], row["trigger_words_source"])
+        for row in shelf_env.owner.get(f"{API}/adapters").json()["adapters"]
+    }
+    assert rows["alice.safetensors"] == (["Shelf Character"], "character")
+    assert rows["bob.safetensors"] == ([], None)
+    assert rows["sd_xl_noname.safetensors"] == ([], None)
+    assert rows["dana.safetensors"] == ([], None)
+    assert _model_row(shelf_env, alice)["trigger_words"] is None, (
+        "the default was written to the row"
+    )
+    # The detail route answers the same way as the list.
+    assert _adapter(shelf_env, ADAPTER_WITH_BASE)["trigger_words"] == [
+        "Shelf Character"
+    ]
+
+    r = shelf_env.owner.patch(
+        f"{API}/models", json={"ids": [alice], "trigger_words": ["ohwx"]}
+    )
+    assert r.status_code == 200, r.text
+    served = _adapter(shelf_env, ADAPTER_WITH_BASE)
+    assert served["trigger_words"] == ["ohwx"]
+    assert served["trigger_words_source"] == "recorded"
+
+
+def test_a_blank_trigger_word_stays_blank_on_a_model_with_a_person(shelf_env):
+    """The person's name is a default for a model nobody has answered for. An
+    owner who empties the field has answered - a style LoRA attached to a
+    person needs no trigger word, and the name must not come back."""
+    alice = shelf_env.model_ids["alice.safetensors"]
+    _attach(shelf_env.server, ADAPTER_WITH_BASE, "character", shelf_env.character_id)
+    assert _adapter(shelf_env, ADAPTER_WITH_BASE)["trigger_words"] == [
+        "Shelf Character"
+    ]
+
+    r = shelf_env.owner.patch(
+        f"{API}/models", json={"ids": [alice], "trigger_words": []}
+    )
+    assert r.status_code == 200, r.text
+    served = _adapter(shelf_env, ADAPTER_WITH_BASE)
+    assert served["trigger_words"] == []
+    assert served["trigger_words_source"] is None
+    listed = {
+        row["filename"]: row["trigger_words"]
+        for row in shelf_env.owner.get(f"{API}/adapters").json()["adapters"]
+    }
+    assert listed["alice.safetensors"] == []
+
+    # Null is the other empty: back to "not set", where the default applies.
+    r = shelf_env.owner.patch(
+        f"{API}/models", json={"ids": [alice], "trigger_words": None}
+    )
+    assert r.status_code == 200, r.text
+    assert _model_row(shelf_env, alice)["trigger_words"] is None
+    served = _adapter(shelf_env, ADAPTER_WITH_BASE)
+    assert served["trigger_words"] == ["Shelf Character"]
+    assert served["trigger_words_source"] == "character"
+
+
+def test_the_person_default_is_only_for_models_a_prompt_calls_up(shelf_env):
+    """A VAE can be attached to a person as well, and has no trigger word for
+    their name to stand in for."""
+    vae = _h("vaeattached")
+    _add_model(shelf_env, "vae", "person_vae.safetensors", vae)
+    _attach(shelf_env.server, vae, "character", shelf_env.character_id)
+    _attach(shelf_env.server, UNKNOWN_HASH, "character", shelf_env.character_id)
+
+    served = _adapter(shelf_env, vae)
+    assert served["attachments"], "the VAE was not attached, so this proves nothing"
+    assert served["trigger_words"] == []
+    assert served["trigger_words_source"] is None
+    # An unclassified file is as likely a LoRA as anything, and keeps it.
+    assert _adapter(shelf_env, UNKNOWN_HASH)["trigger_words"] == ["Shelf Character"]
+
+
+def test_a_model_with_several_people_takes_the_first_ones_name(shelf_env):
+    """The lowest character id, whatever order the attachments come back in, so
+    the word does not move between two requests."""
+    r = shelf_env.owner.post(f"{API}/characters", json={"name": "Second Person"})
+    assert r.status_code in {200, 201}, r.text
+    second = r.json().get("id") or r.json()["character"]["id"]
+    assert second > shelf_env.character_id
+    try:
+        # Newest first, so insertion order would name the wrong one.
+        _attach(shelf_env.server, ADAPTER_WITH_BASE, "character", second)
+        _attach(
+            shelf_env.server, ADAPTER_WITH_BASE, "character", shelf_env.character_id
+        )
+        assert _adapter(shelf_env, ADAPTER_WITH_BASE)["trigger_words"] == [
+            "Shelf Character"
+        ]
+    finally:
+        shelf_env.owner.delete(f"{API}/characters/{second}")
+
+
+def test_checkpoints_serve_trigger_words_as_a_list_too(shelf_env):
+    rows = shelf_env.owner.get(f"{API}/checkpoints").json()["checkpoints"]
+    assert rows, "no checkpoint was listed, so this proves nothing"
+    assert {
+        (type(row["trigger_words"]), row["trigger_words_source"]) for row in rows
+    } == {(list, None)}
+
+
+def test_a_trigger_word_outside_ascii_is_found_by_the_search(shelf_env):
+    """The search is a LIKE over the stored column, so the word has to be
+    stored as typed and not as a JSON escape."""
+    alice = shelf_env.model_ids["alice.safetensors"]
+    r = shelf_env.owner.patch(
+        f"{API}/models", json={"ids": [alice], "trigger_words": ["café"]}
+    )
+    assert r.status_code == 200, r.text
+    r = shelf_env.owner.get(f"{API}/adapters", params={"q": "café"})
+    assert _names(r.json()["adapters"]) == {"alice.safetensors"}
+
+
+def test_a_stored_value_that_is_not_a_list_of_words_is_decoded_safely():
+    decode = model_shelf_service.decode_trigger_words
+    assert decode(None) == []
+    assert decode('["ohwx", 2, "  ", " woman "]') == ["ohwx", "woman"]
+    assert decode('{"a": 1}') == []
+    # Not JSON at all: served as the one word it is rather than dropped.
+    assert decode("ohwx") == ["ohwx"]
+
+
+def test_trigger_words_are_bounded(shelf_env):
+    alice = shelf_env.model_ids["alice.safetensors"]
+    limit = model_shelf_routes.MAX_TRIGGER_WORD_LENGTH
+    r = shelf_env.owner.patch(
+        f"{API}/models", json={"ids": [alice], "trigger_words": ["x" * (limit + 1)]}
+    )
+    assert r.status_code == 422, r.text
+    r = shelf_env.owner.patch(
+        f"{API}/models", json={"ids": [alice], "trigger_words": ["x" * limit]}
+    )
+    assert r.status_code == 200, r.text
+    # A file's whole tag table comes back from the dialog it seeded, so the
+    # list bound has to sit above one; past it is an unbounded body.
+    count = model_shelf_routes.MAX_TRIGGER_WORDS
+    words = [f"tag{i}" for i in range(count + 1)]
+    r = shelf_env.owner.patch(
+        f"{API}/models", json={"ids": [alice], "trigger_words": words}
+    )
+    assert r.status_code == 422, r.text
+    r = shelf_env.owner.patch(
+        f"{API}/models", json={"ids": [alice], "trigger_words": words[:count]}
+    )
+    assert r.status_code == 200, r.text
+    assert len(_adapter(shelf_env, ADAPTER_WITH_BASE)["trigger_words"]) == count
+
+
 def test_a_rename_is_refused_across_a_selection(shelf_env):
     """A name is a fact about one file. In bulk it would give every selected row
     the same name, and there is no undo to walk that back."""
@@ -3315,6 +6182,200 @@ def test_file_kind_cannot_be_cleared_only_corrected(shelf_env):
     assert r.status_code == 400
     assert "unknown" in r.text
     assert _model_row(shelf_env, alice)["file_kind"] == "adapter"
+
+
+# ---------------------------------------------------------------------------
+# The kind a model's workflows load it as (#1962). Hand-written recipes again:
+# what is under test is which loads count as agreeing, not how a graph files.
+# ---------------------------------------------------------------------------
+
+
+def _seed_loader(server, structural_hash: str, widget: str, name: str, cls: str):
+    """One recipe whose only loader, of class *cls*, names *name* by *widget*.
+
+    Its own core hash, so two recipes are two workflows.
+    """
+    _seed_recipe(server, structural_hash, [(widget, name)])
+    with server.hub.transaction() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO workflow_topology_core "
+            "(topology_hash, core_hash, core_version, slots) VALUES (?, ?, 'v1', ?)",
+            (
+                f"topo-{structural_hash}",
+                f"core-{structural_hash}",
+                json.dumps(
+                    [
+                        {
+                            "label": "l1",
+                            "class_type": cls,
+                            "widget": widget,
+                            "is_lora": False,
+                        }
+                    ]
+                ),
+            ),
+        )
+
+
+def _unclassified(shelf_env) -> dict[int, dict]:
+    r = shelf_env.owner.get(f"{API}/adapters", params={"file_kind": "unknown"})
+    assert r.status_code == 200, r.text
+    return {row["id"]: row for row in r.json()["adapters"]}
+
+
+@pytest.fixture
+def gguf_encoder(shelf_env):
+    """An Unclassified GGUF, named in mixed case as a download names it."""
+    model_id = _add_model(shelf_env, "unknown", "T5-XXL-Q8_0.gguf", None)
+    yield model_id
+    _wipe_recipes(shelf_env.server)
+
+
+def test_a_model_every_workflow_loads_as_a_text_encoder_is_offered_it(
+    shelf_env, gguf_encoder
+):
+    server = shelf_env.server
+    _seed_loader(server, "r-te-1", "clip_name", "t5-xxl-q8_0.gguf", "CLIPLoaderGGUF")
+    _seed_loader(server, "r-te-2", "clip_name1", "t5-xxl-q8_0.gguf", "DualCLIPLoader")
+
+    row = _unclassified(shelf_env)[gguf_encoder]
+    assert row["file_kind"] == "unknown", "an offer must never re-file the model"
+    assert row["suggested_kind"] == "text_encoder"
+    assert row["suggested_by"] == 2
+    assert row["suggested_fields"] == ["clip_name", "clip_name1"]
+    assert row["kind_decided"] is False
+
+
+def test_workflows_that_disagree_offer_nothing(shelf_env, gguf_encoder):
+    server = shelf_env.server
+    _seed_loader(server, "r-te", "clip_name", "t5-xxl-q8_0.gguf", "CLIPLoader")
+    _seed_loader(server, "r-vae", "vae_name", "t5-xxl-q8_0.gguf", "VAELoader")
+
+    row = _unclassified(shelf_env)[gguf_encoder]
+    assert row["suggested_kind"] is None
+    assert row["suggested_by"] == 0
+
+
+def test_a_load_in_any_other_slot_disagrees(shelf_env, gguf_encoder):
+    """Every workflow that loads it, not every one that loads it as a kind."""
+    server = shelf_env.server
+    _seed_loader(server, "r-te", "clip_name", "t5-xxl-q8_0.gguf", "CLIPLoader")
+    _seed_loader(server, "r-lora", "lora_name", "t5-xxl-q8_0.gguf", "LoraLoader")
+    assert _unclassified(shelf_env)[gguf_encoder]["suggested_kind"] is None
+
+
+def test_a_vision_loader_is_not_a_text_encoder_and_disagrees(shelf_env, gguf_encoder):
+    """`clip_name` on a CLIP Vision loader names an image encoder."""
+    server = shelf_env.server
+    _seed_loader(
+        server, "r-vision", "clip_name", "t5-xxl-q8_0.gguf", "CLIPVisionLoader"
+    )
+    assert _unclassified(shelf_env)[gguf_encoder]["suggested_kind"] is None
+
+    _seed_loader(server, "r-te", "clip_name", "t5-xxl-q8_0.gguf", "CLIPLoader")
+    assert _unclassified(shelf_env)[gguf_encoder]["suggested_kind"] is None
+
+
+def test_a_name_two_shelf_models_share_is_evidence_for_neither(shelf_env, gguf_encoder):
+    twin = _add_model(shelf_env, "unknown", "t5-xxl-q8_0.gguf", None)
+    _seed_loader(
+        shelf_env.server, "r-te", "clip_name", "t5-xxl-q8_0.gguf", "CLIPLoader"
+    )
+    rows = _unclassified(shelf_env)
+    assert rows[gguf_encoder]["suggested_kind"] is None
+    assert rows[twin]["suggested_kind"] is None
+
+
+def test_a_model_the_shelf_already_files_is_offered_nothing(shelf_env):
+    """Only a checkpoint or an Unclassified file is re-filed: a LoRA's header
+    said what it is, and a workflow loading it oddly is the odd one."""
+    alice = shelf_env.model_ids["alice.safetensors"]
+    _seed_loader(
+        shelf_env.server, "r-lora", "vae_name", "alice.safetensors", "VAELoader"
+    )
+    try:
+        r = shelf_env.owner.get(f"{API}/adapters")
+        row = {row["id"]: row for row in r.json()["adapters"]}[alice]
+        assert row["suggested_kind"] is None
+    finally:
+        _wipe_recipes(shelf_env.server)
+
+
+def test_deciding_the_kind_stops_the_offer_and_suggest_again_restores_it(
+    shelf_env, gguf_encoder
+):
+    _seed_loader(
+        shelf_env.server, "r-te", "clip_name", "t5-xxl-q8_0.gguf", "CLIPLoader"
+    )
+
+    def patch(**body):
+        r = shelf_env.owner.patch(f"{API}/models", json={"ids": [gguf_encoder], **body})
+        assert r.status_code == 200, r.text
+
+    # Don't suggest: the mark only. The kind stays, and the suggestion is
+    # still served so the shelf can offer it again.
+    patch(suggest_kind=False)
+    row = _unclassified(shelf_env)[gguf_encoder]
+    assert row["kind_decided"] is True
+    assert row["suggested_kind"] == "text_encoder"
+
+    patch(suggest_kind=True)
+    assert _unclassified(shelf_env)[gguf_encoder]["kind_decided"] is False
+
+    # Picking a kind is deciding it, even the kind it already has.
+    patch(file_kind="unknown")
+    assert _unclassified(shelf_env)[gguf_encoder]["kind_decided"] is True
+
+
+def test_a_loader_is_offered_its_models_suggestion_only_where_it_takes_that_kind(
+    shelf_env, gguf_encoder
+):
+    """The Workflow tab's offer (#1962): the shelf's suggestion, on the loaders
+    of its kind, until somebody decides."""
+    server = shelf_env.server
+    _seed_loader(server, "r-te", "clip_name", "t5-xxl-q8_0.gguf", "CLIPLoader")
+    loaders = [
+        ("core:a/clip_name", "text_encoder", "T5-XXL-Q8_0.gguf"),
+        ("core:b/vae_name", "vae", "t5-xxl-q8_0.gguf"),
+    ]
+    offers = loader_offers(server.hub, loaders)
+    assert list(offers) == ["core:a/clip_name"]
+    model_id, suggestion = offers["core:a/clip_name"]
+    assert model_id == gguf_encoder
+    assert (suggestion.file_kind, suggestion.kind) == ("unknown", "text_encoder")
+
+    r = shelf_env.owner.patch(
+        f"{API}/models", json={"ids": [gguf_encoder], "suggest_kind": False}
+    )
+    assert r.status_code == 200, r.text
+    assert loader_offers(server.hub, loaders) == {}
+
+
+def test_a_name_match_is_refiled_only_where_no_workflow_says_otherwise(
+    shelf_env, gguf_encoder
+):
+    """The weaker evidence (#1962 after #1966) gives way to any recorded load
+    of the file under its own name, and to the owner's say."""
+    hub = shelf_env.server.hub
+    assert may_refile_by_name(hub, gguf_encoder, "text_encoder")
+    _seed_loader(shelf_env.server, "r-vae", "vae_name", "t5-xxl-q8_0.gguf", "VAELoader")
+    assert not may_refile_by_name(hub, gguf_encoder, "text_encoder")
+    assert may_refile_by_name(hub, gguf_encoder, "vae")
+    r = shelf_env.owner.patch(
+        f"{API}/models", json={"ids": [gguf_encoder], "suggest_kind": False}
+    )
+    assert r.status_code == 200, r.text
+    assert not may_refile_by_name(hub, gguf_encoder, "vae")
+    alice = shelf_env.model_ids["alice.safetensors"]
+    assert not may_refile_by_name(hub, alice, "vae"), "a LoRA is not re-filed"
+
+
+def test_suggest_kind_cannot_be_null(shelf_env, gguf_encoder):
+    r = shelf_env.owner.patch(
+        f"{API}/models", json={"ids": [gguf_encoder], "suggest_kind": None}
+    )
+    assert r.status_code == 400
+    assert _model_row(shelf_env, gguf_encoder)["file_kind_decided"] == 0
 
 
 def test_forget_takes_a_model_whose_every_copy_is_missing(shelf_env):
@@ -3917,6 +6978,27 @@ def test_forget_reports_an_engine_rather_than_deleting_it(shelf_env):
     assert _model_row(shelf_env, engine)["display_name"] == "PixlStash anomaly tagger"
 
 
+def test_forget_reads_a_removed_copy_as_gone_rather_than_as_still_declared(
+    shelf_env,
+):
+    """The engine gate's predicate is "something still declares it", spelled as
+    "not missing" - and `removed` satisfies that while meaning the opposite
+    (#1439).
+
+    Left in, an engine every copy of which had been merged away would be refused
+    forever as declared, with no verb able to clear the row. Closed here, by
+    construction: it is unreachable today only because the merge refuses an engine
+    outright, which is a gate in another file, and "dead by argument" is the class
+    this repo keeps shipping.
+    """
+    engine = _declare_engine(shelf_env, display_name="Tongyi-MAI/Z-Image-Turbo")
+    _set_states(shelf_env, engine, "removed")
+
+    r = shelf_env.owner.post(f"{API}/models/forget", json={"ids": [engine]})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"forgotten": [engine], "refused": []}
+
+
 def test_forget_clears_an_engine_row_nothing_declares_any_more(shelf_env):
     """The other half of that gate, and the reason it cannot be `file_kind`
     alone. `declare_folder` writes `missing` onto a row exactly when its
@@ -4023,6 +7105,120 @@ def test_a_row_with_no_base_model_folds_to_null(shelf_env):
     )
     assert row["base_model"] is None
     assert row["base_model_folded"] is None
+
+
+def test_the_identified_base_model_is_served_filtered_and_sorted_on(shelf_env):
+    """``base_model_canonical`` answers for a row whose file said nothing: it
+    is served with its source, the filter finds the row under the label, the
+    not-set filter no longer does, and a caller holding the trainer's raw
+    spelling still gets its rows."""
+    noname = shelf_env.model_ids["sd_xl_noname.safetensors"]
+    alice = shelf_env.model_ids["alice.safetensors"]
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute(
+            "UPDATE model SET base_model_canonical = 'SDXL 1.0', "
+            "base_model_source = 'filename_fuzzy' WHERE id = ?",
+            (noname,),
+        )
+        conn.execute(
+            "UPDATE model SET base_model = 'sdxl_base_v1-0', "
+            "base_model_canonical = 'SDXL 1.0', base_model_source = 'declared' "
+            "WHERE id = ?",
+            (alice,),
+        )
+
+    rows = shelf_env.owner.get(f"{API}/adapters").json()["adapters"]
+    row = next(r for r in rows if r["id"] == noname)
+    assert (row["base_model"], row["base_model_canonical"]) == (None, "SDXL 1.0")
+    assert row["base_model_source"] == "filename_fuzzy"
+    # A guess never becomes the family the swap UI states as compatibility;
+    # a stated base model does.
+    assert row["family"] is None, row["family"]
+    alice_row = next(r for r in rows if r["id"] == alice)
+    assert alice_row["family"] == "sdxl"
+    # What narrowing reads does take the guess: the shelf already shows the
+    # row as SDXL, and a LoRA whose base model came from its filename would
+    # otherwise narrow nothing (the Create with LoRA picker).
+    assert row["base_model_family"] == "sdxl", row["base_model_family"]
+    assert alice_row["base_model_family"] == "sdxl"
+    dana = next(r for r in rows if r["filename"] == "dana.safetensors")
+    assert dana["base_model_family"] is None
+    assert row["matched_name"] is None, "an adapter's name is never its base"
+
+    r = shelf_env.owner.get(f"{API}/adapters", params={"base_model": "SDXL 1.0"})
+    assert _names(r.json()["adapters"]) == {
+        "sd_xl_noname.safetensors",
+        "alice.safetensors",
+    }
+    r = shelf_env.owner.get(f"{API}/adapters", params={"base_model": "UNASSIGNED"})
+    assert _names(r.json()["adapters"]) == {"dana.safetensors"}
+    r = shelf_env.owner.get(f"{API}/adapters", params={"base_model": "sdxl_base_v1-0"})
+    assert _names(r.json()["adapters"]) == {"alice.safetensors"}
+
+    r = shelf_env.owner.get(
+        f"{API}/adapters", params={"sort": "base_model", "direction": "asc"}
+    )
+    order = [row["filename"] for row in r.json()["adapters"]]
+    # Sorted under the label, so the unset row goes last, not the guessed one.
+    assert order[-1] == "dana.safetensors", order
+
+
+def test_a_checkpoint_named_after_its_base_model_is_matched_by_name(shelf_env):
+    """``flux1-dev.safetensors`` says FLUX.1 dev; a guess never names a row."""
+    huge = shelf_env.model_ids["huge_unhashed.safetensors"]
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute(
+            "UPDATE model SET filename = 'Flux1-Dev-FP8.safetensors', "
+            "base_model_canonical = 'FLUX.1 dev', base_model_source = 'filename' "
+            "WHERE id = ?",
+            (huge,),
+        )
+
+    def matched():
+        rows = shelf_env.owner.get(f"{API}/checkpoints").json()["checkpoints"]
+        return next(r for r in rows if r["id"] == huge)["matched_name"]
+
+    assert matched() == "FLUX.1 dev"
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute(
+            "UPDATE model SET base_model_source = 'filename_fuzzy' WHERE id = ?",
+            (huge,),
+        )
+    assert matched() is None
+
+
+def test_a_row_carries_the_tile_a_workflow_card_draws_it_with(shelf_env):
+    """The server names the tile (#1951), so every client draws the same one:
+    a known release by its short name and role, an adapter of it by its base's
+    tile and its own tab, and a row of no known base model not at all."""
+    huge = shelf_env.model_ids["huge_unhashed.safetensors"]
+    alice = shelf_env.model_ids["alice.safetensors"]
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute(
+            "UPDATE model SET filename = 'sd_xl_refiner_1.0.safetensors', "
+            "base_model_canonical = 'SDXL 1.0', base_model_source = 'filename' "
+            "WHERE id = ?",
+            (huge,),
+        )
+        conn.execute(
+            "UPDATE model SET base_model = 'Qwen-Image-Edit', "
+            "display_name = 'Lightning 4steps V1.0' WHERE id = ?",
+            (alice,),
+        )
+
+    checkpoint = next(
+        r
+        for r in shelf_env.owner.get(f"{API}/checkpoints").json()["checkpoints"]
+        if r["id"] == huge
+    )
+    assert (checkpoint["mark"], checkpoint["mark_tab"]) == (["SDXL", "1.0"], "REFI")
+    assert checkpoint["mark_colors"] == ["#9d39ff", "#e80000"]
+    adapters = shelf_env.owner.get(f"{API}/adapters").json()["adapters"]
+    adapter = next(r for r in adapters if r["id"] == alice)
+    assert (adapter["mark"], adapter["mark_tab"]) == (["Qwen"], "\u26a14")
+    assert (adapter["mark_icon"], adapter["mark_band"]) == ("qwen", True)
+    dana = next(r for r in adapters if r["filename"] == "dana.safetensors")
+    assert dana["mark"] is dana["mark_tab"] is dana["mark_colors"] is None
 
 
 # ── Stack detection over HTTP (shelf plan F5) ───────────────────────────────
@@ -4618,6 +7814,57 @@ def test_a_file_already_inside_a_registered_folder_is_refused_not_duplicated(
     assert sorted(p.name for p in loose_file.store.iterdir()) == [
         "already-there.safetensors"
     ]
+
+
+def test_add_file_lands_in_the_folder_marked_default(shelf_env, loose_file, tmp_path):
+    """With a folder marked default it is the destination; unmarked, the
+    managed store is again, and the list says so on exactly one row."""
+    chosen = tmp_path / "chosen"
+    chosen.mkdir()
+    chosen_id = shelf_env.owner.post(
+        f"{API}/model-folders", json={"path": str(chosen)}
+    ).json()["id"]
+    r = shelf_env.owner.patch(
+        f"{API}/model-folders/{chosen_id}", json={"is_default": True}
+    )
+    assert r.status_code == 200, r.text
+
+    r = shelf_env.owner.post(
+        f"{API}/model-files", json={"path": str(loose_file.source)}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["folder_id"] == chosen_id
+    assert (chosen / "loose.safetensors").exists()
+
+    shelf_env.owner.patch(
+        f"{API}/model-folders/{loose_file.store_id}", json={"is_default": True}
+    )
+    rows = shelf_env.owner.get(f"{API}/model-folders").json()["folders"]
+    assert [row["id"] for row in rows if row["is_default"]] == [loose_file.store_id]
+
+
+def test_a_file_in_the_downloads_folder_can_still_be_added(shelf_env, loose_file):
+    """The Downloads folder is registered but catalogues nothing, so `Add file`
+    from it is not the duplicate the registered-folder refusal guards against."""
+    r = shelf_env.owner.post(
+        f"{API}/model-folders",
+        json={"path": str(loose_file.source.parent), "kind": "downloads"},
+    )
+    assert r.status_code == 200, r.text
+    downloads_id = r.json()["id"]
+
+    r = shelf_env.owner.post(
+        f"{API}/model-files", json={"path": str(loose_file.source)}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["folder_id"] == loose_file.store_id
+
+    # And it is never a destination.
+    r = shelf_env.owner.post(
+        f"{API}/model-files",
+        json={"path": str(loose_file.source), "destination_folder_id": downloads_id},
+    )
+    assert r.status_code == 400, r.text
 
 
 def test_a_file_that_is_not_a_model_is_refused_before_anything_is_copied(
@@ -6013,3 +9260,805 @@ def test_the_spawn_helper_reads_the_openers_exit_status(tmp_path):
 
         run.side_effect = FileNotFoundError(opener)
         assert host_open.open_in_file_manager(str(tmp_path)) is False
+
+
+# ===========================================================================
+# Merge duplicate copies (#1439) - keep one, resolve the rest at use
+# ===========================================================================
+#
+# `POST /model-files/merge` destroys bytes like the delete above it, and differs
+# in the one way that matters: **no row goes**. The removed copies keep their
+# `model_file` row at `state = 'removed'`, which is what makes the model's
+# identity outlive the files - so most of these tests assert on what SURVIVES,
+# and the sweep test in `tests/test_model_folder_scanner.py` proves the next scan
+# does not quietly re-label that fact as `missing`.
+
+_MERGE_ROUTE = ("POST", f"{API}/model-files/merge")
+
+
+@pytest.fixture
+def two_copies(shelf_env, tmp_path, real_files):
+    """Alice registered twice - the shipped shape of a duplicate.
+
+    One `model` row, two `model_file` rows, both `present`, in two registered
+    `user` folders. `real_files` supplies the first, at folder 1; the second is a
+    folder of its own so the two can be told apart by id.
+    """
+    second = tmp_path / "loras-two"
+    second.mkdir()
+    write_adapter(second / "alice-copy.safetensors")
+    alice = shelf_env.model_ids["alice.safetensors"]
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute(
+            "INSERT INTO model_folder (id, path, kind, movable, created_at) "
+            "VALUES (2, ?, 'user', 'per_item', '2026-08-09T00:00:00Z')",
+            (str(second),),
+        )
+        conn.execute(
+            "INSERT INTO model_file (model_id, model_folder_id, relpath, state, "
+            "seen_at, file_mtime) VALUES (?, 2, 'alice-copy.safetensors', "
+            "'present', '2026-08-09T00:00:00Z', 11)",
+            (alice,),
+        )
+    return SimpleNamespace(
+        model_id=alice,
+        first=real_files / "alice.safetensors",
+        second=second / "alice-copy.safetensors",
+    )
+
+
+def _merge(shelf_env, model_id, folder_id, relpath, **body):
+    return shelf_env.owner.post(
+        f"{API}/model-files/merge",
+        json={
+            "keep": [
+                {"model_id": model_id, "folder_id": folder_id, "relpath": relpath}
+            ],
+            **body,
+        },
+    )
+
+
+def _states(server, model_id) -> dict[int, str]:
+    return {
+        int(row["model_folder_id"]): row["state"]
+        for row in server.hub.fetchall(
+            "SELECT model_folder_id, state FROM model_file WHERE model_id = ?",
+            (model_id,),
+        )
+    }
+
+
+def test_merge_removes_the_other_copy_and_keeps_every_row(
+    shelf_env, two_copies, fake_trash
+):
+    """The whole feature: the redundant bytes go, the identity does not.
+
+    The `model` row survives with its curation, and so does the removed copy's
+    `model_file` row - at `removed`, which is what a recipe naming that filename
+    still resolves through.
+    """
+    r = _merge(shelf_env, two_copies.model_id, 1, "alice.safetensors")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["merged"] == [two_copies.model_id]
+    assert body["files_removed"] == 1
+    assert body["permanent"] is False
+    assert body["dry_run"] is False
+    assert body["refused"] == []
+
+    assert two_copies.first.exists(), "the copy that was kept was deleted"
+    assert not two_copies.second.exists(), "the redundant copy is still on disk"
+    assert (fake_trash / "alice-copy.safetensors").exists(), "it was not trashed"
+
+    assert (
+        shelf_env.server.hub.fetchone(
+            "SELECT display_name FROM model WHERE id = ?", (two_copies.model_id,)
+        )["display_name"]
+        == "Alice"
+    ), "the shelf row lost its curation"
+    assert _states(shelf_env.server, two_copies.model_id) == {
+        1: "present",
+        2: "removed",
+    }
+
+
+def test_merge_keeps_the_removed_copys_name_resolving_to_the_model(
+    shelf_env, two_copies, fake_trash
+):
+    """The reason the row is kept, asserted on the two readers that use it.
+
+    `recipe_asset_index` is what a picture's recipe panel resolves a filename
+    through, and `model_ghost_names` is what decides whether a recipe's name is
+    a ghost the owner may forget forever. A merge that dropped the row would
+    break the first and make the second call the name a ghost - which is the
+    failure this design exists to avoid.
+    """
+    from pixlstash.hub.workflows import _shelf_model_names
+    from pixlstash.services.model_shelf_service import recipe_asset_index
+
+    assert (
+        _merge(shelf_env, two_copies.model_id, 1, "alice.safetensors").status_code
+        == 200
+    )
+
+    by_name, _by_digest, _filenames, _names = recipe_asset_index(shelf_env.server.hub)
+    assert by_name.get("alice-copy.safetensors") == {two_copies.model_id}, (
+        "the removed copy's filename no longer names the model it was"
+    )
+    assert "alice-copy.safetensors" in _shelf_model_names(
+        shelf_env.server.hub.fetchall
+    ), "the removed copy's name became a ghost the owner can forget forever"
+
+
+def test_merge_offers_the_surviving_copy_as_the_name_to_load(
+    shelf_env, two_copies, fake_trash
+):
+    """What the submit-time swap is aimed with.
+
+    After the merge the removed copy's name has to point at the one that is
+    left, and the one that is left must not offer itself: a substitution onto
+    the name that was already refused is a report of something that did not
+    happen.
+    """
+    from pixlstash.services.model_shelf_service import model_name_aliases
+
+    assert (
+        _merge(shelf_env, two_copies.model_id, 1, "alice.safetensors").status_code
+        == 200
+    )
+
+    aliases = model_name_aliases(shelf_env.server.hub)
+    assert aliases["alice-copy.safetensors"] == ["alice.safetensors"]
+    assert "alice-copy.safetensors" not in aliases.get("alice.safetensors", [])
+
+    # The KEY is folded and the candidate is not, which is the pairing the swap
+    # depends on: `apply_model_swap` folds its lookup the same way, and ComfyUI
+    # compares the candidate exactly. Asserted on a mixed-case name, because a
+    # shelf of lowercase fixtures cannot tell the two halves apart - and getting
+    # this wrong made the feature a silent no-op for most real filenames.
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute(
+            "UPDATE model_file SET relpath = 'Alice-Kept.safetensors' "
+            "WHERE model_folder_id = 1 AND model_id = ?",
+            (two_copies.model_id,),
+        )
+    aliases = model_name_aliases(shelf_env.server.hub)
+    assert aliases["alice-copy.safetensors"] == ["Alice-Kept.safetensors"]
+
+
+def test_a_name_two_models_share_is_never_offered_as_a_substitution(
+    shelf_env, two_copies, fake_trash
+):
+    """**The one that could substitute the wrong weights.**
+
+    Two unrelated models called the same thing is ordinary (`model.safetensors`
+    out of two trainers), and a name that matches two rows names neither of them
+    - the rule `picture_recipe_service` already applies when it resolves a
+    recipe's filename. Offering a candidate from a coin flip would load somebody
+    else's weights into a run and report it as the same model.
+    """
+    from pixlstash.services.model_shelf_service import model_name_aliases
+
+    assert (
+        _merge(shelf_env, two_copies.model_id, 1, "alice.safetensors").status_code
+        == 200
+    )
+    assert model_name_aliases(shelf_env.server.hub)["alice-copy.safetensors"] == [
+        "alice.safetensors"
+    ]
+
+    # A second, unrelated model now also called `alice-copy.safetensors`.
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute(
+            "UPDATE model SET filename = 'alice-copy.safetensors' WHERE id = ?",
+            (shelf_env.model_ids["bob.safetensors"],),
+        )
+
+    assert "alice-copy.safetensors" not in model_name_aliases(shelf_env.server.hub), (
+        "a name two models share was still resolved to one of them"
+    )
+
+
+def test_merge_will_not_act_on_a_keeper_the_shelf_cannot_find(
+    shelf_env, two_copies, fake_trash
+):
+    """**The refusal that makes this safe.** Removing every other copy on the
+    word of one the shelf does not have is a 20 GB redownload."""
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute(
+            "UPDATE model_file SET state = 'missing' WHERE model_folder_id = 1 "
+            "AND model_id = ?",
+            (two_copies.model_id,),
+        )
+
+    r = _merge(shelf_env, two_copies.model_id, 1, "alice.safetensors")
+    assert r.status_code == 200, r.text
+    assert r.json()["merged"] == []
+    assert r.json()["refused"] == [
+        {"id": two_copies.model_id, "reason": "keeper_not_present"}
+    ]
+    assert two_copies.second.exists(), "a copy went on the word of a missing keeper"
+
+
+def test_merge_refuses_to_remove_the_file_it_is_keeping(
+    shelf_env, two_copies, fake_trash, tmp_path
+):
+    """**The one that would destroy the weights.**
+
+    Two `model_file` rows are one `model` row whenever the bytes match, and a
+    symlink makes them match *because they are the same file* - which is ordinary
+    practice on this shelf, and which `_contained_path` deliberately unlinks the
+    link of rather than the target's. Right for the whole-model delete, where
+    every copy goes anyway; exactly inverted here. Keep the link, remove the
+    target, and the bytes are gone while the shelf still calls the keeper
+    `present`.
+    """
+    target = two_copies.second
+    link = tmp_path / "loras" / "alice-link.safetensors"
+    os.symlink(target, link)
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute(
+            "UPDATE model_file SET relpath = 'alice-link.safetensors' "
+            "WHERE model_folder_id = 1 AND model_id = ?",
+            (two_copies.model_id,),
+        )
+
+    r = _merge(shelf_env, two_copies.model_id, 1, "alice-link.safetensors")
+    assert r.status_code == 200, r.text
+    assert r.json()["merged"] == []
+    assert r.json()["refused"] == [
+        {"id": two_copies.model_id, "reason": "keeper_is_that_copy"}
+    ]
+    assert target.exists(), "the merge deleted the bytes the keeper points at"
+    assert os.path.lexists(link), "the keeper is a dangling link"
+
+    # And the other direction is refused too: keeping the target and removing
+    # the link is the same one file, so there is nothing here to reclaim.
+    r = _merge(shelf_env, two_copies.model_id, 2, "alice-copy.safetensors")
+    assert r.json()["refused"] == [
+        {"id": two_copies.model_id, "reason": "keeper_is_that_copy"}
+    ]
+
+
+def test_merge_refuses_a_body_that_names_one_model_twice(shelf_env, two_copies):
+    """Two keepers for one model is a client bug, not a choice to make for it.
+
+    Planning it twice would remove its copies and then plan it again against rows
+    that had just gone; keeping the first silently would make a destructive
+    decision on a confused client's behalf and report nothing.
+    """
+    r = shelf_env.owner.post(
+        f"{API}/model-files/merge",
+        json={
+            "keep": [
+                {
+                    "model_id": two_copies.model_id,
+                    "folder_id": 1,
+                    "relpath": "alice.safetensors",
+                },
+                {
+                    "model_id": two_copies.model_id,
+                    "folder_id": 2,
+                    "relpath": "alice-copy.safetensors",
+                },
+            ]
+        },
+    )
+    assert r.status_code == 400, r.text
+    assert two_copies.first.exists() and two_copies.second.exists()
+
+
+def test_a_merge_that_half_failed_still_records_what_went(
+    shelf_env, two_copies, monkeypatch, tmp_path
+):
+    """The copies that DID go are recorded, though the model is refused.
+
+    They are gone either way. Leaving them `present` would draw the owner a
+    broken row for a file they successfully removed - and lose, for exactly the
+    copies that were destroyed, the record the whole design rests on.
+    """
+    third = tmp_path / "loras-three"
+    third.mkdir()
+    write_adapter(third / "alice-third.safetensors")
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute(
+            "INSERT INTO model_folder (id, path, kind, movable, created_at) "
+            "VALUES (4, ?, 'user', 'per_item', '2026-08-09T00:00:00Z')",
+            (str(third),),
+        )
+        conn.execute(
+            "INSERT INTO model_file (model_id, model_folder_id, relpath, state, "
+            "seen_at) VALUES (?, 4, 'alice-third.safetensors', 'present', "
+            "'2026-08-09T00:00:00Z')",
+            (two_copies.model_id,),
+        )
+
+    removed: list[str] = []
+
+    def send(path):
+        # The first copy goes; the second one fails, which is `partly_deleted`.
+        if removed:
+            raise OSError("the disk went away")
+        removed.append(path)
+        os.remove(path)
+
+    monkeypatch.setattr(model_files_routes, "send2trash", send)
+
+    r = _merge(shelf_env, two_copies.model_id, 1, "alice.safetensors")
+    assert r.status_code == 200, r.text
+    assert r.json()["merged"] == []
+    assert r.json()["refused"] == [
+        {"id": two_copies.model_id, "reason": "partly_deleted"}
+    ]
+    assert r.json()["files_removed"] == 1
+
+    states = _states(shelf_env.server, two_copies.model_id)
+    assert states[1] == "present", "the keeper was touched"
+    gone = os.path.basename(removed[0])
+    went, stayed = (2, 4) if gone == "alice-copy.safetensors" else (4, 2)
+    assert states[went] == "removed", "the copy that was destroyed still reads present"
+    assert states[stayed] == "present", "a copy that is still there was written off"
+
+
+def test_merge_leaves_the_training_previews_of_a_model_that_survives(
+    shelf_env, two_copies, fake_trash, tmp_path
+):
+    """The whole-model delete takes `<stem>_samples/`; this must not.
+
+    That call is licensed by the model going with its previews - the directory is
+    then an orphan no route lists. Here the model stays on the shelf, and the copy
+    carrying the previews is usually the *imported* one, which is exactly the copy
+    somebody tidying a folder is likely to remove. `permanent=true` would
+    `rmtree` them.
+    """
+    previews = tmp_path / "loras-two" / "alice-copy_samples"
+    previews.mkdir()
+    (previews / "1712345678901__000000500_0.jpg").write_bytes(b"\xff\xd8\xff")
+
+    r = _merge(shelf_env, two_copies.model_id, 1, "alice.safetensors")
+    assert r.status_code == 200, r.text
+    assert r.json()["merged"] == [two_copies.model_id]
+    assert not two_copies.second.exists(), "the redundant copy is still there"
+    assert previews.is_dir(), "the merge destroyed the previews of a model it kept"
+    assert (previews / "1712345678901__000000500_0.jpg").exists()
+
+
+@pytest.mark.parametrize("permanent", [False, True], ids=["trash", "permanent"])
+def test_merge_honours_the_permanent_gesture(
+    shelf_env, two_copies, fake_trash, permanent
+):
+    """The irreversible path, exercised rather than described.
+
+    The trash and the unlink are two different calls, and only one of them has an
+    undo - so "it went" is not enough: the test has to say WHERE.
+    """
+    r = _merge(
+        shelf_env, two_copies.model_id, 1, "alice.safetensors", permanent=permanent
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["permanent"] is permanent
+    assert r.json()["merged"] == [two_copies.model_id]
+    assert not two_copies.second.exists()
+    trashed = fake_trash / "alice-copy.safetensors"
+    assert trashed.exists() is (not permanent), (
+        "a permanent merge put the file in the trash, or a trashing one did not"
+    )
+
+
+def test_merge_keeps_the_rows_when_this_machine_has_no_trash(
+    shelf_env, two_copies, monkeypatch
+):
+    """A machine with no trash we can reach refuses rather than unlinking instead.
+
+    That substitution is the one this route could not take back, and it is the
+    same refusal the whole-model delete makes.
+    """
+
+    def no_trash(path):
+        raise TrashPermissionError("no trash on this machine")
+
+    monkeypatch.setattr(model_files_routes, "send2trash", no_trash)
+
+    r = _merge(shelf_env, two_copies.model_id, 1, "alice.safetensors")
+    assert r.status_code == 200, r.text
+    assert r.json()["merged"] == []
+    assert r.json()["refused"] == [
+        {"id": two_copies.model_id, "reason": "trash_unavailable"}
+    ]
+    assert two_copies.second.exists(), "it was unlinked when the trash refused"
+    assert _states(shelf_env.server, two_copies.model_id) == {
+        1: "present",
+        2: "present",
+    }
+
+
+def test_a_copy_the_scan_re_pointed_is_not_written_off_as_a_duplicate(
+    shelf_env, two_copies, fake_trash, monkeypatch
+):
+    """**The concurrency predicate, held by a test rather than by an argument.**
+
+    The unlink cannot run inside the planning transaction, and the scanner does
+    not take `SHELF_IO_LOCK`. In that window a scan can re-point this
+    `(folder_id, relpath)` at a different model, because the owner replaced the
+    file. Without `AND model_id = ?` the merge then stamps THAT model's row
+    `removed` - a row saying the owner deleted a duplicate, over a file that was
+    somebody else's only copy.
+    """
+    other = _h("another-model")
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute(
+            "INSERT INTO model (file_kind, kind, sha256, filename, provenance) "
+            "VALUES ('adapter', 'lora', ?, 'replacement.safetensors', 'external')",
+            (other,),
+        )
+    other_id = int(
+        shelf_env.server.hub.fetchone(
+            "SELECT id FROM model WHERE sha256 = ?", (other,)
+        )["id"]
+    )
+
+    real_remove = model_files_routes._remove
+
+    def remove_then_rescan(path, *, permanent):
+        real_remove(path, permanent=permanent)
+        # What a scan does when the owner has put a different file at that name.
+        with shelf_env.server.hub.transaction() as conn:
+            conn.execute(
+                "UPDATE model_file SET model_id = ? WHERE model_folder_id = 2 "
+                "AND relpath = 'alice-copy.safetensors'",
+                (other_id,),
+            )
+
+    monkeypatch.setattr(model_files_routes, "_remove", remove_then_rescan)
+
+    r = _merge(shelf_env, two_copies.model_id, 1, "alice.safetensors")
+    assert r.status_code == 200, r.text
+
+    state = shelf_env.server.hub.fetchone(
+        "SELECT model_id, state FROM model_file WHERE model_folder_id = 2 "
+        "AND relpath = 'alice-copy.safetensors'"
+    )
+    assert int(state["model_id"]) == other_id
+    assert state["state"] == "present", (
+        "the merge wrote off another model's only copy as a removed duplicate"
+    )
+
+
+def test_merge_refuses_when_it_cannot_tell_two_copies_apart(
+    shelf_env, two_copies, fake_trash, monkeypatch
+):
+    """`_same_file` fails closed, and that branch is the difference between
+    refusing and unlinking on a guess.
+
+    It is also what catches a keeper that vanished between the scan and the call:
+    the answer is a refusal either way, which is the only answer that cannot
+    destroy anything.
+    """
+
+    def cannot_stat(one, other):
+        raise OSError("the mount went away")
+
+    monkeypatch.setattr(model_files_routes.os.path, "samefile", cannot_stat)
+
+    r = _merge(shelf_env, two_copies.model_id, 1, "alice.safetensors")
+    assert r.status_code == 200, r.text
+    assert r.json()["refused"] == [
+        {"id": two_copies.model_id, "reason": "keeper_is_that_copy"}
+    ]
+    assert two_copies.first.exists() and two_copies.second.exists()
+
+
+def test_a_relpath_that_escapes_its_folder_removes_nothing(
+    shelf_env, two_copies, fake_trash, tmp_path
+):
+    """The property the route's authz justification rests on, as a negative.
+
+    The body's `relpath` is only ever an equality key against rows the scanner
+    wrote, and every path that reaches the removal is rebuilt from the matched
+    row - so a `..` in the body cannot name a file outside a registered folder.
+    Asserted from both ends: a traversal in the *body* matches no row, and a
+    traversal that is somehow IN a row is refused as the broken row it is.
+    """
+    outsider = tmp_path / "not-a-model.safetensors"
+    write_adapter(outsider)
+
+    r = _merge(shelf_env, two_copies.model_id, 1, "../not-a-model.safetensors")
+    assert r.status_code == 200, r.text
+    assert r.json()["refused"] == [
+        {"id": two_copies.model_id, "reason": "no_such_copy"}
+    ]
+
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute(
+            "UPDATE model_file SET relpath = '../not-a-model.safetensors' "
+            "WHERE model_folder_id = 2"
+        )
+    r = _merge(shelf_env, two_copies.model_id, 1, "alice.safetensors")
+    assert r.json()["refused"] == [
+        {"id": two_copies.model_id, "reason": "escapes_its_folder"}
+    ]
+    assert outsider.exists(), "a relpath escaped its folder and was unlinked"
+
+
+def test_a_comfyui_that_cannot_be_asked_still_merges(
+    shelf_env, two_copies, fake_trash, monkeypatch
+):
+    """An unreachable ComfyUI warns about nothing and blocks nothing.
+
+    The read is also outside `SHELF_IO_LOCK`, which is what stops a 15 s timeout
+    refusing every move and import on the machine with a sentence about a move
+    that is not running.
+    """
+
+    def unreachable(url):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(model_files_routes, "fetch_object_info", unreachable)
+    r = shelf_env.owner.patch(
+        f"{API}/users/me/config", json={"comfyui_url": "http://comfy.test:8188"}
+    )
+    assert r.status_code == 200, r.text
+    try:
+        r = _merge(shelf_env, two_copies.model_id, 1, "alice.safetensors")
+        assert r.status_code == 200, r.text
+        assert r.json()["merged"] == [two_copies.model_id]
+        assert r.json()["comfyui_reads"] == []
+    finally:
+        shelf_env.owner.patch(f"{API}/users/me/config", json={"comfyui_url": ""})
+
+
+def test_merge_refuses_a_copy_that_is_not_registered(shelf_env, two_copies, fake_trash):
+    """The keeper is addressed, not searched for: a stale client naming a copy
+    that has moved must not be read as naming some other one."""
+    r = _merge(shelf_env, two_copies.model_id, 1, "not-registered.safetensors")
+    assert r.status_code == 200, r.text
+    assert r.json()["refused"] == [
+        {"id": two_copies.model_id, "reason": "no_such_copy"}
+    ]
+    assert two_copies.first.exists() and two_copies.second.exists()
+
+
+def test_merge_refuses_a_model_with_only_one_copy(shelf_env, real_files, fake_trash):
+    """Nothing to merge is a refusal with a reason rather than a success that
+    removed nothing - the client's duplicate list may be seconds old."""
+    bob = shelf_env.model_ids["bob.safetensors"]
+    r = _merge(shelf_env, bob, 1, "bob.safetensors")
+    assert r.status_code == 200, r.text
+    assert r.json()["refused"] == [{"id": bob, "reason": "not_a_duplicate"}]
+    assert (real_files / "bob.safetensors").exists()
+
+
+def test_merge_refuses_a_model_with_an_unreachable_copy(
+    shelf_env, two_copies, fake_trash
+):
+    """An unplugged drive is not a deletion, and the shelf cannot know whether
+    the copy on it is one of the two this call is about to reduce to one."""
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute(
+            "INSERT INTO model_folder (id, path, kind, movable, created_at) "
+            "VALUES (3, '/mnt/unplugged', 'user', 'per_item', '2026-08-09T00:00:00Z')"
+        )
+        conn.execute(
+            "INSERT INTO model_file (model_id, model_folder_id, relpath, state, "
+            "seen_at) VALUES (?, 3, 'alice.safetensors', 'unreachable', "
+            "'2026-08-09T00:00:00Z')",
+            (two_copies.model_id,),
+        )
+
+    r = _merge(shelf_env, two_copies.model_id, 1, "alice.safetensors")
+    assert r.status_code == 200, r.text
+    assert r.json()["refused"] == [
+        {"id": two_copies.model_id, "reason": "unreachable_copy"}
+    ]
+    assert two_copies.second.exists(), "a copy went while another was out of reach"
+
+
+def test_merge_refuses_to_unlink_out_of_a_folder_that_is_not_the_owners(
+    shelf_env, two_copies, fake_trash
+):
+    """The removal is gated on the folder it unlinks FROM, which is the one way
+    this differs from the whole-model delete: keeping the copy in the shared
+    HuggingFace cache and removing a user-folder one is a legitimate merge, and
+    the reverse is not ours to do."""
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute("UPDATE model_folder SET kind = 'foreign' WHERE id = 2")
+
+    r = _merge(shelf_env, two_copies.model_id, 1, "alice.safetensors")
+    assert r.status_code == 200, r.text
+    assert r.json()["refused"] == [
+        {"id": two_copies.model_id, "reason": "not_a_user_folder"}
+    ]
+    assert two_copies.second.exists()
+
+    # The other direction is allowed: that copy may be KEPT while the one in the
+    # owner's own folder goes.
+    r = _merge(shelf_env, two_copies.model_id, 2, "alice-copy.safetensors")
+    assert r.status_code == 200, r.text
+    assert r.json()["merged"] == [two_copies.model_id]
+    assert not two_copies.first.exists()
+    assert two_copies.second.exists()
+
+
+def test_merge_refuses_one_of_pixlstashs_own_engines(shelf_env, two_copies, fake_trash):
+    """Declared again on every start, so removing a copy of one removes a file
+    PixlStash re-downloads the moment something needs it."""
+    with shelf_env.server.hub.transaction() as conn:
+        conn.execute(
+            "UPDATE model SET file_kind = 'engine' WHERE id = ?",
+            (two_copies.model_id,),
+        )
+
+    r = _merge(shelf_env, two_copies.model_id, 1, "alice.safetensors")
+    assert r.status_code == 200, r.text
+    assert r.json()["refused"] == [
+        {"id": two_copies.model_id, "reason": "is_a_builtin_engine"}
+    ]
+    assert two_copies.second.exists()
+
+
+def test_a_dry_run_plans_it_and_removes_nothing(shelf_env, two_copies, fake_trash):
+    """What the confirmation is built on: the same planner, the same refusals,
+    and both files still there afterwards."""
+    r = _merge(shelf_env, two_copies.model_id, 1, "alice.safetensors", dry_run=True)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["dry_run"] is True
+    assert body["merged"] == []
+    assert body["files_removed"] == 0
+    assert body["refused"] == []
+    assert two_copies.first.exists() and two_copies.second.exists()
+    assert _states(shelf_env.server, two_copies.model_id) == {
+        1: "present",
+        2: "present",
+    }
+
+    # And a dry run reports the refusal the real call would make.
+    r = _merge(
+        shelf_env, two_copies.model_id, 1, "not-registered.safetensors", dry_run=True
+    )
+    assert r.json()["refused"] == [
+        {"id": two_copies.model_id, "reason": "no_such_copy"}
+    ]
+
+
+def test_a_dry_run_warns_that_comfyui_reads_the_copy_being_removed(
+    shelf_env, two_copies, monkeypatch
+):
+    """The warning the scope requires, asked of ComfyUI rather than of the disk.
+
+    PixlStash holds a ComfyUI URL and no path into its `models/` tree, so the
+    only honest answer is the combo list that install publishes - the same source
+    the submit-time swap verifies against.
+    """
+    listed: list[list[str]] = [["alice-copy.safetensors"]]
+
+    def advertise(names):
+        listed[0] = names
+
+    monkeypatch.setattr(
+        model_files_routes,
+        "fetch_object_info",
+        lambda url: {"LoraLoader": {"input": {"required": {"lora_name": [listed[0]]}}}},
+    )
+    r = shelf_env.owner.patch(
+        f"{API}/users/me/config", json={"comfyui_url": "http://comfy.test:8188"}
+    )
+    assert r.status_code in {200, 204}, r.text
+    try:
+        r = _merge(shelf_env, two_copies.model_id, 1, "alice.safetensors", dry_run=True)
+        assert r.status_code == 200, r.text
+        assert r.json()["comfyui_reads"] == [
+            {
+                "model_id": two_copies.model_id,
+                "folder_id": 2,
+                "relpath": "alice-copy.safetensors",
+                "keeper_relpath": "alice.safetensors",
+                # That ComfyUI does not list the keeper, so PixlStash cannot
+                # substitute it either - which is a different warning from one
+                # it can.
+                "keeper_advertised": False,
+            }
+        ]
+
+        # It lists both: the warning stays - a graph queued IN ComfyUI still
+        # names the file that went - but PixlStash can substitute the keeper, so
+        # the sentence the client shows is the other one.
+        advertise(["alice-copy.safetensors", "alice.safetensors"])
+        reads = _merge(
+            shelf_env, two_copies.model_id, 1, "alice.safetensors", dry_run=True
+        ).json()["comfyui_reads"]
+        assert [item["keeper_advertised"] for item in reads] == [True]
+
+        # And it lists only the copy being KEPT: nothing that ComfyUI reads is
+        # going, so there is nothing to warn about.
+        advertise(["alice.safetensors"])
+        assert (
+            _merge(
+                shelf_env, two_copies.model_id, 1, "alice.safetensors", dry_run=True
+            ).json()["comfyui_reads"]
+            == []
+        )
+    finally:
+        shelf_env.owner.patch(f"{API}/users/me/config", json={"comfyui_url": ""})
+
+
+def test_no_comfyui_url_warns_about_nothing_and_says_nothing_about_comfyui(
+    shelf_env, two_copies, monkeypatch
+):
+    """An unconfigured ComfyUI is never asked, and the empty warning list is the
+    absence of a question rather than a promise that nothing reads the file."""
+    asked: list[str] = []
+
+    def never(url):
+        asked.append(url)
+        raise AssertionError("ComfyUI was asked with no URL configured")
+
+    monkeypatch.setattr(model_files_routes, "fetch_object_info", never)
+    r = _merge(shelf_env, two_copies.model_id, 1, "alice.safetensors", dry_run=True)
+    assert r.status_code == 200, r.text
+    assert r.json()["comfyui_reads"] == []
+    assert asked == []
+
+
+def test_merge_takes_the_same_job_slot_as_a_move_and_an_import(
+    shelf_env, two_copies, fake_trash
+):
+    """One shelf I/O slot machine-wide, for the delete's own reason."""
+    assert SHELF_IO_LOCK.acquire(blocking=False), "the slot was left held"
+    try:
+        r = _merge(shelf_env, two_copies.model_id, 1, "alice.safetensors")
+        assert r.status_code == 409, r.text
+        assert two_copies.second.exists()
+    finally:
+        SHELF_IO_LOCK.release()
+
+    assert (
+        _merge(shelf_env, two_copies.model_id, 1, "alice.safetensors").status_code
+        == 200
+    )
+
+
+def test_the_merge_route_is_declared_local_owner_only():
+    declared = ROUTE_POLICIES.get(("POST", "/api/v1/model-files/merge"))
+    assert declared is not None, (
+        "(POST, /api/v1/model-files/merge) has no ROUTE_POLICIES entry"
+    )
+    assert declared.policy is AccessPolicy.LOCAL_OWNER_ONLY, (
+        f"POST /model-files/merge declares {declared.policy}, not LOCAL_OWNER_ONLY"
+    )
+    assert declared.justification, (
+        "POST /model-files/merge is on the tier with no reason"
+    )
+
+
+def test_merge_refuses_every_share_token(shelf_env, two_copies, fake_trash):
+    method, path = _MERGE_ROUTE
+    kwargs = {
+        "json": {
+            "keep": [
+                {
+                    "model_id": two_copies.model_id,
+                    "folder_id": 1,
+                    "relpath": "alice.safetensors",
+                }
+            ]
+        }
+    }
+    for description, restriction in (
+        ("merge scoped probe", {"resource_type": "character", "resource_id": 1}),
+        ("merge unscoped probe", {}),
+    ):
+        token = _mint(shelf_env.owner, description, **restriction)
+        client = _bearer(shelf_env.server, token)
+        assert client.get(f"{API}/pictures").status_code == 200, (
+            f"{description} is dead; the refusal below would prove nothing"
+        )
+        assert_real_route(shelf_env.server.api, method, path)
+        r = client.request(method, path, **kwargs)
+        assert r.status_code == 403, (
+            f"a share token merged model copies: {r.status_code} {r.text}"
+        )
+    assert two_copies.second.exists(), "a refused call still removed a copy"
+    # Positive control: the owner is not blocked on the same call.
+    assert shelf_env.owner.request(method, path, **kwargs).status_code == 200

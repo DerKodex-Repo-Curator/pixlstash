@@ -26,13 +26,21 @@ const listUnclassified = vi.fn();
 // `listAdapters.mockResolvedValue` here would answer them with adapter rows.
 const listSupport = vi.fn();
 const deleteModels = vi.fn();
+const editModels = vi.fn();
+const fetchModelCompanions = vi.fn();
+const deleteWorkflowSet = vi.fn();
+const fetchWorkflowSets = vi.fn();
+const setWorkflowSetsHidden = vi.fn();
+
+/** The set keys the active library hides, as the double's server holds them. */
+let hiddenOnServer = new Set();
 
 vi.mock("../../api/modelShelf", () => ({
   BASE_MODEL_UNASSIGNED: "UNASSIGNED",
   listAdapters: (...args) => {
     if (args[0]?.fileKind === "engine") return listEngines(...args);
     if (args[0]?.fileKind === "unknown") return listUnclassified(...args);
-    if (args[0]?.fileKind === "vae" || args[0]?.fileKind === "text_encoder") {
+    if (["vae", "text_encoder", "controlnet", "upscaler"].includes(args[0]?.fileKind)) {
       return listSupport(...args);
     }
     return listAdapters(...args);
@@ -43,6 +51,12 @@ vi.mock("../../api/modelShelf", () => ({
   // really called it would be asserting the server's gate rather than the
   // view's.
   deleteModels: (...args) => deleteModels(...args),
+  editModels: (...args) => editModels(...args),
+  // Asked before the delete prompt opens; answered per test.
+  fetchModelCompanions: (...args) => fetchModelCompanions(...args),
+  deleteWorkflowSet: (...args) => deleteWorkflowSet(...args),
+  fetchWorkflowSets: (...args) => fetchWorkflowSets(...args),
+  setWorkflowSetsHidden: (...args) => setWorkflowSetsHidden(...args),
   // The base-model field asks for its completion list as it opens. Answered
   // with nothing here: the list is the widget's own suite's business, and left
   // unmocked this is a network call on a double-click.
@@ -156,6 +170,22 @@ vi.mock("../../api/pictures", async (importOriginal) => ({
   ...(await importOriginal()),
   getPictureThumbnailBlob: (...args) => getPictureThumbnailBlob(...args),
 }));
+// The folder-header menu's gates (#1270). They are Settings' gates and their
+// reasons are pinned through `ModelFoldersSection.test.js`; here a stub keeps
+// this suite about the menu.
+const folderGates = vi.hoisted(() => ({
+  moveReason: "",
+  scan: () => {},
+}));
+vi.mock("../../composables/useModelFolderGates", () => ({
+  useModelFolderGates: () => ({
+    canScan: (folder) => folder.kind === "user",
+    scanReason: () => "",
+    relocateReason: () => folderGates.moveReason,
+    scan: (...args) => folderGates.scan(...args),
+  }),
+}));
+
 const setModelIcon = vi.fn();
 vi.mock("../../api/modelIcons", async (importOriginal) => ({
   ...(await importOriginal()),
@@ -163,18 +193,37 @@ vi.mock("../../api/modelIcons", async (importOriginal) => ({
 }));
 
 import ModelShelf from "./ModelShelf.vue";
+import KindMenu from "../widgets/KindMenu.vue";
 import { useModelMovesStore } from "../../stores/useModelMovesStore";
 import { useModelShelfStore } from "../../stores/useModelShelfStore";
 import { useNoticeStore } from "../../stores/useNoticeStore";
+import { useOperationStore } from "../../stores/useOperationStore";
 import { useReviewSessionsStore } from "../../stores/useReviewSessionsStore";
 import { useSidebarStore } from "../../stores/useSidebarStore";
 import { useUserPrefsStore } from "../../stores/useUserPrefsStore";
 import { formatUserDate } from "../../utils/utils";
 
+// The tooltip is stubbed to carry its text on the element it wraps or sits in:
+// the real one renders nothing until it opens, and needs Vuetify besides.
+const TooltipStub = {
+  name: "Tooltip",
+  props: ["text", "activator"],
+  template:
+    '<span class="tip" :data-text="text"><slot name="activator" :props="{}" /></span>',
+};
+
+/** The tooltip text a control carries, whether the tip sits inside or around it. */
+function tip(wrapper) {
+  const inner = wrapper.find(".tip");
+  if (inner.exists()) return inner.attributes("data-text");
+  return wrapper.element.parentElement?.dataset.text;
+}
+
 const globalOpts = {
   global: {
     stubs: {
       "v-icon": true,
+      Tooltip: TooltipStub,
       "v-menu": {
         template: "<div><slot name='activator' :props='{}' /><slot /></div>",
       },
@@ -184,9 +233,28 @@ const globalOpts = {
       // and tooltip providers into a suite that installs neither. The selection
       // BAR is deliberately left real: what a selection does to this view is
       // this suite's business.
-      ModelFoldersDialog: true,
       ShelfEditDialog: true,
       ShelfMoveDialog: true,
+      WorkflowSetRenameDialog: true,
+      MergeCopiesDialog: true,
+      ReplaceMissingDialog: true,
+
+      // Same reason, for the same provider: it wraps `AppDialog`. Its own suite
+      // mounts it against the companions payload.
+      ModelWorksWithDialog: {
+        name: "ModelWorksWithDialog",
+        props: ["model"],
+        template: "<div class='ww-stub'>{{ model?.filename }}</div>",
+      },
+      // Its own suite mounts it against a payload; here what matters is only
+      // whether the shelf puts it on screen instead of the row list.
+      ModelSetGrid: {
+        name: "ModelSetGrid",
+        emits: ["works-with", "menu"],
+        // The real grid exposes the cards it draws selected; a test sets it.
+        data: () => ({ selectedCardGroups: [] }),
+        template: "<div class='set-grid-stub'></div>",
+      },
       // The host-path picker `Add file` opens. Real, it would drag Vuetify's
       // dialog provider into a suite that installs none; stubbed, it still
       // emits `select`, which is the whole of what this view listens for.
@@ -211,6 +279,22 @@ const globalOpts = {
 };
 
 /** The shape `/adapters` really returns, taken from a fixture probe. */
+/**
+ * A pointer click (`detail` 1) and a right-button press: `trigger` cannot set
+ * either field, jsdom makes them getters. A keyboard click has `detail` 0.
+ */
+async function mouseClick(wrapper) {
+  wrapper.element.dispatchEvent(
+    new MouseEvent("click", { bubbles: true, detail: 1 }),
+  );
+}
+
+async function rightPress(wrapper) {
+  wrapper.element.dispatchEvent(
+    new MouseEvent("pointerdown", { bubbles: true, button: 2 }),
+  );
+}
+
 function adapter(overrides = {}) {
   return {
     id: 1,
@@ -238,6 +322,11 @@ async function mountShelf(
   listEngines.mockResolvedValue([]);
   listUnclassified.mockResolvedValue(unclassified);
   listSupport.mockResolvedValue([]);
+  // The ROW LIST is what this suite is about, and since #1438 the default axis
+  // is the set grid, which replaces it. Chosen here rather than per test, so a
+  // new test lands on the list without having to know that; the grid's own
+  // screen is covered by `ModelSetGrid.test.js`.
+  useModelShelfStore().setView({ groupBy: "none" });
   const wrapper = mount(ModelShelf, { ...globalOpts, ...extra });
   await new Promise((resolve) => setTimeout(resolve, 0));
   await wrapper.vm.$nextTick();
@@ -257,6 +346,17 @@ beforeEach(() => {
   listEngines.mockReset().mockResolvedValue([]);
   listUnclassified.mockReset().mockResolvedValue([]);
   listSupport.mockReset().mockResolvedValue([]);
+  fetchWorkflowSets
+    .mockReset()
+    .mockResolvedValue({ combinations: [], no_set: [], hand_made: [] });
+  hiddenOnServer = new Set();
+  setWorkflowSetsHidden.mockReset().mockImplementation(async (keys, hidden) => {
+    for (const key of keys) {
+      if (hidden) hiddenOnServer.add(key);
+      else hiddenOnServer.delete(key);
+    }
+    return [...hiddenOnServer];
+  });
   listModelFolderDevices.mockReset();
   listModelFolderDevices.mockResolvedValue([]);
   // The thumbnail verb's two halves. Reset here rather than per-test: a
@@ -309,6 +409,84 @@ describe("a row with nothing in its header", () => {
     // dashed - this fixture carries no `added_at`.
     const cells = row.findAll(".shelf-col").map((s) => textOf(s));
     expect(cells).toEqual(["LoRA", "not set", "342.1 MB", ""]);
+  });
+
+  it("takes the quant postfix out of the name and puts it on a chip", async () => {
+    // The two halves of one change, asserted together on purpose: stripping
+    // without badging makes two quant builds of one model read identically,
+    // which is worse than leaving the postfix in the name.
+    const wrapper = await mountShelf([
+      adapter({
+        display_name: null,
+        filename: "z_image_turbo_bf16.safetensors",
+        quant: "bf16",
+      }),
+    ]);
+    const row = wrapper.find(".shelf-row");
+    expect(row.find(".shelf-row-name").text()).toBe("z image turbo");
+    expect(row.find(".shelf-chip--quant").text()).toBe("BF16");
+    // And the file's own string is untouched on the line under it, which is
+    // what a reader pastes into a ComfyUI node.
+    expect(row.find(".shelf-row-file").text()).toContain(
+      "z_image_turbo_bf16.safetensors",
+    );
+  });
+
+  it("badges the precision even where the NAME never carried it", async () => {
+    // The column is read from the safetensors header, so a file whose name
+    // says nothing still has an answer - and a row the owner named by hand
+    // keeps THEIR name and gets the chip all the same. `fp8_e4m3` is the id
+    // the API serves, folded from the header's own `f8_e4m3`; the chip shows
+    // the short label and the hover text carries the variant.
+    const wrapper = await mountShelf([
+      adapter({
+        display_name: "Clementine",
+        filename: "clem.safetensors",
+        quant: "fp8_e4m3",
+      }),
+    ]);
+    const row = wrapper.find(".shelf-row");
+    expect(row.find(".shelf-row-name").text()).toBe("Clementine");
+    expect(row.find(".shelf-chip--quant").text()).toBe("FP8");
+  });
+
+  it("puts the trigger word on the row, and marks a default as one", async () => {
+    const wrapper = await mountShelf([
+      adapter({
+        id: 1,
+        filename: "a.safetensors",
+        trigger_words: ["ohwx", "woman"],
+        trigger_words_source: "recorded",
+      }),
+      adapter({
+        id: 2,
+        sha256: "b".repeat(64),
+        filename: "b.safetensors",
+        trigger_words: ["Ada"],
+        trigger_words_source: "character",
+      }),
+      adapter({ id: 3, sha256: "c".repeat(64), filename: "c.safetensors" }),
+    ]);
+    const chips = Object.fromEntries(
+      wrapper.findAll(".shelf-row").map((row) => [
+        row.find(".shelf-row-file").text(),
+        row.find(".shelf-chip--trigger"),
+      ]),
+    );
+    expect(chips["a.safetensors"].text()).toBe("Trigger word: ohwx +1");
+    expect(chips["a.safetensors"].classes()).not.toContain("shelf-chip--none");
+    // The person's name is not a word out of the file, so it takes the dashed
+    // "nothing recorded" chip rather than the mono one.
+    expect(chips["b.safetensors"].text()).toBe("Trigger word: Ada");
+    expect(chips["b.safetensors"].classes()).toContain("shelf-chip--none");
+    expect(chips["c.safetensors"].exists()).toBe(false);
+  });
+
+  it("draws no quant chip on a row that records no precision", async () => {
+    const wrapper = await mountShelf([
+      adapter({ display_name: null, filename: "Foxglove.safetensors" }),
+    ]);
+    expect(wrapper.find(".shelf-chip--quant").exists()).toBe(false);
   });
 
   it("marks the derived name by type, not by fading it", async () => {
@@ -459,9 +637,8 @@ describe("editing a base model in place", () => {
     await wrapper.find(".shelf-col--base span").trigger("dblclick");
     const field = wrapper.find(".shelf-row-base-edit");
     expect(field.exists()).toBe(true);
-    // Seeded from the stored value, unlike the name field: nothing infers a
-    // base model, so what the row shows is what the file said and a correction
-    // is one word rather than a retype.
+    // Seeded from what the cell shows, unlike the name field: here that is
+    // what the file said, so a correction is one word rather than a retype.
     expect(field.element.value).toBe("flux.1-dev");
 
     await field.setValue("FLUX.2");
@@ -485,6 +662,33 @@ describe("editing a base model in place", () => {
     await field.setValue("SDXL 1.0");
     await field.trigger("keydown", { key: "Enter" });
     expect(edit).toHaveBeenCalledWith([7], { base_model: "SDXL 1.0" });
+  });
+
+  it("starts a guess from the guess, and clearing it says 'none of these'", async () => {
+    // A guessed row stores no base model of its own, so comparing against the
+    // stored value made an emptied field look unchanged and wrote nothing.
+    const wrapper = await mountShelf([
+      adapter({
+        id: 7,
+        base_model: null,
+        base_model_canonical: "Sana",
+        base_model_source: "filename_fuzzy",
+      }),
+    ]);
+    const store = useModelShelfStore();
+    const edit = vi.spyOn(store, "editModelIds").mockResolvedValue(true);
+
+    await wrapper.find(".shelf-base-text").trigger("dblclick");
+    let field = wrapper.find(".shelf-row-base-edit");
+    expect(field.element.value).toBe("Sana");
+    await field.trigger("keydown", { key: "Enter" });
+    expect(edit).not.toHaveBeenCalled();
+
+    await wrapper.find(".shelf-base-text").trigger("dblclick");
+    field = wrapper.find(".shelf-row-base-edit");
+    await field.setValue("");
+    await field.trigger("keydown", { key: "Enter" });
+    expect(edit).toHaveBeenCalledWith([7], { base_model: null });
   });
 
   it("clears the column with an explicit null rather than an empty string", async () => {
@@ -619,6 +823,100 @@ describe("editing a base model in place", () => {
   });
 });
 
+describe("the kind the workflows suggest (#1962)", () => {
+  const encoder = (overrides = {}) =>
+    adapter({
+      id: 7,
+      file_kind: "unknown",
+      kind: null,
+      display_name: "t5 xxl",
+      suggested_kind: "text_encoder",
+      suggested_by: 3,
+      suggested_fields: ["clip_name"],
+      kind_decided: false,
+      ...overrides,
+    });
+
+  async function mountUnclassified(row) {
+    useModelShelfStore().setFilters({
+      adapters: false,
+      checkpoints: false,
+      unclassified: true,
+    });
+    return mountShelf([], [], [row]);
+  }
+
+  it("writes the suggestion under the Kind chip, and only while undecided", async () => {
+    const offered = await mountUnclassified(encoder());
+    const cell = offered.find(".shelf-row .shelf-col--kind");
+    expect(textOf(cell.find(".kmenu-chip"))).toBe("Unclassified");
+    expect(textOf(cell.find("[data-testid='kind-suggestion']"))).toBe(
+      "Text encoder?",
+    );
+
+    const decided = await mountUnclassified(encoder({ kind_decided: true }));
+    const plain = decided.find(".shelf-row .shelf-col--kind");
+    expect(textOf(plain)).toBe("Unclassified");
+    expect(plain.find("[data-testid='kind-suggestion']").exists()).toBe(false);
+  });
+
+  it("files the row from its menu, with a receipt that undoes it", async () => {
+    editModels.mockReset().mockResolvedValue({ updated: [7], fields: ["file_kind"] });
+    const wrapper = await mountUnclassified(encoder());
+    wrapper.findComponent(KindMenu).vm.$emit("pick", "text_encoder");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(editModels).toHaveBeenCalledWith([7], { file_kind: "text_encoder" });
+    const notice = useNoticeStore().notices.at(-1);
+    expect(notice.text).toBe("Filed t5 xxl as Text encoder.");
+    expect(notice.action.label).toBe("Undo");
+
+    await notice.action.handler();
+    expect(editModels).toHaveBeenLastCalledWith([7], {
+      file_kind: "unknown",
+      suggest_kind: true,
+    });
+  });
+
+  it("hands focus back to the Kind menu when the write fails too", async () => {
+    editModels.mockReset().mockRejectedValue(new Error("offline"));
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    try {
+      const wrapper = await mountUnclassified(encoder());
+      wrapper.findComponent(KindMenu).vm.$emit("pick", "text_encoder");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await wrapper.vm.$nextTick();
+      expect(useNoticeStore().notices.at(-1).level).toBe("error");
+      expect(
+        focus.mock.contexts.some(
+          (el) => el.dataset?.testid === "kind-menu",
+        ),
+      ).toBe(true);
+    } finally {
+      focus.mockRestore();
+    }
+  });
+
+  it("dismisses the suggestion without touching the kind", async () => {
+    editModels.mockReset().mockResolvedValue({ updated: [7], fields: [] });
+    const wrapper = await mountUnclassified(encoder());
+    wrapper.findComponent(KindMenu).vm.$emit("suggest", false);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(editModels).toHaveBeenCalledWith([7], { suggest_kind: false });
+  });
+
+  it("leaves an engine's kind a chip: PixlStash's own is not curated", async () => {
+    // Served through the adapter double: which block brings it is not this
+    // test's business, what its Kind cell draws is.
+    const wrapper = await mountShelf([
+      adapter({ id: 9, file_kind: "engine", capabilities: ["tagger"] }),
+    ]);
+    const row = wrapper.find(".shelf-row");
+    expect(row.exists()).toBe(true);
+    expect(row.findComponent(KindMenu).exists()).toBe(false);
+  });
+});
+
 describe("file kinds", () => {
   it("never renders an unclassified file as a checkpoint", async () => {
     // `unknown` is in neither of the other two lists (see api/modelShelf.js),
@@ -688,8 +986,8 @@ describe("location state", () => {
         ],
       }),
     ]);
-    expect(wrapper.find(".shelf-row-file").attributes("title")).toBe(
-      "/home/me/models/a.st\n/media/me/spare/a.st",
+    expect(tip(wrapper.find(".shelf-row-file"))).toBe(
+      `/home/me/models/a.st\n/media/me/spare/a.st\nSHA-256: ${"a".repeat(64)}`,
     );
   });
 
@@ -707,12 +1005,10 @@ describe("location state", () => {
     ]);
     useModelShelfStore().setView({ groupBy: "folder" });
     await wrapper.vm.$nextTick();
-    const titles = wrapper
-      .findAll(".shelf-row-file")
-      .map((el) => el.attributes("title"));
+    const titles = wrapper.findAll(".shelf-row-file").map((el) => tip(el));
     expect(titles).toEqual([
-      "/home/me/models/a.st",
-      "/media/me/spare/a.st · not where it was",
+      `/home/me/models/a.st\nSHA-256: ${"a".repeat(64)}`,
+      `/media/me/spare/a.st · not where it was\nSHA-256: ${"a".repeat(64)}`,
     ]);
   });
 
@@ -732,16 +1028,26 @@ describe("location state", () => {
       }),
     ]);
     await wrapper.find(".shelf-row").trigger("keydown", { key: "ArrowRight" });
-    expect(
-      wrapper.find(".shelf-row--member .shelf-row-file").attributes("title"),
-    ).toBe("/media/me/spare/b.st");
+    expect(tip(wrapper.find(".shelf-row--member .shelf-row-file"))).toBe(
+      `/media/me/spare/b.st\nSHA-256: ${"b".repeat(64)}`,
+    );
   });
 
-  it("offers no tooltip at all when every copy has been forgotten", async () => {
-    // An empty `title` is a tooltip that flashes and says nothing. The file
-    // line already carries the words for this state.
+  it("still names the hash when every copy has been forgotten", async () => {
+    // No path left to give, but the hash is what the file is matched by.
     const wrapper = await mountShelf([adapter({ locations: [] })]);
-    expect(wrapper.find(".shelf-row-file").attributes("title")).toBeUndefined();
+    expect(tip(wrapper.find(".shelf-row-file"))).toBe(
+      `SHA-256: ${"a".repeat(64)}`,
+    );
+  });
+
+  it("says a checkpoint not hashed yet is waiting, rather than showing none", async () => {
+    const wrapper = await mountShelf([
+      adapter({ sha256: null, hash_pending: true }),
+    ]);
+    expect(tip(wrapper.find(".shelf-row-file"))).toBe(
+      "/m/a.st\nSHA-256: not read yet",
+    );
   });
 });
 
@@ -818,6 +1124,99 @@ describe("empty states", () => {
   });
 });
 
+describe("refetching after an edit", () => {
+  it("keeps the list, and so its scroll position, while the new rows load", async () => {
+    // Assigning a stack to a character refetches the shelf. Swapping the list
+    // for "Reading the shelf…" meanwhile rebuilt the scrollport at the top.
+    const wrapper = await mountShelf([adapter()]);
+    const scrollport = wrapper.find(".shelf-scroll").element;
+
+    let land;
+    listAdapters.mockReturnValue(new Promise((resolve) => (land = resolve)));
+    const pending = useModelShelfStore().fetchRows();
+    await wrapper.vm.$nextTick();
+
+    expect(useModelShelfStore().loading).toBe(true);
+    // The same element, not a rebuilt one: a rebuilt scrollport starts at 0.
+    expect(wrapper.find(".shelf-scroll").element).toBe(scrollport);
+    expect(textOf(wrapper.find(".shelf-body"))).not.toContain(
+      "Reading the shelf",
+    );
+
+    land([adapter()]);
+    await pending;
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".shelf-scroll").element).toBe(scrollport);
+  });
+
+  it("keeps the set grid mounted through a refetch too", async () => {
+    const wrapper = await mountShelf([adapter()]);
+    useModelShelfStore().setView({ groupBy: "workflow_set" });
+    await wrapper.vm.$nextTick();
+    const grid = wrapper.find(".set-grid-stub").element;
+    expect(grid).toBeTruthy();
+
+    listAdapters.mockReturnValue(new Promise(() => {}));
+    useModelShelfStore().fetchRows();
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".set-grid-stub").element).toBe(grid);
+  });
+
+  it("offers to select every set missing its checkpoint, once, dismissibly", async () => {
+    const wrapper = await mountShelf([adapter()]);
+    const store = useModelShelfStore();
+    store.setView({ groupBy: "workflow_set" });
+    const gone = (name) => ({
+      key: `+${name}`,
+      models: [],
+      missing: [{ name, workflow_ids: ["auto:a"] }],
+      recipes: 1,
+      history_runs: 0,
+      picture_count: 1,
+      covers: [],
+    });
+    store.workflowSets = {
+      combinations: [gone("a.sft"), gone("b.sft")],
+      handMade: [],
+    };
+    await wrapper.vm.$nextTick();
+    const banner = () => wrapper.find('[data-testid="shelf-missing-banner"]');
+    expect(textOf(banner())).toContain("2 sets are missing their checkpoint");
+    await banner()
+      .findAll("button")
+      .find((b) => b.text().includes("Select them"))
+      .trigger("click");
+    expect([...store.selectedMissingKeys]).toEqual(["missing:a.sft", "missing:b.sft"]);
+    await banner().find('[aria-label="Dismiss the missing checkpoint notice"]').trigger("click");
+    expect(banner().exists()).toBe(false);
+    // One fixed, another gone missing: the count is unchanged, the banner back.
+    store.workflowSets = { ...store.workflowSets, combinations: [gone("a.sft"), gone("c.sft")] };
+    await wrapper.vm.$nextTick();
+    expect(banner().exists()).toBe(true);
+  });
+
+  it("says it is reading, not 'no models', while Reset refetches an empty view", async () => {
+    const wrapper = await mountShelf([]);
+    await useModelShelfStore().setFilters(
+      { adapters: false, checkpoints: false, unclassified: false },
+      { refetch: true },
+    );
+    listAdapters.mockReturnValue(new Promise(() => {}));
+    useModelShelfStore().resetFilters();
+    await wrapper.vm.$nextTick();
+    expect(textOf(wrapper.find(".shelf-state"))).toContain("Reading the shelf");
+  });
+
+  it("still says it is reading before the first rows arrive", async () => {
+    listAdapters.mockReturnValue(new Promise(() => {}));
+    listCheckpoints.mockResolvedValue([]);
+    useModelShelfStore().setView({ groupBy: "none" });
+    const wrapper = mount(ModelShelf, globalOpts);
+    await wrapper.vm.$nextTick();
+    expect(textOf(wrapper.find(".shelf-state"))).toContain("Reading the shelf");
+  });
+});
+
 describe("after a session reset", () => {
   it("refetches rather than claiming the machine has no models", async () => {
     // Logout, login, a share token or a restore empties the store. Nothing
@@ -827,11 +1226,16 @@ describe("after a session reset", () => {
     expect(wrapper.find(".shelf-row").exists()).toBe(true);
 
     listAdapters.mockClear();
+    fetchWorkflowSets.mockClear();
     useModelShelfStore().resetForSession();
     await new Promise((resolve) => setTimeout(resolve, 0));
     await wrapper.vm.$nextTick();
 
     expect(listAdapters).toHaveBeenCalled();
+    // The sets go with the rows; the grid and the Models rail asked for them
+    // only as they mounted, and are still mounted.
+    expect(fetchWorkflowSets).toHaveBeenCalledTimes(1);
+    expect(useModelShelfStore().setsLoaded).toBe(true);
     expect(textOf(wrapper.find(".shelf-body"))).not.toContain(
       "No models found",
     );
@@ -900,7 +1304,7 @@ describe("the shelf's own accessible name", () => {
     // them.
     const wrapper = await mountShelf([adapter()]);
     const help = wrapper.find("#shelf-help").text();
-    expect(help).toContain("Settings and the stats sidebar toggle");
+    expect(help).toContain("Settings and the Models and tasks toggle");
     expect(help).toMatch(/nothing on this screen can be undone/i);
     expect(help).not.toMatch(/undo and redo/i);
   });
@@ -1561,6 +1965,12 @@ describe("selecting rows", () => {
     await rowAt(wrapper, 0).trigger("click");
     await rowAt(wrapper, 1).trigger("click", { ctrlKey: true });
     store.setFilters({ adapters: false });
+    // Hand-made sets exist, but this is the ROW LIST: the set branch of Ctrl+A
+    // belongs to the grid and must not take them (and clear the models) here.
+    store.workflowSets = {
+      ...store.workflowSets,
+      handMade: [{ id: 10, name: "Kit", members: [] }],
+    };
     await wrapper.vm.$nextTick();
     expect(store.visibleRows).toHaveLength(0);
 
@@ -1641,9 +2051,7 @@ describe("selecting rows", () => {
 
     await rowAt(wrapper, 0).trigger("click");
     await wrapper.vm.$nextTick();
-    expect(wrapper.find(".selbar-count").attributes("title")).toContain(
-      "1 model selected",
-    );
+    expect(tip(wrapper.find(".selbar-count"))).toContain("1 model selected");
   });
 
   it("drops a selected model that the shelf no longer holds", async () => {
@@ -1777,9 +2185,9 @@ describe("drive bands", () => {
 
     const icons = wrapper.findAll(".shelf-band-icon");
     expect(icons[0].text()).toBe("mdi-nas");
-    expect(icons[0].attributes("title")).toBe("Network share");
+    expect(tip(icons[0])).toBe("Network share");
     expect(icons[1].text()).toBe("mdi-harddisk");
-    expect(icons[1].attributes("title")).toBeUndefined();
+    expect(tip(icons[1])).toBe("");
     expect(textOf(wrapper.findAll(".shelf-band")[1])).not.toContain("Unknown");
   });
 
@@ -2091,6 +2499,127 @@ describe("what a folder header says about its folder (#899)", () => {
   });
 });
 
+describe("a folder header's context menu (#1270)", () => {
+  const scan = vi.fn();
+  const relocate = vi.fn();
+  beforeEach(() => {
+    folderGates.scan = scan;
+    folderGates.moveReason = "";
+  });
+
+  async function mountWithFolders(folders) {
+    scan.mockReset();
+    relocate.mockReset();
+    listModelFolders.mockResolvedValue(folders);
+    const rows = folders.map((folder, i) =>
+      adapter({
+        id: i + 1,
+        sha256: String(i + 1).repeat(64),
+        locations: [
+          {
+            state: "present",
+            folder_id: folder.id,
+            folder_path: folder.path,
+            relpath: "a.st",
+          },
+        ],
+      }),
+    );
+    // Attached, so the focus the menu hands back is a real one.
+    const wrapper = await mountShelf(rows, [], [], { attachTo: document.body });
+    vi.spyOn(useModelMovesStore(), "relocate").mockImplementation(relocate);
+    useModelShelfStore().setView({ groupBy: "folder", folderLayout: "alpha" });
+    await wrapper.vm.$nextTick();
+    return wrapper;
+  }
+
+  const menuItems = (wrapper) =>
+    wrapper.findAll('[role="menuitem"]').filter((el) => {
+      const text = textOf(el);
+      return /^(Re)?[Ss]can folder$|^Move folder/.test(text);
+    });
+
+  it("offers Rescan and Move on a folder that can take both", async () => {
+    folderGates.moveReason = "";
+    const folder = {
+      id: 1,
+      path: "/m",
+      kind: "user",
+      relocatable: true,
+      last_checked: "2026-01-01T00:00:00Z",
+      file_count: 1,
+    };
+    const wrapper = await mountWithFolders([folder]);
+    await wrapper.find(".shelf-group-btn").trigger("contextmenu");
+    const [rescan, move] = menuItems(wrapper);
+    expect(textOf(rescan)).toBe("Rescan folder");
+    expect(textOf(move)).toBe("Move folder…");
+
+    await rescan.trigger("click");
+    expect(scan).toHaveBeenCalledWith(expect.objectContaining({ id: 1 }));
+    // Move opens the shelf's own picker and empties the folder into the pick.
+    await move.trigger("click");
+    const picker = wrapper
+      .findAllComponents({ name: "FolderBrowser" })
+      .find((b) => b.props("open"));
+    await picker.vm.$emit("select", "/mnt/x");
+    expect(relocate).toHaveBeenCalledWith(1, "/mnt/x");
+    wrapper.unmount();
+  });
+
+  it("disables a refused verb and says why", async () => {
+    folderGates.moveReason = "A move is already running.";
+    const wrapper = await mountWithFolders([
+      { id: 1, path: "/m", kind: "user", relocatable: true, file_count: 1 },
+    ]);
+    await wrapper.find(".shelf-group-btn").trigger("contextmenu");
+    const move = menuItems(wrapper).find((el) =>
+      textOf(el).includes("Move folder"),
+    );
+    expect(move.attributes("disabled")).toBeDefined();
+    expect(tip(move)).toBe("A move is already running.");
+    // A never-scanned folder is offered a Scan, not a Rescan.
+    expect(menuItems(wrapper).map(textOf)).toContain("Scan folder");
+    wrapper.unmount();
+  });
+
+  it("keeps the browser's menu on a folder with nothing to offer", async () => {
+    const wrapper = await mountWithFolders([
+      {
+        id: 1,
+        path: "/src",
+        kind: "source",
+        relocatable: false,
+        file_count: 1,
+      },
+    ]);
+    const event = new MouseEvent("contextmenu", { cancelable: true });
+    wrapper.find(".shelf-group-btn").element.dispatchEvent(event);
+    await wrapper.vm.$nextTick();
+    expect(event.defaultPrevented).toBe(false);
+    expect(menuItems(wrapper)).toHaveLength(0);
+    wrapper.unmount();
+  });
+
+  it("opens from the keyboard and gives focus back to the header", async () => {
+    folderGates.moveReason = "";
+    const wrapper = await mountWithFolders([
+      { id: 1, path: "/m", kind: "user", relocatable: false, file_count: 1 },
+    ]);
+    const header = wrapper.find(".shelf-group-btn");
+    expect(menuItems(wrapper)).toHaveLength(0);
+    await header.trigger("keydown", { key: "F10", shiftKey: true });
+    const [rescan] = menuItems(wrapper);
+    expect(textOf(rescan)).toBe("Scan folder");
+
+    header.element.blur();
+    await rescan.trigger("click");
+    expect(scan).toHaveBeenCalled();
+    expect(document.activeElement).toBe(header.element);
+    wrapper.unmount();
+  });
+});
+
 describe("the group header's reserved column", () => {
   it("carries the axis glyph rather than an empty gap", async () => {
     // The width is reserved either way so the header's label lines up with the
@@ -2175,9 +2704,7 @@ describe("selection and drive bands together", () => {
 
     await rows[0].trigger("click");
     await wrapper.vm.$nextTick();
-    expect(wrapper.find(".selbar-count").attributes("title")).toContain(
-      "1 model selected",
-    );
+    expect(tip(wrapper.find(".selbar-count"))).toContain("1 model selected");
     // The band is a header, not a row: it must not have become selectable.
     expect(wrapper.find(".shelf-band").attributes("role")).not.toBe("option");
   });
@@ -2253,6 +2780,44 @@ describe("focus under folder grouping, where a model is drawn twice", () => {
 
     expect(useModelShelfStore().selectedRows).toHaveLength(1);
     expect(wrapper.findAll(".shelf-row--selected")).toHaveLength(2);
+  });
+});
+
+describe("a click on the list's background", () => {
+  it("clears the selection, and a click on a row does not", async () => {
+    const wrapper = await mountShelf([adapter({ id: 7 }), adapter({ id: 8 })]);
+    const store = useModelShelfStore();
+    await wrapper.findAll(".shelf-row")[0].trigger("click");
+    expect(store.selectedRows).toHaveLength(1);
+
+    // Pressed on a row and released on another (or a text drag out of the
+    // rename field): the click lands on the list, and must not clear.
+    await wrapper.findAll(".shelf-row")[0].trigger("pointerdown");
+    await mouseClick(wrapper.find(".shelf-list"));
+    expect(store.selectedRows).toHaveLength(1);
+
+    // A right-press ends without a click; a keyboard click (detail 0) after a
+    // left one does not count either.
+    await rightPress(wrapper.find(".shelf-list"));
+    await mouseClick(wrapper.find(".shelf-list"));
+    expect(store.selectedRows).toHaveLength(1);
+    await wrapper.find(".shelf-list").trigger("pointerdown");
+    await wrapper.find(".shelf-list").trigger("click");
+    expect(store.selectedRows).toHaveLength(1);
+
+    await wrapper.find(".shelf-list").trigger("pointerdown");
+    await mouseClick(wrapper.find(".shelf-list"));
+    expect(store.selectedRows).toHaveLength(0);
+
+    await wrapper.findAll(".shelf-row")[0].trigger("click");
+    await wrapper.find(".shelf-group").trigger("pointerdown");
+    await mouseClick(wrapper.find(".shelf-group"));
+    expect(store.selectedRows).toHaveLength(0);
+
+    await wrapper.findAll(".shelf-row")[0].trigger("click");
+    await wrapper.find(".shelf-scroll").trigger("pointerdown");
+    await mouseClick(wrapper.find(".shelf-scroll"));
+    expect(store.selectedRows).toHaveLength(0);
   });
 });
 
@@ -2781,13 +3346,16 @@ describe("a run's disclosure", () => {
     // tabindex="0">` is exactly as much of a second control, and a
     // tag-name-only assertion let that mutant through when this was checked.
     // `[tabindex]` is on the row itself, so the search is for descendants.
-    // The count badge is the one control in a row, and it is a real button on
-    // purpose: the grid role permits one where the old listbox did not, and a
-    // pointer needs a target for the disclosure that Right/Left gives the
-    // keyboard. Everything else in the row is still inert.
-    const controls = row.findAll(
-      'button, a[href], input, select, textarea, [tabindex], [role="button"]',
-    );
+    // The count badge is the one disclosure control in a row, and it is a real
+    // button on purpose: the grid role permits one where the old listbox did
+    // not, and a pointer needs a target for the disclosure that Right/Left
+    // gives the keyboard. The Kind menu (#1962) sets a value, not the
+    // disclosure; everything else in the row is still inert.
+    const controls = row
+      .findAll(
+        'button, a[href], input, select, textarea, [tabindex], [role="button"]',
+      )
+      .filter((el) => el.attributes("data-testid") !== "kind-menu");
     expect(controls).toHaveLength(1);
     expect(controls[0].classes()).toContain("shelf-stack-badge");
     // ...and it does not pick the row. The badge sits inside the one thing a
@@ -3012,9 +3580,7 @@ describe("the date column", () => {
     let wrapper = await mountShelf([adapter({ added_at: ADDED })]);
     let cell = wrapper.find(".shelf-col--date");
     expect(cell.text()).toBe("30/07/2026");
-    expect(cell.attributes("title")).toBe(
-      `Date added: ${formatUserDate(ADDED, "eu")}`,
-    );
+    expect(tip(cell)).toBe(`Date added: ${formatUserDate(ADDED, "eu")}`);
 
     prefs.dateFormat = "iso";
     wrapper = await mountShelf([adapter({ added_at: ADDED })]);
@@ -3134,7 +3700,7 @@ describe("the assignment ring (#892, redrawn for #904)", () => {
     // The greyscale test, as arithmetic: strip the hue and the ring still
     // carries a STYLE, and the mark still says who out loud. Both attachments
     // are named even though one ring is drawn - the mark has one edge.
-    expect(mark.attributes("title")).toBe("Ada (person), Beach (set)");
+    expect(tip(mark)).toBe("Ada (person), Beach (set)");
     expect(textOf(mark)).toContain("Ada (person), Beach (set)");
     expect(mark.classes()).toContain("mmark--ring");
     expect(
@@ -3181,7 +3747,7 @@ describe("the assignment ring (#892, redrawn for #904)", () => {
     // mark has one reads as a rendering fault rather than as "assigned to
     // nothing", and the word is what a reader hears.
     expect(mark.classes()).toContain("mmark--none");
-    expect(mark.attributes("title")).toBe("Unassigned");
+    expect(tip(mark)).toBe("Unassigned");
   });
 
   it("still rings an attachment whose entity the lists do not answer", async () => {
@@ -3192,7 +3758,7 @@ describe("the assignment ring (#892, redrawn for #904)", () => {
     ]);
     const mark = wrapper.find(".mmark");
     expect(mark.classes()).not.toContain("mmark--none");
-    expect(mark.attributes("title")).toBe("#42 (person)");
+    expect(tip(mark)).toBe("#42 (person)");
   });
 
   it("borrows the assigned face when the model has no picture of its own", async () => {
@@ -3319,8 +3885,18 @@ describe("the thumbnail verb", () => {
     });
     const wrapper = await mountShelf([
       adapter({ id: 1, stack_id: 9, stack_position: 0 }),
-      adapter({ id: 2, sha256: "b".repeat(64), stack_id: 9, stack_position: 1 }),
-      adapter({ id: 3, sha256: "c".repeat(64), stack_id: 9, stack_position: 2 }),
+      adapter({
+        id: 2,
+        sha256: "b".repeat(64),
+        stack_id: 9,
+        stack_position: 1,
+      }),
+      adapter({
+        id: 3,
+        sha256: "c".repeat(64),
+        stack_id: 9,
+        stack_position: 2,
+      }),
     ]);
     const store = useModelShelfStore();
     store.selectVisible();
@@ -3341,7 +3917,9 @@ describe("the thumbnail verb", () => {
     store.toggleSelected(1);
     await wrapper.vm.$nextTick();
     const clear = () =>
-      wrapper.findAll("button").find((b) => b.text().includes("Clear thumbnail"));
+      wrapper
+        .findAll("button")
+        .find((b) => b.text().includes("Clear thumbnail"));
     expect(clear()).toBeUndefined();
 
     store.rows = [adapter({ id: 1, icon_sha256: "a".repeat(64) })];
@@ -3355,7 +3933,10 @@ describe("the thumbnail verb", () => {
     // route has to copy pixels, and the thumbnail is the copy it sends.
     const bytes = new Blob(["webp"], { type: "image/webp" });
     getPictureThumbnailBlob.mockResolvedValue(bytes);
-    setModelIcon.mockResolvedValue({ model_id: 1, icon_sha256: "c".repeat(64) });
+    setModelIcon.mockResolvedValue({
+      model_id: 1,
+      icon_sha256: "c".repeat(64),
+    });
     const wrapper = await mountShelf([adapter({ id: 1 })]);
     const store = useModelShelfStore();
     store.toggleSelected(1);
@@ -3407,7 +3988,10 @@ describe("the thumbnail verb", () => {
     // chooser must land the reader back in the picker rather than on a bare
     // shelf, so the picker is closed by a file ARRIVING, never by the chooser
     // opening.
-    setModelIcon.mockResolvedValue({ model_id: 1, icon_sha256: "d".repeat(64) });
+    setModelIcon.mockResolvedValue({
+      model_id: 1,
+      icon_sha256: "d".repeat(64),
+    });
     const wrapper = await mountShelf([adapter({ id: 1 })]);
     const store = useModelShelfStore();
     store.toggleSelected(1);
@@ -3611,91 +4195,50 @@ describe("the manual stack verb", () => {
 
 describe("the model-folders door", () => {
   // Deleted once already, in the toolbar consolidation for #904, and nothing in
-  // this suite noticed: the shelf kept rendering the dialog with no control left
-  // to open it. Asserted on a POPULATED shelf, because the empty state's own
-  // button unmounts exactly when the registry starts needing edits.
-  it("opens the folders dialog from the toolbar", async () => {
+  // this suite noticed. Asserted on a POPULATED shelf, because the empty
+  // state's own button unmounts exactly when the registry starts needing edits.
+  // The registry lives in Settings › Models, so every door asks for that entry.
+  it("opens Settings on Models from the toolbar", async () => {
     const wrapper = await mountShelf([adapter({ id: 1 })]);
     const folders = wrapper.find(
       '.shelf-toolbar button[aria-label="Model folders"]',
     );
     expect(folders.exists()).toBe(true);
-    expect(
-      wrapper.findComponent({ name: "ModelFoldersDialog" }).props("open"),
-    ).toBe(false);
-
     await folders.trigger("click");
-    expect(
-      wrapper.findComponent({ name: "ModelFoldersDialog" }).props("open"),
-    ).toBe(true);
+    expect(wrapper.emitted("open-settings")).toEqual([["models"]]);
   });
 
-  // Focus return needs a real document, because `activeElement` is the whole
-  // assertion and a detached wrapper has none. Both doors are asserted: the
-  // toolbar button rides the fallback, and the Add item names the Add button
-  // because the item itself unmounts with the menu. Deleting either half of
-  // the plumbing - the `folderInvoker` write or the `.focus()` - fails this.
-  async function closeFoldersFrom(wrapper, opener) {
-    await opener.trigger("click");
-    wrapper.findComponent({ name: "ModelFoldersDialog" }).vm.$emit("close");
-    await wrapper.vm.$nextTick();
-    await wrapper.vm.$nextTick();
-  }
+  it("opens it from the Add menu and the empty state too", async () => {
+    const wrapper = await mountShelf([]);
+    await wrapper
+      .findAll(".ctx-item")
+      .find((b) => b.text().includes("Add folder"))
+      .trigger("click");
+    await wrapper
+      .findAll(".shelf-state button")
+      .find((b) => b.text().includes("Add a model folder"))
+      .trigger("click");
+    expect(wrapper.emitted("open-settings")).toEqual([["models"], ["models"]]);
+  });
 
-  it("hands focus back to whichever door opened it", async () => {
+  it("puts focus on the Add button before Settings records its opener", async () => {
+    // Settings hands focus back to whatever held it when it opened, and the
+    // `Add folder…` item is gone by then, so the Add button it hangs off has
+    // to be the one holding it.
     const wrapper = await mountShelf([adapter({ id: 1 })]);
     document.body.appendChild(wrapper.element);
-
-    const folders = wrapper.find(
-      '.shelf-toolbar button[aria-label="Model folders"]',
-    );
-    await closeFoldersFrom(wrapper, folders);
-    expect(document.activeElement).toBe(folders.element);
-
-    const add = wrapper.find(
-      '.shelf-toolbar button[title="Add models to the shelf"]',
-    );
-    const addItem = wrapper
-      .findAll(".shelf-mi")
-      .find((b) => b.text().includes("Add folder"));
-    await closeFoldersFrom(wrapper, addItem);
-    expect(document.activeElement).toBe(add.element);
-
-    wrapper.unmount();
-  });
-
-  it("returns to the empty-state button, until the first scan unmounts it", async () => {
-    // The empty state is the one door that can disappear underneath its own
-    // dialog. While it is still there it gets focus back like any other - a
-    // reader who opened it to look and closed without adding must not be
-    // thrown to a toolbar icon they never pressed. Once a scan has found
-    // something the button is gone, and THAT is what the `isConnected`
-    // fallback is for.
-    const wrapper = await mountShelf([]);
-    document.body.appendChild(wrapper.element);
-    const store = useModelShelfStore();
-
-    const emptyBtn = wrapper
-      .findAll(".shelf-state button")
-      .find((b) => b.text().includes("Add a model folder"));
-    await closeFoldersFrom(wrapper, emptyBtn);
-    expect(document.activeElement).toBe(emptyBtn.element);
-
-    // Now the scan lands while the dialog is open: the empty state unmounts.
-    await emptyBtn.trigger("click");
-    store.rows = [adapter({ id: 1 })];
-    await wrapper.vm.$nextTick();
-    expect(wrapper.find(".shelf-state").exists()).toBe(false);
-    wrapper.findComponent({ name: "ModelFoldersDialog" }).vm.$emit("close");
-    await wrapper.vm.$nextTick();
-    await wrapper.vm.$nextTick();
-    expect(document.activeElement).toBe(
-      wrapper.find('.shelf-toolbar button[aria-label="Model folders"]').element,
-    );
-
+    const add = wrapper
+      .find('.shelf-toolbar .tip[data-text="Add models to the shelf"]')
+      .element.closest("button");
+    await wrapper
+      .findAll(".ctx-item")
+      .find((b) => b.text().includes("Add folder"))
+      .trigger("click");
+    expect(document.activeElement).toBe(add);
     wrapper.unmount();
   });
 });
+
 
 describe("Escape", () => {
   // The key is handled on the WINDOW, so every assertion here needs a real
@@ -3789,7 +4332,7 @@ describe("Escape", () => {
     // Every dialog the shelf owns, not only the edit one: a press with nothing
     // focused targets `<body>`, so the ref is the only thing that can see them.
     wrapper.vm.editVerb = "";
-    wrapper.vm.foldersOpen = true;
+    wrapper.vm.relocatingFolder = { id: 1, path: "/m" };
     await wrapper.vm.$nextTick();
     document.body.dispatchEvent(
       new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
@@ -3942,7 +4485,7 @@ describe("Add file", () => {
     // share the one accented control (#904).
     const wrapper = await mountShelf([adapter({ id: 1 })]);
     const item = wrapper
-      .findAll(".shelf-mi")
+      .findAll(".ctx-item")
       .find((entry) => entry.text().includes("Add file"));
     expect(item).toBeDefined();
   });
@@ -3991,7 +4534,7 @@ describe("Add file", () => {
     document.body.appendChild(wrapper.element);
 
     const item = wrapper
-      .findAll(".shelf-mi")
+      .findAll(".ctx-item")
       .find((entry) => entry.text().includes("Add file"));
     await item.trigger("click");
     wrapper.findComponent({ name: "FolderBrowser" }).vm.$emit("close");
@@ -3999,8 +4542,9 @@ describe("Add file", () => {
     await wrapper.vm.$nextTick();
 
     expect(document.activeElement).toBe(
-      wrapper.find('.shelf-toolbar button[title="Add models to the shelf"]')
-        .element,
+      wrapper
+        .find('.shelf-toolbar .tip[data-text="Add models to the shelf"]')
+        .element.closest("button"),
     );
     wrapper.unmount();
   });
@@ -4014,7 +4558,7 @@ describe("Add file", () => {
 
     await wrapper.find(".tbo-trigger").trigger("click");
     const item = wrapper
-      .findAll(".tbo-panel .shelf-mi")
+      .findAll(".tbo-panel .ctx-item")
       .find((entry) => entry.text().includes("Add file"));
     await item.trigger("click");
     wrapper.findComponent({ name: "FolderBrowser" }).vm.$emit("close");
@@ -4158,20 +4702,29 @@ describe("a long move, in the panel that is running it", () => {
 // moment the grid unmounts. Undo is the exception: nothing on this screen writes
 // to the operation log, so there is nothing here for it to take back.
 describe("the app-wide toolbar tail", () => {
-  it("asks App.vue for Settings and toggles the stats sidebar itself", async () => {
+  it("asks App.vue for Settings and toggles the Models rail itself", async () => {
     const wrapper = await mountShelf([adapter({ id: 1 })]);
     const sidebar = useSidebarStore();
-    const settings = wrapper.find(".shelf-toolbar button[title='Settings']");
+    const settings = wrapper.find(
+      ".shelf-toolbar button[aria-label='Settings']",
+    );
 
     await settings.trigger("click");
     expect(wrapper.emitted("open-settings")).toHaveLength(1);
 
     // Directional, not a flip: the rail opens on the first press and closes on
     // the second, from the shut state a fresh session starts in.
+    // The rail on this screen is Models | Tasks, with its own flag: the
+    // Library's stats flag is left alone.
+    sidebar.modelsRailOpen = false;
     sidebar.statsOpen = false;
-    await wrapper.find(".shelf-toolbar .tb-stats-btn").trigger("click");
-    expect(sidebar.statsOpen).toBe(true);
-    await wrapper.find(".shelf-toolbar .tb-stats-btn").trigger("click");
+    const toggle = wrapper.find(".shelf-toolbar .tb-stats-btn");
+    expect(toggle.attributes("aria-label")).toBe("Models and tasks");
+    await toggle.trigger("click");
+    expect(sidebar.modelsRailOpen).toBe(true);
+    expect(toggle.attributes("aria-pressed")).toBe("true");
+    await toggle.trigger("click");
+    expect(sidebar.modelsRailOpen).toBe(false);
     expect(sidebar.statsOpen).toBe(false);
   });
 
@@ -4183,14 +4736,12 @@ describe("the app-wide toolbar tail", () => {
     const wrapper = await mountShelf([adapter({ id: 1 })]);
     const cluster = wrapper.find(".shelf-bar-cluster").element;
     // TbGlobalActions is multi-root; its Settings button is a stable anchor.
-    const settings = wrapper.find("button[title='Settings']").element;
+    const settings = wrapper.find("button[aria-label='Settings']").element;
     const separator = wrapper.find(".shelf-bar-cluster .bar-separator").element;
     // The Show menu - the LAST of this view's own controls, and the one the
-    // tail has to come after. (`.bar-btn--boxed` alone would find the stack
-    // sweep, which sits outside the cluster and proves nothing.)
-    const showBtn = wrapper
-      .findAll(".shelf-bar-cluster .bar-btn--boxed")
-      .at(-1).element;
+    // tail has to come after. (Every bar button is `--boxed` now, the tail's
+    // own included, so the Show button is found by name.)
+    const showBtn = wrapper.find(".shelf-bar-cluster .shelf-show-btn").element;
     const follows = (a, b) =>
       Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
 
@@ -4210,6 +4761,95 @@ describe("the app-wide toolbar tail", () => {
   it("mounts no undo control", async () => {
     const wrapper = await mountShelf([adapter({ id: 1 })]);
     expect(wrapper.findComponent({ name: "UndoControl" }).exists()).toBe(false);
+  });
+});
+
+// The closed Models rail's handle is the Workflows one (visual-language
+// "Closed inspector"): it names the selection, and a NEW selection bumps the
+// counter the handle's bounce and the toolbar glyph's flash both play on.
+describe("the closed Models rail's handle", () => {
+  const handle = (wrapper) => wrapper.find('[data-testid="models-rail-handle"]');
+  const rowAt = (wrapper, i) => wrapper.findAll(".shelf-row")[i];
+
+  it("says All models, unstriped, until something is selected, then names it", async () => {
+    const wrapper = await mountShelf([
+      adapter({ id: 1 }),
+      adapter({ id: 2, display_name: "Mossy Ink" }),
+    ]);
+    expect(handle(wrapper).classes()).toContain("inspector-edge-tab--labelled");
+    expect(handle(wrapper).classes()).toContain("inspector-edge-tab--plain");
+    expect(handle(wrapper).find(".inspector-edge-tab__label").text()).toBe(
+      "All models",
+    );
+    expect(handle(wrapper).attributes("aria-label")).toBe(
+      `Show all models (${useModelShelfStore().railRows.length})`,
+    );
+
+    await rowAt(wrapper, 1).trigger("click");
+    expect(handle(wrapper).classes()).not.toContain("inspector-edge-tab--plain");
+    expect(handle(wrapper).find(".inspector-edge-tab__label").text()).toBe(
+      "Mossy Ink",
+    );
+    expect(handle(wrapper).attributes("aria-label")).toBe(
+      "Show models: Mossy Ink",
+    );
+
+    await rowAt(wrapper, 0).trigger("click", { ctrlKey: true });
+    expect(handle(wrapper).find(".inspector-edge-tab__label").text()).toBe(
+      "2 models",
+    );
+  });
+
+  it("nudges on a new selection, never on the same one or on clearing it", async () => {
+    const wrapper = await mountShelf([adapter({ id: 1 }), adapter({ id: 2 })]);
+    const sidebar = useSidebarStore();
+    const store = useModelShelfStore();
+    const start = sidebar.inspectorNudge;
+
+    await rowAt(wrapper, 0).trigger("click");
+    expect(sidebar.inspectorNudge).toBe(start + 1);
+    expect(handle(wrapper).classes().join(" ")).toContain(
+      "inspector-edge-tab--nudge-",
+    );
+
+    await rowAt(wrapper, 0).trigger("click");
+    expect(sidebar.inspectorNudge).toBe(start + 1);
+
+    await rowAt(wrapper, 1).trigger("click");
+    expect(sidebar.inspectorNudge).toBe(start + 2);
+
+    store.clearSelection();
+    await wrapper.vm.$nextTick();
+    expect(sidebar.inspectorNudge).toBe(start + 2);
+  });
+
+  it("nudges when a card's tray opens with nothing selected, not when it closes", async () => {
+    const wrapper = await mountShelf([adapter({ id: 1 })]);
+    const sidebar = useSidebarStore();
+    const store = useModelShelfStore();
+    const start = sidebar.inspectorNudge;
+
+    store.toggleSet("set:a");
+    await wrapper.vm.$nextTick();
+    expect(store.selectedRows).toEqual([]);
+    expect(sidebar.inspectorNudge).toBe(start + 1);
+    expect(handle(wrapper).find(".inspector-edge-tab__label").text()).toBe(
+      "All models",
+    );
+    expect(handle(wrapper).classes().join(" ")).toContain(
+      "inspector-edge-tab--nudge-",
+    );
+
+    store.toggleSet("set:a");
+    await wrapper.vm.$nextTick();
+    expect(sidebar.inspectorNudge).toBe(start + 1);
+  });
+
+  it("opens the rail on a click, and is gone while it is open", async () => {
+    const wrapper = await mountShelf([adapter({ id: 1 })]);
+    await handle(wrapper).trigger("click");
+    expect(useSidebarStore().modelsRailOpen).toBe(true);
+    expect(handle(wrapper).exists()).toBe(false);
   });
 });
 
@@ -4261,6 +4901,154 @@ describe("Delete", () => {
       permanent: false,
       refused: [],
     });
+    fetchModelCompanions.mockReset();
+    fetchModelCompanions.mockResolvedValue({
+      orphaned: [],
+      shared: [],
+      unknown: [],
+      in_use: [],
+      no_evidence: [],
+    });
+  });
+
+  // The Models rail beside the shelf answers its own keys: a Delete pressed
+  // there is the rail's to ask for, never the window handler's as well.
+  it("is not the shelf's when pressed in the Models rail", async () => {
+    const wrapper = await mountWithSelection();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const rail = document.createElement("div");
+    rail.className = "mrail";
+    document.body.appendChild(rail);
+    rail.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Delete", bubbles: true }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fetchModelCompanions).not.toHaveBeenCalled();
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(useModelShelfStore().selectedIds.size).toBe(1);
+    rail.remove();
+    wrapper.unmount();
+  });
+
+  it("says in the prompt what the delete leaves behind", async () => {
+    // #1314: the question is asked for exactly the ids the call will send,
+    // and its answer is in front of the reader before they agree.
+    fetchModelCompanions.mockResolvedValue({
+      orphaned: [{ id: 5, name: "ae.safetensors" }],
+      shared: [{ id: 6, name: "clip_l.safetensors", used_with: [] }],
+      unknown: [],
+      in_use: [],
+      no_evidence: [],
+    });
+    const wrapper = await mountWithSelection();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+
+    await pressDelete();
+
+    expect(fetchModelCompanions).toHaveBeenCalledWith([1]);
+    const said = confirmSpy.mock.calls[0][0];
+    expect(said).toContain(
+      "ae.safetensors ran only with models you are deleting",
+    );
+    expect(said).toContain("clip_l.safetensors is still used by other models");
+    expect(deleteModels).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("opens one prompt however often Delete is pressed while it is being prepared", async () => {
+    let answer;
+    fetchModelCompanions.mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve;
+      }),
+    );
+    const wrapper = await mountWithSelection();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+
+    await pressDelete();
+    await pressDelete();
+    answer({
+      orphaned: [],
+      shared: [],
+      unknown: [],
+      in_use: [],
+      no_evidence: [],
+    });
+    await pressDelete();
+
+    expect(fetchModelCompanions).toHaveBeenCalledTimes(1);
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it("still asks, and says so, when what it leaves behind cannot be read", async () => {
+    fetchModelCompanions.mockRejectedValue(new Error("offline"));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const wrapper = await mountWithSelection();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    await pressDelete();
+
+    expect(confirmSpy.mock.calls[0][0]).toContain("could not check");
+    expect(deleteModels).toHaveBeenCalledWith([1], { permanent: false });
+    wrapper.unmount();
+  });
+
+  it("leaves the Models rail's selection to the rail's own keys", async () => {
+    // Delete pressed over here was aimed at the shelf, and the shelf has
+    // nothing selected: the rail's rows are not this key's to take.
+    listModelFolders.mockResolvedValue([FOLDER]);
+    const wrapper = await mountShelf([inFolder(1)]);
+    document.body.appendChild(wrapper.element);
+    const store = useModelShelfStore();
+    store.setRailSelection([1]);
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    await pressDelete();
+    document.body.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(deleteModels).not.toHaveBeenCalled();
+    expect(store.selectedRows.map((r) => r.id)).toEqual([1]);
+    wrapper.unmount();
+  });
+
+  it("deletes the Models rail's selection when the rail asks, not the shelf's", async () => {
+    // The rail is not this view's child, so its Delete arrives through the
+    // store - and lands on the same prompt, counting the rail's own rows.
+    listModelFolders.mockResolvedValue([FOLDER]);
+    const wrapper = await mountShelf([inFolder(1), inFolder(2)]);
+    const store = useModelShelfStore();
+    store.toggleSelected(1);
+    store.setRailSelection([2]);
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    store.requestVerb("delete", true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    expect(deleteModels).toHaveBeenCalledWith([2], { permanent: true });
+    wrapper.unmount();
+  });
+
+  it("opens the edit dialog for a verb the rail asks for, rename included", async () => {
+    const wrapper = await mountShelf([inFolder(1), inFolder(2)]);
+    const store = useModelShelfStore();
+    store.setRailSelection([2]);
+
+    store.requestVerb("set-kind");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.vm.editVerb).toBe("kind");
+
+    // The rail's row may not be drawn on the list at all, so there is no
+    // inline field to open: the name takes the dialog.
+    store.requestVerb("rename");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.vm.editVerb).toBe("rename");
+    expect(wrapper.find(".shelf-row-rename").exists()).toBe(false);
+    wrapper.unmount();
   });
 
   // The `window.confirm` spies below are restored here rather than at the end
@@ -4282,6 +5070,37 @@ describe("Delete", () => {
     confirmSpy.mockReturnValue(true);
     await pressDelete();
     expect(deleteModels).toHaveBeenCalledWith([1], { permanent: false });
+    confirmSpy.mockRestore();
+    wrapper.unmount();
+  });
+
+  it("says a file in a hand-made set stays there, trashed or deleted for good (#1520)", async () => {
+    const wrapper = await mountWithSelection();
+    const store = useModelShelfStore();
+    store.workflowSets = {
+      ...store.workflowSets,
+      handMade: [
+        {
+          id: 10,
+          name: "Kit",
+          members: [
+            { sha256: "x".repeat(64), slot: "lora", on_shelf: true, id: 1 },
+          ],
+        },
+      ],
+    };
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+
+    await pressDelete();
+    await pressDelete({ shiftKey: true });
+
+    // Membership is kept by hash in a table neither delete touches, so the
+    // sentence holds for both - and says HOW, beside "everything recorded".
+    expect(confirmSpy).toHaveBeenCalledTimes(2);
+    for (const [said] of confirmSpy.mock.calls) {
+      expect(said).toContain('It stays in your set "Kit"');
+      expect(said).toContain("kept by its file hash");
+    }
     confirmSpy.mockRestore();
     wrapper.unmount();
   });
@@ -4427,7 +5246,7 @@ describe("setting the ai-toolkit output folder", () => {
   };
 
   const addItems = (wrapper) =>
-    wrapper.findAll(".shelf-mi").map((b) => b.text());
+    wrapper.findAll(".ctx-item").map((b) => b.text());
 
   it("offers to set it while none is registered", async () => {
     const wrapper = await mountShelf([]);
@@ -4455,7 +5274,7 @@ describe("setting the ai-toolkit output folder", () => {
     // sidebar entry.
     const wrapper = await mountShelf([]);
     const setItem = wrapper
-      .findAll(".shelf-mi")
+      .findAll(".ctx-item")
       .find((b) => b.text().includes("Set ai-toolkit"));
     await setItem.trigger("click");
     await wrapper.vm.$nextTick();
@@ -4531,6 +5350,50 @@ describe("the two views of the shelf", () => {
     wrapper.unmount();
   });
 
+  it("draws a set receipt on the grid's pill, never a library one, and drops it on leaving", async () => {
+    const wrapper = await mountShelf([adapter({ id: 1 })]);
+    const operations = useOperationStore();
+    operations.showReceipt(
+      operations.buildReceipt({ id: 1, op_type: "pictures.score" }, "did"),
+    );
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".receipt").exists()).toBe(false);
+
+    operations.showLocalReceipt({
+      summary: 'Added 1 model to "Portrait kit".',
+      icon: "mdi-playlist-plus",
+      undo: vi.fn(),
+      redo: vi.fn(),
+    });
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".receipt .r-text").text()).toBe(
+      'Added 1 model to "Portrait kit"',
+    );
+
+    // The runs tab keeps the shelf mounted, and must not keep its receipt.
+    nav.route.name = "models-runs";
+    await wrapper.vm.$nextTick();
+    expect(operations.receipt).toBe(null);
+    operations.showLocalReceipt({
+      summary: "Late",
+      icon: "mdi-plus",
+      undo: vi.fn(),
+      redo: vi.fn(),
+    });
+    expect(operations.receipt).toBe(null);
+
+    nav.route.name = "models";
+    await wrapper.vm.$nextTick();
+    operations.showLocalReceipt({
+      summary: "Back",
+      icon: "mdi-plus",
+      undo: vi.fn(),
+      redo: vi.fn(),
+    });
+    wrapper.unmount();
+    expect(operations.receipt).toBe(null);
+  });
+
   it("does not dock the shelf's pill over the runs grid", async () => {
     const wrapper = await mountShelf([adapter({ id: 1 })]);
     await rowAt(wrapper, 0).trigger("click");
@@ -4553,7 +5416,7 @@ describe("the two views of the shelf", () => {
       wrapper
         .findAll(".shelf-toolbar button")
         .map((b) =>
-          [b.attributes("aria-label"), b.attributes("title"), b.text()]
+          [b.attributes("aria-label"), tip(b), b.text()]
             .filter(Boolean)
             .join(" "),
         );
@@ -4575,7 +5438,7 @@ describe("the two views of the shelf", () => {
       wrapper
         .findAll(".shelf-toolbar button")
         .some((b) =>
-          [b.attributes("aria-label"), b.attributes("title"), b.text()]
+          [b.attributes("aria-label"), tip(b), b.text()]
             .filter(Boolean)
             .join(" ")
             .includes(needle),
@@ -4598,21 +5461,21 @@ describe("the two views of the shelf", () => {
     // offers the SAME doors as the buttons it replaces. Lose either and the
     // bar silently stops collapsing.
     const wrapper = await mountShelf([adapter()]);
-    expect(wrapper.find(".shelf-title").classes()).toContain("shelf-fold-1070");
+    expect(wrapper.find(".shelf-title").classes()).toContain("shelf-fold-1262");
     expect(wrapper.find(".shelf-sub--ingap").classes()).toContain(
-      "shelf-fold-1070",
+      "shelf-fold-1262",
     );
     const folded = wrapper
       .findAll(".shelf-toolbar button")
       .filter((b) => b.classes().includes("shelf-fold-680"))
-      .map((b) => b.attributes("title"));
+      .map((b) => tip(b));
     expect(folded).toEqual([
       "Add models to the shelf",
       "Model folders - add, rescan, move or forget a folder",
     ]);
 
     await wrapper.find(".tbo-trigger").trigger("click");
-    const rows = wrapper.findAll(".tbo-panel .shelf-mi").map((b) => b.text());
+    const rows = wrapper.findAll(".tbo-panel .ctx-item").map((b) => b.text());
     expect(rows).toEqual([
       "Add folder…",
       "Add file…",
@@ -4620,10 +5483,8 @@ describe("the two views of the shelf", () => {
       "Model folders…",
     ]);
 
-    await wrapper.findAll(".tbo-panel .shelf-mi").at(-1).trigger("click");
-    expect(
-      wrapper.findComponent({ name: "ModelFoldersDialog" }).props("open"),
-    ).toBe(true);
+    await wrapper.findAll(".tbo-panel .ctx-item").at(-1).trigger("click");
+    expect(wrapper.emitted("open-settings")).toEqual([["models"]]);
     wrapper.unmount();
   });
 
@@ -4724,14 +5585,19 @@ describe("acting inside a run", () => {
 
   it("says which file the run is being drawn from, once it is open", async () => {
     const wrapper = await openRun();
-    const chips = wrapper
-      .findAll(".shelf-row:not(.shelf-row--member) .shelf-chip")
-      .map((c) => c.text());
-    expect(chips).toContain("Cover");
+    // On the cover's thumbnail, not among the name's chips (where it pushed
+    // the line into the text around it).
+    const flags = wrapper.findAll(
+      ".shelf-row:not(.shelf-row--member) .shelf-row-ident .stack-cover-flag",
+    );
+    expect(flags.map((f) => f.text())).toEqual(["Cover"]);
+    expect(
+      wrapper.findAll(".shelf-row-label .shelf-chip").map((c) => c.text()),
+    ).not.toContain("Cover");
     // Not on the member rows: exactly one file covers a run.
     expect(
-      wrapper.findAll(".shelf-row--member .shelf-chip").map((c) => c.text()),
-    ).not.toContain("Cover");
+      wrapper.findAll(".shelf-row--member .stack-cover-flag"),
+    ).toHaveLength(0);
     wrapper.unmount();
   });
 
@@ -4806,9 +5672,7 @@ describe("acting inside a run", () => {
     useModelShelfStore().setFilters({ baseModels: ["flux.1-dev"] });
     await wrapper.vm.$nextTick();
 
-    expect(wrapper.findAll(".shelf-chip").map((c) => c.text())).not.toContain(
-      "Cover",
-    );
+    expect(wrapper.find(".stack-cover-flag").exists()).toBe(false);
     wrapper.unmount();
   });
 
@@ -4885,5 +5749,578 @@ describe("acting inside a run", () => {
     expect(removeStackMember).not.toHaveBeenCalled();
     confirmSpy.mockRestore();
     wrapper.unmount();
+  });
+});
+
+// ===========================================================================
+// The shipped DEFAULT (#1438)
+//
+// `mountShelf` chooses `groupBy: "none"` for every test above, because the row
+// list is what they are about. Nothing then mounted this view in the state a
+// reader actually opens it in, which is how a live-but-inert Sort control got
+// as far as review. These mount it as shipped.
+// ===========================================================================
+
+async function mountDefaultShelf(rows = [adapter()]) {
+  listAdapters.mockResolvedValue(rows);
+  listCheckpoints.mockResolvedValue([]);
+  listEngines.mockResolvedValue([]);
+  listUnclassified.mockResolvedValue([]);
+  listSupport.mockResolvedValue([]);
+  const wrapper = mount(ModelShelf, globalOpts);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await wrapper.vm.$nextTick();
+  return wrapper;
+}
+
+describe("the set grid is what the shelf opens on", () => {
+  const rowAt = (wrapper, i) => wrapper.findAll(".shelf-row")[i];
+
+  it("draws the grid rather than the row list, with no axis chosen", async () => {
+    const wrapper = await mountDefaultShelf();
+    const store = useModelShelfStore();
+
+    expect(store.view.groupBy).toBe("workflow_set");
+    expect(wrapper.find(".set-grid-stub").exists()).toBe(true);
+    expect(wrapper.find(".shelf-row").exists()).toBe(false);
+  });
+
+  it("hides Sort, because it steers a list that is not on screen", async () => {
+    const wrapper = await mountDefaultShelf();
+    const store = useModelShelfStore();
+
+    // The shipped split-button, which is what `Sort` actually is.
+    const hasSort = () => wrapper.find(".bar-split-button").exists();
+
+    // A live control with no effect reads "Sort: Added" over a grid it cannot
+    // reorder, so it is absent here and back the moment the row list is. The grid
+    // orders itself by the weight of the evidence behind each set.
+    expect(hasSort()).toBe(false);
+
+    store.setView({ groupBy: "none" });
+    await wrapper.vm.$nextTick();
+    expect(hasSort()).toBe(true);
+  });
+
+  it("counts sets rather than models while the grid is on screen", async () => {
+    const wrapper = await mountDefaultShelf();
+
+    expect(textOf(wrapper.find(".shelf-sub"))).toContain("0 sets");
+
+    useModelShelfStore().setView({ groupBy: "none" });
+    await wrapper.vm.$nextTick();
+    expect(textOf(wrapper.find(".shelf-sub"))).toContain("1 model");
+  });
+
+  /**
+   * The shelf on the set grid, with a card actually drawn for model 1.
+   *
+   * Seeded straight onto the store rather than through the api double: this
+   * suite stubs `ModelSetGrid`, so nothing here ever calls `loadWorkflowSets`
+   * and an unseeded grid draws no cards - which is the state that made three of
+   * these assertions pass for the wrong reason.
+   */
+  async function shelfOnTheGrid() {
+    const wrapper = await mountDefaultShelf([
+      adapter({ id: 1, sha256: "a".repeat(64) }),
+      adapter({ id: 2, sha256: "b".repeat(64) }),
+    ]);
+    const store = useModelShelfStore();
+    store.workflowSets = {
+      combinations: [
+        {
+          key: "1",
+          models: [{ id: 1, name: "a.st", kind: "checkpoint" }],
+          recipes: 1,
+          picture_count: 1,
+          covers: [],
+        },
+      ],
+    };
+    store.setView({ groupBy: "workflow_set" });
+    await wrapper.vm.$nextTick();
+    return { wrapper, store };
+  }
+
+  it("the shelf's WINDOW listener deletes selected sets on Delete and no other key (#1520)", async () => {
+    // Scope: the shelf-level listener only, with the grid stubbed out. A
+    // review asked whether any key reaching the window with a set selected
+    // would delete it; only Delete does. Backspace ON a focused hand-made card
+    // is the grid's own gesture (the Mac keyboard's Delete key sends it) and
+    // is covered in ModelSetGrid.test.js, so the two do not contradict.
+    deleteWorkflowSet.mockReset().mockResolvedValue({
+      deleted: { id: 10, name: "Kit", members: [] },
+    });
+    const { store } = await shelfOnTheGrid();
+    store.workflowSets = {
+      ...store.workflowSets,
+      handMade: [{ id: 10, name: "Kit", members: [] }],
+    };
+    store.selectSet(10);
+    for (const key of ["ArrowDown", "n", "F2", "Backspace"]) {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key }));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(deleteWorkflowSet).not.toHaveBeenCalled();
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete" }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(deleteWorkflowSet).toHaveBeenCalledWith(10);
+  });
+
+  it("still deletes the selected set while the Models rail holds a selection", async () => {
+    // The rail's rows are not the shelf's "a model is selected too": with
+    // them counted, Delete on a set card would ask about a file instead.
+    deleteWorkflowSet.mockReset().mockResolvedValue({
+      deleted: { id: 10, name: "Kit", members: [] },
+    });
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const { store } = await shelfOnTheGrid();
+    store.workflowSets = {
+      ...store.workflowSets,
+      handMade: [{ id: 10, name: "Kit", members: [] }],
+    };
+    store.setRailSelection([2]);
+    store.selectSet(10);
+    expect(store.selectedRows.map((r) => r.id)).toEqual([2]);
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete" }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(deleteWorkflowSet).toHaveBeenCalledWith(10);
+    expect(deleteModels).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it("renames a selected hand-made set on F2, as its pill says (#1520)", async () => {
+    const { wrapper, store } = await shelfOnTheGrid();
+    store.workflowSets = {
+      ...store.workflowSets,
+      handMade: [{ id: 10, name: "Kit", members: [] }],
+    };
+    store.selectSet(10);
+    await wrapper.vm.$nextTick();
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "F2" }));
+    await wrapper.vm.$nextTick();
+
+    expect(
+      wrapper.findComponent({ name: "WorkflowSetRenameDialog" }).props("set"),
+    ).toMatchObject({ id: 10 });
+  });
+
+  it("floats the verb bar over the grid, as it does over the list", async () => {
+    // It did not, while a card stood for a whole SET: a Delete aimed at one
+    // could have taken a shared VAE with it. A card stands for its BASE MODEL
+    // now and a tray row for one file, so everything the bar can be aimed at
+    // there is one model - which is what its verbs write.
+    // The PILL, not the `.selbar-float` strip it docks in: the strip is the
+    // host's positioning wrapper and is always there, so asserting on it would
+    // be asserting that `isShelfTab` is true.
+    const { wrapper, store } = await shelfOnTheGrid();
+    expect(wrapper.find(".selbar").exists()).toBe(false);
+
+    store.toggleSelected(1);
+    await wrapper.vm.$nextTick();
+    expect(store.selectedRows.map((row) => row.id)).toEqual([1]);
+    expect(wrapper.find(".selbar").exists()).toBe(true);
+
+    // And model 2, which is on NO card, arms nothing while the grid is up.
+    store.clearSelection();
+    store.toggleSelected(2);
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".selbar").exists()).toBe(false);
+    // It is still held, and the row list offers it again.
+    store.setView({ groupBy: "none" });
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".selbar").exists()).toBe(true);
+  });
+
+  it("opens the verb menu where the grid says the pointer was", async () => {
+    const { wrapper, store } = await shelfOnTheGrid();
+    store.toggleSelected(1);
+    await wrapper.vm.$nextTick();
+    const bar = wrapper.findComponent({ name: "ShelfSelectionBar" });
+    expect(bar.vm.contextOpen).toBe(false);
+
+    await wrapper
+      .findComponent({ name: "ModelSetGrid" })
+      .vm.$emit("menu", { x: 210, y: 64 });
+    await wrapper.vm.$nextTick();
+
+    // One bar for both views, so there is one set of refusals rather than two
+    // that can drift. The menu is its own, opened through its exposed method.
+    expect(bar.vm.contextOpen).toBe(true);
+    expect(bar.vm.contextAt).toEqual([210, 64]);
+
+    // A card's menu says which card, and its Clone set to edit reaches the
+    // store with the set the bar named.
+    await wrapper
+      .findComponent({ name: "ModelSetGrid" })
+      .vm.$emit("menu", { x: 1, y: 2, setKey: "model:1" });
+    expect(bar.vm.contextSetKey).toBe("model:1");
+    store.cloneSetFromPictures = vi.fn();
+    const group = { key: "model:1" };
+    await bar.vm.$emit("clone-set", group);
+    expect(store.cloneSetFromPictures).toHaveBeenCalledWith(group);
+  });
+
+  /** The grid with three cards: models 1 and 2, and a missing checkpoint. */
+  async function gridWithThreeCards() {
+    const { wrapper, store } = await shelfOnTheGrid();
+    const card = (extra) => ({
+      recipes: 1,
+      picture_count: 1,
+      covers: [],
+      ...extra,
+    });
+    store.workflowSets = {
+      ...store.workflowSets,
+      combinations: [
+        ...store.workflowSets.combinations,
+        card({ key: "2", models: [{ id: 2, name: "b.st", kind: "checkpoint" }] }),
+        card({
+          key: "+gone.sft",
+          models: [],
+          missing: [{ name: "gone.sft", workflow_ids: ["auto:a"] }],
+        }),
+      ],
+    };
+    await wrapper.vm.$nextTick();
+    expect(store.setGroups.map((g) => g.key).sort()).toEqual([
+      "missing:gone.sft",
+      "model:1",
+      "model:2",
+    ]);
+    // The stubbed grid's answer to "which cards are drawn selected".
+    const lightCards = async (...keys) => {
+      wrapper.findComponent({ name: "ModelSetGrid" }).vm.selectedCardGroups =
+        store.setGroups.filter((g) => keys.includes(g.key));
+      await wrapper.vm.$nextTick();
+    };
+    return { wrapper, store, lightCards };
+  }
+
+  it("hides the cards the grid says are selected, and no other", async () => {
+    const { wrapper, store, lightCards } = await gridWithThreeCards();
+    const bar = wrapper.findComponent({ name: "ShelfSelectionBar" });
+    const hide = () =>
+      bar.findAll(".ctx-item").find((b) => b.text().includes("workflow set"));
+    store.toggleSelected(1);
+    store.toggleSelected(2);
+    await wrapper.vm.$nextTick();
+    // Two models are selected, but the grid names no card as lit (which is
+    // what it answers for a pick made in a tray): no set verb.
+    expect(hide()).toBeUndefined();
+
+    await lightCards("model:1");
+    expect(hide().text()).toBe("Hide workflow set");
+    await hide().trigger("click");
+    // The hide is a server call (#1869), so the grid redraws a turn later.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(store.setGroups.map((g) => g.key).sort()).toEqual([
+      "missing:gone.sft",
+      "model:2",
+    ]);
+    // The row behind the card is untouched: hidden, not forgotten or deleted.
+    expect(store.rows.map((r) => r.id)).toEqual([1, 2]);
+  });
+
+  it("hides every lit card from either pill's menu, missing ones included", async () => {
+    const { wrapper, store, lightCards } = await gridWithThreeCards();
+    store.toggleSelected(1);
+    store.selectAllMissing();
+    await lightCards("model:1");
+
+    const fileRow = wrapper
+      .findComponent({ name: "ShelfSelectionBar" })
+      .findAll(".ctx-item")
+      .find((b) => b.text().includes("workflow set"));
+    const missingBar = wrapper.findComponent({ name: "MissingSetSelectionBar" });
+    // One row, one count, on both: a card is a card whichever pill counts it.
+    expect(fileRow.text()).toBe("Hide 2 workflow sets");
+    expect(missingBar.find(".ctx-item[data-verb='hide-sets']").text()).toBe(
+      "Hide 2 workflow sets",
+    );
+
+    await missingBar.find('.selbar [data-verb="hide-sets"]').trigger("click");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Model 2's card was never selected.
+    expect(store.setGroups.map((g) => g.key)).toEqual(["model:2"]);
+    expect(store.hiddenSetCount).toBe(2);
+    // Both left the screen, so neither is still held for a later Undo to arm.
+    expect([...store.selectedIds]).toEqual([]);
+    expect([...store.selectedMissingKeys]).toEqual([]);
+  });
+
+  it("hides a selected hand-made set from the set pill, by its store group", async () => {
+    const { wrapper, store } = await gridWithThreeCards();
+    store.workflowSets = {
+      ...store.workflowSets,
+      handMade: [{ id: 10, name: "Kit", members: [] }],
+    };
+    await wrapper.vm.$nextTick();
+    const spy = vi.fn();
+    store.toggleHiddenSets = spy;
+    store.selectSet(10);
+    await wrapper.vm.$nextTick();
+
+    const setBar = wrapper.findComponent({ name: "WorkflowSetSelectionBar" });
+    await setBar.find('.selbar [data-verb="hide-sets"]').trigger("click");
+
+    // The store's group, by key: the set's card is what Hide reads.
+    expect(spy.mock.calls.map(([groups]) => groups.map((g) => g.key))).toEqual([
+      ["hand:10"],
+    ]);
+  });
+
+  it("passes the lit model cards and the selected hand-made set together", async () => {
+    const { wrapper, store, lightCards } = await gridWithThreeCards();
+    store.workflowSets = {
+      ...store.workflowSets,
+      handMade: [{ id: 10, name: "Kit", members: [] }],
+    };
+    await wrapper.vm.$nextTick();
+    const spy = vi.fn();
+    store.toggleHiddenSets = spy;
+    store.selectSet(10);
+    store.selectFromClick(1, { ctrl: true });
+    await lightCards("model:1");
+
+    // Either pill's row acts on the whole mixed selection, one list.
+    const setBar = wrapper.findComponent({ name: "WorkflowSetSelectionBar" });
+    await setBar.find('.selbar [data-verb="hide-sets"]').trigger("click");
+    expect(spy.mock.calls.map(([groups]) => groups.map((g) => g.key))).toEqual([
+      ["model:1", "hand:10"],
+    ]);
+  });
+
+  it("takes Ctrl+A to mean the models the GRID draws", async () => {
+    // The key was taken away entirely while nothing on the grid was selectable.
+    // Back on, it has to answer the screen it is on: the row list holds two
+    // rows here and the grid draws one card, so a guard reading `visibleRows`
+    // would pass and then select the wrong set - or, with no card at all,
+    // silently clear what the reader was still holding.
+    const { wrapper, store } = await shelfOnTheGrid();
+    document.body.appendChild(wrapper.element);
+
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "a", ctrlKey: true }),
+    );
+    await wrapper.vm.$nextTick();
+    expect(store.selectedRows.map((row) => row.id)).toEqual([1]);
+    expect(store.visibleRows).toHaveLength(2);
+  });
+
+  /** The grid with two hand-made ("Grouped by you") sets beside card 1. */
+  async function gridWithHandMade() {
+    const { wrapper, store } = await shelfOnTheGrid();
+    document.body.appendChild(wrapper.element);
+    store.workflowSets = {
+      ...store.workflowSets,
+      handMade: [
+        { id: 10, name: "Kit", members: [] },
+        { id: 11, name: "Other", members: [] },
+      ],
+    };
+    await wrapper.vm.$nextTick();
+    return { wrapper, store };
+  }
+
+  it("takes the models AND every hand-made set on Ctrl+A", async () => {
+    const { wrapper, store } = await gridWithHandMade();
+
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "a", ctrlKey: true }),
+    );
+    await wrapper.vm.$nextTick();
+    expect(store.selectedRows.map((row) => row.id)).toEqual([1]);
+    expect(store.selectedSets.map((set) => set.id)).toEqual([10, 11]);
+    wrapper.unmount();
+  });
+
+  it("holds sets and models together on Ctrl+click, and a plain click replaces both", async () => {
+    const { wrapper, store } = await gridWithHandMade();
+
+    store.selectSet(10);
+    store.selectFromClick(1, { ctrl: true });
+    store.selectSet(11, { ctrl: true });
+    await wrapper.vm.$nextTick();
+    expect(store.selectedRows.map((row) => row.id)).toEqual([1]);
+    expect(store.selectedSets.map((set) => set.id)).toEqual([10, 11]);
+
+    store.selectFromClick(1);
+    await wrapper.vm.$nextTick();
+    expect(store.selectedSets).toHaveLength(0);
+    expect(store.selectedRows.map((row) => row.id)).toEqual([1]);
+
+    store.selectSet(10, { ctrl: true });
+    store.selectSet(11);
+    await wrapper.vm.$nextTick();
+    expect(store.selectedRows).toHaveLength(0);
+    expect(store.selectedSets.map((set) => set.id)).toEqual([11]);
+    wrapper.unmount();
+  });
+
+  it("clears both kinds on Escape, and never deletes sets from a mixed Delete", async () => {
+    // With models selected too, Delete is the FILE confirmation - a prompt -
+    // and the sets are left for their own pill.
+    deleteWorkflowSet.mockReset().mockResolvedValue({
+      deleted: { id: 10, name: "Kit", members: [] },
+    });
+    const { wrapper, store } = await gridWithHandMade();
+    const mixed = async () => {
+      store.selectSet(10);
+      store.selectFromClick(1, { ctrl: true });
+      await wrapper.vm.$nextTick();
+      expect(store.selectedSets).toHaveLength(1);
+      expect(store.selectedRows).toHaveLength(1);
+    };
+
+    await mixed();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await wrapper.vm.$nextTick();
+    expect(store.selectedSets).toHaveLength(0);
+    expect(store.selectedRows).toHaveLength(0);
+
+    await mixed();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete" }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(deleteWorkflowSet).not.toHaveBeenCalled();
+    expect(deleteModels).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("takes the hand-made sets on Ctrl+A when the grid draws no model", async () => {
+    const { wrapper, store } = await shelfOnTheGrid();
+    document.body.appendChild(wrapper.element);
+    store.workflowSets = {
+      ...store.workflowSets,
+      combinations: [],
+      handMade: [{ id: 10, name: "Kit", members: [] }],
+    };
+    await wrapper.vm.$nextTick();
+    expect(store.screenRows).toHaveLength(0);
+
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "a", ctrlKey: true }),
+    );
+    await wrapper.vm.$nextTick();
+    expect(store.selectedSets.map((set) => set.id)).toEqual([10]);
+    wrapper.unmount();
+  });
+
+  it("clears on Escape from the grid, and refuses Delete once it has", async () => {
+    const { wrapper, store } = await shelfOnTheGrid();
+    document.body.appendChild(wrapper.element);
+    store.toggleSelected(1);
+    await wrapper.vm.$nextTick();
+    // The pre-state, asserted: without it this test is green whenever the
+    // selection happens to be empty for some other reason.
+    expect(store.selectedRows).toHaveLength(1);
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await wrapper.vm.$nextTick();
+    expect(store.selectedRows).toHaveLength(0);
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete" }));
+    await wrapper.vm.$nextTick();
+    expect(deleteModels).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("titles Works with from the row list with a name, not a serialised object", async () => {
+    // A shelf row's `name` is `modelName`'s `{text, state}` pair; a set member's
+    // is a plain string. Bound straight into the heading, the row list's own
+    // entry point rendered the title as JSON - and every dialog test fabricated
+    // a flat object, so the suite never saw the shape the row list sends
+    // (#1479 review).
+    const wrapper = await mountDefaultShelf([
+      adapter({ id: 1, display_name: "Cyanwood Style" }),
+    ]);
+    const store = useModelShelfStore();
+    store.setView({ groupBy: "none" });
+    await wrapper.vm.$nextTick();
+    await rowAt(wrapper, 0).trigger("click");
+
+    wrapper.findComponent({ name: "ShelfSelectionBar" }).vm.$emit("works-with");
+    await wrapper.vm.$nextTick();
+
+    const handed = wrapper
+      .findComponent({ name: "ModelWorksWithDialog" })
+      .props().model;
+    // The ROW is handed over whole - the dialog is what normalises the two
+    // shapes - so this asserts the shape really does reach it.
+    expect(handed.id).toBe(1);
+    expect(handed.name).toMatchObject({ text: "Cyanwood Style" });
+    wrapper.unmount();
+  });
+
+  it("hands the grid's file to the one Works with dialog", async () => {
+    const wrapper = await mountDefaultShelf();
+
+    await wrapper
+      .findComponent({ name: "ModelSetGrid" })
+      .vm.$emit("works-with", { id: 7, filename: "handed-up.st" });
+    await wrapper.vm.$nextTick();
+
+    // One dialog, owned here: two mounted copies with a ref each is two dialogs
+    // that can disagree about which is open.
+    expect(wrapper.findAll(".ww-stub")).toHaveLength(1);
+    expect(wrapper.find(".ww-stub").text()).toBe("handed-up.st");
+  });
+});
+
+describe("the Group by menu", () => {
+  it("closes once a grouping is picked, and hands focus back to its button", async () => {
+    const wrapper = await mountShelf([adapter()], [], [], {
+      attachTo: document.body,
+    });
+    wrapper.vm.groupMenuOpen = true;
+
+    const group = wrapper.findComponent({ name: "ShelfSortPanel" });
+    expect(group.props("section")).toBe("group");
+    group.vm.$emit("group-picked");
+
+    expect(wrapper.vm.groupMenuOpen).toBe(false);
+    expect(document.activeElement).toBe(wrapper.vm.groupButtonRef.el);
+    wrapper.unmount();
+  });
+});
+
+describe("a row the owner has marked in a set", () => {
+  const mark = (verdict, names) => ({ combo_key: "1,2", names, verdict });
+
+  it("wears a cross that names the set, and the cross wins over a check", async () => {
+    const wrapper = await mountShelf([
+      adapter({
+        set_verdicts: [
+          mark("not_problem", ["Base", "VAE"]),
+          mark("problem", ["Base", "LoRA"]),
+        ],
+      }),
+    ]);
+    const icon = wrapper.get(".shelf-row [data-testid='verdict-icon']");
+    expect(icon.classes()).toContain("verdict-icon--negative");
+    expect(icon.attributes("aria-label")).toBe(
+      "Marked a problem in 1 set: Base + LoRA. Not a problem in 1 set: Base + VAE",
+    );
+  });
+
+  it("wears a check when every answer was not-a-problem", async () => {
+    const wrapper = await mountShelf([
+      adapter({ set_verdicts: [mark("not_problem", ["Base", "VAE"])] }),
+    ]);
+    expect(
+      wrapper.get(".shelf-row [data-testid='verdict-icon']").classes(),
+    ).toContain("verdict-icon--positive");
+  });
+
+  it("wears nothing without verdicts", async () => {
+    const wrapper = await mountShelf([adapter({ set_verdicts: [] })]);
+    expect(
+      wrapper.find(".shelf-row [data-testid='verdict-icon']").exists(),
+    ).toBe(false);
   });
 });

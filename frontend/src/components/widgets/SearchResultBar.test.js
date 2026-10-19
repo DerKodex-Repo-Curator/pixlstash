@@ -14,6 +14,18 @@ import { readFileSync } from "node:fs";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { mount } from "@vue/test-utils";
 
+vi.mock("vuetify/components", async (importOriginal) => ({
+  ...(await importOriginal()),
+  // Tooltip.vue wraps VTooltip: render the activator only, as a closed tip does.
+  VTooltip: {
+    name: "VTooltip",
+    setup:
+      (_p, { slots }) =>
+      () =>
+        slots.activator?.({ props: {} }),
+  },
+}));
+
 import SearchResultBar from "./SearchResultBar.vue";
 
 const globalOpts = {
@@ -30,8 +42,17 @@ const globalOpts = {
   },
 };
 
+// Every mount is tracked and torn down below. Left alive, the bar's `Tooltip`
+// children reach their `onUnmounted` only when Vitest disposes the file's
+// jsdom, and that hook calls `document.removeEventListener` after `document`
+// has gone — an unhandled rejection attributed to this file, appearing or not
+// with the worker scheduling rather than with anything the tests do.
+const mountedBars = [];
+
 function mountBar(props = {}) {
-  return mount(SearchResultBar, { ...globalOpts, props });
+  const wrapper = mount(SearchResultBar, { ...globalOpts, props });
+  mountedBars.push(wrapper);
+  return wrapper;
 }
 
 /** Props for an armed character face search. */
@@ -48,6 +69,11 @@ function characterSearchProps(overrides = {}) {
   };
 }
 
+/** The assign action, found by its accessible name. */
+function assignButton(wrapper) {
+  return wrapper.find('button[aria-label^="Assign "]');
+}
+
 /** The nth slider group in the panel: 0 is match strength, 1 is agreement. */
 function group(wrapper, index) {
   return wrapper.findAll(".threshold-group")[index];
@@ -59,6 +85,7 @@ function armedBar() {
 }
 
 afterEach(() => {
+  while (mountedBars.length) mountedBars.pop().unmount();
   vi.useRealTimers();
 });
 
@@ -68,7 +95,7 @@ describe("SearchResultBar - plain search", () => {
     // likeness to cut on; rendering either would be an inert control.
     const wrapper = mountBar({ statusCount: 12, statusLabel: "matches" });
     expect(wrapper.find(".search-result-threshold").exists()).toBe(false);
-    expect(wrapper.find(".assign-btn").exists()).toBe(false);
+    expect(assignButton(wrapper).exists()).toBe(false);
   });
 
   it("gives the count its own weight, separate from the sentence", () => {
@@ -92,9 +119,12 @@ describe("SearchResultBar - plain search", () => {
       statusCount: 42,
       statusLabel: 'matches for "sunset" in Landscapes',
     });
-    expect(wrapper.find(".search-result-status").attributes("title")).toBe(
-      '42 matches for "sunset" in Landscapes',
-    );
+    expect(
+      wrapper
+        .find(".search-result-status")
+        .findComponent({ name: "Tooltip" })
+        .props("text"),
+    ).toBe('42 matches for "sunset" in Landscapes');
   });
 });
 
@@ -108,7 +138,7 @@ describe("SearchResultBar - character face search", () => {
     // DOM text runs the count into it. The accessible name is a real string
     // built in JS and is the thing that must never degrade.
     const wrapper = mountBar(characterSearchProps());
-    expect(wrapper.find(".assign-btn").attributes("aria-label")).toBe(
+    expect(assignButton(wrapper).attributes("aria-label")).toBe(
       "Assign 41 to Alice",
     );
     expect(wrapper.find(".assign-label").text()).toContain("Assign 41");
@@ -121,7 +151,7 @@ describe("SearchResultBar - character face search", () => {
     const wrapper = mountBar(
       characterSearchProps({ assignCount: 12, assignFromSelection: true }),
     );
-    expect(wrapper.find(".assign-btn").attributes("aria-label")).toContain(
+    expect(assignButton(wrapper).attributes("aria-label")).toContain(
       "Assign 12 selected to Alice",
     );
     expect(wrapper.find(".assign-label").text()).toContain(
@@ -136,7 +166,7 @@ describe("SearchResultBar - character face search", () => {
     const wrapper = mountBar(
       characterSearchProps({ assignCount: 12, assignFromSelection: true }),
     );
-    expect(wrapper.find(".assign-btn").attributes("aria-label")).toContain(
+    expect(assignButton(wrapper).attributes("aria-label")).toContain(
       "Using your 12 selected, not all 41 matches.",
     );
   });
@@ -144,14 +174,14 @@ describe("SearchResultBar - character face search", () => {
   it("disables the assign action when nothing is above the cut", () => {
     // A button that promises "Assign 0" is a dead affordance.
     const wrapper = mountBar(characterSearchProps({ assignCount: 0 }));
-    expect(wrapper.find(".assign-btn").attributes("disabled")).toBeDefined();
+    expect(assignButton(wrapper).attributes("disabled")).toBeDefined();
   });
 
   it("disables the assign action while a write is in flight", () => {
     // Double-submitting a bulk assignment would raise two operation-log
     // entries, so Undo would only reverse half of it.
     const wrapper = mountBar(characterSearchProps({ assignBusy: true }));
-    expect(wrapper.find(".assign-btn").attributes("disabled")).toBeDefined();
+    expect(assignButton(wrapper).attributes("disabled")).toBeDefined();
   });
 
   it("drops the person's name before the count when space runs out", () => {
@@ -296,7 +326,7 @@ describe("SearchResultBar - character face search", () => {
 
   it("emits assign when the action is used", () => {
     const wrapper = mountBar(characterSearchProps());
-    wrapper.find(".assign-btn").trigger("click");
+    assignButton(wrapper).trigger("click");
     expect(wrapper.emitted("assign")).toHaveLength(1);
   });
 
@@ -381,8 +411,127 @@ describe("SearchResultBar - the Esc keycap", () => {
     expect(
       wrapper.find(".clear-search-btn").attributes("aria-keyshortcuts"),
     ).toBeUndefined();
-    expect(wrapper.find(".clear-search-btn").attributes("title")).toBe(
-      "Clear search - press Esc twice, or click",
+    expect(
+      wrapper
+        .find(".clear-search-btn")
+        .findComponent({ name: "Tooltip" })
+        .props("text"),
+    ).toBe("Clear search - press Esc twice, or click");
+  });
+});
+
+describe("SearchResultBar - All / In text switch (#1197)", () => {
+  const textSearch = (overrides = {}) => ({
+    statusCount: 6,
+    statusLabel: 'matches for "coffee"',
+    isAllPicturesActive: true,
+    ...overrides,
+  });
+  const scopeGroup = (w) => w.find('[role="group"][aria-label="Show matches from"]');
+
+  it("is absent when no result matched text", () => {
+    expect(
+      scopeGroup(mountBar(textSearch({ textMatchCount: 0 }))).exists(),
+    ).toBe(false);
+  });
+
+  it("appears with a text match, All pressed, the text count on In text", () => {
+    const group = scopeGroup(mountBar(textSearch({ textMatchCount: 4 })));
+    expect(group.exists()).toBe(true);
+    const [all, inText] = group.findAll("button");
+    expect(all.attributes("aria-pressed")).toBe("true");
+    expect(inText.attributes("aria-pressed")).toBe("false");
+    expect(inText.text()).toContain("In text");
+    expect(inText.text()).toContain("4");
+  });
+
+  it("pressing In text asks to narrow, pressing All asks to restore", async () => {
+    const w = mountBar(textSearch({ textMatchCount: 4 }));
+    await scopeGroup(w).findAll("button")[1].trigger("click");
+    expect(w.emitted("update:text-matches-only")).toEqual([[true]]);
+
+    await w.setProps({ textMatchesOnly: true });
+    const [all, inText] = scopeGroup(w).findAll("button");
+    expect(inText.attributes("aria-pressed")).toBe("true");
+    await all.trigger("click");
+    expect(w.emitted("update:text-matches-only")).toEqual([[true], [false]]);
+  });
+
+  it("gives way to the face search's tuning control", () => {
+    const w = mountBar(characterSearchProps({ textMatchCount: 4 }));
+    expect(scopeGroup(w).exists()).toBe(false);
+  });
+
+  it("announces the narrowed sentence", async () => {
+    vi.useFakeTimers();
+    const w = mountBar(textSearch({ textMatchCount: 4 }));
+    await w.setProps({
+      textMatchesOnly: true,
+      statusCount: 4,
+      statusLabel: 'matches in text for "coffee"',
+    });
+    vi.advanceTimersByTime(300);
+    await w.vm.$nextTick();
+    expect(w.find('[role="status"]').text()).toBe(
+      '4 matches in text for "coffee"',
     );
+  });
+});
+
+// The set twin (#1489): the same bar, other copy, and an agreement knob that
+// starts at zero (tags off) rather than one reference face.
+describe("SearchResultBar - set suggestion search", () => {
+  function setSearchProps(overrides = {}) {
+    return characterSearchProps({
+      suggestKind: "set",
+      threshold: 0.82,
+      thresholdMin: 0,
+      thresholdMax: 1,
+      minRefs: 0,
+      referenceCount: 3,
+      assignTarget: "Beach",
+      assignCount: 14,
+      ...overrides,
+    });
+  }
+
+  it("says Add, not Assign, on the bulk action", () => {
+    const wrapper = mountBar(setSearchProps());
+    const button = wrapper.find('button[aria-label^="Add "]');
+    expect(button.attributes("aria-label")).toBe("Add 14 to Beach");
+    expect(wrapper.find(".assign-label").text()).toContain("Add 14");
+    expect(assignButton(wrapper).exists()).toBe(false);
+  });
+
+  it("labels the second knob as tags and lets it go down to zero", () => {
+    const wrapper = mountBar(setSearchProps());
+    const tags = group(wrapper, 1);
+    expect(tags.find(".section-label").text()).toBe("Tags in common");
+    expect(tags.find(".threshold-readout").text()).toBe("0 of 3");
+    expect(tags.find(".search-result-threshold-input").attributes("min")).toBe(
+      "0",
+    );
+  });
+
+  it("keeps the tag knob off the trigger at zero, and shows it above", () => {
+    expect(
+      mountBar(setSearchProps()).find(".search-result-threshold-refs").exists(),
+    ).toBe(false);
+    expect(
+      mountBar(setSearchProps({ minRefs: 2 }))
+        .find(".search-result-threshold-refs")
+        .text(),
+    ).toContain("2/3");
+  });
+
+  it("offers a single signature tag as an on/off knob", () => {
+    // Zero to one is a real choice, unlike one-of-one reference faces.
+    const wrapper = mountBar(setSearchProps({ referenceCount: 1 }));
+    expect(wrapper.findAll(".threshold-group")).toHaveLength(2);
+  });
+
+  it("drops the tag knob when the set has no signature tags", () => {
+    const wrapper = mountBar(setSearchProps({ referenceCount: 0 }));
+    expect(wrapper.findAll(".threshold-group")).toHaveLength(1);
   });
 });

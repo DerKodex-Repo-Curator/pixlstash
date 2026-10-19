@@ -19,6 +19,11 @@ import { setActivePinia, createPinia } from "pinia";
 vi.mock("vuetify/components", () => ({
   VIcon: { name: "v-icon", template: "<i><slot /></i>" },
   VDialog: { name: "v-dialog", template: "<div><slot /></div>" },
+  // Tooltip.vue wraps VTooltip: render the activator only, as a closed tip does.
+  VTooltip: {
+    name: "VTooltip",
+    setup: (_p, { slots }) => () => slots.activator?.({ props: {} }),
+  },
 }));
 
 const streamPictures = vi.fn();
@@ -161,9 +166,9 @@ describe("search", () => {
     await w.find(".pp-search input").trigger("keydown", { key: "Enter" });
     await flush(w);
 
-    expect(searchPictures).toHaveBeenCalledWith("red dress", {
-      query: "character_id=7",
-    });
+    const [text, { query }] = searchPictures.mock.calls.at(-1);
+    expect(text).toBe("red dress");
+    expect(new URLSearchParams(query).get("character_id")).toBe("7");
     expect(w.findAll(".pp-cell")).toHaveLength(1);
   });
 });
@@ -292,6 +297,75 @@ describe("the ceilings, and saying so", () => {
   });
 });
 
+describe("the media type", () => {
+  // A workflow's LoadImage cannot read a video file, so by default the picker
+  // offers still images only, and says so in every read - the grid, the
+  // search and the Everything count.
+  const VCheckbox = {
+    name: "v-checkbox",
+    props: ["modelValue"],
+    emits: ["update:modelValue"],
+    template: `<input type="checkbox" class="pp-videos" :checked="modelValue"
+      @change="$emit('update:modelValue', $event.target.checked)" />`,
+  };
+
+  async function mountWith(props) {
+    const w = mount(PicturePicker, {
+      props: { open: true, ...props },
+      global: { stubs: { "v-checkbox": VCheckbox } },
+    });
+    await flush(w);
+    return w;
+  }
+
+  it("is still images only, with no way to add videos, by default", async () => {
+    const w = await mountWith({});
+    const formats = lastStreamQuery().getAll("format");
+    expect(formats).toContain("PNG");
+    expect(formats).not.toContain("MP4");
+    const counted = new URLSearchParams(getPictureCount.mock.calls.at(-1)[0]);
+    expect(counted.getAll("format")).toContain("PNG");
+    expect(w.find(".pp-videos").exists()).toBe(false);
+
+    await w.find(".pp-search input").setValue("cat");
+    await w.find(".pp-search input").trigger("keydown", { key: "Enter" });
+    await flush(w);
+    const { query } = searchPictures.mock.calls.at(-1)[1];
+    const searched = new URLSearchParams(query);
+    expect(searched.getAll("format")).toContain("PNG");
+  });
+
+  it("lets a caller that can use a video offer them, unticked", async () => {
+    const w = await mountWith({ offerVideos: true });
+    expect(lastStreamQuery().getAll("format")).toContain("PNG");
+
+    await w.find(".pp-videos").setValue(true);
+    await flush(w);
+    expect(lastStreamQuery().getAll("format")).toEqual([]);
+    expect(getPictureCount.mock.calls.at(-1)[0]).toBe("");
+
+    // An empty grid names the checkbox only where there is one.
+    streamPictures.mockResolvedValue(batch([]));
+    await w.find(".pp-videos").setValue(false);
+    await flush(w);
+    expect(w.find(".pp-note").text()).toContain("Tick Include videos");
+    await w.setProps({ offerVideos: false });
+    expect(w.find(".pp-note").text()).toContain("Videos are not offered");
+
+    await w.setProps({ offerVideos: true });
+    await w.find(".pp-videos").setValue(true);
+    await flush(w);
+    expect(w.find(".pp-videos").element.checked).toBe(true);
+
+    // Not remembered: the next open is images only again.
+    await w.setProps({ open: false });
+    await w.setProps({ open: true });
+    await flush(w);
+    expect(w.find(".pp-videos").element.checked).toBe(false);
+    expect(lastStreamQuery().getAll("format")).toContain("PNG");
+  });
+});
+
 describe("the facet rail's truncation", () => {
   it("shows the top few and opens the rest on All N", async () => {
     listCharacters.mockResolvedValue(
@@ -342,7 +416,7 @@ describe("a picture whose file cannot be reached", () => {
 
     const cell = w.findAll(".pp-cell")[0];
     expect(cell.classes()).toContain("pp-cell--gone");
-    expect(cell.attributes("title")).toContain("not available");
+    expect(cell.findComponent({ name: "Tooltip" }).props("text")).toContain("not available");
     await cell.trigger("click");
     expect(w.findAll(".pp-cell--on")).toHaveLength(0);
   });

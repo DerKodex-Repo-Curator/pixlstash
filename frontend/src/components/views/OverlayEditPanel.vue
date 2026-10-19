@@ -1,0 +1,961 @@
+<template>
+  <!-- The body of the sidebar's Edit tab (#1381, design "Slim Form"): pick an
+       edit workflow, say what should change, run it. The lightbox stays on the
+       picture; the result joins its stack and the tab says where it went. -->
+  <div class="edit-pane">
+    <div v-if="loading" class="edit-note">Reading your workflows…</div>
+    <div v-else-if="loadError" class="edit-note">{{ loadError }}</div>
+
+    <div v-else-if="!cards.length" class="edit-empty">
+      <p v-if="unrunnable" class="edit-empty-lead">
+        None of your edit workflows can run as they stand. Open one in
+        Workflows and press Run… to see why.
+      </p>
+      <p v-else class="edit-empty-lead">
+        None of your workflows takes a single picture as its input, so there is
+        nothing to run this picture through.
+      </p>
+      <p class="edit-note">
+        An image-to-image, inpaint or outpaint workflow with one open picture
+        input shows up here.
+      </p>
+      <AppButton
+        size="sm"
+        block
+        on-dark
+        @click="router.push({ name: 'workflows' })"
+      >
+        Open Workflows
+      </AppButton>
+    </div>
+
+    <template v-else>
+      <div class="edit-scroll">
+        <div class="section-label section-label--on-dark edit-sec">
+          <span :id="workflowLabelId">Workflow</span>
+          <span class="edit-sec-end">
+            <span v-if="workflowId === rememberedKey" class="edit-aside"
+              >last used</span
+            >
+            <!-- The Recipe tab's "Open", on the card this tab would run. -->
+            <button
+              v-if="workflowId"
+              class="edit-sec-act"
+              type="button"
+              @click="openInWorkflows"
+            >
+              <Tooltip
+                text="Show this workflow in the Workflows view"
+                activator="parent"
+                :describe="false"
+              />
+              Open
+              <v-icon size="14">mdi-chevron-right</v-icon>
+            </button>
+          </span>
+        </div>
+        <!-- The app's one menu in its on-dark skin, not a native <select>:
+             an OS-drawn popup ignores the theme (PluginSelect was a <select>
+             briefly for the same reason). A below-opening menu's min-width is
+             capped at its activator's, so the oversized floor makes the menu
+             exactly as wide as the field. -->
+        <v-menu
+          v-model="pickerOpen"
+          location="bottom start"
+          :offset="4"
+          :min-width="10000"
+          @after-leave="onPickerAfterLeave"
+        >
+          <template #activator="{ props: menuProps }">
+            <button
+              v-bind="withRef(menuProps, (el) => (pickerTriggerRef = el))"
+              class="edit-select"
+              type="button"
+              :aria-labelledby="`${workflowLabelId} ${pickerValueId}`"
+            >
+              <span :id="pickerValueId" class="edit-select-name">{{
+                workflowId
+                  ? chosenCard?.name || "Untitled workflow"
+                  : "Choose a workflow"
+              }}</span>
+              <span class="edit-kind">{{ chosenCard?.type_label }}</span>
+              <v-icon class="edit-select-chevron" aria-hidden="true"
+                >mdi-chevron-down</v-icon
+              >
+            </button>
+          </template>
+          <div
+            class="ctx-menu ctx-menu--on-dark"
+            role="menu"
+            aria-label="Workflow"
+            tabindex="-1"
+            @keydown="onMenuKeydown"
+          >
+            <button
+              v-for="card in cards"
+              :key="card.id"
+              class="ctx-item edit-option"
+              type="button"
+              role="menuitemradio"
+              :aria-checked="card.id === workflowId ? 'true' : 'false'"
+              @click="choose(card.id)"
+            >
+              <!-- The ellipsis: this one opens the Run popup. -->
+              <span class="ctx-label-text"
+                >{{ card.name || "Untitled workflow"
+                }}{{ fillInPopup.has(card.id) ? "…" : "" }}</span
+              >
+              <span class="visually-hidden">, </span>
+              <span class="edit-kind">{{ card.type_label }}</span>
+            </button>
+            <div class="ctx-sep" role="separator"></div>
+            <p class="edit-menu-note">
+              Upscalers are not listed here. Use More options… for those.
+            </p>
+          </div>
+        </v-menu>
+
+        <label
+          :for="instructionFieldId"
+          class="section-label section-label--on-dark edit-sec"
+        >
+          <span>What should change?</span>
+        </label>
+        <textarea
+          :id="instructionFieldId"
+          v-model="instruction"
+          class="edit-textarea"
+          rows="4"
+          :aria-describedby="shortcutHintId"
+          @keydown="onInstructionKeydown"
+        ></textarea>
+
+        <label class="edit-check">
+          <input v-model="stack" type="checkbox" />
+          Stack with the original
+        </label>
+
+        <template v-if="runHere">
+          <div class="section-label section-label--on-dark edit-sec">
+            <span>{{ runHeading }}</span>
+            <span v-if="run.status === 'running'" class="edit-aside"
+              >{{ comfyuiProgressPercent }}%</span
+            >
+          </div>
+          <template v-if="run.status === 'running'">
+            <div
+              class="edit-bar"
+              role="progressbar"
+              aria-label="Edit progress"
+              :aria-valuenow="comfyuiProgressPercent"
+              aria-valuemin="0"
+              aria-valuemax="100"
+            >
+              <i :style="{ width: `${comfyuiProgressPercent}%` }"></i>
+            </div>
+            <p class="edit-note">
+              You can keep browsing.
+              {{
+                run.stack
+                  ? "The result joins the original's stack when it lands."
+                  : "The result is saved to your library when it lands."
+              }}
+            </p>
+          </template>
+          <p v-else-if="run.status === 'failed'" class="edit-note" role="alert">
+            {{ run.message }}
+          </p>
+          <div v-else class="edit-last">
+            <img
+              v-if="run.resultId"
+              class="edit-last-thumb"
+              :src="pictureThumbnailUrl(run.resultId)"
+              alt=""
+            />
+            <div class="edit-last-text">
+              <div class="edit-last-instruction">
+                {{ run.instruction ? `“${run.instruction}”` : "No instruction" }}
+              </div>
+              <div class="edit-note">
+                {{ run.workflowName }}
+                <template v-if="run.stack">· added to the original's stack</template>
+              </div>
+              <button
+                v-if="run.stack && run.resultId"
+                type="button"
+                class="edit-link"
+                @click="showResult"
+              >
+                Show it
+              </button>
+              <p v-else-if="run.stack && run.lookedInVain" class="edit-note">
+                It has not reached the stack yet. It will be there once it is
+                imported.
+              </p>
+              <p v-else-if="run.stack" class="edit-note">
+                Adding it to the stack…
+              </p>
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <div class="edit-foot">
+        <p v-if="submitError" class="edit-note" role="alert">
+          {{ submitError }}
+        </p>
+        <AppButton
+          on-dark
+          variant="primary"
+          size="sm"
+          block
+          :loading="submitting"
+          @click="submit"
+        >
+          <v-icon v-if="!submitting" size="16">mdi-play</v-icon>
+          Run edit
+        </AppButton>
+        <div class="edit-foot-row">
+          <button type="button" class="edit-link" @click="onMoreOptions()">
+            More options…
+          </button>
+          <span :id="shortcutHintId" class="edit-note">Ctrl + Enter</span>
+        </div>
+      </div>
+    </template>
+  </div>
+</template>
+
+<script setup>
+/**
+ * The Edit tab of the lightbox sidebar (#1381).
+ *
+ * Built to the "Slim Form" design: three fields and a button. Everything past
+ * the instruction (LoRAs, seed, size) stays in the Run popup, one click away
+ * behind *More options…*, which opens it with this picture, this workflow and
+ * the typed instruction filled in.
+ *
+ * **Which cards count.** Image to Image, Inpaint and Outpaint only - the card
+ * types whose graph starts from a picture and takes an instruction. Upscalers
+ * are left out (a form with a dead text box) and stay on *Use as input for…*.
+ * Hidden cards stay out because the grid's default list leaves them out.
+ *
+ * **Only cards that would run.** Each edit card is pre-flighted against the
+ * open picture, the same question Run asks, and one that answers with a reason
+ * is dropped: a missing node or model, a UI-format file. A card whose only
+ * reason is an open picture input (a reference beside the open picture) is
+ * listed with an ellipsis and never becomes the tab's card: an instruction
+ * alone cannot run it, so choosing it opens the Run popup, which can fill it. A node the server replaces (a seed node) or a LoRA it bypasses is not
+ * a reason, so those cards stay. A ComfyUI that cannot be asked (not set up,
+ * not running) is no verdict on any one card, so every card stays and the run
+ * says why; so does a card whose pre-flight itself failed.
+ *
+ * **After a run the lightbox stays put.** The run is handed to the grid
+ * WITHOUT a source picture, because a source picture is what makes the grid
+ * step the lightbox to the newest stack member when the output lands - the
+ * Run popup's behaviour, and the opposite of this design. *Show it* does that
+ * step when asked.
+ *
+ * One run is shown at a time. A second Run while the first is going is queued
+ * by ComfyUI as usual, and the tab follows the newest.
+ */
+import { computed, onBeforeUnmount, ref, useId, watch } from "vue";
+import { useRouter } from "vue-router";
+import AppButton from "../widgets/AppButton.vue";
+import Tooltip from "../widgets/Tooltip.vue";
+import {
+  listWorkflowCards,
+  preflightWorkflowRun,
+  runWorkflowCard,
+} from "../../api/workflows";
+import { pictureThumbnailUrl } from "../../api/pictures";
+import { useLibrariesStore } from "../../stores/useLibrariesStore";
+import { useRunDialogStore } from "../../stores/useRunDialogStore";
+import { errorMessage } from "../../utils/apiError";
+import {
+  PICTURE_INPUT_UNFILLED,
+  UNCHECKED_CODES,
+  readReason,
+} from "../../utils/runReasons";
+import { onMenuKeydown } from "../../utils/menuKeyboard";
+import { runTaskLabel } from "../../utils/runTaskLabel";
+import { withRef } from "../../utils/withRef";
+import { selectNewestStackMember } from "../../utils/stack";
+import { stackMemberIds } from "../../utils/stackMembers";
+
+const props = defineProps({
+  /** The open picture. */
+  pictureId: { type: [Number, String], default: null },
+  /** Whether the tab is the one on screen; the card list is read on first show. */
+  active: { type: Boolean, default: false },
+  /** The grid's ComfyUI progress, `{status, message}`. */
+  comfyuiProgress: { type: Object, default: null },
+  comfyuiProgressPercent: { type: Number, default: 0 },
+});
+
+const emit = defineEmits(["show-picture", "more-options", "running"]);
+const router = useRouter();
+
+/** The card types this tab lists, as `workflow_type` spells them. */
+const EDIT_TYPES = new Set(["img2img", "inpaint", "outpaint"]);
+
+const LAST_KEY_PREFIX = "pixlstash:editTabWorkflow:";
+
+const workflowLabelId = useId();
+const pickerValueId = useId();
+const instructionFieldId = useId();
+const shortcutHintId = useId();
+
+const runDialog = useRunDialogStore();
+const libraries = useLibrariesStore();
+
+const cards = ref([]);
+// Edit cards the pre-flight turned away, so the empty state can say so.
+const unrunnable = ref(0);
+// Cards that run once the Run popup fills their other picture inputs.
+const fillInPopup = ref(new Set());
+const loaded = ref(false);
+const loading = ref(false);
+const loadError = ref("");
+const workflowId = ref("");
+const rememberedKey = ref("");
+// Kept across filmstrip steps on purpose, so one instruction can be run on
+// several pictures in a row. It is never filled from the picture's recipe.
+const instruction = ref("");
+const stack = ref(true);
+const submitting = ref(false);
+const submitError = ref("");
+/**
+ * The run this tab started last, or null.
+ * `{sourceId, workflowName, instruction, stack, status, message, beforeIds,
+ * resultId, lookedInVain}` - `status` is running | done | failed.
+ */
+const run = ref(null);
+
+const pickerOpen = ref(false);
+const pickerTriggerRef = ref(null);
+// The chosen row leaves with the menu and takes focus to <body>; the field is
+// refocused once the close transition ends, as PluginSelect does.
+let refocusPicker = false;
+
+const chosenCard = computed(
+  () => cards.value.find((card) => card.id === workflowId.value) || null,
+);
+
+// Whether the reader has picked a card by hand since the list loaded, which the
+// late library key below must not overrule.
+let choseByHand = false;
+
+function choose(key) {
+  pickerOpen.value = false;
+  if (fillInPopup.value.has(key)) {
+    // The Run popup takes focus; handing it back to the picker would steal it.
+    onMoreOptions(key, true);
+    return;
+  }
+  refocusPicker = true;
+  choseByHand = true;
+  workflowId.value = key;
+}
+
+function onPickerAfterLeave() {
+  if (!refocusPicker) return;
+  refocusPicker = false;
+  pickerTriggerRef.value?.focus?.();
+}
+
+const storageKey = computed(
+  () => `${LAST_KEY_PREFIX}${libraries.activeLibrary?.uuid || ""}`,
+);
+
+// The library list can arrive after the cards did (a lightbox opened from a
+// deep link), which moves the key from "no library" to the real one. Read the
+// remembered card again under it, or the first run would be remembered under
+// one key and looked up under another. A library SWITCH reloads the page.
+watch(storageKey, () => {
+  if (!loaded.value) return;
+  rememberedKey.value = readRemembered();
+  if (!choseByHand && runsHere(rememberedKey.value)) {
+    workflowId.value = rememberedKey.value;
+  }
+});
+
+// The run belongs to the picture it started from (and the picture it made);
+// stepping to any other picture shows that picture's form, not this run.
+const runHere = computed(() => {
+  const current = run.value;
+  if (!current) return null;
+  const here = String(props.pictureId);
+  return String(current.sourceId) === here || String(current.resultId) === here
+    ? current
+    : null;
+});
+
+// A refusal is about the picture it was for.
+watch(
+  () => props.pictureId,
+  () => {
+    submitError.value = "";
+  },
+);
+
+const runHeading = computed(() => {
+  if (run.value?.status === "running") return "Running";
+  if (run.value?.status === "failed") return "Edit failed";
+  return "Last edit";
+});
+
+function readRemembered() {
+  try {
+    return window.localStorage?.getItem(storageKey.value) || "";
+  } catch (err) {
+    console.warn("Could not read the Edit tab's last workflow:", err);
+    return "";
+  }
+}
+
+function remember(key) {
+  rememberedKey.value = key;
+  try {
+    window.localStorage?.setItem(storageKey.value, key);
+  } catch (err) {
+    console.warn("Could not remember the Edit tab's workflow:", err);
+  }
+}
+
+async function loadCards() {
+  if (loaded.value || loading.value) return;
+  loading.value = true;
+  loadError.value = "";
+  try {
+    // The Workflows grid's own list: one card per workflow, and no
+    // one-offs. Every variant and every pulled experiment made the picker too
+    // long to be any use.
+    const { cards: all } = await listWorkflowCards();
+    const edits = all.filter((card) => EDIT_TYPES.has(card.type));
+    const runs = await Promise.all(edits.map(wouldRun));
+    cards.value = edits.filter((_, index) => runs[index]);
+    fillInPopup.value = new Set(
+      edits.filter((_, index) => runs[index] === FILL).map((card) => card.id),
+    );
+    unrunnable.value = edits.length - cards.value.length;
+    rememberedKey.value = readRemembered();
+    // The last one used from this tab, else the first Image to Image card in
+    // the grid's own order, else whatever edit card comes first - of the
+    // cards the open picture alone can run.
+    const here = cards.value.filter((card) => runsHere(card.id));
+    workflowId.value = runsHere(rememberedKey.value)
+      ? rememberedKey.value
+      : (here.find((card) => card.type === "img2img") || here[0])?.id || "";
+    loaded.value = true;
+  } catch (err) {
+    loadError.value = errorMessage(err, "Could not read your workflows.");
+  } finally {
+    loading.value = false;
+  }
+}
+
+const FILL = "fill";
+
+/** A listed card the open picture alone can run. */
+function runsHere(key) {
+  return (
+    !fillInPopup.value.has(key) && cards.value.some((card) => card.id === key)
+  );
+}
+
+/**
+ * True when the card runs on the open picture, `FILL` when the pre-flight's
+ * only objection is a picture input the Run popup can fill, false otherwise.
+ */
+async function wouldRun(card) {
+  const id = Number(props.pictureId);
+  if (!Number.isFinite(id) || id <= 0) return true;
+  try {
+    const answer = await preflightWorkflowRun({
+      picture_ids: [id],
+      target: card.id,
+    });
+    const reasons = (answer?.groups || [])
+      .flatMap((group) => group.reasons || [])
+      .filter((reason) => !UNCHECKED_CODES.includes(reason.code));
+    if (!reasons.length) return true;
+    return reasons.every((reason) => reason.code === PICTURE_INPUT_UNFILLED)
+      ? FILL
+      : false;
+  } catch (err) {
+    console.warn(`Could not pre-flight ${card.id} for the Edit tab:`, err);
+    return true;
+  }
+}
+
+watch(
+  () => props.active,
+  (active) => {
+    if (active) void loadCards();
+  },
+  { immediate: true },
+);
+
+/**
+ * The picture this run made: the newest stack member that was not there
+ * before the run. Null while the output has not been imported yet.
+ */
+async function findResult(current) {
+  const { members } = await stackMemberIds(current.sourceId);
+  const fresh = members.filter((row) => !current.beforeIds.has(String(row.id)));
+  return selectNewestStackMember(fresh)?.id ?? null;
+}
+
+let resolveTimer = null;
+// ponytail: polls the stack after ComfyUI finishes, because the output is
+// imported a moment later; a `picture_imported` hook would be exact. Half a
+// minute covers a slow import; *Show it* appears only once the poll finds it.
+const RESOLVE_ATTEMPTS = 20;
+const RESOLVE_DELAY_MS = 1500;
+
+async function resolveResult(current, attempt = 1) {
+  if (run.value !== current || !current.stack) return;
+  // The popup could not read the stack before the run, so no member can be
+  // told apart as this run's: say so rather than guess.
+  if (!current.beforeIds) {
+    run.value = { ...current, lookedInVain: true };
+    return;
+  }
+  try {
+    current.resultId = await findResult(current);
+  } catch (err) {
+    console.warn(
+      `Could not look up the result of the edit on picture ${current.sourceId}:`,
+      err,
+    );
+  }
+  if (run.value !== current) return;
+  run.value = { ...current };
+  if (!current.resultId && attempt < RESOLVE_ATTEMPTS) {
+    resolveTimer = setTimeout(
+      () => resolveResult(run.value, attempt + 1),
+      RESOLVE_DELAY_MS,
+    );
+  } else if (!current.resultId) {
+    run.value = { ...current, lookedInVain: true };
+  }
+}
+
+// The grid follows the runs started from it (`useGridComfyuiRuns`), so this
+// tab reads that state rather than asking after its run itself.
+watch(
+  () => props.comfyuiProgress?.status,
+  (status) => {
+    const current = run.value;
+    if (!current || current.status !== "running") return;
+    if (status === "completed") {
+      run.value = { ...current, status: "done" };
+      void resolveResult(run.value);
+    } else if (status === "failed") {
+      run.value = {
+        ...current,
+        status: "failed",
+        message: props.comfyuiProgress?.message || "ComfyUI could not run it.",
+      };
+    }
+  },
+);
+
+// Whether the grid's ComfyUI state on screen is this tab's run: while it runs,
+// and through the short "complete" tail after it, which the tab's own Last
+// edit already says. The lightbox drops its own bar for as long as this
+// holds. A later run from the grid's menus flips the state back to running,
+// which this done run does not claim.
+const tellsRun = computed(() => {
+  const status = runHere.value?.status;
+  if (status === "running") return true;
+  return (
+    status === "done" &&
+    !!props.comfyuiProgress?.visible &&
+    props.comfyuiProgress?.status === "completed"
+  );
+});
+
+watch(tellsRun, (running) => emit("running", running));
+
+onBeforeUnmount(() => {
+  clearTimeout(resolveTimer);
+  if (tellsRun.value) emit("running", false);
+});
+
+// Only offered once the result has been found, so it always has somewhere to go.
+function showResult() {
+  const current = run.value;
+  if (current?.resultId) {
+    emit("show-picture", current.resultId, current.sourceId);
+  }
+}
+
+function onInstructionKeydown(event) {
+  if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault();
+    void submit();
+  }
+}
+
+function openInWorkflows() {
+  if (!workflowId.value) return;
+  router.push({ name: "workflows", query: { workflow: workflowId.value } });
+}
+
+/**
+ * The Run popup for this picture. *edit* is a card chosen because it needs
+ * another picture: the popup opens as an edit of this one, reading none of its
+ * recipe, as the tab's own Run would. *More options…* keeps the recipe read.
+ */
+function onMoreOptions(key = workflowId.value, edit = false) {
+  const id = Number(props.pictureId);
+  if (!Number.isFinite(id) || id <= 0) return;
+  emit("more-options", {
+    pictureId: id,
+    workflowId: key,
+    edit,
+    // The tab's own choice, which the popup would otherwise re-default.
+    stack: stack.value,
+    // Trimmed as Run trims it, so a blank box means the same thing on both
+    // paths: no instruction.
+    prompt: instruction.value.trim(),
+  });
+}
+
+async function submit() {
+  const id = Number(props.pictureId);
+  if (submitting.value || !workflowId.value) return;
+  if (!Number.isFinite(id) || id <= 0) return;
+  submitting.value = true;
+  submitError.value = "";
+  clearTimeout(resolveTimer);
+  const card = cards.value.find((row) => row.id === workflowId.value);
+  const text = instruction.value.trim();
+  try {
+    // Before the run, so the member it adds can be told apart afterwards.
+    const before = stack.value
+      ? (await stackMemberIds(id)).ids
+      : new Set([String(id)]);
+    // Filed where the Run popup would file it: the set, project and person in
+    // view, which the grid keeps on the store. Sent only when there is one.
+    const view = runDialog.context || {};
+    const destination = {
+      set_id: view.set_id ?? null,
+      project_id: view.project_id ?? null,
+      character_id: view.character_id ?? null,
+    };
+    const answer = await runWorkflowCard({
+      picture_ids: [id],
+      target: workflowId.value,
+      // An empty box leaves the workflow's own prompt alone: `""` would blank
+      // every positive prompt node in the graph.
+      prompt: text || null,
+      stack: stack.value,
+      ...(Object.values(destination).some((value) => value != null)
+        ? { destination }
+        : {}),
+      label: runTaskLabel({ workflow: card?.name }),
+    });
+    const prompts = Array.isArray(answer?.prompts) ? answer.prompts : [];
+    if (!prompts.length) {
+      const reasons = (answer?.groups || []).flatMap((g) => g.reasons || []);
+      const said = reasons.map((reason) => readReason(reason).text);
+      submitError.value = said.length
+        ? `Nothing was queued: ${said.join(" ")}`
+        : "Nothing was queued.";
+      return;
+    }
+    remember(workflowId.value);
+    follow(id, card?.name, text, stack.value, before);
+    // No picture ids: see the component's docstring.
+    runDialog.started(prompts, []);
+  } catch (err) {
+    submitError.value = errorMessage(err, "Could not start the edit.");
+  } finally {
+    submitting.value = false;
+  }
+}
+
+function follow(sourceId, workflowName, text, stacked, before) {
+  run.value = {
+    sourceId,
+    workflowName: workflowName || "Untitled workflow",
+    instruction: text,
+    stack: stacked,
+    status: "running",
+    message: "",
+    beforeIds: before,
+    resultId: null,
+  };
+}
+
+// A run the Run popup started for this tab (*More options…*, or a card that
+// needs a reference picture), followed as one of its own. App.vue has already
+// handed it on without picture ids, so the lightbox stays put.
+watch(
+  () => runDialog.editRun,
+  (started) => {
+    if (!started) return;
+    // Taken, so nothing stale is left on the store for a later reader.
+    runDialog.editRun = null;
+    clearTimeout(resolveTimer);
+    // Read by the popup BEFORE it queued the run, as `submit` does here.
+    follow(
+      started.pictureId,
+      started.workflowName,
+      started.instruction,
+      started.stack,
+      started.beforeIds,
+    );
+  },
+);
+
+defineExpose({ submit });
+</script>
+
+<style scoped>
+.edit-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+.edit-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.edit-sec {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-5) 0 var(--space-3);
+}
+
+.edit-scroll > .edit-sec:first-child {
+  padding-top: 0;
+}
+
+.edit-sec-end {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* The Recipe tab's `.recipe-sec-act`, in this tab's label row. */
+.edit-sec-act {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: var(--weight-medium);
+  font-size: var(--text-xs);
+  color: rgba(var(--v-theme-on-dark-surface), 0.75);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+}
+
+.edit-sec-act:hover {
+  background: rgba(var(--v-theme-on-dark-surface), 0.16);
+  color: rgb(var(--v-theme-on-dark-surface));
+}
+
+.edit-aside {
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: var(--weight-medium);
+  font-size: var(--text-xs);
+  color: rgba(var(--v-theme-on-dark-surface), var(--opacity-text-secondary));
+}
+
+.edit-select,
+.edit-textarea {
+  width: 100%;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(var(--v-theme-on-dark-surface), 0.2);
+  background: rgba(var(--v-theme-shadow), 0.35);
+  color: rgb(var(--v-theme-on-dark-surface));
+  font-family: inherit;
+  font-size: var(--text-sm);
+}
+
+/* The field box, as a button so it opens the app's menu. */
+.edit-select {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: var(--control-h);
+  padding: 0 var(--space-3);
+  text-align: left;
+  cursor: pointer;
+}
+
+.edit-select:focus-visible {
+  outline-color: rgb(var(--v-theme-on-dark-surface));
+}
+
+.edit-select-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.edit-select-chevron {
+  flex-shrink: 0;
+  font-size: var(--gutter-glyph);
+  color: rgba(var(--v-theme-on-dark-surface), var(--opacity-text-secondary));
+}
+
+/* The workflow's type, as the design's small chip on the field and each row. */
+.edit-kind {
+  flex-shrink: 0;
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-sm);
+  background: rgba(var(--v-theme-on-dark-surface), 0.1);
+  font-size: var(--text-2xs);
+  color: rgba(var(--v-theme-on-dark-surface), var(--opacity-text-secondary));
+  white-space: nowrap;
+}
+
+.edit-option[aria-checked="true"] {
+  background: rgba(var(--v-theme-on-dark-surface), 0.1);
+}
+
+.edit-menu-note {
+  margin: 0;
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--text-xs);
+  line-height: var(--leading-snug);
+  color: rgba(var(--v-theme-on-dark-surface), var(--opacity-text-secondary));
+  white-space: normal;
+}
+
+.edit-textarea {
+  display: block;
+  min-height: 76px;
+  padding: var(--space-3);
+  line-height: var(--leading-snug);
+  resize: vertical;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(var(--v-theme-on-dark-surface), 0.4) transparent;
+}
+
+.edit-check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  font-size: var(--text-sm);
+  color: rgb(var(--v-theme-on-dark-surface));
+}
+
+.edit-check input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: rgb(var(--v-theme-primary));
+}
+
+.edit-bar {
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: rgba(var(--v-theme-on-dark-surface), 0.12);
+  overflow: hidden;
+}
+
+.edit-bar i {
+  display: block;
+  height: 100%;
+  background: rgb(var(--v-theme-dark-surface-accent));
+  transition: width var(--dur-2) var(--ease-standard);
+}
+
+.edit-note {
+  margin: var(--space-3) 0 0;
+  font-size: var(--text-xs);
+  line-height: var(--leading-snug);
+  color: rgba(var(--v-theme-on-dark-surface), var(--opacity-text-secondary));
+}
+
+.edit-empty-lead {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+  color: rgb(var(--v-theme-on-dark-surface));
+}
+
+.edit-empty .edit-note {
+  margin-bottom: var(--space-4);
+}
+
+.edit-last {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+}
+
+.edit-last-thumb {
+  width: 48px;
+  height: 32px;
+  flex: none;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+}
+
+.edit-last-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.edit-last-text .edit-note {
+  margin-top: var(--space-1);
+}
+
+.edit-last-instruction {
+  font-size: var(--text-sm);
+  color: rgb(var(--v-theme-on-dark-surface));
+  overflow-wrap: anywhere;
+}
+
+.edit-link {
+  padding: 0;
+  font-family: inherit;
+  font-size: var(--text-xs);
+  color: rgba(var(--v-theme-on-dark-surface), 0.75);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.edit-link:hover {
+  color: rgb(var(--v-theme-on-dark-surface));
+}
+
+.edit-foot {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-4);
+  margin-top: var(--space-4);
+  border-top: 1px solid rgba(var(--v-theme-on-dark-surface), 0.12);
+}
+
+.edit-foot .edit-note {
+  margin: 0;
+}
+
+.edit-foot-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+</style>

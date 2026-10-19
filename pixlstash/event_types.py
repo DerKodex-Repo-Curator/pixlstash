@@ -30,3 +30,13 @@ class EventType(Enum):
     # polling; the count itself is re-fetched from GET /moves/pending, this
     # event only says "look again".
     EXTERNAL_MOVES_PENDING = auto()
+    # A workflow changed: imported, edited, merged or split, or a saved recipe
+    # written (v1.12 B4, #1623). A "look again" signal like
+    # EXTERNAL_MOVES_PENDING - it names the workflow ids it touched and why,
+    # and the client re-fetches GET /workflows rather than trusting a card
+    # carried on the wire.
+    CHANGED_WORKFLOWS = auto()
+    # Models were moved onto the shelf from the watched Downloads folder. A
+    # "look again" nudge for the shelf and the sidebar's `new` tag on Models;
+    # it names the model ids and carries no row.
+    MODELS_ARRIVED = auto()

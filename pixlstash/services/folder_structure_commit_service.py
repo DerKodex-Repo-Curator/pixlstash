@@ -1,7 +1,7 @@
 """Commit an accepted folder-structure mapping. v1.11 Phase 3.
 
 ``docs/plans/v1.11.0-existing-library.md`` §4 Phase 3; wire contract
-``docs/integration_architecture.md`` §22. The read (Phase 2,
+``docs/integration_architecture.md`` §20.2. The read (Phase 2,
 ``folder_structure_service.py``) only ever proposes; this module is the one
 place anything from the mapping screen is written.
 
@@ -55,6 +55,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from PIL import Image
+from fastapi import HTTPException
 from sqlalchemy import func
 from sqlmodel import Session, select
 
@@ -92,7 +93,15 @@ from pixlstash.utils.sql_chunking import chunked
 from pixlstash.utils.image_processing.image_utils import ImageUtils
 from pixlstash.utils.image_processing.video_utils import VideoUtils
 from pixlstash.utils.library_layout import Facet
-from pixlstash.utils.media_files import is_hidden_entry, is_supported_media_file
+from pixlstash.utils.media_files import (
+    LIBRARY_OWN_FOLDERS,
+    is_hidden_entry,
+    is_supported_media_file,
+)
+from pixlstash.utils.library_roots import (
+    holding_folder_overlap_lock,
+    refuse_overlapping_folder,
+)
 from pixlstash.utils.path_utils import path_is_within
 from pixlstash.utils.reference_folder_validator import (
     canonical_path,
@@ -575,6 +584,7 @@ def _commit_owns_this_root(
     )
 
 
+@holding_folder_overlap_lock
 def register_reference_folder(
     server,
     root_path: str,
@@ -613,6 +623,16 @@ def register_reference_folder(
     error = validate_reference_folder_path(root_path)
     if error:
         raise CommitError(error)
+    # The rule the "add a reference folder" route also applies: no overlap with
+    # another registered library or a watch folder, neither of which the
+    # conflict check below knows about (#1223). Before the DB task, because it
+    # reads the registry. `exclude` is this path itself: registering is
+    # idempotent by path, so the row a resumed commit made last time is not a
+    # conflict with itself - whether it may be *reused* is decided below.
+    try:
+        refuse_overlapping_folder(root_path, server, server.vault, exclude=root_path)
+    except HTTPException as exc:
+        raise CommitError(exc.detail) from exc
     image_root = os.path.normpath(getattr(server.vault, "image_root", "") or "")
 
     def fetch_or_create(session: Session) -> ReferenceFolder:
@@ -663,16 +683,6 @@ def register_reference_folder(
     if rf.status == ReferenceFolderStatus.ACTIVE:
         server.vault.watch_reference_folder(rf.id, rf.folder)
     return rf
-
-
-#: Top-level folders under a library's own root that hold PixlStash's files,
-#: not the owner's pictures: the snapshot tree, and the ``tmp/`` cache the
-#: set and character thumbnail routes write into. Every walk of a library's
-#: root skips these; the dot-folder rule covers the rest
-#: (``.pixlstash-thumbnails``, the older ``.ref_thumbs``, ``.staging``). Found
-#: the hard way: an import of a library's
-#: own root indexed 24 set and face thumbnails as pictures.
-LIBRARY_OWN_FOLDERS = ("snapshots", "tmp")
 
 
 def library_own_folders(image_root: str) -> set[str]:

@@ -29,12 +29,13 @@
  */
 import { computed, ref, watch } from "vue";
 
-import { addLibrary } from "../../api/libraries";
+import { addLibrary, discardLibrary } from "../../api/libraries";
 import {
   cancelFolderStructureRead,
   getFolderStructureReadStatus,
 } from "../../api/folderStructure";
 import { errorDetail } from "../../utils/apiError";
+import { reloadPage } from "../../utils/reloadPage";
 import { useFolderMappingStore } from "../../stores/useFolderMappingStore";
 import {
   useLibrariesStore,
@@ -248,13 +249,21 @@ async function build(accepted, answered = null) {
   }
 }
 
-function onCommitStarted() {
+function onCommitStarted(commitTaskId) {
   // Started is as good as done for the entry's purposes: from here on a
   // reopen must reattach to the read, not commit it again.
   const entry = mappingStore.pending;
-  if (!entry?.autoCommit) return;
+  if (!entry) return;
+  // A first import's promotion reloads the page before the poll below can see
+  // `completed` and clear the entry, whichever path saved it; the sidebar asks
+  // the server instead (SideBar.vue, the auto-open).
+  if (!entry.autoCommit) {
+    mappingStore.save({ ...entry, commitTaskId });
+    return;
+  }
   mappingStore.save({
     taskId: entry.taskId,
+    commitTaskId,
     path: entry.path,
     label: entry.label,
     mode: entry.mode,
@@ -265,8 +274,8 @@ function onCommitStarted() {
 }
 
 function close() {
-  // A commit that has started cannot be cancelled (§22) and keeps running
-  // server-side either way, so this must be a no-op while `committing` is
+  // A commit that has started cannot be cancelled (integration §20.2) and
+  // keeps running server-side either way, so this must be a no-op while `committing` is
   // true. The dialog is `:persistent` for its whole life: Escape belongs to
   // the mapping step (it clears the selection) and a backdrop click must
   // never mean "organise later" by accident. AppDialog's header close button
@@ -287,6 +296,21 @@ function close() {
   }
   // A resumed entry is left alone on purpose: its read (or its library) is
   // real, and the sidebar's row must still offer it.
+  const pending = librariesStore.importingUuid;
+  if (pending) {
+    // Closing is an answer, and the answer is no: the folder goes back to
+    // being the owner's, with nothing of PixlStash's left in it. Deliberately
+    // not silent-keep - a library nobody finished would sit there working but
+    // invisible, and its folder would read as "already a library" next time.
+    discardLibrary(pending)
+      .then(reloadPage)
+      .catch((error) => {
+        console.warn("Could not give the folder back", {
+          uuid: pending,
+          error,
+        });
+      });
+  }
   emit("close");
 }
 
@@ -305,7 +329,7 @@ function onCommitted(result) {
         ? 'Point PixlStash at a folder. Nothing inside it is moved.'
         : ''
     "
-    :width="840"
+    size="xl"
     :pad-body="step !== 'mapping'"
     :persistent="true"
     @close="close"
@@ -358,7 +382,7 @@ function onCommitted(result) {
 <style scoped>
 .mapping-wizard__error {
   /* The mapping step's body is flush; the padding is the dialog's own. */
-  margin: 0 0 var(--space-4);
+  margin: 0;
   flex-shrink: 0;
   padding: var(--space-3) var(--space-4);
   border-radius: var(--radius-sm);

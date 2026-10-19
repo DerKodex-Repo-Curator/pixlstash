@@ -54,7 +54,6 @@ function makeHarness() {
     rebuildGridImagesFromLastFetch: vi.fn(),
     triggerNewImageHighlight: vi.fn(),
     updateVisibleThumbnails: vi.fn(),
-    maybeRefreshOverlayForComfyui: vi.fn(),
     removeImagesById,
   });
   return { scoring, allGridImages, removeImagesById };
@@ -82,6 +81,24 @@ describe("scoring while the unscored filter is on", () => {
     ]);
     expect(h.removeImagesById).toHaveBeenCalledWith(["3"]);
     expect(h.allGridImages.value.map((i) => i.id)).toEqual([1, 2]);
+  });
+
+  it("keeps a scored picture when a score range sits beside unscored", async () => {
+    const h = makeHarness();
+    const store = useFilterStore();
+    store.minScoreFilter = 3;
+    store.unscoredOnlyFilter = true;
+    await h.scoring.applyScoresByEntries([["2", 4]]);
+    expect(h.removeImagesById).not.toHaveBeenCalled();
+  });
+
+  it("drops a picture scored below the range that sits beside unscored", async () => {
+    const h = makeHarness();
+    const store = useFilterStore();
+    store.minScoreFilter = 3;
+    store.unscoredOnlyFilter = true;
+    await h.scoring.applyScoresByEntries([["2", 1]]);
+    expect(h.removeImagesById).toHaveBeenCalledWith(["2"]);
   });
 
   it("removes nothing when the filter is off", async () => {

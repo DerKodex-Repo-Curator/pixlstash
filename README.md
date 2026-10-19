@@ -122,7 +122,12 @@ a time. Pictures, tags, scores, snapshots, guest sessions, and guest scores stay
 with their library; your owner account and preferences stay with the
 installation. API tokens and share links are pinned to the library where they
 were created: they become inactive while a different library is open and work
-again when you switch back.
+again when you switch back. An API token for a script or an AI agent can be set
+to work in every library instead (the **Every library** switch in the token
+list, or **Use in every library** in **Connect AI agent**); it then acts on
+whichever library is open. Only the owner, signed in from the local network,
+can change that (a token cannot change it, its own included). A share link and
+the ComfyUI link key always stay with their library.
 
 **Settings → Libraries** does all of it: add a library, rename one, switch
 between them, and stop using one. **Add a library…** takes a single folder and
@@ -579,7 +584,9 @@ one; image filters are re-scanned every time the Filters menu is listed.
 one verb that imports the plugin instead of reading it: it loads the file the
 way the server does, registers what it defines, and checks that the parameter
 schema is one the settings screen can render — so a typo costs a command rather
-than a restart. `--image PATH` runs it over one picture as well, and stops
+than a restart, and it ends by listing the connections, programs and file
+writes it saw the plugin make while it ran. `--image PATH` runs it over one
+picture as well, and stops
 instead of running when the plugin reports its model is not present — though a
 plugin that downloads inside `init()` still will, since by then it is the
 plugin's code deciding.
@@ -742,6 +749,153 @@ license chosen by the plugin author.
 If a plugin copies substantial GPL backend code or depends directly on other
 GPL-only backend internals, different obligations may apply.
 
+
+## Connecting an AI agent (MCP)
+
+`pixlstash-mcp` is an [MCP](https://modelcontextprotocol.io) server: an agent
+can search the library and read pictures, tags and ComfyUI recipes. By default
+it has no tools that change anything; `--allow-write` adds workflow editing
+(see [Read and write workflows](#read-and-write-workflows)). It talks to a
+running PixlStash server with an API token and sees exactly what that token
+sees.
+
+The quickest way in is **API Tokens → Connect AI agent** in your account
+settings: it mints a read-only token (unless you choose **Read and write
+workflows**) and hands back the finished configuration to paste, either a one-line `claude mcp add …` or the `mcpServers` block below.
+That token covers the whole library. To narrow it to one set, character or
+project, mint a **Read-only share** token with **New token** instead and put it
+in the configuration yourself.
+
+A token works only in the library that was open when you made it, so the agent
+is refused once you switch. If you keep several libraries, turn on **Use in every
+library** before creating it (or turn on **Every library** for it in the token
+list afterwards): the agent then sees whichever library is open.
+
+For read-only use, do not give it a full-access token: any agent that can read
+its own config file then has full owner control of PixlStash - not just read
+access to your pictures - because that token authorises writes, deletes and the
+local-only filesystem endpoints, and nothing here limits what else the agent
+does with it. Write mode needs exactly that token, and that is its cost.
+
+`get_recipe` also asks your ComfyUI whether a recipe's nodes and models are
+installed.
+
+```json
+{
+  "mcpServers": {
+    "pixlstash": {
+      "command": "pixlstash-mcp",
+      "env": { "PIXLSTASH_TOKEN": "<your read-only token>" }
+    }
+  }
+}
+```
+
+That goes in your MCP client's own configuration file. In Claude Desktop that
+is **Settings → Developer → Edit Config**; other clients document their own
+location. If the file already lists servers, add the `"pixlstash"` entry inside
+the existing `"mcpServers"` block rather than replacing the file, or you will
+drop the servers already there.
+
+No address is needed: `pixlstash-mcp` reads the port, the scheme and the
+certificate out of your `server-config.json`, the same file the server reads,
+so it keeps working if you change any of them. If you have **Require SSL** on,
+it connects over https and trusts PixlStash's own self-signed certificate.
+The desktop app keeps a separate `server-config.json`, and its shim passes that
+path with `--server-config`; point a hand-written config at it the same way. Pass `--url` (or set `PIXLSTASH_URL`) only to point it at
+a different machine. **Do not copy the address out of the desktop app's
+window** - that is an ephemeral port the desktop shell picks afresh on every
+launch, so it stops resolving the next time PixlStash starts.
+
+**Desktop app:** you do not need to install anything. Turn on **Shell command**
+in Settings and the app puts both `pixlstash` and `pixlstash-mcp` on your PATH,
+forwarding to the interpreter it already ships. Nothing is installed into any
+Python environment of your own.
+
+Running from a checkout instead, `pip install -e .` provides `pixlstash-mcp`
+in that virtualenv. If your MCP client then reports
+`Executable not found in $PATH: "pixlstash-mcp"`, it is not inheriting that
+environment; give it the absolute path, which `which pixlstash-mcp` prints in a
+shell where PixlStash runs.
+
+Tools: `search_pictures`, `list_pictures`, `count_pictures`, `get_picture`,
+`view_picture`, `list_tags`, `list_sets`, `list_characters`, `list_projects`,
+`get_recipe`.
+`list_pictures` and `search_pictures` also narrow by `set_id`, `character_id`,
+`project_id` and `tags`; `list_pictures` and `count_pictures` also by the
+`workflow_id` a recipe names. `get_recipe` says whether the model forks into
+several sampler passes and which LoRAs feed each, and gives the path that opens
+the picture's workflow in PixlStash.
+
+The MCP server reads `PIXLSTASH_TOKEN` once, when it starts. After you replace
+or revoke the token, restart or reconnect it in your MCP client.
+
+### Read and write workflows
+
+Choose **Read and write workflows** in **Connect AI agent** and the agent can
+also edit and store workflow graphs and start runs. The dialog mints a
+full-access token and adds `--allow-write` to the configuration:
+
+```json
+{
+  "mcpServers": {
+    "pixlstash": {
+      "command": "pixlstash-mcp",
+      "args": ["--allow-write"],
+      "env": { "PIXLSTASH_TOKEN": "<your full-access token>" }
+    }
+  }
+}
+```
+
+Every workflow route is owner-only, so a read-only or shared token cannot use
+these tools, and `pixlstash-mcp` says so at start-up. The flag decides which
+tools are offered; it does not limit the token, which can do anything you can.
+
+Extra tools: `list_workflows`, `get_workflow`, `export_workflow_graph`,
+`import_workflow_graph`, `preflight_workflow`, `run_workflow`,
+`get_workflow_run`.
+
+`import_workflow_graph` with a `workflow_id` saves the edited graph over that
+workflow as its next version: the workflow keeps its name, pictures and
+recipes, and the graph it replaces is kept, so you can go back to it. Without a
+`workflow_id` it makes a new workflow card. A graph that swaps a checkpoint
+you have installed is stored as a new workflow either way, and a LoRA attached
+to a person is left out of the stored graph. A different prompt, seed or LoRA
+is not a graph edit; pass it to the run instead.
+
+#### With a ComfyUI MCP server
+
+PixlStash does not edit graphs itself. Connect ComfyUI's own MCP server
+([comfy-mcp](https://docs.comfy.org/agent-tools/mcp)) to the same agent and
+the two work on one file; they never talk to each other, the agent goes
+between them:
+
+1. `export_workflow_graph` (PixlStash) writes a workflow's graph to a JSON file,
+   in PixlStash's cache folder unless you name a path, and returns the path.
+2. The agent edits that file. ComfyUI's server tells it what inputs a node
+   takes on your install and which models are on disk, and can set widget
+   values for it.
+3. ComfyUI's server validates the edited file. Do not store one that fails.
+4. `import_workflow_graph` (PixlStash) saves it over the workflow it was
+   exported from (pass that `workflow_id`), or stores it as a new workflow
+   card.
+5. `preflight_workflow` checks it would run; `run_workflow` runs it and
+   says how each run ended: a failed one names the node that failed and why.
+
+Run through PixlStash, not through ComfyUI's server: a run there goes straight
+to ComfyUI, and its pictures never reach your library.
+
+If the agent answers questions about your library from the shell instead of
+from these tools, it is almost always one of two things:
+
+- **The server is registered for one directory only.** `claude mcp add`
+  defaults to `--scope local`, which registers it just for the directory you
+  ran it in; everywhere else the agent has no PixlStash tools at all. Use
+  `-s user`, as the **Connect AI agent** command does. `claude mcp list` run
+  from an unrelated folder tells you which you have.
+- **Nothing is listening.** `pixlstash-mcp` writes a line to stderr at
+  start-up in that case, which most clients show in their MCP server log.
 
 ## Troubleshooting
 

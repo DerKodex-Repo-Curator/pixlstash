@@ -1,504 +1,399 @@
 <template>
-  <v-dialog :model-value="open" max-width="560" @click:outside="emit('close')">
-    <div class="editor-shell">
-      <v-btn icon size="36px" class="close-icon" @click="emit('close')">
-        <v-icon size="24px">mdi-close</v-icon>
-      </v-btn>
-      <v-card class="editor-card">
-        <v-card-title class="editor-header">
-          {{
-            isEditMode
-              ? `Edit ${isImport ? "Import" : "Reference"} Folder`
-              : `Add ${isImport ? "Import" : "Reference"} Folder`
-          }}
-        </v-card-title>
-        <v-card-text class="editor-body">
-          <!-- Path input (create mode, non-Docker) -->
-          <div v-if="!isEditMode && !props.inDocker" class="editor-path-row">
-            <v-text-field
-              ref="pathInputRef"
-              v-model="localPath"
-              label="Folder path *"
-              placeholder="/path/to/folder"
-              density="comfortable"
-              variant="filled"
-              hide-details
-              @keydown.enter="save"
-            />
-            <v-btn
-              variant="outlined"
-              size="small"
-              icon
-              class="editor-browse-btn"
-              title="Browse for folder"
-              @click="browseOpen = true"
-            >
-              <v-icon size="18">mdi-folder-open-outline</v-icon>
-            </v-btn>
-          </div>
-
-          <!-- Docker helper (create mode) -->
-          <div
-            v-else-if="!isEditMode && props.inDocker"
-            class="editor-docker-helper"
-          >
-            <v-text-field
-              ref="pathInputRef"
-              v-model="localHostPath"
-              label="Local folder (host path)"
-              placeholder="/home/you/Pictures/import"
-              density="comfortable"
-              variant="filled"
-              hide-details
-              @keydown.enter="save"
-            />
-            <v-text-field
-              v-model="localLabel"
-              label="Display name"
-              placeholder="Auto-filled from host path (editable)"
-              density="comfortable"
-              variant="filled"
-              hide-details
-              @keydown.enter="save"
-            />
-
-            <div class="editor-docker-path-row">
-              <div class="editor-docker-path-label">Container path</div>
-              <div
-                class="editor-docker-path-value"
-                :title="dockerSuggestedPath"
-              >
-                {{ dockerSuggestedPath }}
-              </div>
-            </div>
-
-            <div class="editor-docker-format-row">
-              <div class="editor-docker-title">Docker mount line</div>
-              <v-btn-toggle
-                v-model="shellFormat"
-                mandatory
-                density="compact"
-                class="editor-docker-shell-btns"
-              >
-                <v-btn value="linux" size="small">Linux / Mac</v-btn>
-                <v-btn value="windows" size="small">Windows</v-btn>
-              </v-btn-toggle>
-            </div>
-            <div class="editor-docker-note">
-              Add this <code>-v</code> mount to your
-              <code>docker run</code> command:
-            </div>
-            <div class="editor-docker-snippet-wrap">
-              <code class="editor-docker-snippet">{{
-                dockerMountSnippet
-              }}</code>
-              <v-btn
-                variant="outlined"
-                size="small"
-                icon
-                class="editor-copy-btn"
-                title="Copy mount line"
-                @click="
-                  copyToClipboard(dockerMountSnippet, 'Mount line copied.')
-                "
-              >
-                <v-icon size="16">mdi-content-copy</v-icon>
-              </v-btn>
-            </div>
-            <div class="editor-docker-title">Container restart helpers</div>
-            <div class="editor-docker-note editor-docker-note--muted">
-              This removes the old container, not the image.
-            </div>
-            <div class="editor-docker-snippet-wrap">
-              <code class="editor-docker-snippet">{{
-                dockerRemoveContainerSnippet
-              }}</code>
-              <v-btn
-                variant="outlined"
-                size="small"
-                icon
-                class="editor-copy-btn"
-                title="Copy remove-container command"
-                @click="
-                  copyToClipboard(
-                    dockerRemoveContainerSnippet,
-                    'Remove-container command copied.',
-                  )
-                "
-              >
-                <v-icon size="16">mdi-content-copy</v-icon>
-              </v-btn>
-            </div>
-            <div class="editor-docker-note">
-              Full restart command (uses your local folder mapping):
-            </div>
-            <div
-              v-if="hasExistingMounts"
-              class="editor-docker-note editor-docker-note--muted"
-            >
-              Existing reference and import folder mounts are included.
-            </div>
-            <div class="editor-docker-snippet-wrap">
-              <code
-                class="editor-docker-snippet editor-docker-snippet--full"
-                >{{ dockerRestartCommandSnippet }}</code
-              >
-              <v-btn
-                variant="outlined"
-                size="small"
-                icon
-                class="editor-copy-btn"
-                title="Copy full restart command"
-                @click="
-                  copyToClipboard(
-                    dockerRestartCommandSnippet,
-                    'Restart command copied.',
-                  )
-                "
-              >
-                <v-icon size="16">mdi-content-copy</v-icon>
-              </v-btn>
-            </div>
-
-            <div v-if="copyStatus" class="editor-copy-status">
-              {{ copyStatus }}
-            </div>
-          </div>
-
-          <!-- Reference path input (edit mode, non-Docker) -->
-          <div
-            v-else-if="isEditMode && !isImport && !props.inDocker"
-            class="editor-path-display editor-path-display--with-action"
-          >
-            <v-icon size="16" class="editor-path-icon"
-              >mdi-folder-network-outline</v-icon
-            >
-            <span class="editor-path-text" :title="activeFolder?.folder">{{
-              activeFolder?.folder
-            }}</span>
-            <v-btn
-              variant="outlined"
-              size="small"
-              icon
-              class="editor-relocate-btn"
-              title="Relocate folder and move files"
-              @click="
-                emit('relocate', activeFolder);
-                emit('close');
-              "
-            >
-              <v-icon size="18">mdi-folder-move-outline</v-icon>
-            </v-btn>
-          </div>
-
-          <!-- Reference path inputs (edit mode, Docker) -->
-          <div
-            v-else-if="isEditMode && !isImport && props.inDocker"
-            class="editor-docker-helper"
-          >
-            <v-text-field
-              ref="pathInputRef"
-              v-model="localHostPath"
-              label="Local folder (host path)"
-              placeholder="/home/you/Pictures"
-              density="comfortable"
-              variant="filled"
-              hide-details
-              @keydown.enter="save"
-            />
-            <v-text-field
-              v-model="localPath"
-              label="Container path"
-              placeholder="/data/ref/pictures-001"
-              density="comfortable"
-              variant="filled"
-              hide-details
-              @keydown.enter="save"
-            />
-          </div>
-
-          <!-- Path display (edit mode for import folders) -->
-          <div v-else class="editor-path-display">
-            <v-icon size="16" class="editor-path-icon">{{
-              isImport ? "mdi-folder-import" : "mdi-folder-network-outline"
-            }}</v-icon>
-            <span class="editor-path-text" :title="activeFolder?.folder">{{
-              activeFolder?.folder
-            }}</span>
-          </div>
-
-          <!-- Docker restart helper (edit mode) -->
-          <div
-            v-if="isEditMode && props.inDocker"
-            class="editor-docker-instructions"
-          >
-            <div class="editor-docker-format-row">
-              <div class="editor-docker-title">Docker restart command</div>
-              <v-btn-toggle
-                v-model="shellFormat"
-                mandatory
-                density="compact"
-                class="editor-docker-shell-btns"
-              >
-                <v-btn value="linux" size="small">Linux / Mac</v-btn>
-                <v-btn value="windows" size="small">Windows</v-btn>
-              </v-btn-toggle>
-            </div>
-            <div class="editor-docker-note">
-              Copy this if you need to restart with the current folder mounts.
-            </div>
-            <div class="editor-docker-snippet-wrap">
-              <code class="editor-docker-snippet">{{
-                dockerRemoveContainerSnippet
-              }}</code>
-              <v-btn
-                variant="outlined"
-                size="small"
-                icon
-                class="editor-copy-btn"
-                title="Copy remove-container command"
-                @click="
-                  copyToClipboard(
-                    dockerRemoveContainerSnippet,
-                    'Remove-container command copied.',
-                  )
-                "
-              >
-                <v-icon size="16">mdi-content-copy</v-icon>
-              </v-btn>
-            </div>
-            <div
-              v-if="hasExistingMounts"
-              class="editor-docker-note editor-docker-note--muted"
-            >
-              <template v-if="isImport">
-                Existing reference and import folder mounts are included.
-              </template>
-              <template v-else>
-                Stored host paths are used when available. Replace any remaining
-                <code>/absolute/host/path/for-*</code> placeholder values.
-              </template>
-            </div>
-            <div class="editor-docker-snippet-wrap">
-              <code class="editor-docker-snippet editor-docker-snippet--full">{{
-                dockerEditRestartCommandSnippet
-              }}</code>
-              <v-btn
-                variant="outlined"
-                size="small"
-                icon
-                class="editor-copy-btn"
-                title="Copy full restart command"
-                @click="
-                  copyToClipboard(
-                    dockerEditRestartCommandSnippet,
-                    'Restart command copied.',
-                  )
-                "
-              >
-                <v-icon size="16">mdi-content-copy</v-icon>
-              </v-btn>
-            </div>
-          </div>
-
-          <!-- Display label -->
-          <v-text-field
-            v-if="isEditMode || !props.inDocker"
-            v-model="localLabel"
-            label="Display label"
-            placeholder="Leave blank to use folder name"
-            density="comfortable"
-            variant="filled"
-            hide-details
-            @keydown.enter="save"
-          />
-
-          <!-- Import-only: delete after import toggle -->
-          <div v-if="isImport" class="editor-toggle-row">
-            <v-checkbox
-              v-model="localDeleteAfterImport"
-              label="Delete source files after successful import"
-              density="compact"
-              hide-details
-              color="warning"
-            />
-            <div v-if="localDeleteAfterImport" class="editor-toggle-desc">
-              Imported files are removed from this folder after they are added
-              to PixlStash.
-            </div>
-          </div>
-
-          <!-- Reference-only: caption file sync (edit mode). Gated on edit
-               like the allow-delete row below: create is import-only now, and
-               a control the create submit does not read must not be shown. -->
-          <div v-if="!isImport && isEditMode" class="editor-sync-section">
-            <button
-              type="button"
-              class="editor-sync-header"
-              @click="syncSectionOpen = !syncSectionOpen"
-            >
-              <v-icon size="18">{{
-                syncSectionOpen ? "mdi-chevron-down" : "mdi-chevron-right"
-              }}</v-icon>
-              <span>Synchronise caption files?</span>
-              <span class="editor-sync-summary">{{ syncSummary }}</span>
-            </button>
-            <v-expand-transition>
-              <div v-show="syncSectionOpen" class="editor-sync-body">
-                <div class="editor-sync-intro">
-                  Keep <code>.txt</code> sidecar files next to each image in sync
-                  with PixlStash. Tags and descriptions are stored in separate
-                  files: changes made outside PixlStash are read back in, and
-                  changes made here are written out. An image that already has a
-                  file keeps it, whatever it is called; the suffixes below only
-                  name the files created for images that have none.
-                </div>
-
-                <!-- Tags -->
-                <div class="editor-toggle-row">
-                  <v-checkbox
-                    v-model="localSyncTags"
-                    label="Sync tags"
-                    density="compact"
-                    hide-details
-                  />
-                  <div v-if="localSyncTags" class="editor-sync-suffix">
-                    <v-text-field
-                      v-model="localTagsSuffix"
-                      label="Suffix for new tags files"
-                      :placeholder="DEFAULT_TAGS_SUFFIX"
-                      density="compact"
-                      variant="filled"
-                      hide-details
-                    />
-                    <div class="editor-toggle-desc">
-                      e.g. <code>{{ tagsExample }}</code>
-                    </div>
-                  </div>
-                </div>
-
-                <!-- Descriptions -->
-                <div class="editor-toggle-row">
-                  <v-checkbox
-                    v-model="localSyncDescriptions"
-                    label="Sync descriptions"
-                    density="compact"
-                    hide-details
-                  />
-                  <div v-if="localSyncDescriptions" class="editor-sync-suffix">
-                    <v-text-field
-                      v-model="localDescriptionSuffix"
-                      label="Suffix for new description files"
-                      :placeholder="DEFAULT_DESCRIPTION_SUFFIX"
-                      density="compact"
-                      variant="filled"
-                      hide-details
-                    />
-                    <div class="editor-toggle-desc">
-                      e.g. <code>{{ descriptionExample }}</code>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </v-expand-transition>
-          </div>
-
-          <!-- Reference-only: allow delete (edit mode) -->
-          <div v-if="!isImport && isEditMode" class="editor-toggle-row">
-            <v-checkbox
-              v-model="localAllowDelete"
-              label="Allow deleting source files from PixlStash"
-              density="compact"
-              hide-details
-              color="error"
-            />
-            <div
-              v-if="localAllowDelete"
-              class="editor-toggle-desc editor-toggle-desc--warning"
-            >
-              Warning: enabling this allows PixlStash to permanently delete
-              files from your disk.
-            </div>
-          </div>
-
-          <div v-if="saveError" class="editor-error">{{ saveError }}</div>
-
-          <div
-            v-if="isEditMode && props.inDocker && copyStatus"
-            class="editor-copy-status"
-          >
-            {{ copyStatus }}
-          </div>
-
-          <div v-if="confirmingDelete" class="editor-delete-confirm">
-            <v-icon size="18" color="error" style="flex-shrink: 0">
-              mdi-alert-circle-outline
-            </v-icon>
-            <div class="editor-delete-confirm-text">
-              <template v-if="isImport">
-                Remove
-                <strong>{{
-                  activeFolder?.label || activeFolder?.folder
-                }}</strong>
-                from automatic import monitoring?
-              </template>
-              <template v-else>
-                Remove
-                <strong>{{
-                  activeFolder?.label || activeFolder?.folder
-                }}</strong>
-                from PixlStash? The original files on disk will not be deleted.
-              </template>
-            </div>
-          </div>
-        </v-card-text>
-        <v-card-actions class="editor-footer">
-          <v-btn
-            v-if="isEditMode && !confirmingDelete"
-            variant="outlined"
-            color="error"
-            size="small"
-            class="editor-delete-btn"
-            :loading="deleteLoading"
-            @click="confirmingDelete = true"
-          >
-            Remove
-          </v-btn>
-          <v-btn
-            v-if="confirmingDelete"
-            variant="flat"
-            color="error"
-            size="small"
-            class="editor-delete-btn"
-            :loading="deleteLoading"
-            @click="doDelete"
-          >
-            Confirm Remove
-          </v-btn>
-          <v-btn
-            v-if="confirmingDelete"
-            variant="text"
-            size="small"
-            @click="confirmingDelete = false"
-          >
-            Cancel
-          </v-btn>
-          <v-spacer></v-spacer>
-          <template v-if="!confirmingDelete">
-            <v-btn class="btn-cancel" @click="emit('close')">Cancel</v-btn>
-            <v-btn
-              class="btn-save"
-              :loading="saveLoading"
-              :disabled="!isValid"
-              @click="save"
-            >
-              {{ isEditMode ? "Save" : "Add Folder" }}
-            </v-btn>
-          </template>
-        </v-card-actions>
-      </v-card>
+  <AppDialog
+    :open="open"
+    :title="`${isEditMode ? 'Edit' : 'Add'} ${isImport ? 'import' : 'reference'} folder`"
+    @close="emit('close')"
+    @accept="!confirmingDelete && save()"
+  >
+    <!-- Path input (create mode, non-Docker) -->
+    <div v-if="!isEditMode && !props.inDocker" class="editor-path-row">
+      <AppInput
+        ref="pathInputRef"
+        v-model="localPath"
+        label="Folder path *"
+        placeholder="/path/to/folder"
+        mono
+        class="editor-path-input"
+      />
+      <AppButton
+        icon-only
+        icon-left="folder-open-outline"
+        class="editor-browse-btn"
+        tooltip="Browse for folder"
+        @click="browseOpen = true"
+      />
     </div>
-  </v-dialog>
+
+    <!-- Docker helper (create mode) -->
+    <div
+      v-else-if="!isEditMode && props.inDocker"
+      class="editor-docker-helper"
+    >
+      <AppInput
+        ref="pathInputRef"
+        v-model="localHostPath"
+        label="Local folder (host path)"
+        placeholder="/home/you/Pictures/import"
+        mono
+      />
+      <AppInput
+        v-model="localLabel"
+        label="Display name"
+        placeholder="Auto-filled from host path (editable)"
+      />
+
+      <div class="editor-docker-path-row">
+        <div class="editor-docker-path-label">Container path</div>
+        <div
+          class="editor-docker-path-value"
+          :title="dockerSuggestedPath"
+        >
+          {{ dockerSuggestedPath }}
+        </div>
+      </div>
+
+      <div class="editor-docker-format-row">
+        <div class="editor-docker-title">Docker mount line</div>
+        <Segmented
+          v-model="shellFormat"
+          :options="SHELL_FORMAT_OPTIONS"
+          aria-label="Shell format"
+          class="editor-docker-shell-btns"
+        />
+      </div>
+      <div class="editor-docker-note">
+        Add this <code>-v</code> mount to your
+        <code>docker run</code> command:
+      </div>
+      <DockerSnippet
+        :text="dockerMountSnippet"
+        tooltip="Copy mount line"
+        @copy="copyToClipboard(dockerMountSnippet, 'Mount line copied.')"
+      />
+      <div class="editor-docker-title">Container restart helpers</div>
+      <div class="editor-docker-note editor-docker-note--muted">
+        This removes the old container, not the image.
+      </div>
+      <DockerSnippet
+        :text="dockerRemoveContainerSnippet"
+        tooltip="Copy remove-container command"
+        @copy="
+          copyToClipboard(
+            dockerRemoveContainerSnippet,
+            'Remove-container command copied.',
+          )
+        "
+      />
+      <div class="editor-docker-note">
+        Full restart command (uses your local folder mapping):
+      </div>
+      <div
+        v-if="hasExistingMounts"
+        class="editor-docker-note editor-docker-note--muted"
+      >
+        Existing reference and import folder mounts are included.
+      </div>
+      <DockerSnippet
+        :text="dockerRestartCommandSnippet"
+        tooltip="Copy full restart command"
+        full
+        @copy="
+          copyToClipboard(dockerRestartCommandSnippet, 'Restart command copied.')
+        "
+      />
+
+      <div v-if="copyStatus" class="editor-copy-status">
+        {{ copyStatus }}
+      </div>
+    </div>
+
+    <!-- Reference path input (edit mode, non-Docker) -->
+    <div
+      v-else-if="isEditMode && !isImport && !props.inDocker"
+      class="editor-path-display editor-path-display--with-action"
+    >
+      <v-icon size="16" class="editor-path-icon"
+        >mdi-folder-network-outline</v-icon
+      >
+      <span class="editor-path-text" :title="activeFolder?.folder">{{
+        activeFolder?.folder
+      }}</span>
+      <AppButton
+        icon-only
+        icon-left="folder-move-outline"
+        class="editor-relocate-btn"
+        tooltip="Relocate folder and move files"
+        @click="
+          emit('relocate', activeFolder);
+          emit('close');
+        "
+      />
+    </div>
+
+    <!-- Reference path inputs (edit mode, Docker) -->
+    <div
+      v-else-if="isEditMode && !isImport && props.inDocker"
+      class="editor-docker-helper"
+    >
+      <AppInput
+        ref="pathInputRef"
+        v-model="localHostPath"
+        label="Local folder (host path)"
+        placeholder="/home/you/Pictures"
+        mono
+      />
+      <AppInput
+        v-model="localPath"
+        label="Container path"
+        placeholder="/data/ref/pictures-001"
+        mono
+      />
+    </div>
+
+    <!-- Path display (edit mode for import folders) -->
+    <div v-else class="editor-path-display">
+      <v-icon size="16" class="editor-path-icon">{{
+        isImport ? "mdi-folder-import" : "mdi-folder-network-outline"
+      }}</v-icon>
+      <span class="editor-path-text" :title="activeFolder?.folder">{{
+        activeFolder?.folder
+      }}</span>
+    </div>
+
+    <!-- Docker restart helper (edit mode) -->
+    <div
+      v-if="isEditMode && props.inDocker"
+      class="editor-docker-instructions"
+    >
+      <div class="editor-docker-format-row">
+        <div class="editor-docker-title">Docker restart command</div>
+        <Segmented
+          v-model="shellFormat"
+          :options="SHELL_FORMAT_OPTIONS"
+          aria-label="Shell format"
+          class="editor-docker-shell-btns"
+        />
+      </div>
+      <div class="editor-docker-note">
+        Copy this if you need to restart with the current folder mounts.
+      </div>
+      <DockerSnippet
+        :text="dockerRemoveContainerSnippet"
+        tooltip="Copy remove-container command"
+        @copy="
+          copyToClipboard(
+            dockerRemoveContainerSnippet,
+            'Remove-container command copied.',
+          )
+        "
+      />
+      <div
+        v-if="hasExistingMounts"
+        class="editor-docker-note editor-docker-note--muted"
+      >
+        <template v-if="isImport">
+          Existing reference and import folder mounts are included.
+        </template>
+        <template v-else>
+          Stored host paths are used when available. Replace any remaining
+          <code>/absolute/host/path/for-*</code> placeholder values.
+        </template>
+      </div>
+      <DockerSnippet
+        :text="dockerEditRestartCommandSnippet"
+        tooltip="Copy full restart command"
+        full
+        @copy="
+          copyToClipboard(
+            dockerEditRestartCommandSnippet,
+            'Restart command copied.',
+          )
+        "
+      />
+    </div>
+
+    <!-- Display label -->
+    <AppInput
+      v-if="isEditMode || !props.inDocker"
+      v-model="localLabel"
+      label="Display label"
+      placeholder="Leave blank to use folder name"
+    />
+
+    <!-- Import-only: delete after import toggle -->
+    <div v-if="isImport" class="editor-toggle-row">
+      <v-checkbox
+        v-model="localDeleteAfterImport"
+        label="Delete source files after successful import"
+        density="compact"
+        hide-details
+        color="warning"
+      />
+      <div v-if="localDeleteAfterImport" class="editor-toggle-desc">
+        Imported files are removed from this folder after they are added
+        to PixlStash.
+      </div>
+    </div>
+
+    <!-- Reference-only: caption file sync (edit mode). Gated on edit
+         like the allow-delete row below: create is import-only now, and
+         a control the create submit does not read must not be shown. -->
+    <div v-if="!isImport && isEditMode" class="editor-sync-section">
+      <button
+        type="button"
+        class="editor-sync-header"
+        @click="syncSectionOpen = !syncSectionOpen"
+      >
+        <v-icon size="18">{{
+          syncSectionOpen ? "mdi-chevron-down" : "mdi-chevron-right"
+        }}</v-icon>
+        <span>Synchronise caption files?</span>
+        <span class="editor-sync-summary">{{ syncSummary }}</span>
+      </button>
+      <v-expand-transition>
+        <div v-show="syncSectionOpen" class="editor-sync-body">
+          <div class="editor-sync-intro">
+            Keep <code>.txt</code> sidecar files next to each image in sync
+            with PixlStash. Tags and descriptions are stored in separate
+            files: changes made outside PixlStash are read back in, and
+            changes made here are written out. An image that already has a
+            file keeps it, whatever it is called; the suffixes below only
+            name the files created for images that have none.
+          </div>
+
+          <!-- Tags -->
+          <div class="editor-toggle-row">
+            <v-checkbox
+              v-model="localSyncTags"
+              label="Sync tags"
+              density="compact"
+              hide-details
+            />
+            <div v-if="localSyncTags" class="editor-sync-suffix">
+              <AppInput
+                v-model="localTagsSuffix"
+                label="Suffix for new tags files"
+                :placeholder="DEFAULT_TAGS_SUFFIX"
+                mono
+              />
+              <div class="editor-toggle-desc">
+                e.g. <code>{{ tagsExample }}</code>
+              </div>
+            </div>
+          </div>
+
+          <!-- Descriptions -->
+          <div class="editor-toggle-row">
+            <v-checkbox
+              v-model="localSyncDescriptions"
+              label="Sync descriptions"
+              density="compact"
+              hide-details
+            />
+            <div v-if="localSyncDescriptions" class="editor-sync-suffix">
+              <AppInput
+                v-model="localDescriptionSuffix"
+                label="Suffix for new description files"
+                :placeholder="DEFAULT_DESCRIPTION_SUFFIX"
+                mono
+              />
+              <div class="editor-toggle-desc">
+                e.g. <code>{{ descriptionExample }}</code>
+              </div>
+            </div>
+          </div>
+        </div>
+      </v-expand-transition>
+    </div>
+
+    <!-- Reference-only: allow delete (edit mode) -->
+    <div v-if="!isImport && isEditMode" class="editor-toggle-row">
+      <v-checkbox
+        v-model="localAllowDelete"
+        label="Allow deleting source files from PixlStash"
+        density="compact"
+        hide-details
+        color="error"
+      />
+      <div
+        v-if="localAllowDelete"
+        class="editor-toggle-desc editor-toggle-desc--warning"
+      >
+        Warning: enabling this allows PixlStash to permanently delete
+        files from your disk.
+      </div>
+    </div>
+
+    <div v-if="saveError" class="editor-error">{{ saveError }}</div>
+
+    <div
+      v-if="isEditMode && props.inDocker && copyStatus"
+      class="editor-copy-status"
+    >
+      {{ copyStatus }}
+    </div>
+
+    <div v-if="confirmingDelete" class="editor-delete-confirm">
+      <v-icon size="18" color="surface-error" style="flex-shrink: 0">
+        mdi-alert-circle-outline
+      </v-icon>
+      <div class="editor-delete-confirm-text">
+        <template v-if="isImport">
+          Remove
+          <strong>{{
+            activeFolder?.label || activeFolder?.folder
+          }}</strong>
+          from automatic import monitoring?
+        </template>
+        <template v-else>
+          Remove
+          <strong>{{
+            activeFolder?.label || activeFolder?.folder
+          }}</strong>
+          from PixlStash? The original files on disk will not be deleted.
+        </template>
+      </div>
+    </div>
+
+    <template #footer>
+      <AppButton
+        v-if="isEditMode && !confirmingDelete"
+        class="editor-delete-btn"
+        :loading="deleteLoading"
+        @click="confirmingDelete = true"
+      >
+        Remove
+      </AppButton>
+      <AppButton
+        v-if="confirmingDelete"
+        variant="danger"
+        class="editor-delete-btn"
+        :loading="deleteLoading"
+        @click="doDelete"
+      >
+        Confirm remove
+      </AppButton>
+      <AppButton
+        v-if="confirmingDelete"
+        variant="secondary"
+        @click="confirmingDelete = false"
+      >
+        Cancel
+      </AppButton>
+      <span class="editor-footer-spacer" />
+      <template v-if="!confirmingDelete">
+        <AppButton variant="secondary" @click="emit('close')">Cancel</AppButton>
+        <AppButton
+          variant="primary"
+          :loading="saveLoading"
+          :disabled="!isValid"
+          @click="save"
+        >
+          {{ isEditMode ? "Save" : "Add folder" }}
+        </AppButton>
+      </template>
+    </template>
+  </AppDialog>
 
   <FolderBrowser
     :open="browseOpen"
@@ -529,6 +424,11 @@ import {
   normalizeFolderPath,
 } from "../../utils/dockerHelpers";
 import FolderBrowser from "./FolderBrowser.vue";
+import AppButton from "../widgets/AppButton.vue";
+import AppDialog from "../widgets/AppDialog.vue";
+import AppInput from "../widgets/AppInput.vue";
+import DockerSnippet from "./DockerSnippet.vue";
+import Segmented from "../widgets/Segmented.vue";
 import { errorDetail } from "../../utils/apiError";
 
 const appVersion = __APP_VERSION__;
@@ -598,6 +498,10 @@ const defaultShellFormat = navigator.userAgent.toLowerCase().includes("win")
   ? "windows"
   : "linux";
 const shellFormat = ref(defaultShellFormat);
+const SHELL_FORMAT_OPTIONS = [
+  { id: "linux", label: "Linux / Mac" },
+  { id: "windows", label: "Windows" },
+];
 
 // --- Core computed ---
 
@@ -948,28 +852,23 @@ watch(
   { immediate: true },
 );
 
-function handleKeydown(event) {
-  if (event.key === "Escape") emit("close");
-}
-
+// Escape is AppDialog's; a document-level listener here also closed this editor
+// when Escape was meant for the folder browser stacked on top of it.
 watch(
   () => props.open,
   (isOpen) => {
-    if (isOpen) {
-      document.addEventListener("keydown", handleKeydown);
-    } else {
-      document.removeEventListener("keydown", handleKeydown);
-      if (copyStatusTimer) {
-        clearTimeout(copyStatusTimer);
-        copyStatusTimer = null;
-      }
-      copyStatus.value = "";
+    if (isOpen) return;
+    if (copyStatusTimer) {
+      clearTimeout(copyStatusTimer);
+      copyStatusTimer = null;
     }
+    copyStatus.value = "";
   },
 );
 
-// Guard against leaking the listener if the component unmounts while open.
-onUnmounted(() => document.removeEventListener("keydown", handleKeydown));
+onUnmounted(() => {
+  if (copyStatusTimer) clearTimeout(copyStatusTimer);
+});
 
 // --- API actions ---
 
@@ -1080,55 +979,20 @@ async function copyToClipboard(value, successMessage) {
 </script>
 
 <style scoped>
-.editor-shell {
-  position: relative;
-  width: 100%;
-}
-
-.editor-card {
-  overflow: hidden;
-}
-
-.close-icon {
-  position: absolute;
-  top: -16px;
-  right: -16px;
-  background-color: rgb(var(--v-theme-primary));
-  border: none;
-  color: rgb(var(--v-theme-on-primary));
-  cursor: pointer;
-  z-index: 2;
-}
-
-.close-icon:hover {
-  background-color: rgb(var(--v-theme-accent));
-}
-
-.editor-header {
-  font-size: var(--text-lg);
-  font-weight: var(--weight-semibold);
-  padding: var(--space-6) var(--space-6) var(--space-3);
-}
-
-.editor-body {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-  padding: var(--space-4) var(--space-6) var(--space-3);
-}
-
+/* The field's caption sits above it, so the button aligns to the field's
+   bottom edge; both are --control-h. */
 .editor-path-row {
   display: flex;
-  align-items: flex-start;
+  align-items: flex-end;
   gap: var(--space-3);
 }
 
-.editor-path-row .v-text-field {
+.editor-path-input {
   flex: 1;
+  min-width: 0;
 }
 
 .editor-browse-btn {
-  margin-top: var(--space-2);
   flex-shrink: 0;
 }
 
@@ -1136,7 +1000,6 @@ async function copyToClipboard(value, successMessage) {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  margin-bottom: var(--space-1);
 }
 
 .editor-docker-path-row {
@@ -1214,39 +1077,9 @@ async function copyToClipboard(value, successMessage) {
   opacity: 0.65;
 }
 
-.editor-docker-snippet-wrap {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-3);
-}
-
-.editor-docker-snippet {
-  flex: 1;
-  display: block;
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-sm);
-  background: rgba(var(--v-theme-dark-surface), 0.55);
-  color: rgb(var(--v-theme-on-dark-surface));
-  font-size: var(--text-xs);
-  white-space: nowrap;
-  overflow: auto hidden;
-}
-
-.editor-docker-snippet--full {
-  white-space: pre-wrap;
-  overflow: auto;
-  line-height: 1.35;
-}
-
-.editor-copy-btn {
-  flex-shrink: 0;
-  margin-top: var(--space-1);
-}
-
 .editor-copy-status {
   font-size: var(--text-xs);
-  color: rgb(var(--v-theme-accent));
-  margin-top: var(--space-1);
+  color: rgb(var(--v-theme-on-surface));
 }
 
 .editor-path-display {
@@ -1294,7 +1127,7 @@ async function copyToClipboard(value, successMessage) {
 }
 
 .editor-toggle-desc--warning {
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
   opacity: 1;
 }
 
@@ -1318,7 +1151,13 @@ async function copyToClipboard(value, successMessage) {
 }
 
 .editor-sync-header:hover {
-  background: rgba(var(--v-theme-primary), 0.1);
+  background: var(--hover-wash);
+}
+
+/* Flush inside a section that clips its overflow: the ring goes inside. */
+.editor-sync-header:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring-inset);
 }
 
 .editor-sync-summary {
@@ -1350,14 +1189,14 @@ async function copyToClipboard(value, successMessage) {
 
 .editor-sync-detected {
   font-size: var(--text-xs);
-  color: rgb(var(--v-theme-accent));
+  color: rgb(var(--v-theme-on-surface));
 }
 
 .editor-error {
   font-size: var(--text-sm);
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
   background: rgba(var(--v-theme-error), 0.08);
-  border: 1px solid rgba(var(--v-theme-error), 0.22);
+  border: 1px solid rgba(var(--v-theme-surface-error), 0.22);
   border-radius: var(--radius-sm);
   padding: var(--space-3) var(--space-3);
 }
@@ -1369,7 +1208,7 @@ async function copyToClipboard(value, successMessage) {
   padding: var(--space-3) var(--space-4);
   background: rgba(var(--v-theme-error), 0.08);
   border-radius: var(--radius-sm);
-  border: 1px solid rgba(var(--v-theme-error), 0.25);
+  border: 1px solid rgba(var(--v-theme-surface-error), 0.25);
   font-size: var(--text-sm);
 }
 
@@ -1377,60 +1216,12 @@ async function copyToClipboard(value, successMessage) {
   line-height: 1.4;
 }
 
-.editor-footer {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-3) var(--space-5) var(--space-5);
+/* Remove sits left, apart from Cancel and Save. */
+.editor-footer-spacer {
+  flex: 1;
 }
 
 .editor-delete-btn {
   flex-shrink: 0;
-}
-
-.btn-cancel {
-  background: rgb(var(--v-theme-cancel-button));
-  color: rgb(var(--v-theme-cancel-button-text));
-  transition: filter 0.2s;
-}
-
-.btn-cancel:hover {
-  filter: brightness(1.2);
-}
-
-.btn-save {
-  background: rgb(var(--v-theme-accent));
-  color: rgb(var(--v-theme-on-accent));
-  transition: filter 0.2s;
-}
-
-/* Pending is not disabled (visual-language.md §11): the shared AppButton keeps
-   its label legible while busy, but Save/Remove/Confirm Remove here are stock
-   Vuetify v-btn, whose own `--loading` styling sets `.v-btn__content { opacity: 0
-   }` - blanking the label entirely instead of just dimming it. Restore it so
-   these three match the pending contract the rest of #647's forms carry. */
-.btn-save :deep(.v-btn--loading .v-btn__content),
-.btn-save :deep(.v-btn--loading .v-btn__prepend),
-.btn-save :deep(.v-btn--loading .v-btn__append),
-.editor-delete-btn :deep(.v-btn--loading .v-btn__content),
-.editor-delete-btn :deep(.v-btn--loading .v-btn__prepend),
-.editor-delete-btn :deep(.v-btn--loading .v-btn__append) {
-  opacity: 1;
-}
-
-/* The spinner keeps spinning under reduced motion, the same fix AppButton takes
-   for its own mdi-spin icon: the global reset in design-tokens.css zeroes every
-   element's animation, which would freeze Vuetify's indeterminate spinner into a
-   static ring that reads as a rendering fault rather than "working". */
-@media (prefers-reduced-motion: reduce) {
-  .btn-save :deep(.v-progress-circular--indeterminate > svg),
-  .btn-save
-    :deep(.v-progress-circular--indeterminate .v-progress-circular__overlay),
-  .editor-delete-btn :deep(.v-progress-circular--indeterminate > svg),
-  .editor-delete-btn
-    :deep(.v-progress-circular--indeterminate .v-progress-circular__overlay) {
-    animation-duration: 1.4s !important;
-    animation-iteration-count: infinite !important;
-  }
 }
 </style>

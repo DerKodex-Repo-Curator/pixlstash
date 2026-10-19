@@ -28,22 +28,121 @@ scope*: they resolve to candidate-id sets and stay in ``filter_helpers.py``.  Co
 with a pre-resolved set via the caller's own ``Picture.id.in_(...)`` clause.
 """
 
+import json
 import os
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 from fastapi import HTTPException
 from pydantic import BaseModel
-from sqlalchemy import exists, or_, text
+from sqlalchemy import and_, case, exists, func, not_, or_, text
 from sqlalchemy.sql.elements import ColumnElement
 from sqlmodel import select
 
 from pixlstash.db_models.dedup import DedupGroup, DedupGroupMember
 from pixlstash.db_models.picture import Picture
+from pixlstash.utils.workflow_ids import AUTO_PREFIX, MANUAL_PREFIX
 from pixlstash.utils.service.person_tags import (
     FACE_REQUIRING_TAGS,
     OBJECT_META_TAGS,
     PERSON_TAGS,
 )
+
+_WORKFLOW_ID_PREFIXES = (AUTO_PREFIX, MANUAL_PREFIX)
+
+# In a workflow filter's key list, a workflow whose runs file on it and whose
+# pictures are therefore NOT a plain variant's (``!manual:<uuid>``,
+# ``!auto:<digest>``). See :func:`workflow_keys_predicate`.
+NOT_MADE_BY = "!"
+# The workflow a held variant (:data:`RUN_VARIANT`) must have been run by
+# (``=manual:<uuid>``): one run-filed workflow's own runs, narrowed by a LoRA.
+ONLY_MADE_BY = "="
+# A variant counted only in a picture an :data:`ONLY_MADE_BY` workflow's run
+# made (``@<structural hash>``), where a plain variant is counted in every
+# picture no run-filed workflow made.
+RUN_VARIANT = "@"
+
+
+def _in_json(column, values: Sequence[str]) -> ColumnElement:
+    """``column IN values`` as one bound JSON array, through ``json_each``.
+
+    An ``IN`` list would bind one parameter per value and meet SQLite's cap,
+    which several workflows' variants together can reach.
+    """
+    rows = func.json_each(json.dumps(sorted(values))).table_valued("value")
+    return column.in_(select(rows.c.value))
+
+
+def made_by_run_filed(live: Sequence[str]) -> ColumnElement:
+    """``picture.run_workflow_id`` names one of the *live* run-filed workflows.
+
+    *live* is ``workflow_card_reads.run_filed_workflow_ids``: the manual
+    workflows the hub holds and the automatic ones the owner saved over. A
+    picture naming a manual workflow that has since been deleted is in none.
+    """
+    return _in_json(Picture.run_workflow_id, live)
+
+
+def filed_as(live: Sequence[str]) -> ColumnElement:
+    """The key a kept picture is filed under: the workflow whose run made it, else its variant.
+
+    A picture made by a run of a workflow whose runs file on it
+    (``run_workflow_id`` in *live*: a manual workflow, or an automatic one
+    the owner saved over) belongs to THAT workflow while it lives, not to the
+    automatic one its variant is in. Every per-workflow read of pictures (the
+    grid's counts and covers, a workflow's pictures, its recipes' credit and
+    looks) groups or narrows by this, so such a workflow's id is one more key
+    beside the variants (``workflow_card_reads.picture_keys``).
+    """
+    if not live:
+        return Picture.workflow_structural_hash
+    return case(
+        (made_by_run_filed(live), Picture.run_workflow_id),
+        else_=Picture.workflow_structural_hash,
+    )
+
+
+def workflow_keys_predicate(keys: Sequence[str]) -> ColumnElement:
+    """The pictures a resolved workflow filter names.
+
+    *keys* is what ``routes/pictures/_listing._resolve_workflow_filter``
+    resolves ``?workflow=`` to, for one workflow or several (OR'd):
+
+    * a workflow id (``manual:``, ``auto:``): the pictures its own runs made,
+      by ``run_workflow_id``. A manual workflow's only key; a saved-over
+      automatic one's beside its variants;
+    * a variant: its pictures, less those a :data:`NOT_MADE_BY` workflow's
+      run made. A run-filed workflow's picture is that workflow's and never
+      the one its variant is in, while it lives;
+    * a :data:`RUN_VARIANT`: that variant's pictures made by a run of an
+      :data:`ONLY_MADE_BY` workflow (its runs, narrowed by a LoRA).
+
+    Empty matches nothing.
+    """
+    own = [key for key in keys if key.startswith(_WORKFLOW_ID_PREFIXES)]
+    excluded = [key[1:] for key in keys if key.startswith(NOT_MADE_BY)]
+    only = [key[1:] for key in keys if key.startswith(ONLY_MADE_BY)]
+    held = [key[1:] for key in keys if key.startswith(RUN_VARIANT)]
+    variants = [
+        key
+        for key in keys
+        if key not in own and key[:1] not in (NOT_MADE_BY, ONLY_MADE_BY, RUN_VARIANT)
+    ]
+    found = _in_json(Picture.workflow_structural_hash, variants)
+    if excluded:
+        found = and_(
+            found,
+            or_(Picture.run_workflow_id.is_(None), not_(made_by_run_filed(excluded))),
+        )
+    if held:
+        found = or_(
+            found,
+            and_(
+                _in_json(Picture.workflow_structural_hash, held),
+                _in_json(Picture.run_workflow_id, only),
+            ),
+        )
+    return or_(_in_json(Picture.run_workflow_id, own), found) if own else found
+
 
 # Tag vocabularies for the live "Impossible tags" grid filters, lowercased once for
 # case-insensitive SQL membership.
@@ -154,12 +253,21 @@ class PredicateFilter(BaseModel):
     # picture that was never touched keeps ``score IS NULL``, while clicking the
     # current star again writes a literal 0 (``POST /pictures/apply-scores``
     # accepts 0..5 and nothing normalises it back to NULL). To a user those are
-    # the same thing, so the predicate covers both.
+    # the same thing, so the predicate covers both. Given with a score range it
+    # widens the range to take the unrated in too.
     unscored: bool = False
     smart_score_bucket: Optional[str] = None
     resolution_bucket: Optional[str] = None
     comfyui_models_filter: Optional[List[str]] = None
     comfyui_loras_filter: Optional[List[str]] = None
+    # "The pictures made by this workflow": its variants (or a manual one's
+    # own id), resolved from the hub BEFORE the query is built, because the
+    # workflows live in the hub and the pictures live in the vault - there is
+    # no join to write (:func:`workflow_keys_predicate`). ``None`` is no
+    # filter; an empty list is a workflow with no filed variant and must match
+    # nothing, so every read of this field tests ``is not None`` rather than
+    # truthiness.
+    workflow_structural_hashes: Optional[List[str]] = None
     tags_filter: Optional[List[str]] = None
     tags_rejected_filter: Optional[List[str]] = None
     hidden_tags_filter: Optional[List[str]] = None
@@ -303,12 +411,18 @@ class PredicateFilter(BaseModel):
         if self.format:
             preds.append(Picture.format.in_(self.format))
 
+        score_range: list[ColumnElement] = []
         if self.min_score is not None:
-            preds.append(Picture.score >= self.min_score)
+            score_range.append(Picture.score >= self.min_score)
         if self.max_score is not None:
-            preds.append(Picture.score <= self.max_score)
+            score_range.append(Picture.score <= self.max_score)
         if self.unscored:
-            preds.append(or_(Picture.score.is_(None), Picture.score == 0))
+            # With a range, unscored is added to it ("3-4 plus the unrated"),
+            # alone it is the unrated only.
+            unrated = or_(Picture.score.is_(None), Picture.score == 0)
+            preds.append(or_(and_(*score_range), unrated) if score_range else unrated)
+        else:
+            preds.extend(score_range)
 
         preds.extend(self._smart_score_bucket_predicates())
         preds.extend(self._resolution_bucket_predicates())
@@ -407,6 +521,11 @@ class PredicateFilter(BaseModel):
                         f"EXISTS (SELECT 1 FROM json_each(picture.comfyui_loras) WHERE value = :clf_{i})"
                     ).bindparams(**{f"clf_{i}": m})
                 )
+        if self.workflow_structural_hashes is not None:
+            # ponytail: one expanding IN, unchunked. SQLite's parameter ceiling
+            # is 32,766 on the bundled builds, so a card would need that many
+            # variants to reach it; a temp table and a join if one ever does.
+            preds.append(workflow_keys_predicate(self.workflow_structural_hashes))
 
         preds.extend(self.face_predicates())
 

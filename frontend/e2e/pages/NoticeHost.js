@@ -110,9 +110,22 @@ export class NoticeHost {
     )
   }
 
-  /** Empty the queue between tests. */
-  clear() {
-    return this.page.evaluate(() => window.__notice().clear())
+  /**
+   * Empty the queue, and wait for the cards to actually leave the DOM.
+   *
+   * `clear()` is synchronous in the store, but the TransitionGroup keeps each
+   * leaving card mounted for the length of its leave transition. A `push()`
+   * issued straight afterwards therefore renders INTO a stack that still holds
+   * the old card, and `cards.first()` resolves to that one - it is visible, so
+   * `toBeVisible()` passes, and then it detaches half a second later, in the
+   * middle of whatever the test went on to measure. A detached element has an
+   * empty computed style, which is how this surfaced: `colorsOf` returned a
+   * bag of nulls and `composite` threw `Cannot read properties of null` from a
+   * different file. Waiting here is the fix for every caller at once.
+   */
+  async clear() {
+    await this.page.evaluate(() => window.__notice().clear())
+    await expect(this.cards).toHaveCount(0)
   }
 
   actionCallCount() {
@@ -190,7 +203,7 @@ export class NoticeHost {
   }
 
   /**
-   * Effective colours of a card, with the `rgba(status, .08)` ::before tint
+   * Effective colours of a card, with the `rgba(status, .08)` tint layer
    * composited over the opaque base — which is what the eye actually sees and
    * what the spec's §8 contrast table is measured against. `backgroundColor`
    * alone would report the untinted base and quietly pass a broken variant.
@@ -214,6 +227,15 @@ export class NoticeHost {
         a: 1,
       })
       const cs = getComputedStyle(card)
+      // A detached element has an EMPTY computed style, so every parse below
+      // would return null and the failure would land in `composite`, in a
+      // different file. Say what actually happened instead.
+      if (!cs.backgroundColor) {
+        throw new Error(
+          'e2e: the notice card left the DOM before its colours were read - ' +
+            'it was a leaving card, or it auto-dismissed mid-measurement',
+        )
+      }
       const base = parse(cs.backgroundColor)
       const tint = parse(cs.getPropertyValue('--notice-tint'))
       const effectiveBg = tint ? over(tint, base) : base
@@ -269,7 +291,7 @@ export function composite(fg, bg) {
 /**
  * WCAG relative-luminance contrast ratio between two opaque {r,g,b} colours.
  * Used instead of an axe-core rule because the notice card's real background is
- * a composited ::before tint that axe's colour-contrast rule does not model.
+ * a composited tint layer that axe's colour-contrast rule does not model.
  */
 export function contrastRatio(a, b) {
   const lum = (c) => {

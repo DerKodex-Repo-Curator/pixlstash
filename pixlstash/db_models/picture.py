@@ -12,13 +12,13 @@ from sqlalchemy.types import LargeBinary
 from sqlmodel import (
     Boolean,
     Column,
-    DateTime,
     SQLModel,
     Field,
     Relationship,
     exists,
     select,
     Session,
+    UTCDateTime,
 )
 from typing import ClassVar, Optional, List, Union, TYPE_CHECKING
 
@@ -39,6 +39,7 @@ from .tag import Tag
 from .tag_prediction import TagPrediction
 
 from pixlstash.pixl_logging import get_logger
+from pixlstash.utils.sql_chunking import chunked
 
 if TYPE_CHECKING:
     from .character import Character
@@ -200,6 +201,12 @@ def _scope_predicates_for_leaders(
 
 class Picture(SQLModel, table=True):
     ExportType: ClassVar[type["ExportType"]] = ExportType
+    # Left out of ``metadata_fields()`` (#1197): a screenshot's words and boxes
+    # run to kilobytes, which every metadata and search row would carry.
+    # ``GET /pictures/{id}/text`` serves them shaped; the generic
+    # ``GET /pictures/{id}/{field}`` reader still returns the raw columns, under
+    # the same picture scope.
+    OCR_FIELDS: ClassVar[frozenset] = frozenset({"ocr_text", "ocr_words"})
     id: int = Field(default=None, primary_key=True)
     file_path: Optional[str] = None
     description: Optional[str] = None
@@ -220,11 +227,11 @@ class Picture(SQLModel, table=True):
     size_bytes: Optional[int] = None
     size_bin_index: Optional[int] = Field(default=None, index=True)
     created_at: Optional[datetime] = Field(
-        default=None, sa_column=Column("created_at", type_=DateTime, nullable=True)
+        default=None, sa_column=Column("created_at", type_=UTCDateTime(), nullable=True)
     )
     imported_at: Optional[datetime] = Field(
         default=None,
-        sa_column=Column("imported_at", type_=DateTime, nullable=True, index=True),
+        sa_column=Column("imported_at", type_=UTCDateTime(), nullable=True, index=True),
     )
     text_embedding: Optional[np.ndarray] = Field(
         sa_column=Column("text_embedding", LargeBinary, default=None, nullable=True)
@@ -261,6 +268,22 @@ class Picture(SQLModel, table=True):
     aesthetic_score: Optional[float] = None
     smart_score: Optional[float] = Field(default=None, index=True)
     text_score: Optional[float] = Field(default=None, index=True)
+    # Whether the picture looks like its prompt AT ALL: the fraction of a fixed
+    # bank of unrelated texts its CLIP image embedding is less similar to than
+    # to ``comfyui_positive_prompt`` (``pixlstash/scoring/prompt_match.py``).
+    # A sanity check for total failures, never a quality score. NULL when there
+    # is no prompt or it is not computed yet; -1.0 when it could not be.
+    prompt_match: Optional[float] = Field(default=None)
+    # Text read out of the picture (#1197), words joined by spaces and lines by
+    # newlines. NULL means not read; "" means read and nothing found. Kept out
+    # of ``description`` so the caption embedding stays about meaning, and out
+    # of tags so the tag board and review queue never see it.
+    ocr_text: Optional[str] = Field(default=None)
+    # The same words with their boxes, as JSON lines of words:
+    # ``[[{"text": str, "box": [x, y, w, h]}, ...], ...]``, the box in fractions
+    # of the picture as displayed (orientation applied). NULL whenever
+    # ``ocr_text`` is.
+    ocr_words: Optional[str] = Field(default=None)
     pixel_sha: Optional[str] = Field(default=None, index=True)
     deleted: bool = Field(default=False, index=True)
     # When the picture was soft-deleted to the scrapheap (UTC). Stamped on the
@@ -270,7 +293,7 @@ class Picture(SQLModel, table=True):
     # with deleted_at IS NULL is never auto-purged (fail-closed).
     deleted_at: Optional[datetime] = Field(
         default=None,
-        sa_column=Column("deleted_at", type_=DateTime, nullable=True, index=True),
+        sa_column=Column("deleted_at", type_=UTCDateTime(), nullable=True, index=True),
     )
     stack_id: Optional[int] = Field(
         default=None, foreign_key="picturestack.id", index=True
@@ -319,14 +342,34 @@ class Picture(SQLModel, table=True):
     # The third tier: that recipe with ONE set of parameters, the prompt
     # included and the seed excluded (a generation is an instance plus a seed).
     # Two pictures share an instance exactly when they share this value, which
-    # is what "Covered only" asks. Vault-only on purpose -- an instance carries
-    # the prompt, and a hub-side instance table is Phase 2 work in v1.12.
+    # is what "While matched" asks, and the join to the hub's per-library
+    # ``workflow_recipe_instance`` row and this picture's ``generation``.
     workflow_instance_hash: Optional[str] = Field(
         default=None,
         sa_column=Column(
             "workflow_instance_hash", String, default=None, nullable=True, index=True
         ),
     )
+    # The workflow a run of which made this picture, or NULL: a MANUAL one
+    # (``manual:<uuid>``, a hub row), or an automatic one the owner has saved
+    # over (``auto:<digest>`` with a ``workflow_version``, #1849). Written
+    # once, by the import of that run's outputs; filing is exclusive, so such
+    # a picture counts on that workflow and not on the automatic one its
+    # graph is in - while the workflow lives. Delete it and the picture falls
+    # back, with no write here (the reads take the hub's list of live ids).
+    run_workflow_id: Optional[str] = Field(
+        default=None,
+        sa_column=Column(
+            "run_workflow_id", String, default=None, nullable=True, index=True
+        ),
+    )
+    # Which version of ``run_workflow_id``'s document made it (hub
+    # ``workflow_version.version``): the one a PixlStash Run submitted, or for
+    # a picture made in ComfyUI the version its embedded editor workflow equals
+    # by content. NULL is "not known": an automatic workflow, an older picture,
+    # or a ComfyUI graph with edits no version holds. Written once. The version
+    # may since have been pruned from the hub; the number still says which.
+    run_workflow_version: Optional[int] = Field(default=None)
     # The scanned-marker, and the re-hash selector when the rule changes.
     # NULL means never scanned; set means scanned, with ALL THREE
     # `workflow_*_hash` columns above NULL when the picture carried no
@@ -596,6 +639,31 @@ class Picture(SQLModel, table=True):
             "id",
             sqlite_where=text("aesthetic_score IS NULL"),
         ),
+        # MissingOcrFinder: ocr_text IS NULL AND deleted IS 0 AND text_score >=
+        # the threshold, most text first. The two equality terms lead, as above;
+        # the range on text_score comes last so the index also serves the ORDER
+        # BY. Without it the probe range-scans every qualifying picture, read or
+        # not, on ``ix_picture_text_score``.
+        Index(
+            "ix_picture_ocr_unread",
+            "ocr_text",
+            "deleted",
+            "text_score",
+            sqlite_where=text("ocr_text IS NULL"),
+        ),
+        # MissingPromptMatchFinder: prompt_match IS NULL AND deleted IS 0 among
+        # pictures with a prompt. The prompt term is in the WHERE so the many
+        # pictures with no prompt, whose score stays NULL for good, are not in
+        # the index for the probe to walk.
+        Index(
+            "ix_picture_prompt_match_missing",
+            "prompt_match",
+            "deleted",
+            "id",
+            sqlite_where=text(
+                "prompt_match IS NULL AND comfyui_positive_prompt IS NOT NULL"
+            ),
+        ),
     )
 
     class Config:
@@ -654,10 +722,11 @@ class Picture(SQLModel, table=True):
         session: Session,
         query: str,
         query_words: List[str],
-        text_to_embedding: callable,
-        clip_text_to_embedding: callable = None,
+        query_embedding: Optional[np.ndarray],
+        clip_query_embedding: Optional[np.ndarray] = None,
         fuzzy_weight: float = 0.5,
         embedding_weight: float = 0.5,
+        text_match_weight: float = 0.0,
         threshold: float = 0.0,
         offset: int = 0,
         limit: int = sys.maxsize,
@@ -681,30 +750,37 @@ class Picture(SQLModel, table=True):
         """
         Hybrid semantic search: combines fuzzy tag search (levenshtein SQL function) and embedding similarity (cosine_similarity SQL function).
         Orders by combined score in SQL.
+
+        Text read out of a picture adds ``text_match_weight`` when every query
+        word appears in it (``ocr_text_match``), and nothing otherwise, so a
+        picture full of words gains nothing on searches its words do not answer.
+        The search route passes ``database.OCR_TEXT_MATCH_WEIGHT``.
+
+        The query embeddings come in as values, not as encoder callables,
+        because this runs inside a database task: an encode here would hold the
+        single DB writer thread, and every write, for the length of a model
+        call. Callers encode on their own thread before queuing the search.
+        ``query_embedding`` is the SBERT embedding compared with
+        ``Picture.text_embedding``; ``clip_query_embedding`` the CLIP text
+        embedding compared with ``Picture.image_embedding``. ``None`` leaves
+        that half out of the score.
         """
         if candidate_ids is not None and not candidate_ids:
             return []
         # Imported lazily to avoid a circular import (predicate_filter imports Picture).
         from pixlstash.utils.query.predicate_filter import PredicateFilter
 
-        # 1. Generate SBERT embedding for tag search (Text-to-Text)
-        query_embedding = text_to_embedding(query)
+        # 1. SBERT embedding for tag search (Text-to-Text)
         if query_embedding is None:
             logger.warning("Semantic search: Failed to generate SBERT embedding.")
             query_embedding_bytes = None
         else:
             query_embedding_bytes = query_embedding.tobytes()
 
-        # 2. Generate CLIP embedding for visual search (Text-to-Image)
-        if clip_text_to_embedding:
-            clip_query_embedding = clip_text_to_embedding(query)
-            clip_query_embedding_bytes = (
-                clip_query_embedding.tobytes()
-                if clip_query_embedding is not None
-                else None
-            )
-        else:
-            clip_query_embedding_bytes = None
+        # 2. CLIP embedding for visual search (Text-to-Image)
+        clip_query_embedding_bytes = (
+            clip_query_embedding.tobytes() if clip_query_embedding is not None else None
+        )
 
         logger.debug(
             f"Performing semantic search for query='{query}' and query_words={query_words} with fuzzy_weight={fuzzy_weight}, embedding_weight={embedding_weight}"
@@ -762,14 +838,20 @@ class Picture(SQLModel, table=True):
             0.0, 1.0 - func.coalesce(tag_subq.c.min_tag_dist, 1.0)
         )
         fuzzy_score = func.pow(raw_fuzzy_score, 1.5)
+        # Skipped outright at weight 0 rather than evaluated and multiplied away.
+        text_match_score = (
+            func.ocr_text_match(cls.ocr_text, query) if text_match_weight else 0.0
+        )
 
         # Main query: join pictures with tag_subq, compute combined score
         stmt = (
             select(
                 cls,
-                (fuzzy_weight * fuzzy_score + embedding_weight * embedding_score).label(
-                    "combined_score"
-                ),
+                (
+                    fuzzy_weight * fuzzy_score
+                    + embedding_weight * embedding_score
+                    + text_match_weight * text_match_score
+                ).label("combined_score"),
                 fuzzy_score.label("fuzzy_score"),
                 embedding_score.label("embedding_score"),
                 tag_subq.c.min_tag_dist.label(
@@ -847,7 +929,9 @@ class Picture(SQLModel, table=True):
                 lines.append(
                     f"{idx:>4} {pic_id:>6} {float(combined_score):>9.4f} {float(fuzzy_val):>7.4f} {float(embed_val):>7.4f} {float(min_tag_val):>8.4f}"
                 )
-            logger.info(
+            # DEBUG, not INFO: this carries the search text, which has no
+            # business in the log at the default level.
+            logger.debug(
                 "Semantic search score breakdown (top %d) query=%r:\n%s",
                 len(top_rows),
                 query,
@@ -865,6 +949,37 @@ class Picture(SQLModel, table=True):
             if combined_score and combined_score >= threshold:
                 output.append((pic, combined_score))
         return output
+
+    @classmethod
+    def ids_matching_text(
+        cls, session: Session, query: str, picture_ids: List[int]
+    ) -> set[int]:
+        """Return which of *picture_ids* have read text matching every query word.
+
+        Only the ids given are looked at, by primary key, so the cost follows
+        the rows a search returned rather than the size of the library.
+
+        Args:
+            session: Open database session.
+            query: The search text.
+            picture_ids: The pictures to check, typically one search's rows.
+
+        Returns:
+            The subset of *picture_ids* for which ``ocr_text_match`` is 1.
+        """
+        matched: set[int] = set()
+        for chunk in chunked(list(picture_ids)):
+            matched.update(
+                session.exec(
+                    select(cls.id).where(
+                        cls.id.in_(chunk),
+                        cls.ocr_text.is_not(None),
+                        cls.ocr_text != "",
+                        func.ocr_text_match(cls.ocr_text, query) > 0,
+                    )
+                ).all()
+            )
+        return matched
 
     @staticmethod
     def serialize_with_likeness(picture_and_score):
@@ -917,6 +1032,7 @@ class Picture(SQLModel, table=True):
         stack_leaders_only: bool = False,
         comfyui_models_filter: Optional[List[str]] = None,
         comfyui_loras_filter: Optional[List[str]] = None,
+        workflow_structural_hashes: Optional[List[str]] = None,
         tags_filter: Optional[List[str]] = None,
         tags_rejected_filter: Optional[List[str]] = None,
         tags_confidence_above_filter: Optional[List[str]] = None,
@@ -944,10 +1060,7 @@ class Picture(SQLModel, table=True):
         """
         # Imported lazily: predicate_filter imports Picture, so a module-level
         # import here would be circular.
-        from pixlstash.utils.query.predicate_filter import (
-            PredicateFilter,
-            comfyui_leaf_parts,
-        )
+        from pixlstash.utils.query.predicate_filter import PredicateFilter
 
         query = select(func.count(cls.id)) if count_only else select(cls)
 
@@ -1027,21 +1140,12 @@ class Picture(SQLModel, table=True):
             stack_state=stack_state,
             impossible_sources=impossible_sources,
             file_path_prefix=file_path_prefix,
+            workflow_structural_hashes=workflow_structural_hashes,
             only_deleted=only_deleted,
             include_deleted=include_deleted,
             include_unimported=include_unimported,
         )
         query = predicate_filter.apply(query)
-
-        # Build comfyui filter conditions via the shared leaf-snippet helper.  Two
-        # parallel fragment lists are returned:
-        # comfyui_self_parts   – fragments that test the picture row itself.
-        # comfyui_member_parts – equivalent fragments that test an aliased member
-        #                        row (_m) used in a stack-member EXISTS subquery.
-        # comfyui_bind_params  – shared bind-parameter dict (same names in both).
-        comfyui_self_parts, comfyui_member_parts, comfyui_bind_params = (
-            comfyui_leaf_parts(comfyui_models_filter, comfyui_loras_filter)
-        )
 
         # A stack leader is either an unstacked picture or the picture with
         # stack_position == 0 in its stack.  This inline condition replaces the
@@ -1098,37 +1202,10 @@ class Picture(SQLModel, table=True):
                 )
             else:
                 query = query.where(cls.stack_leader_filter(leader_scope))
-        if comfyui_self_parts:
-            self_where = " OR ".join(comfyui_self_parts)
-            if stack_leaders_only:
-                # Restore the original behaviour: include a stack leader when
-                # *any* member of the stack satisfies the ComfyUI filter, not
-                # only when the leader row itself satisfies it.
-                member_where = " OR ".join(comfyui_member_parts)
-                # NOTE: the whole disjunction is wrapped in an extra outer pair of
-                # parentheses.  ``text()`` is opaque, so SQLAlchemy adds none of its
-                # own, and SQL ``AND`` binds tighter than ``OR``: without the wrapper
-                # this clause renders as ``... AND deleted = 0 AND <leader condition>
-                # AND self_match OR member_match``, which parses as ``(everything AND
-                # self) OR member``.  The stack-member branch then escapes every other
-                # predicate (the deleted filter, the stack-leader collapse, and any id
-                # or project scope narrowing) and returns each member of a matching
-                # stack as its own row.  Same trap, same fix, as the
-                # ``tags_confidence_above_filter`` branch in predicate_filter.py.
-                comfyui_sql = (
-                    f"(({self_where})"
-                    f" OR (picture.stack_id IS NOT NULL"
-                    f" AND EXISTS ("
-                    f"SELECT 1 FROM picture AS _m"
-                    f" WHERE _m.stack_id = picture.stack_id"
-                    f" AND ({member_where})"
-                    f")))"
-                )
-                query = query.where(text(comfyui_sql).bindparams(**comfyui_bind_params))
-            else:
-                query = query.where(
-                    text(f"({self_where})").bindparams(**comfyui_bind_params)
-                )
+        for clause in cls.comfyui_filter_clauses(
+            comfyui_models_filter, comfyui_loras_filter, stack_leaders_only
+        ):
+            query = query.where(clause)
 
         if sort_mech and not count_only:
             if sort_mech.key == SortMechanism.Keys.IMAGE_SIZE:
@@ -1200,7 +1277,7 @@ class Picture(SQLModel, table=True):
         """
         Return a list of simple scalar fields
         """
-        return cls.scalar_fields() - cls.large_binary_fields()
+        return cls.scalar_fields() - cls.large_binary_fields() - cls.OCR_FIELDS
 
     @classmethod
     def grid_fields(cls):
@@ -1303,6 +1380,7 @@ class Picture(SQLModel, table=True):
         resolution_bucket: Optional[str] = None,
         project_id: Optional[int] = None,
         only_unassigned_project: bool = False,
+        unassigned_by: Optional[str] = None,
         tags_filter: Optional[List[str]] = None,
         tags_rejected_filter: Optional[List[str]] = None,
         tags_confidence_above_filter: Optional[List[str]] = None,
@@ -1312,6 +1390,9 @@ class Picture(SQLModel, table=True):
         stack_state: Optional[str] = None,
         impossible_sources: Optional[List[str]] = None,
         file_path_prefix: Optional[str] = None,
+        comfyui_models_filter: Optional[List[str]] = None,
+        comfyui_loras_filter: Optional[List[str]] = None,
+        workflow_structural_hashes: Optional[List[str]] = None,
         picture_ids: Optional[List[int]] = None,
         guest_session_id: Optional[str] = None,
         guest_token_public_id: Optional[str] = None,
@@ -1325,6 +1406,7 @@ class Picture(SQLModel, table=True):
             enforce_stack_assignment=True,
             assignment_project_id=project_id,
             assignment_unassigned_project=only_unassigned_project,
+            unassigned_by=unassigned_by,
         )
         query = query.where(
             *unassigned_conditions,
@@ -1350,8 +1432,8 @@ class Picture(SQLModel, table=True):
 
         # Intrinsic-attribute predicates via the shared compiler.  The unassigned /
         # project / deleted scoping is applied above; stack-leader collapsing stays
-        # below.  find_unassigned never filters on comfyui / import-source /
-        # import-excluded, so those fields are left unset.
+        # below.  ComfyUI membership is applied after it, the same way `find`
+        # applies it. Import-source / import-excluded are not filtered here.
         #
         # ``file_path_prefix`` IS honoured, on the same children-only semantics
         # ``find()`` uses, so "the unassigned pictures in one folder" is one
@@ -1375,8 +1457,13 @@ class Picture(SQLModel, table=True):
             stack_state=stack_state,
             impossible_sources=impossible_sources,
             file_path_prefix=file_path_prefix,
+            workflow_structural_hashes=workflow_structural_hashes,
             apply_deleted_filter=False,
         ).apply(query)
+        for clause in cls.comfyui_filter_clauses(
+            comfyui_models_filter, comfyui_loras_filter, stack_leaders_only
+        ):
+            query = query.where(clause)
 
         if stack_leaders_only:
             # Same rule and same implementation as `find` - see
@@ -1481,6 +1568,57 @@ class Picture(SQLModel, table=True):
         return session.exec(query).all()
 
     @classmethod
+    def comfyui_filter_clauses(
+        cls,
+        models_filter: Optional[List[str]],
+        loras_filter: Optional[List[str]],
+        stack_leaders_only: bool,
+    ) -> list:
+        """WHERE clauses for the ComfyUI checkpoint and LoRA filters.
+
+        One clause per list, ANDed by the caller: ticking a checkpoint and a
+        LoRA narrows to pictures made with both. Within one list the names are
+        ORed, since a picture records one checkpoint and "either of these" is
+        the only useful reading of two. Both list-reading paths (`find` and
+        `find_unassigned`) take them from here, so a scope cannot drop them.
+
+        With ``stack_leaders_only`` a leader also matches when *any* member of
+        its stack does, not only when the leader row itself does.
+        """
+        # Imported lazily: predicate_filter imports Picture.
+        from pixlstash.utils.query.predicate_filter import comfyui_leaf_parts
+
+        clauses = []
+        for models, loras in ((models_filter, None), (None, loras_filter)):
+            self_parts, member_parts, bind_params = comfyui_leaf_parts(models, loras)
+            if not self_parts:
+                continue
+            self_where = " OR ".join(self_parts)
+            if not stack_leaders_only:
+                clauses.append(text(f"({self_where})").bindparams(**bind_params))
+                continue
+            member_where = " OR ".join(member_parts)
+            # The whole disjunction is wrapped in an extra outer pair of
+            # parentheses. ``text()`` is opaque, so SQLAlchemy adds none of its
+            # own, and SQL ``AND`` binds tighter than ``OR``: without the wrapper
+            # the stack-member branch escapes every other predicate (the deleted
+            # filter, the stack-leader collapse, any id or project scope) and
+            # returns each member of a matching stack as its own row. Same trap,
+            # same fix, as ``tags_confidence_above_filter`` in predicate_filter.py.
+            clauses.append(
+                text(
+                    f"(({self_where})"
+                    f" OR (picture.stack_id IS NOT NULL"
+                    f" AND EXISTS ("
+                    f"SELECT 1 FROM picture AS _m"
+                    f" WHERE _m.stack_id = picture.stack_id"
+                    f" AND ({member_where})"
+                    f")))"
+                ).bindparams(**bind_params)
+            )
+        return clauses
+
+    @classmethod
     def stack_leader_filter(cls, scope_predicates: list):
         """Collapse a NARROWED grid to one row per stack, correctly.
 
@@ -1582,8 +1720,13 @@ class Picture(SQLModel, table=True):
         enforce_stack_assignment: bool = False,
         assignment_project_id: Optional[int] = None,
         assignment_unassigned_project: bool = False,
+        unassigned_by: Optional[str] = None,
     ) -> list:
         """Build SQL predicates for pictures that should count as unassigned.
+
+        Unassigned means no named face and no set membership. ``unassigned_by``
+        narrows it to one half: ``"character"`` (no named face, sets ignored)
+        or ``"set"`` (in no set, faces ignored). ``None`` keeps both.
 
         When enforce_stack_assignment is enabled, any stack with at least one
         assigned member (character face or set membership) is treated as assigned,
@@ -1622,7 +1765,13 @@ class Picture(SQLModel, table=True):
                 PictureSet.id == PictureSetMember.set_id,
             ).where(set_scope)
 
-        conditions = [~exists(assigned_face_query), ~exists(assigned_set_query)]
+        check_faces = unassigned_by != "set"
+        check_sets = unassigned_by != "character"
+        conditions = []
+        if check_faces:
+            conditions.append(~exists(assigned_face_query))
+        if check_sets:
+            conditions.append(~exists(assigned_set_query))
 
         if not enforce_stack_assignment:
             return conditions
@@ -1659,9 +1808,10 @@ class Picture(SQLModel, table=True):
                 PictureSet.id == PictureSetMember.set_id,
             ).where(set_scope)
 
-        stack_has_assigned_face = exists(stack_assigned_face_query)
-        stack_has_set_member = exists(stack_assigned_set_query)
-        conditions.extend([~stack_has_assigned_face, ~stack_has_set_member])
+        if check_faces:
+            conditions.append(~exists(stack_assigned_face_query))
+        if check_sets:
+            conditions.append(~exists(stack_assigned_set_query))
         return conditions
 
     @staticmethod

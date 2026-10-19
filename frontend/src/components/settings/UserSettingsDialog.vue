@@ -7,18 +7,19 @@ import AccountSection from "./AccountSection.vue";
 import LibrariesSection from "./LibrariesSection.vue";
 import AppearanceSection from "./AppearanceSection.vue";
 import BehaviourSection from "./BehaviourSection.vue";
+import ComfyuiHostSection from "./ComfyuiHostSection.vue";
 import ComputeSection from "./ComputeSection.vue";
+import ModelFoldersSection from "./ModelFoldersSection.vue";
 import PrivacySection from "./PrivacySection.vue";
 import ScrapheapSection from "./ScrapheapSection.vue";
 import SnapshotsSection from "./SnapshotsSection.vue";
 import SmartScoreSection from "./SmartScoreSection.vue";
-import WorkflowsSection from "./WorkflowsSection.vue";
 import { VIcon } from "vuetify/components";
 
 const appVersion = __APP_VERSION__;
 
 // The desktop app injects this bridge (Electron preload); a plain browser does
-// not, so the Compute tab is desktop-only.
+// not, so the Backend and Compute tabs are desktop-only.
 const isDesktop = typeof window !== "undefined" && !!window.pixlstashDesktop;
 
 const props = defineProps({
@@ -69,21 +70,24 @@ const navItems = computed(() =>
       show: true,
     },
     {
-      id: "behaviour",
-      icon: "tune-variant",
+      // The model folders. The shelf's folder button lands here.
+      id: "models",
+      icon: "folder-multiple-outline",
       label: "Models",
+      show: !isReadOnly.value,
+    },
+    {
+      // Memory, VRAM and the taggers. The id predates the label and is kept:
+      // the server's library insights deep-link to it.
+      id: "behaviour",
+      icon: "tag-outline",
+      label: "Tagging",
       show: !isReadOnly.value,
     },
     {
       id: "smart-score",
       icon: "star-four-points-outline",
       label: "Smart Score & Filters",
-      show: !isReadOnly.value,
-    },
-    {
-      id: "workflows",
-      icon: "sitemap-outline",
-      label: "Workflows",
       show: !isReadOnly.value,
     },
     {
@@ -112,6 +116,14 @@ const navItems = computed(() =>
       id: "privacy",
       icon: "shield-lock-outline",
       label: "Privacy",
+      show: !isReadOnly.value,
+    },
+    {
+      // Its own pane rather than a section under Compute: the acceleration
+      // runtime alone fills that pane, and a browser has no runtime at all.
+      id: "comfyui",
+      icon: "sitemap-outline",
+      label: "ComfyUI",
       show: !isReadOnly.value,
     },
     {
@@ -156,7 +168,7 @@ watch(
     :open="dialogOpen"
     title="Settings"
     :subtitle="`v${appVersion}`"
-    :width="820"
+    size="xl"
     :pad-body="false"
     @close="dialogOpen = false"
   >
@@ -188,7 +200,7 @@ watch(
         @click="settingsTab = item.id"
       >
         <span v-if="settingsTab === item.id" class="settings-nav-item__bar" />
-        <v-icon size="17" class="settings-nav-item__icon">
+        <v-icon size="16" class="settings-nav-item__icon">
           mdi-{{ item.icon }}
         </v-icon>
         {{ item.label }}
@@ -224,6 +236,16 @@ watch(
       </div>
       <div
         v-if="!isReadOnly"
+        v-show="settingsTab === 'models'"
+        id="settings-pane-models"
+        class="settings-pane"
+        role="region"
+        aria-labelledby="settings-nav-models"
+      >
+        <ModelFoldersSection :open="dialogOpen && settingsTab === 'models'" />
+      </div>
+      <div
+        v-if="!isReadOnly"
         v-show="settingsTab === 'behaviour'"
         id="settings-pane-behaviour"
         class="settings-pane"
@@ -244,19 +266,6 @@ watch(
           :open="dialogOpen"
           @update:hidden-tags="emit('update:hidden-tags', $event)"
           @update:apply-tag-filter="emit('update:apply-tag-filter', $event)"
-        />
-      </div>
-      <div
-        v-if="!isReadOnly"
-        v-show="settingsTab === 'workflows'"
-        id="settings-pane-workflows"
-        class="settings-pane"
-        role="region"
-        aria-labelledby="settings-nav-workflows"
-      >
-        <WorkflowsSection
-          :open="dialogOpen"
-          @update:comfyui-configured="emit('update:comfyui-configured', $event)"
         />
       </div>
       <div
@@ -298,6 +307,20 @@ watch(
         aria-labelledby="settings-nav-privacy"
       >
         <PrivacySection :open="dialogOpen && settingsTab === 'privacy'" />
+      </div>
+      <div
+        v-if="!isReadOnly"
+        v-show="settingsTab === 'comfyui'"
+        id="settings-pane-comfyui"
+        class="settings-pane"
+        role="region"
+        aria-labelledby="settings-nav-comfyui"
+      >
+        <ComfyuiHostSection
+          :open="dialogOpen"
+          first
+          @update:comfyui-configured="emit('update:comfyui-configured', $event)"
+        />
       </div>
       <div
         v-if="isDesktop && !isReadOnly"
@@ -376,7 +399,7 @@ watch(
 }
 
 .settings-nav-item--active {
-  color: rgb(var(--v-theme-on-surface));
+  color: var(--active-text);
   font-weight: var(--weight-semibold);
   background: var(--active-wash);
 }
@@ -388,7 +411,13 @@ watch(
   bottom: 6px;
   width: 3px;
   border-radius: 0 2px 2px 0;
-  background: rgb(var(--v-theme-accent));
+  background: var(--active-bar);
+}
+
+/* A full-width row flush in the nav column: an outset ring would be clipped. */
+.settings-nav-item:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring-inset);
 }
 
 .settings-nav-item__icon {

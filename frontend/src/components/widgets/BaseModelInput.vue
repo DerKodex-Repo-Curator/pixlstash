@@ -15,11 +15,12 @@
     @keydown="onKeydown"
     @blur="onBlur"
   />
-  <!-- Teleported and fixed, like the tag panel's list, because both places this
-       field lands in clip: a dialog body scrolls and a shelf row hides its
-       overflow, so an absolutely positioned menu would be cut off in one and
-       cropped in the other. -->
-  <Teleport to="body">
+  <!-- A layer on the overlay stack and fixed, like the tag panel's list,
+       because both places this field lands in clip: a dialog body scrolls and a
+       shelf row hides its overflow, so an absolutely positioned menu would be
+       cut off in one and cropped in the other. The stack also puts it above the
+       dialog, which no z-index can promise. -->
+  <StackLayer :open="menuShown">
     <div
       v-if="menuShown"
       :id="menuId"
@@ -55,7 +56,7 @@
         >
       </button>
     </div>
-  </Teleport>
+  </StackLayer>
 </template>
 
 <script setup>
@@ -111,6 +112,7 @@ import {
 } from "vue";
 
 import { useModelShelfStore } from "../../stores/useModelShelfStore";
+import StackLayer from "./StackLayer.vue";
 
 defineOptions({ inheritAttrs: false });
 
@@ -282,13 +284,12 @@ defineExpose({
    from `OverlayTagsPanel.vue` along with the reasons they are off-token. */
 .bmi-menu {
   position: fixed;
-  z-index: 9999;
   max-height: 240px;
   overflow-y: auto;
   background: color-mix(in srgb, rgb(var(--v-theme-shadow)) 85%, transparent);
   backdrop-filter: blur(6px);
   border: 1px solid rgba(var(--v-theme-on-dark-surface), 0.15);
-  border-radius: 6px; /* no clean token: 6px equidistant between --radius-sm(4px) and --radius-md(8px) */
+  border-radius: var(--radius-md);
   box-shadow: var(--elevation-3);
   display: flex;
   flex-direction: column;
@@ -306,16 +307,29 @@ defineExpose({
   text-overflow: ellipsis;
 }
 
-.bmi-item:hover,
+.bmi-item:hover {
+  background: rgba(var(--v-theme-on-dark-surface), 0.16);
+}
+
+/* The keyboard's current option is a selection on a dark menu: the dark-surface
+   olive wash. Hover layers over it rather than replacing it. */
 .bmi-item--active {
-  background: rgba(var(--v-theme-primary), 0.22);
+  background: rgba(var(--v-theme-dark-surface-primary), 0.2);
+}
+
+.bmi-item--active:hover {
+  background: linear-gradient(
+      rgba(var(--v-theme-on-dark-surface), 0.16),
+      rgba(var(--v-theme-on-dark-surface), 0.16)
+    )
+    rgba(var(--v-theme-dark-surface-primary), 0.2);
 }
 
 .bmi-hint {
   display: inline-block;
   margin-left: var(--space-3);
   padding: 0 var(--space-2);
-  font-size: 0.55rem; /* no token: ~7.7px, well below --text-2xs=11px */
+  font-size: var(--text-2xs);
   font-weight: var(--weight-semibold);
   letter-spacing: 0.04em;
   border-radius: var(--radius-sm);

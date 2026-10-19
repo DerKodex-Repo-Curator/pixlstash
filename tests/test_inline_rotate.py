@@ -34,7 +34,8 @@ import os
 import secrets
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from contextlib import contextmanager
+from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -625,7 +626,9 @@ def test_a_180_rotate_changes_the_thumbnail_cache_version(client, server):
         picture.thumbnail_height = 240
         session.add(picture)
         session.commit()
-        return ImageUtils.thumbnail_cache_version(320, 240, picture.orientation)
+        return ImageUtils.thumbnail_cache_version(
+            320, 240, picture.orientation, file_path=None
+        )
 
     before = server.vault.db.run_task(_version)
     assert before == "320x240"
@@ -894,7 +897,7 @@ def _forge_write_token(server, set_id):
                 library_uuid=server._active_library_uuid(),
                 token_hash=bcrypt.hash(token_value),
                 token_prefix=token_value[:8],
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(timezone.utc),
                 description="write-enabled picture-set token (test only)",
                 scope="WRITE",
                 resource_type="picture_set",
@@ -1054,22 +1057,9 @@ def test_the_owner_is_not_over_blocked(client, server):
     assert read_orientation(_file_path(server, picture_id)) == 6
 
 
-def test_undo_announces_that_the_pixels_changed(client, server):
-    """A bare ``updated`` leaves the grid painting the pre-rotate bitmap.
-
-    A rotate rewrites the FILE, so the card's thumbnail URL changes - and that
-    URL comes from the batch-thumbnail endpoint, never from
-    ``GET /pictures/{id}/metadata``. The client's targeted refresh re-reads
-    metadata, so without the field being named it repaints the same stale tile
-    and the undo looks like it did nothing.
-
-    The forward rotate is safe because the client that issued it refreshes the
-    URL itself. Undo arrives over the socket with no such local hook, which is
-    why this is asserted on the *undo*.
-    """
-    picture_id = _upload(client)
-    assert _rotate(client, [picture_id], "cw").status_code == 200
-
+@contextmanager
+def _captured_notifications(server):
+    """Collect the picture-change events the vault broadcasts inside the block."""
     emitted: list[dict] = []
     real_notify = server.vault.notify
 
@@ -1080,18 +1070,67 @@ def test_undo_announces_that_the_pixels_changed(client, server):
 
     server.vault.notify = _capture
     try:
-        assert client.post(f"{API}/operations/undo").status_code == 200
+        yield emitted
     finally:
         server.vault.notify = real_notify
 
+
+def _assert_announced_a_turn(emitted, picture_id, what):
     announcements = [
         event
         for event in emitted
         if picture_id in (event.get("picture_ids") or [])
         and event.get("change_kind") == "updated"
     ]
-    assert announcements, "the undo announced nothing about the rotated picture"
-    assert any("pixels" in (event.get("fields") or []) for event in announcements), (
-        "an orientation restore must name `pixels`, or the client refreshes the "
+    assert announcements, f"the {what} announced nothing about the rotated picture"
+    fields = [set(event.get("fields") or []) for event in announcements]
+    assert any("pixels" in names for names in fields), (
+        f"a {what} must name `pixels`, or a receiving client refreshes the "
         "card's metadata and goes on painting the pre-rotate thumbnail"
     )
+    # `orientation` is what separates a turn from the three byte rewrites that
+    # turn nothing (the thumbnail regeneration task, the layout move route and
+    # its task). Only a turn redefines the coordinate space the face and object
+    # boxes are drawn in, drops the text, and moves the `?v=o<n>` the lightbox
+    # builds its <img> from - so a client that cannot tell them apart either
+    # re-reads all of that for every background batch or none of it for a turn.
+    assert any("orientation" in names for names in fields), (
+        f"a {what} must name `orientation` as well, or the client cannot tell "
+        "it from a thumbnail regeneration that rewrote the same bytes"
+    )
+
+
+def test_undo_announces_a_turn(client, server):
+    """A bare ``updated`` leaves the grid painting the pre-rotate bitmap.
+
+    A rotate rewrites the FILE, so the card's thumbnail URL changes - and that
+    URL comes from the batch-thumbnail endpoint, never from
+    ``GET /pictures/{id}/metadata``. The client's targeted refresh re-reads
+    metadata, so without the field being named it repaints the same stale tile
+    and the undo looks like it did nothing.
+    """
+    picture_id = _upload(client)
+    assert _rotate(client, [picture_id], "cw").status_code == 200
+
+    with _captured_notifications(server) as emitted:
+        assert client.post(f"{API}/operations/undo").status_code == 200
+
+    _assert_announced_a_turn(emitted, picture_id, "orientation restore")
+
+
+def test_the_rotate_itself_announces_a_turn(client, server):
+    """The forward rotate names the fields for the same reason its undo does.
+
+    The client that *issued* the rotate refreshes its own card and its own open
+    lightbox, so this event is for everybody else: another tab, and any surface
+    that only learns of the turn over the socket. A bare ``updated`` sends them
+    to ``GET /pictures/{id}/metadata``, which carries no thumbnail URL and no
+    reason to rebuild the lightbox's ``?v=o<n>`` - so the picture stays the way
+    it was until the view is reloaded.
+    """
+    picture_id = _upload(client)
+
+    with _captured_notifications(server) as emitted:
+        assert _rotate(client, [picture_id], "cw").status_code == 200
+
+    _assert_announced_a_turn(emitted, picture_id, "rotate")

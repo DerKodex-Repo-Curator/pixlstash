@@ -182,20 +182,20 @@ defineExpose({
    button's readout, but the lane still hosts the swipe/chrome hints, so the
    placement stands.
 
-   z-index 6 is the overlay's own trapped local scale (visual-language.md §14
-   sanctions it): the same rung as `.overlay-progress`, which is the same class
-   of object. */
+   `--z-floating`, the floating-status-pill rung, and the same one as
+   `.overlay-progress`, which is the same class of object. Inside the lightbox's
+   own stacking context, so it orders the lightbox's chrome and nothing else. */
 .overlay-receipt-slot {
   position: absolute;
   bottom: calc(var(--space-5) + var(--space-8));
   left: var(--filmstrip-rail-width, 0px);
   right: var(--sidebar-width, 0px);
-  z-index: 6;
+  z-index: var(--z-floating);
   display: flex;
   justify-content: center;
   pointer-events: none;
-  /* `--sidebar-width` flips instantly (0 to 320px) while `.overlay-sidebar`
-     slides its width over 200ms. Without this the pill jumps mid-glide. */
+  /* `--sidebar-width` flips instantly (0 to the pane's width) while
+     `.overlay-sidebar` slides its width. Without this the pill jumps. */
   transition:
     left var(--dur-2) var(--ease-standard),
     right var(--dur-2) var(--ease-standard);
@@ -298,10 +298,13 @@ defineExpose({
   text-decoration: underline;
   text-underline-offset: 2px;
 }
-/* `--hover-wash` is `rgba(accent, 0.14)` in BOTH themes, so it composites to a
-   visible warm lift on this dark fill without a variant. */
+/* The pill is dark in both themes, so hover and focus take the on-dark ink
+   rather than the theme's. */
 .r-btn:hover:not([aria-disabled="true"]) {
-  background: var(--hover-wash);
+  background: rgba(var(--v-theme-on-dark-surface), 0.16);
+}
+.r-btn:focus-visible {
+  outline-color: rgb(var(--v-theme-on-dark-surface));
 }
 /* `aria-disabled`, never the attribute: disabling a control the keyboard is on
    moves focus to <body>, and this button flips to Redo when the trip lands. */

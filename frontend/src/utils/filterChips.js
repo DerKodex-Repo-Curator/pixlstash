@@ -1,0 +1,394 @@
+/**
+ * The grid's active filters as chips, and the choices the filter menu offers.
+ *
+ * One module for both so the menu row and the strip chip it produces can never
+ * spell a choice two ways. Every chip carries its own `remove`, which is the
+ * only way the strip changes a filter: editing a chip in place is out of scope.
+ */
+
+// Pick-one Picture kinds. "Any" is deliberately not a choice: removing the chip
+// is how you get back to any.
+export const MEDIA_OPTIONS = [
+  { id: "images", label: "Images", chip: "images", icon: "mdi-image-outline" },
+  { id: "videos", label: "Video", chip: "video", icon: "mdi-video-outline" },
+];
+
+export const FACE_OPTIONS = [
+  {
+    id: "with_face",
+    label: "Has face",
+    chip: "has face",
+    icon: "mdi-face-recognition",
+  },
+  {
+    id: "without_face",
+    label: "No face",
+    chip: "no face",
+    icon: "mdi-account-off-outline",
+  },
+];
+
+// 'unresolved' is honoured by the store and API but not offered: the duplicate
+// queue owns undecided groups.
+export const STACK_OPTIONS = [
+  {
+    id: "stacked",
+    label: "Stacked",
+    chip: "stacked",
+    icon: "mdi-layers-outline",
+  },
+  {
+    id: "unstacked",
+    label: "Unstacked",
+    chip: "unstacked",
+    icon: "mdi-layers-off",
+  },
+];
+
+// Only the combinations the backend actually detects. Each maps to one
+// `impossible_tag_source` value.
+export const IMPOSSIBLE_OPTIONS = [
+  { id: "no_face", label: "Face tags, no face", chip: "face tags, no face" },
+  {
+    id: "no_humans",
+    label: "People tags, no humans",
+    chip: "people tags, no humans",
+  },
+];
+
+export const CONFIDENCE_THRESHOLDS = [0.9, 0.8, 0.7, 0.6];
+// Doubtful asks for an unsure tagger, so its thresholds sit lower.
+export const DOUBTFUL_THRESHOLDS = [0.6, 0.5, 0.4, 0.3];
+
+export const SMART_SCORE_BUCKET_LABELS = {
+  unscored: "unscored",
+  "1-2": "1–2",
+  "2-3": "2–3",
+  "3-4": "3–4",
+  "4-5": "4–5",
+};
+
+export const RESOLUTION_BUCKET_LABELS = {
+  unknown: "unknown",
+  lt1mp: "under 1 MP",
+  "1-4mp": "1–4 MP",
+  "4-8mp": "4–8 MP",
+  "8-16mp": "8–16 MP",
+  "16plus": "16 MP+",
+};
+
+/** `"hat:0.80"` → `{ tag: "hat", threshold: 0.8 }`. Tags may hold a colon. */
+export function parseConfidenceEntry(entry) {
+  const at = String(entry).lastIndexOf(":");
+  return {
+    tag: entry.slice(0, at),
+    threshold: parseFloat(entry.slice(at + 1)),
+  };
+}
+
+export function confidenceEntry(tag, threshold) {
+  return `${tag}:${threshold.toFixed(2)}`;
+}
+
+export function percent(threshold) {
+  return `${Math.round(threshold * 100)}%`;
+}
+
+/** A model or LoRA file name without its extension, as the menus list it. */
+export function modelLabel(name) {
+  return String(name).replace(/\.[^/.]+$/, "");
+}
+
+/** "3–4", "3+", "up to 4", with the unscored part when it is on. */
+export function scoreChipValue(min, max, unscored) {
+  let range = "";
+  if (min != null && max != null)
+    range = min === max ? `${min}` : `${min}–${max}`;
+  else if (min != null) range = `${min}+`;
+  else if (max != null) range = `up to ${max}`;
+  if (!unscored) return range;
+  // From the filter menu a range from 0 carries the unrated: 0 stars is them.
+  if (min == null && max != null) return max === 0 ? "unscored" : range;
+  return range ? `${range} or unscored` : "unscored";
+}
+
+function without(list, value) {
+  return (list || []).filter((v) => v !== value);
+}
+
+/**
+ * The chips for the store's current filters, in strip order.
+ *
+ * @param {object} store the filter store
+ * @param {{ allPicturesView?: boolean }} [view] "No character" and "In no
+ *   set" only exist in All Pictures, so a stale flag elsewhere is not shown
+ *   as a filter.
+ * @returns {Array<{ key: string, kind: string, value: string, remove: Function }>}
+ */
+/** The Workflows Filters panel's two Source answers (v1.12 F7). */
+export const WORKFLOW_SOURCE_LABELS = Object.freeze({
+  imported: "Imported file",
+  found: "Found in your pictures",
+});
+
+/**
+ * Where a workflow card came from, by the server's `origin_category`: ComfyUI's
+ * saved workflows (cards made while PixlStash still read them, #1854), made
+ * automatically from pictures, or one of the owner's own (a clone, import,
+ * edit or built-in).
+ */
+export const WORKFLOW_ORIGIN_LABELS = Object.freeze({
+  comfyui: "ComfyUI",
+  pictures: "From pictures",
+  own: "Our own",
+});
+
+/**
+ * The Workflows screen's active filters as chips (v1.12 F7).
+ *
+ * Here rather than in `useWorkflowsStore` for this module's own reason: it is
+ * where a filter's chip words live, so a screen cannot spell one filter two
+ * ways. The picture grid's `filterChips` above reads a STORE; this reads the
+ * plain `filters` object and the cards, because a workflow chip's label can
+ * need the payload (a type's `type_label`) and because the caller applies the
+ * change through `setFilters`, which has a refetch decision to make that no
+ * chip should know about.
+ *
+ * @param {object} filters - `useWorkflowsStore().filters`.
+ * @param {Array<object>} cards - the payload's cards, for label lookups.
+ * @param {(changes: object) => void} setFilters - the store's own setter.
+ * @returns {Array<{key: string, kind: string, value: string, remove: Function}>}
+ */
+export function workflowFilterChips(filters, cards, setFilters) {
+  const chips = [];
+  const push = (key, kind, value, reset) =>
+    chips.push({ key, kind, value, remove: () => setFilters(reset) });
+
+  if (!filters.hideOneOffs) {
+    push("one-offs", "Showing", "one-offs", { hideOneOffs: true });
+  }
+  if (filters.showHidden) {
+    push("hidden", "Showing", "hidden workflows", { showHidden: false });
+  }
+  if (filters.ghosts) {
+    push("ghosts", "Keeps", "something deleted", { ghosts: false });
+  }
+  if (filters.type != null) {
+    // The SERVED label, as the card's own type chip uses, so the strip and
+    // the card cannot say one type in two vocabularies.
+    const label =
+      (cards ?? []).find((card) => card.type === filters.type)?.type_label ??
+      filters.type;
+    push("type", "Type", label, { type: null });
+  }
+  if (filters.checkpoint != null) {
+    push("checkpoint", "Checkpoint", filters.checkpoint, { checkpoint: null });
+  }
+  if (filters.source != null) {
+    push("source", "Source", WORKFLOW_SOURCE_LABELS[filters.source], {
+      source: null,
+    });
+  }
+  if (filters.origin != null) {
+    push("origin", "Origin", WORKFLOW_ORIGIN_LABELS[filters.origin], {
+      origin: null,
+    });
+  }
+  if (filters.minRating != null) {
+    push("min-rating", "Rated", `${filters.minRating}★ and up`, {
+      minRating: null,
+    });
+  }
+  if (filters.name?.trim()) {
+    push("name", "Name", filters.name.trim(), { name: "" });
+  }
+  return chips;
+}
+
+export function filterChips(store, { allPicturesView = true } = {}) {
+  const chips = [];
+  const push = (key, kind, value, remove) =>
+    chips.push({ key, kind, value, remove });
+
+  if (allPicturesView && store.noCharacterFilter) {
+    push("problem:no_character", "Problem", "no character", () => {
+      store.noCharacterFilter = false;
+    });
+  }
+  if (allPicturesView && store.noSetFilter) {
+    push("problem:no_set", "Problem", "in no set", () => {
+      store.noSetFilter = false;
+    });
+  }
+  for (const source of store.impossibleSources || []) {
+    const opt = IMPOSSIBLE_OPTIONS.find((o) => o.id === source);
+    push(`problem:${source}`, "Problem", opt ? opt.chip : source, () => {
+      store.impossibleSources = without(store.impossibleSources, source);
+    });
+  }
+
+  const media = MEDIA_OPTIONS.find((o) => o.id === store.mediaTypeFilter);
+  if (media) {
+    push("media", "Media", media.chip, () => {
+      store.mediaTypeFilter = "all";
+    });
+  }
+  const faces = FACE_OPTIONS.find((o) => o.id === store.faceBboxFilter);
+  if (faces) {
+    push("faces", "Faces", faces.chip, () => {
+      store.faceBboxFilter = null;
+    });
+  }
+  // "unresolved" is not offered in the menu but can arrive from a URL; it still
+  // gets a chip, or the grid would be narrowed with nothing saying so.
+  const stacks = [
+    ...STACK_OPTIONS,
+    { id: "unresolved", chip: "unresolved" },
+  ].find((o) => o.id === store.stackStateFilter);
+  if (stacks) {
+    push("stacks", "Stacks", stacks.chip, () => {
+      store.stackStateFilter = "all";
+    });
+  }
+  if (store.sharedOnlyFilter) {
+    push("sharing", "Sharing", "shared", () => {
+      store.sharedOnlyFilter = false;
+    });
+  }
+
+  const score = scoreChipValue(
+    store.minScoreFilter,
+    store.maxScoreFilter,
+    store.unscoredOnlyFilter,
+  );
+  if (score) {
+    push("score", "Score", score, () => {
+      store.minScoreFilter = null;
+      store.maxScoreFilter = null;
+      store.unscoredOnlyFilter = false;
+    });
+  }
+  // Smart score and Resolution have no row in the filter menu: they are set
+  // from the stats sidebar's charts. They still get chips, so the strip names
+  // every filter narrowing the grid and Clear all reaches them.
+  if (store.smartScoreBucketFilter != null) {
+    const b = store.smartScoreBucketFilter;
+    push(
+      "smart_score",
+      "Smart score",
+      SMART_SCORE_BUCKET_LABELS[b] ?? b,
+      () => {
+        store.smartScoreBucketFilter = null;
+      },
+    );
+  }
+  if (store.resolutionBucketFilter != null) {
+    const b = store.resolutionBucketFilter;
+    push("resolution", "Resolution", RESOLUTION_BUCKET_LABELS[b] ?? b, () => {
+      store.resolutionBucketFilter = null;
+    });
+  }
+
+  for (const tag of store.tagFilter || []) {
+    push(`tag:${tag}`, "Has tag", tag, () => {
+      store.tagFilter = without(store.tagFilter, tag);
+    });
+  }
+  for (const tag of store.tagRejectedFilter || []) {
+    push(`lacks:${tag}`, "Lacks tag", tag, () => {
+      store.tagRejectedFilter = without(store.tagRejectedFilter, tag);
+    });
+  }
+  for (const entry of store.tagConfidenceAboveFilter || []) {
+    const { tag, threshold } = parseConfidenceEntry(entry);
+    push(
+      `missing:${entry}`,
+      "Missing tag",
+      `${tag} ${percent(threshold)}+`,
+      () => {
+        store.tagConfidenceAboveFilter = without(
+          store.tagConfidenceAboveFilter,
+          entry,
+        );
+      },
+    );
+  }
+  for (const entry of store.tagConfidenceBelowFilter || []) {
+    const { tag, threshold } = parseConfidenceEntry(entry);
+    push(
+      `doubtful:${entry}`,
+      "Doubtful tag",
+      `${tag} under ${percent(threshold)}`,
+      () => {
+        store.tagConfidenceBelowFilter = without(
+          store.tagConfidenceBelowFilter,
+          entry,
+        );
+      },
+    );
+  }
+
+  // One chip per workflow (#1797), the way four ticked checkpoints are four
+  // chips. They arrive from the Filters menu's Workflow row, *Show all N
+  // pictures* on a card (F7) and the Workflows screen's *Show all pictures*.
+  //
+  // Before the Checkpoint and LoRA chips, because a value opened from the
+  // Workflow tab (#1653) is a narrowing of the workflow: × on the value chip
+  // leaves this one standing, and × on this one takes the value it was opened
+  // with too, or a checkpoint chip would silently filter the whole library.
+  const workflows = store.workflowFilter || [];
+  const opened = workflows.find((w) => w.opened)?.opened;
+  for (const workflow of workflows) {
+    push(
+      `workflow:${workflow.id}`,
+      "Workflow",
+      workflow.name || "A deleted workflow",
+      () => {
+        store.workflowFilter = (store.workflowFilter || []).filter(
+          (w) => w.id !== workflow.id,
+        );
+        if (workflow.opened?.kind === "model") {
+          store.comfyuiModelFilter = without(
+            store.comfyuiModelFilter,
+            workflow.opened.value,
+          );
+        } else if (workflow.opened?.kind === "lora") {
+          store.comfyuiLoraFilter = without(
+            store.comfyuiLoraFilter,
+            workflow.opened.value,
+          );
+        }
+      },
+    );
+  }
+  // The pile's LoRA (`workflow_lora`) only narrows one workflow, so it stays
+  // on that workflow's entry and gets a chip of its own (F-4). Beside a second
+  // workflow it is not sent (`workflowFilterParams`), so it gets no chip.
+  const only = workflows.length === 1 ? workflows[0] : null;
+  if (only?.lora) {
+    // Off the store as it is NOW, never the entry captured here: Clear all
+    // runs the Workflow chip's × first, and writing this one back would
+    // restore the workflow it just removed.
+    push("workflow-lora", "LoRA", only.loraName || "A forgotten LoRA", () => {
+      store.workflowFilter = (store.workflowFilter || []).map(
+        ({ lora: _lora, loraName: _loraName, ...rest }) => rest,
+      );
+    });
+  }
+  /** The Workflow tab's short name for the value it opened, else the file's. */
+  const valueLabel = (kind, name) =>
+    opened?.kind === kind && opened.value === name && opened.label
+      ? opened.label
+      : modelLabel(name);
+  for (const name of store.comfyuiModelFilter || []) {
+    push(`model:${name}`, "Checkpoint", valueLabel("model", name), () => {
+      store.comfyuiModelFilter = without(store.comfyuiModelFilter, name);
+    });
+  }
+  for (const name of store.comfyuiLoraFilter || []) {
+    push(`lora:${name}`, "LoRA", valueLabel("lora", name), () => {
+      store.comfyuiLoraFilter = without(store.comfyuiLoraFilter, name);
+    });
+  }
+  return chips;
+}

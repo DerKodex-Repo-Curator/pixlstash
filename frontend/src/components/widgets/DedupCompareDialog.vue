@@ -75,9 +75,12 @@ import {
 } from "../../utils/zoomMath";
 import AppDialog from "./AppDialog.vue";
 import AppButton from "./AppButton.vue";
+import Segmented from "./Segmented.vue";
 import DedupConfidencePill from "./DedupConfidencePill.vue";
 import DedupWhyPills from "./DedupWhyPills.vue";
 import StackExpansionStrip from "./StackExpansionStrip.vue";
+import Tooltip from "./Tooltip.vue";
+import StackLayer from "./StackLayer.vue";
 import { pictureThumbnailUrl } from "../../api/pictures";
 import { listStackMembers, MAX_STACK_MEMBER_PAGE } from "../../api/dedup";
 import { API_BASE_URL } from "../../utils/apiClient";
@@ -864,7 +867,7 @@ function pickTitle(unit) {
       : "Click, or press X, to mark this picture as a stranger, so it comes out of the stack.";
   }
   return unit.kind === "deck"
-    ? "Make this stack the cover. Its leader, the picture shown here, leads the result."
+    ? "Make this stack the cover. Its leader, the picture shown here, leads the result. The numbers below are this picture's."
     : "Make this the cover";
 }
 
@@ -1317,6 +1320,17 @@ function nearScale(target) {
 const zoomAtFit = computed(() => nearScale(zoomFitScale.value));
 const zoomAtActual = computed(() => nearScale(1));
 
+const ZOOM_SNAP_OPTIONS = [
+  { id: "fit", label: "Fit", icon: "mdi-fit-to-screen-outline" },
+  { id: "actual", label: "Actual pixels", icon: "mdi-magnify-scan" },
+];
+
+/** The snap stop the zoom sits on, or null between stops. Fit wins where the
+ * two coincide (a picture no larger than the viewport). */
+const zoomSnap = computed(() =>
+  zoomAtFit.value ? "fit" : zoomAtActual.value ? "actual" : null,
+);
+
 /** The readout: percentage of ACTUAL pixels, the photo-tool convention.
  * Visibility of status - it is also what makes the blink guarantee (same
  * magnification across flips) verifiable by eye. */
@@ -1752,9 +1766,9 @@ function onZoomContextMenu() {
           class="dc-pick"
           :aria-pressed="isMixed ? isMarkedUnit(unit) : isUnitCover(unit)"
           :aria-label="unitName(unit, index)"
-          :title="pickTitle(unit)"
           @click="onCardPick(unit)"
         >
+          <Tooltip :text="pickTitle(unit)" activator="parent" />
           <!-- Wheel over the picture starts the zoom on it: the mouse's
                equivalent of the corner button, without the pixel hunt. -->
           <span class="dc-thumb" @wheel="onThumbWheel(index, $event)">
@@ -1773,12 +1787,9 @@ function onZoomContextMenu() {
             </span>
             <!-- A deck is showing ONE picture and standing for several, so it
                  says which one this is: the numbers below are its, not the
-                 stack's. -->
-            <span
-              v-if="unit.kind === 'deck'"
-              class="dc-flag dc-flag--leader"
-              title="This stack's leader. The numbers below are this picture's, and a cover choice on this card resolves to it."
-            >
+                 stack's. The card's own tip says so; a second tip on the flag
+                 would open on top of it. -->
+            <span v-if="unit.kind === 'deck'" class="dc-flag dc-flag--leader">
               Leader
             </span>
             <span v-if="isUnitOut(unit)" class="dc-flag dc-flag--out">
@@ -1797,10 +1808,13 @@ function onZoomContextMenu() {
         <button
           type="button"
           class="dc-zoom"
-          title="Zoom - full-screen blink compare (Z)"
           :aria-label="`Zoom ${unitName(unit, index)}`"
           @click.stop="openZoom(unitZoomStart(index))"
         >
+          <Tooltip
+            text="Zoom - full-screen blink compare (Z)"
+            activator="parent"
+          />
           <v-icon size="16">mdi-magnify-plus-outline</v-icon>
         </button>
 
@@ -1829,12 +1843,16 @@ function onZoomContextMenu() {
                some cards only would leave the pictures out of register. -->
           <span v-if="isMixed" class="dc-cell">
             <span class="dc-label">Match</span>
-            <span
-              class="dc-val"
-              :class="{ 'dc-val--gap': isMarkedUnit(unit) }"
-              :title="matchTitle(unit)"
-              >{{ matchText(unit) }}</span
-            >
+            <Tooltip :text="matchTitle(unit)">
+              <template #activator="{ props: tipProps }">
+                <span
+                  class="dc-val"
+                  :class="{ 'dc-val--gap': isMarkedUnit(unit) }"
+                  v-bind="tipProps"
+                  >{{ matchText(unit) }}</span
+                >
+              </template>
+            </Tooltip>
           </span>
           <span class="dc-cell">
             <span class="dc-label">Resolution</span>
@@ -1873,13 +1891,16 @@ function onZoomContextMenu() {
                 type="button"
                 class="dc-expand"
                 :aria-expanded="isExpanded(unit)"
-                :title="
-                  isExpanded(unit)
-                    ? 'Hide the pictures in this stack'
-                    : 'Show the pictures in this stack, below the cards'
-                "
                 @click.stop="toggleExpansion(unit)"
               >
+                <Tooltip
+                  :text="
+                    isExpanded(unit)
+                      ? 'Hide the pictures in this stack'
+                      : 'Show the pictures in this stack, below the cards'
+                  "
+                  activator="parent"
+                />
                 <v-icon size="14">{{
                   isExpanded(unit) ? "mdi-chevron-down" : "mdi-chevron-right"
                 }}</v-icon>
@@ -1958,9 +1979,14 @@ function onZoomContextMenu() {
                 type="button"
                 class="dc-toggle"
                 :aria-pressed="!leavesStack(unit)"
-                :title="inStackToggleTitle(unit)"
+                :aria-label="inStackToggleTitle(unit)"
                 @click.stop="onInStackToggle(unit)"
               >
+                <Tooltip
+                  :text="inStackToggleTitle(unit)"
+                  activator="parent"
+                  :describe="false"
+                />
                 <v-icon size="14">{{
                   leavesStack(unit)
                     ? "mdi-checkbox-blank-outline"
@@ -1982,24 +2008,28 @@ function onZoomContextMenu() {
               class="dc-val dc-path"
               :title="candidatePath(face)"
             >
-              <v-icon
-                size="13"
-                class="dc-path-icon"
-                title="Reference folder, you manage these files yourself"
-                >mdi-folder-eye-outline</v-icon
-              >
+              <Tooltip text="Reference folder, you manage these files yourself">
+                <template #activator="{ props: tipProps }">
+                  <v-icon size="13" class="dc-path-icon" v-bind="tipProps"
+                    >mdi-folder-eye-outline</v-icon
+                  >
+                </template>
+              </Tooltip>
               {{ shortenPath(candidatePath(face)) }}
             </span>
-            <span
+            <Tooltip
               v-else
-              class="dc-val dc-path"
-              title="Stored in your PixlStash library, not in a reference folder"
+              text="Stored in your PixlStash library, not in a reference folder"
             >
-              <v-icon size="13" class="dc-path-icon"
-                >mdi-image-multiple-outline</v-icon
-              >
-              In your library
-            </span>
+              <template #activator="{ props: tipProps }">
+                <span class="dc-val dc-path" v-bind="tipProps">
+                  <v-icon size="13" class="dc-path-icon"
+                    >mdi-image-multiple-outline</v-icon
+                  >
+                  In your library
+                </span>
+              </template>
+            </Tooltip>
           </span>
         </span>
       </div>
@@ -2124,7 +2154,7 @@ function onZoomContextMenu() {
           icon-left="check"
           key-hint="k"
           :disabled="busy"
-          title="This stack is fine. It stops being listed until its pictures change."
+          tooltip="This stack is fine. It stops being listed until its pictures change."
           @click="emit('keep')"
         >
           Keep
@@ -2139,7 +2169,7 @@ function onZoomContextMenu() {
           :icon-left="primaryIcon"
           key-hint="enter"
           :disabled="busy"
-          :title="primaryTitle"
+          :tooltip="primaryTitle"
           @click="emit('resolve')"
         >
           {{ primaryLabel }}
@@ -2152,7 +2182,7 @@ function onZoomContextMenu() {
           icon-left="call-split"
           key-hint="k"
           :disabled="busy"
-          title="Leave these as separate pictures. They stay in your library and stop being suggested."
+          tooltip="Leave these as separate pictures. They stay in your library and stop being suggested."
           @click="emit('keep-separate')"
         >
           Keep separate
@@ -2163,7 +2193,7 @@ function onZoomContextMenu() {
           icon-left="layers-plus"
           key-hint="enter"
           :disabled="busy"
-          title="Group these behind one cover. Every file stays on disk, and Ctrl+Z reverses it."
+          tooltip="Group these behind one cover. Every file stays on disk, and Ctrl+Z reverses it."
           @click="emit('stack')"
         >
           {{ verdictLabel.full }}
@@ -2179,7 +2209,7 @@ function onZoomContextMenu() {
        this surface has when a group named only one member of a stack.
        Deliberately near-black chrome at fixed colors: this is a
        photo-judgement surface, same rationale as the lightbox. -->
-  <Teleport to="body">
+  <StackLayer :open="zoomOpen">
     <div v-if="zoomOpen" class="dc-zv" data-testid="dedup-zoom">
       <div class="dc-zv-top">
         <div class="dc-zv-flip" role="tablist" aria-label="Picture">
@@ -2214,35 +2244,37 @@ function onZoomContextMenu() {
         <!-- Fit and 100% are SNAP STOPS on the wheel's continuum; the
              percentage readout is what makes "same magnification across the
              blink" verifiable by eye. -->
-        <div class="dc-zv-mode">
-          <button
-            type="button"
-            :class="{ 'dc-zv-on': zoomAtFit }"
-            title="Snap to fit - every candidate in the same box, the blink registered"
-            @click="snapZoomTo(zoomFitScale)"
-          >
-            <v-icon size="15">mdi-fit-to-screen-outline</v-icon>
-            Fit
-          </button>
-          <button
-            type="button"
-            :class="{ 'dc-zv-on': zoomAtActual }"
-            title="Snap to 1:1 - resolution differences show as size jumps (P)"
-            @click="snapZoomTo(1)"
-          >
-            <v-icon size="15">mdi-magnify-scan</v-icon>
-            Actual pixels
-          </button>
-          <span v-if="zoomPercent !== null" class="dc-zv-pct">{{
-            zoomPercent
-          }}</span>
-        </div>
+        <!-- mousedown.prevent: a click snaps the zoom without taking focus, so the
+             arrows go on flipping pictures. Tabbed to, the group owns them. -->
+        <Segmented
+          class="dc-zv-mode"
+          :model-value="zoomSnap"
+          :options="ZOOM_SNAP_OPTIONS"
+          variant="icon-label"
+          aria-label="Zoom"
+          @update:model-value="
+            (id) => snapZoomTo(id === 'fit' ? zoomFitScale : 1)
+          "
+          @pick="(id) => snapZoomTo(id === 'fit' ? zoomFitScale : 1)"
+          @mousedown.prevent
+        />
+        <span v-if="zoomPercent !== null" class="dc-zv-pct">{{
+          zoomPercent
+        }}</span>
         <button
           type="button"
           class="dc-zv-close"
-          title="Back to compare (Esc)"
+          aria-label="Back to compare"
+          aria-keyshortcuts="Escape"
           @click="closeZoom()"
         >
+          <Tooltip
+            text="Back to compare"
+            shortcut="Esc"
+            activator="parent"
+            attach=".dc-zv"
+            :describe="false"
+          />
           <v-icon size="18">mdi-close</v-icon>
         </button>
       </div>
@@ -2286,7 +2318,7 @@ function onZoomContextMenu() {
         <span><kbd>Esc</kbd> back</span>
       </div>
     </div>
-  </Teleport>
+  </StackLayer>
 </template>
 
 <style scoped>
@@ -2337,7 +2369,7 @@ function onZoomContextMenu() {
    and quieting it would say "inert" about the one card that is not. The flag
    chip is the second, non-colour channel (WCAG 1.4.1). */
 .dc-card--split {
-  border-color: rgb(var(--v-theme-warning));
+  border-color: rgb(var(--v-theme-surface-warning));
 }
 
 .dc-pick {
@@ -2443,7 +2475,13 @@ function onZoomContextMenu() {
 }
 
 .dc-zoom:hover {
-  color: rgb(var(--v-theme-accent));
+  background: rgba(var(--v-theme-on-dark-surface), 0.16);
+}
+
+/* It sits on the photo scrim in both themes, so its focus ring is the on-dark
+   ink rather than the theme's. */
+.dc-zoom:focus-visible {
+  outline-color: rgb(var(--v-theme-on-dark-surface));
 }
 
 /* ── The compact meta grid: two columns, label over value ─────────────────── */
@@ -2508,7 +2546,7 @@ function onZoomContextMenu() {
 .dc-val--gap {
   font-weight: var(--weight-semibold);
   background: rgba(var(--v-theme-warning), 0.12);
-  border: 1px solid rgba(var(--v-theme-warning), 0.35);
+  border: 1px solid rgba(var(--v-theme-surface-warning), 0.35);
   border-radius: var(--radius-sm);
   padding: 0 var(--space-2);
   align-self: flex-start;
@@ -2563,16 +2601,11 @@ function onZoomContextMenu() {
   font: inherit;
   font-variant-numeric: tabular-nums;
   text-align: left;
+  border-radius: var(--radius-sm);
 }
 
 .dc-expand:hover {
-  color: rgb(var(--v-theme-accent));
-}
-
-.dc-expand:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-  border-radius: var(--radius-sm);
+  background: var(--hover-wash);
 }
 
 /* ── The expansion band ────────────────────────────────────────────────────
@@ -2580,7 +2613,6 @@ function onZoomContextMenu() {
    it is the flexible child and gives up the height, so opening a band never
    squeezes the band itself into a scrolling sliver. */
 .dc-expansion {
-  margin-top: var(--space-4);
   flex-shrink: 0;
 }
 
@@ -2601,19 +2633,18 @@ function onZoomContextMenu() {
    own two rules itself: the strip above is the flexible child and gives up the
    height, which is what stops this line being squeezed into a scrolling sliver. */
 .dc-mixed-error {
-  margin-top: var(--space-4);
   flex-shrink: 0;
 }
 
 /* The hue is on the glyph and the border; the text stays `on-surface`, because
    `on-<x>` is only ever correct on a solid `<x>` fill. */
 .dc-expansion-state--error {
-  border-color: rgb(var(--v-theme-warning));
+  border-color: rgb(var(--v-theme-surface-warning));
   color: rgb(var(--v-theme-on-surface));
 }
 
 .dc-expansion-state--error .v-icon {
-  color: rgb(var(--v-theme-warning));
+  color: rgb(var(--v-theme-surface-warning));
 }
 
 /* The consequence sentence sits with the two buttons that answer it, so the
@@ -2644,7 +2675,6 @@ function onZoomContextMenu() {
 
 /* ── Why pills ───────────────────────────────────────────────────────────── */
 .dc-why {
-  margin-top: var(--space-4);
   flex-shrink: 0;
 }
 
@@ -2656,11 +2686,13 @@ function onZoomContextMenu() {
 
 /* ── The blink compare ─────────────────────────────────────────────────────
    Fixed colors on purpose: like the lightbox, a photo-judgement surface gets
-   near-black chrome in both themes. Sits above the modal dialog. */
+   near-black chrome in both themes. Sits above the modal dialog because it is
+   a `StackLayer`, which the overlay stack orders over it; no z-index. */
 .dc-zv {
   position: fixed;
-  inset: 0;
-  z-index: calc(var(--z-modal) + 100);
+  /* Under the desktop title bar (0px in a browser): the overlay stack is above
+     it, so only the inset keeps the drag region and window controls usable. */
+  inset: var(--titlebar-h) 0 0 0;
   display: flex;
   flex-direction: column;
   background: #0a0a0a;
@@ -2693,14 +2725,21 @@ function onZoomContextMenu() {
 }
 
 .dc-zv-flip button:hover {
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(var(--v-theme-on-dark-surface), 0.16);
 }
 
+/* The picture on screen is SELECTED, not an action: the dark-surface olive
+   edge and wash, words in the surface's ink. */
 .dc-zv .dc-zv-on {
-  background: rgb(var(--v-theme-accent));
-  border-color: rgb(var(--v-theme-accent));
-  color: rgb(var(--v-theme-on-accent));
+  background: rgba(var(--v-theme-dark-surface-primary), 0.2);
+  border-color: rgb(var(--v-theme-dark-surface-primary));
+  color: #fff;
   font-weight: var(--weight-semibold);
+}
+
+/* Near-black in both themes, so the theme's ink ring would vanish in light. */
+.dc-zv :focus-visible {
+  outline-color: rgb(var(--v-theme-on-dark-surface));
 }
 
 .dc-flag--zv {
@@ -2717,36 +2756,27 @@ function onZoomContextMenu() {
   text-overflow: ellipsis;
 }
 
+/* Near-black in both themes, so Segmented's on-surface ink and track take the
+   dark-surface values (the dark theme's own) instead of the light theme's. */
 .dc-zv-mode {
-  display: flex;
-  gap: var(--space-1);
   flex-shrink: 0;
-}
-
-.dc-zv-mode button {
-  height: 30px;
-  padding: 0 var(--space-3);
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  border: 1px solid rgba(255, 255, 255, 0.24);
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: #fff;
-  font-family: var(--font-ui);
-  font-size: var(--text-xs);
-  cursor: pointer;
-}
-
-.dc-zv-mode button:hover {
-  background: rgba(255, 255, 255, 0.12);
+  --v-theme-on-surface: var(--v-theme-on-dark-surface);
+  --hover-wash: rgba(var(--v-theme-on-dark-surface), 0.16);
+  --track-trough: rgba(var(--v-theme-scrim), 0.34);
+  --track-ring: rgba(var(--v-theme-on-dark-surface), 0.4);
+  --focus-stroke: rgb(var(--v-theme-on-dark-surface));
+  /* The selected fill too. The deep olive is a dark fill on a dark trough and
+     the elevation that carries the second cue is invisible on near-black; the
+     bright olive is the dark-theme value for exactly this, under the surface's
+     own near-black ink (5.50:1 on #242628, 6.25:1 on #181b20 - main.js). */
+  --v-theme-primary: var(--v-theme-dark-surface-primary);
+  --v-theme-on-primary: var(--v-theme-dark-surface);
 }
 
 /* The live magnification, in the photo-tool convention (100% = 1:1). Same
    fixed chrome values as the meta line: this is the near-black judgement
    surface, deliberately un-themed. */
 .dc-zv-pct {
-  align-self: center;
   min-width: 5ch;
   text-align: right;
   font-size: var(--text-xs);
@@ -2766,7 +2796,7 @@ function onZoomContextMenu() {
 }
 
 .dc-zv-close:hover {
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(var(--v-theme-on-dark-surface), 0.16);
   color: #fff;
 }
 

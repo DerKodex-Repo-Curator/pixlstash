@@ -10,7 +10,7 @@
 //
 // Per the §src/api rules the URL strings live only here.
 
-import { apiClient} from "../utils/apiClient";
+import { apiClient } from "../utils/apiClient";
 import { unwrap } from "../utils/unwrap";
 
 // Public, deployment-independent fallback for remote owners. Unlike cli_hint
@@ -30,14 +30,19 @@ const INSPECT_LIBRARY_URL = "/libraries/inspect";
 /**
  * List the registered libraries.
  *
- * `path` and `cli_hint` are present only when the caller is on the server's
+ * `path`, `cli_hint` and `importing_path` are present only when the caller is on the server's
  * machine, its LAN, or Tailscale. A remote session gets the names and which one
  * is active, and `can_manage: false`, so the UI can disable switching rather
  * than letting the call fail. Every library entry includes
  * `active_share_links`, owner metadata used to warn before its resource-scoped
  * links become inactive.
  *
- * @returns {Promise<Object>} `{ libraries, can_manage, in_docker, cli_hint }`.
+ * A library still on its first import is left out of `libraries`; the
+ * `importing_*` fields name it instead (the sidebar finds its saved import by
+ * `importing_path`).
+ *
+ * @returns {Promise<Object>} `{ libraries, can_manage, in_docker, cli_hint,
+ *   importing_uuid, importing_name, importing_path }`.
  */
 export async function listLibraries() {
   return unwrap(apiClient.get(LIBRARIES_URL));
@@ -116,4 +121,22 @@ export async function renameLibrary(uuid, name) {
  */
 export async function detachLibrary(uuid) {
   return unwrap(apiClient.delete(`${LIBRARIES_URL}/${uuid}`));
+}
+
+/**
+ * Give a folder back: undo a first import the owner did not keep.
+ *
+ * Deletes the temporary database and the folders PixlStash made, drops the
+ * registration, and touches no picture file - the folder is left exactly as it
+ * was found, with no `vault.db` to make it read as a library next time. The
+ * session lands on a library of PixlStash's own.
+ *
+ * Only a library still on its first import can be discarded; a real one is
+ * refused (409) because discarding it would delete something the owner kept.
+ *
+ * @param {string} uuid
+ * @returns {Promise<Object>} the library the session landed on.
+ */
+export async function discardLibrary(uuid) {
+  return unwrap(apiClient.post(`${LIBRARIES_URL}/${uuid}/discard`));
 }

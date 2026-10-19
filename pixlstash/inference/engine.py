@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
+import threading
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Iterator
 
+from pixlstash.inference.cpu_query_encoders import build_cpu_query_encoders
 from pixlstash.inference.vram_budget import VramBudget
 from pixlstash.inference.model_lifecycle import ModelLifecycleManager
 from pixlstash.pixl_logging import get_logger
 from pixlstash.services.builtin_models import builtin_model_dir
+from pixlstash.utils.accelerator import (
+    CUDA,
+    MPS,
+    configure_metal_model_loading,
+    normalise_device,
+    resolve_device,
+)
 
 if TYPE_CHECKING:
     from pixlstash.tagger_plugins.clip_service import ClipService
@@ -26,6 +36,25 @@ logger = get_logger(__name__)
 
 _MAX_CONCURRENT_GPU = 64
 _MAX_CONCURRENT_CPU = 8
+
+#: Images at once on Apple Silicon. Deliberately the CPU figure rather than the
+#: CUDA one, and it costs nothing: MPS throughput on the default tagger is
+#: **flat** across batch 1-16 (226 +/- 2 ms/image at fp16), so a larger batch
+#: buys no speed and only spends memory. It spends a lot of it - the measured
+#: model is 443 MB + 162 MB per 576 px image - and the memory is system RAM
+#: shared with everything else running. 64 was reproduced as a real OOM at 32:
+#: "MPS backend out of memory ... max allowed: 9.07 GiB" on a machine with 8 GiB
+#: installed, because torch's default MPS high watermark is 1.7x the
+#: recommended working set and therefore above physical RAM.
+_MAX_CONCURRENT_MPS = 8
+
+#: Image concurrency per device. A table rather than an if-ladder so a fourth
+#: device is one entry, and so this cannot drift from the sibling decision in
+#: ``inference/workflows/tagging.py`` the way the two ladders did.
+_MAX_CONCURRENT_BY_DEVICE = {
+    CUDA: _MAX_CONCURRENT_GPU,
+    MPS: _MAX_CONCURRENT_MPS,
+}
 
 
 class InferenceEngine:
@@ -86,6 +115,12 @@ class InferenceEngine:
         self.wd14_service = wd14_service
         self.pixlstash_tagger_service = pixlstash_tagger_service
         self.florence_service = florence_service
+        # CPU copies of the query encoders, so a search never encodes on the
+        # inference device while the GPU worker is using it, when using Metal.
+        # See inference/cpu_query_encoders.py.
+        self.query_encoders = None
+        # One query encode at a time; see query_services.
+        self._query_lock = threading.Lock()
         self.vram_budget = vram_budget
         self.lifecycle = lifecycle
         self.force_cpu = force_cpu
@@ -341,7 +376,11 @@ class InferenceEngine:
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        """Unload all models and release GPU/CPU memory."""
+        """Unload all models and release GPU/CPU memory.
+
+        The CPU query encoders are deliberately kept: they load once, before the
+        engine is published, and go when the engine does (#1774).
+        """
         self.lifecycle.aggressive_unload(
             clip_service=self.clip_service,
             wd14_service=self.wd14_service,
@@ -353,6 +392,29 @@ class InferenceEngine:
     def aggressive_unload(self) -> None:
         """Alias for :meth:`close`."""
         self.close()
+
+    @contextmanager
+    def query_services(self) -> Iterator[tuple]:
+        """Yield ``(clip_service, sbert_service)`` for one search-query encode.
+
+        On Metal these are the CPU copies (:mod:`.cpu_query_encoders`), because
+        a query is encoded on a request thread while the GPU worker uses the
+        device; everywhere else they are the engine's own services.
+
+        One encode at a time, on every host: the query encodes run on request
+        threads and share these service instances, which read their model and
+        tokenizer without a lock once loaded. They used to take turns on the
+        single database writer thread; this lock is that serialisation, without
+        holding the writer.
+
+        Raises:
+            CpuQueryEncodersNotReadyError: The CPU copies failed to load.
+        """
+        with self._query_lock:
+            if self.query_encoders is None:
+                yield self.clip_service, self.sbert_service
+            else:
+                yield self.query_encoders.services()
 
     def safe_idle_unload(self) -> None:
         """Release non-captioning models during idle periods."""
@@ -368,10 +430,19 @@ class InferenceEngine:
     # ------------------------------------------------------------------
 
     def max_concurrent_images(self) -> int:
-        """Return the maximum number of images to process concurrently."""
-        if self.device == "cpu":
-            return _MAX_CONCURRENT_CPU
-        return _MAX_CONCURRENT_GPU
+        """Return the maximum number of images to process concurrently.
+
+        Named per device rather than "cpu or else", which is how it was written
+        and which is a live hazard the moment a third device exists: ``"mps"``
+        is not ``"cpu"``, so it inherited the 64-image CUDA branch - a batch the
+        memory model puts at roughly 10.8 GB. The sibling decision in
+        ``inference/workflows/tagging.py`` was written with the opposite
+        polarity ("cuda or else"), so the two disagreed about every device
+        neither of them named.
+        """
+        return _MAX_CONCURRENT_BY_DEVICE.get(
+            normalise_device(self.device), _MAX_CONCURRENT_CPU
+        )
 
     def description_batch_size(self) -> int:
         """Return the current Florence-2 description batch size."""
@@ -445,6 +516,21 @@ class InferenceEngine:
         self.ensure_captioning_ready()
         return self.florence_service.detect_objects(image_paths, prompt=prompt)
 
+    def read_text(self, image_paths: list) -> dict:
+        """Read the text in a batch of still images with Florence-2.
+
+        Loads Florence-2 if needed (shared with captioning) and delegates to
+        :meth:`~pixlstash.tagger_plugins.florence2.Florence2Service.read_text`.
+
+        Args:
+            image_paths: Still-image file paths.
+
+        Returns:
+            ``{path: [[{"text": str, "box": [x, y, w, h]}, ...], ...]}``.
+        """
+        self.ensure_captioning_ready()
+        return self.florence_service.read_text(image_paths)
+
     def _effective_pixlstash_tagger_batch_size(self) -> int:
         """Return the VRAM-constrained batch size for the PixlStash tagger."""
         return self.tagging_workflow.effective_pixlstash_tagger_batch_size()
@@ -496,7 +582,6 @@ class InferenceEngine:
         Returns:
             A fully constructed :class:`InferenceEngine` ready for use.
         """
-        import torch
         from pixlstash.tagger_plugins.clip_service import ClipService
         from pixlstash.tagger_plugins.sbert import SBertService
         from pixlstash.tagger_plugins.pixlstash_tagger import PixlStashTaggerService
@@ -505,10 +590,12 @@ class InferenceEngine:
 
         model_dir = builtin_model_dir()
 
-        if force_cpu:
-            device = "cpu"
-        elif device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+        configure_metal_model_loading()
+
+        # One resolution, accelerator-blind. ``force_cpu`` wins over everything
+        # here as it does everywhere else, which is what keeps CI's --force-cpu
+        # honest on a developer machine that has Metal.
+        device = resolve_device(device, force_cpu=force_cpu)
 
         clip_service = ClipService(device=device)
         sbert_service = SBertService(device=device)
@@ -608,5 +695,10 @@ class InferenceEngine:
 
         if wd14_threshold is not None:
             wd14_service.set_threshold(wd14_threshold)
+
+        # Metal only, and constructed unloaded like every service here. The
+        # Vault loads them before it publishes the engine (Vault._create_engine);
+        # the CPU spillover engines built on the CPU never get any.
+        engine.query_encoders = build_cpu_query_encoders(device)
 
         return engine

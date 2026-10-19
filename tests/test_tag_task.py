@@ -9,9 +9,11 @@ from sqlmodel import SQLModel, Session, create_engine, select
 from pixlstash.db_models.picture import Picture
 from pixlstash.db_models.tag import Tag
 from pixlstash.db_models.tag_prediction import TagPrediction
+from pixlstash.inference.workflows.tagging import TaggingWorkflow
 from pixlstash.tagger_plugins.pixlstash_tagger import (
     CENTRE_CROP_TAG_WHITELIST,
     FACE_QUALITY_CROP_TAGS,
+    PixlStashTaggerPlugin,
     QUALITY_CROP_TAG_WHITELIST,
 )
 from pixlstash.tasks.tag_task import TagTask
@@ -30,7 +32,7 @@ def test_centre_crop_whitelist_excludes_face_tags():
     assert (
         CENTRE_CROP_TAG_WHITELIST == QUALITY_CROP_TAG_WHITELIST - FACE_QUALITY_CROP_TAGS
     )
-    assert {"malformed teeth", "flux chin"} <= FACE_QUALITY_CROP_TAGS
+    assert {"malformed teeth", "malformed eyes", "flux chin"} <= FACE_QUALITY_CROP_TAGS
     assert not (FACE_QUALITY_CROP_TAGS & CENTRE_CROP_TAG_WHITELIST)
     # The general image-quality tags survive in the centre whitelist.
     assert "blocky" in CENTRE_CROP_TAG_WHITELIST
@@ -272,10 +274,13 @@ class _PredictionDb:
 
     def run_task(self, fn, *args, priority=None):
         name = getattr(fn, "__name__", "")
-        if name == "_add_tags_bulk":
+        if name in ("_add_tags_bulk", "_add_tags_unless_reset"):
             self.tag_payloads.extend(args[0])
             return list(self._picture_ids)
-        if name == "_write_predictions_from_tags":
+        if name in (
+            "_write_predictions_from_tags",
+            "_write_predictions_unless_reset",
+        ):
             self.prediction_calls.append(args)
         if name == "_clear_sentinels":
             self.cleared_sentinels.extend(args[0])
@@ -320,6 +325,9 @@ class _PluginWorkflow:
 
     def active_model_version(self, engine_override=None):
         return "acme_tagger:v1"
+
+    def whole_face_crop(self):
+        return True
 
     def pixlstash_tagger_image_size_quality_crop(self):
         return 32
@@ -430,14 +438,14 @@ def test_a_malformed_bbox_costs_only_its_own_picture(tmp_path):
     """
     task = _task_for(_FakeDb(str(tmp_path)))
     pics = [
-        Picture(id=1, file_path=str(_png(tmp_path, "first.png"))),
+        Picture(id=1, file_path=str(_png(tmp_path, "first.png", (128, 96)))),
         Picture(id=2, file_path=str(_png(tmp_path, "second.png"))),
-        Picture(id=3, file_path=str(_png(tmp_path, "third.png"))),
+        Picture(id=3, file_path=str(_png(tmp_path, "third.png", (128, 96)))),
     ]
     faces_by_pic = {
-        1: [_FakeFace(11, [1, 2, 40, 30])],
+        1: [_FakeFace(11, [1, 2, 60, 50])],
         2: [_FakeFace(22, [1, 2])],  # truncated: IndexError in the max() key
-        3: [_FakeFace(33, [3, 4, 44, 34])],
+        3: [_FakeFace(33, [3, 4, 64, 54])],
     }
     preloaded = {}
 
@@ -481,9 +489,9 @@ def test_no_faces_falls_back_to_a_centre_crop(tmp_path):
     task = _task_for(_FakeDb(str(tmp_path)))
     pic = Picture(id=5, file_path=str(_png(tmp_path, "faceless.png")))
 
-    key, crop, file_path, is_centre_crop = task._build_quality_crop(pic, [], 32, {})
+    key, crop, file_path, kind = task._build_quality_crop(pic, [], 32, {})
 
-    assert is_centre_crop is True
+    assert kind == "centre"
     assert key == f"{file_path}#centre"
     assert crop.size == (32, 32)
 
@@ -493,11 +501,11 @@ def test_a_negative_face_index_is_not_a_face(tmp_path):
     task = _task_for(_FakeDb(str(tmp_path)))
     pic = Picture(id=6, file_path=str(_png(tmp_path, "negative-index.png")))
 
-    _key, _crop, _path, is_centre_crop = task._build_quality_crop(
+    _key, _crop, _path, kind = task._build_quality_crop(
         pic, [_FakeFace(66, [1, 2, 40, 30], face_index=-1)], 32, {}
     )
 
-    assert is_centre_crop is True
+    assert kind == "centre"
 
 
 def test_an_undecodable_picture_is_marked_once_from_the_crop_pass(tmp_path):
@@ -549,8 +557,8 @@ def test_a_face_low_in_a_rotated_photo_still_yields_a_crop(tmp_path):
 
     Picture 4401: orientation 6, 4608x2592 stored, face bbox
     [432, 1971, 1584, 3699]. Against the untransposed frame the box's centre
-    sits below the image, `expand_bbox_to_square` clamps the bottom edge and
-    not the top, and PIL refuses: "Coordinate 'lower' is less than 'upper'".
+    sits below the image, so the crop is refused as off-frame and the picture
+    gets none.
     """
     path = _rotated_jpeg(tmp_path, "low-face.jpg")
     task = _task_for(_FakeDb(str(tmp_path)))
@@ -560,7 +568,290 @@ def test_a_face_low_in_a_rotated_photo_still_yields_a_crop(tmp_path):
     built = task._build_quality_crop(pic, faces, 448, {})
 
     assert built is not None, "the crop must be buildable, not warned away"
-    key, crop, _source, is_centre = built
+    key, crop, _source, kind = built
     assert key.endswith("#face1"), "and it must be the FACE crop, not the fallback"
-    assert is_centre is False
-    assert crop.size == (448, 448), f"a square target-sized crop; got {crop.size}"
+    assert kind == "face", "2419px is bigger than the 448 target: not upscaled"
+    # 1.4 x the 1728px long side, square: the window scales with the face.
+    assert crop.size == (2419, 2419), f"a square face-sized crop; got {crop.size}"
+
+
+def _face_crop_box(tmp_path, name, size, bbox, target=512, face_scale=1.4):
+    """The box `_build_quality_crop` cut, recovered from a gradient image."""
+    from PIL import Image as PILImage
+
+    w, h = size
+    image = PILImage.new("RGB", size)
+    image.putdata(
+        [
+            (x % 256, y % 256, (x // 256) * 16 + y // 256)
+            for y in range(h)
+            for x in range(w)
+        ]
+    )
+    path = tmp_path / name
+    image.save(path)
+    task = _task_for(_FakeDb(str(tmp_path)))
+    built = task._build_quality_crop(
+        Picture(id=1, file_path=str(path)),
+        [_FakeFace(1, bbox)],
+        target,
+        {},
+        face_scale,
+    )
+    expected_kind = "face"
+    if face_scale and built[1].size[0] < target:
+        expected_kind = "upscaled_face"
+    assert built is not None and built[3] == expected_kind
+    crop = built[1]
+    r, g, b = crop.getpixel((0, 0))
+    x0, y0 = (b // 16) * 256 + r, (b % 16) * 256 + g
+    return x0, y0, x0 + crop.size[0], y0 + crop.size[1]
+
+
+def test_a_face_bigger_than_the_target_is_cropped_whole(tmp_path):
+    """#1648: a 400px face used to get a 320px window cut out of its middle."""
+    x1, y1, x2, y2 = _face_crop_box(
+        tmp_path, "big-face.png", (1200, 1000), [400, 300, 700, 700], target=320
+    )
+    assert (x2 - x1, y2 - y1) == (560, 560), "1.4 x the 400px long side"
+    assert x1 <= 400 and y1 <= 300 and x2 >= 700 and y2 >= 700, "the whole face"
+
+
+def test_a_face_at_the_edge_slides_the_square_inward(tmp_path):
+    """Clipping made the crop non-square, and the square resize stretched it."""
+    box = _face_crop_box(tmp_path, "edge-face.png", (800, 600), [700, 400, 800, 600])
+    assert box == (520, 320, 800, 600)
+
+
+def test_a_face_outside_the_frame_gets_no_crop(tmp_path):
+    """Sliding would otherwise turn it into a faceless corner judged as a face."""
+    task = _task_for(_FakeDb(str(tmp_path)))
+    pic = Picture(id=8, file_path=str(_png(tmp_path, "off-frame.png")))
+
+    faces = [_FakeFace(88, [5000, 5000, 5100, 5100])]
+    assert task._build_quality_crop(pic, faces, 32, {}) is None
+
+
+def test_a_zero_size_face_gets_no_crop(tmp_path):
+    task = _task_for(_FakeDb(str(tmp_path)))
+    pic = Picture(id=9, file_path=str(_png(tmp_path, "zero-face.png")))
+
+    assert task._build_quality_crop(pic, [_FakeFace(99, [5, 5, 5, 5])], 32, {}) is None
+
+
+def test_a_face_bigger_than_the_frame_takes_the_short_side(tmp_path):
+    box = _face_crop_box(tmp_path, "huge-face.png", (800, 600), [100, 50, 700, 550])
+    assert box == (100, 0, 700, 600)
+
+
+def test_with_whole_face_crop_off_a_face_gets_the_fixed_window(tmp_path):
+    """The setting's off position: a `target` square centred on the face."""
+    box = _face_crop_box(
+        tmp_path,
+        "fixed-window.png",
+        (1200, 1000),
+        [400, 300, 700, 700],
+        target=320,
+        face_scale=None,
+    )
+    assert box == (390, 340, 710, 660)
+
+
+@pytest.mark.parametrize(
+    "params, expected",
+    [({"whole_face_crop": True}, 512), ({"whole_face_crop": False}, 320), ({}, 320)],
+)
+def test_the_whole_face_crop_setting_picks_the_crop_input_size(params, expected):
+    settings = {"plugins": {"pixlstash_tagger": {"params": params}}}
+    workflow = TaggingWorkflow(
+        engine=None, use_wd14=False, use_pixlstash_tagger=True, tagger_settings=settings
+    )
+    assert workflow.whole_face_crop() is (expected == 512)
+    assert workflow.pixlstash_tagger_image_size_quality_crop() == expected
+
+
+def test_whole_face_crop_is_a_user_setting_that_defaults_off():
+    """Declared in the schema, so the tagger settings dialog shows it."""
+    schema = {f["name"]: f for f in PixlStashTaggerPlugin().parameter_schema()}
+    assert schema["whole_face_crop"]["type"] == "bool"
+    assert schema["whole_face_crop"]["default"] is False
+
+
+@pytest.mark.parametrize("whole_face, expected_side", [(True, 70), (False, 32)])
+def test_the_tagging_pass_honours_the_whole_face_crop_setting(
+    tmp_path, whole_face, expected_side
+):
+    """A 50px face: 1.4 x 50 = 70 with the setting on, the 32px target off."""
+
+    class _FaceDb(_PredictionDb):
+        def run_immediate_read_task(self, fn, *args, **kwargs):
+            return {1: [_FakeFace(11, [10, 10, 60, 60])]}
+
+    class _CropWorkflow(_PluginWorkflow):
+        def whole_face_crop(self):
+            return whole_face
+
+        def tag_quality_crops(self, items, out_raw_scores=None, **_kwargs):
+            self.crop_sizes = [crop.size for _key, crop in items]
+            return {}
+
+    picture = Picture(
+        id=1, file_path=str(_png(tmp_path, "setting.png", size=(128, 96)))
+    )
+    workflow = _CropWorkflow()
+
+    _prediction_task(
+        _FaceDb(str(tmp_path), [1]), workflow, [picture]
+    )._tag_pictures_batch()
+
+    assert workflow.crop_sizes == [(expected_side, expected_side)]
+
+
+# --- Upscaled and too-small faces (#1747) ----------------------------------
+
+
+@pytest.mark.parametrize(
+    "bbox, whole_face, expected, size",
+    [
+        # A 60px face's 84px square is resized up to 512.
+        ([500, 300, 560, 360], True, "upscaled_face", (1024, 768)),
+        # A 400px face's 560px square is not.
+        ([200, 100, 600, 500], True, "face", (1024, 768)),
+        # 47px: under the minimum. 48px: just at it.
+        ([500, 300, 547, 347], True, "small_face", (1024, 768)),
+        ([500, 300, 548, 348], True, "upscaled_face", (1024, 768)),
+        # The fixed window keeps today's behaviour whatever the face size.
+        ([500, 300, 540, 340], False, "face", (1024, 768)),
+        # 1.4 x 366 = 512.4 rounds to exactly the target: not resized up.
+        ([300, 200, 666, 566], True, "face", (1024, 768)),
+        # 1.4 x 365 = 511: one pixel short, so it is resized up.
+        ([300, 200, 665, 565], True, "upscaled_face", (1024, 768)),
+        # A big face in a 400px picture shrinks to the short side: magnified.
+        ([100, 50, 500, 350], True, "upscaled_face", (600, 400)),
+    ],
+)
+def test_a_face_crop_reports_its_kind(tmp_path, bbox, whole_face, expected, size):
+    task = _task_for(_FakeDb(str(tmp_path)))
+    pic = Picture(id=1, file_path=str(_png(tmp_path, "kind.png", size)))
+    target = 512 if whole_face else 320
+
+    built = task._build_quality_crop(
+        pic, [_FakeFace(1, bbox)], target, {}, 1.4 if whole_face else None
+    )
+
+    assert built[3] == expected
+    if expected == "small_face":
+        assert built[0].endswith("#centre"), "a face too small to judge gets no crop"
+        assert built[1].size == (512, 512), "the native centre crop instead"
+
+
+class _OwnTaggerWorkflow(_PluginWorkflow):
+    """The built-in tagger on both passes, with a face-sized 512 crop."""
+
+    def __init__(self, full_scores, crop_scores):
+        super().__init__()
+        self.full_scores = full_scores
+        self.crop_scores = crop_scores
+
+    def active_plugin_name(self, engine_override=None):
+        return "pixlstash_tagger"
+
+    def active_model_version(self, engine_override=None):
+        return "pixlstash_tagger:test"
+
+    def pixlstash_tagger_image_size_quality_crop(self):
+        return 512
+
+    def tag_images(self, image_paths, out_raw_scores=None, **_kwargs):
+        for path in image_paths:
+            out_raw_scores[path] = dict(self.full_scores)
+        return {
+            path: [t for t, c in self.full_scores.items() if c >= 0.5]
+            for path in image_paths
+        }
+
+    def tag_quality_crops(self, items, out_raw_scores=None, **_kwargs):
+        if out_raw_scores is not None:
+            for key, _crop in items:
+                out_raw_scores[key] = dict(self.crop_scores)
+        # Like the real tagger, a crop with no tag found is left out.
+        found = [t for t, c in self.crop_scores.items() if c >= 0.5]
+        return {key: found for key, _crop in items if found}
+
+
+def _run_with_face(tmp_path, bbox, full_scores, crop_scores):
+    """One 1024x768 picture with one face; returns (applied tags, confidences)."""
+
+    class _FaceDb(_PredictionDb):
+        def run_immediate_read_task(self, fn, *args, **kwargs):
+            return {1: [_FakeFace(11, bbox)]}
+
+    picture = Picture(id=1, file_path=str(_png(tmp_path, "face.png", (1024, 768))))
+    db = _FaceDb(str(tmp_path), [1])
+    _prediction_task(
+        db, _OwnTaggerWorkflow(full_scores, crop_scores), [picture]
+    )._tag_pictures_batch()
+    applied = {u["pic_id"]: set(u["tags"]) for u in db.tag_payloads}[1]
+    label_scores = db.prediction_calls[0][0][1]
+    return applied, label_scores
+
+
+def test_an_upscaled_face_crop_does_not_own_blocky(tmp_path):
+    """A 60px face resized up to 512 looks smeared; the picture is not blocky."""
+    applied, scores = _run_with_face(
+        tmp_path,
+        [500, 300, 560, 360],
+        {"person": 0.9, "blocky": 0.1},
+        {"blocky": 0.99, "malformed eyes": 0.9},
+    )
+    assert "blocky" not in applied, "the crop's blocky came from the upscale"
+    assert "malformed eyes" in applied, "face tags still come from the crop"
+    assert scores["blocky"] == 0.1, "the stored confidence is the full pass's"
+    assert scores["malformed eyes"] == 0.9
+
+
+def test_an_upscaled_face_crop_leaves_the_full_pass_blocky(tmp_path):
+    applied, _scores = _run_with_face(
+        tmp_path,
+        [500, 300, 560, 360],
+        {"person": 0.9, "blocky": 0.8},
+        {"blocky": 0.1},
+    )
+    assert "blocky" in applied, "the crop may not strip what it does not own"
+
+
+def test_a_native_face_crop_still_owns_blocky(tmp_path):
+    applied, scores = _run_with_face(
+        tmp_path,
+        [200, 100, 600, 500],
+        {"person": 0.9, "blocky": 0.1},
+        {"blocky": 0.99},
+    )
+    assert "blocky" in applied
+    assert scores["blocky"] == 0.99
+
+
+def test_a_face_too_small_to_judge_gets_no_face_tags(tmp_path):
+    """A 40px face: no face crop, and the full pass's face tags are stripped."""
+    applied, _scores = _run_with_face(
+        tmp_path,
+        [500, 300, 540, 340],
+        {"person": 0.9, "malformed eyes": 0.8, "blocky": 0.1},
+        {"malformed teeth": 0.9, "flux chin": 0.9, "blocky": 0.9},
+    )
+    assert not applied & FACE_QUALITY_CROP_TAGS, applied
+    assert "blocky" in applied, "the native centre crop still owns blocky"
+    assert "person" in applied
+
+
+def test_a_face_too_small_to_judge_loses_face_tags_when_its_crop_finds_nothing(
+    tmp_path,
+):
+    """`tag_quality_crops` omits a crop it found no tag on; strip regardless."""
+    applied, _scores = _run_with_face(
+        tmp_path,
+        [500, 300, 540, 340],
+        {"person": 0.9, "malformed eyes": 0.8, "blocky": 0.1},
+        {"blocky": 0.1},
+    )
+    assert applied == {"person"}, applied

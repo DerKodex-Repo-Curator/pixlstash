@@ -4,7 +4,12 @@
 // have already migrated; the counts, scores, thumbnails, and export endpoints
 // join it as the grid and overlay move over.
 
-import { apiClient, appendShareToken, API_BASE_URL} from "../utils/apiClient";
+import {
+  apiClient,
+  appendShareToken,
+  API_BASE_URL,
+  operationBatchHeaders,
+} from "../utils/apiClient";
 import { unwrap } from "../utils/unwrap";
 
 /**
@@ -207,6 +212,36 @@ export async function characterFaceSearch(
 }
 
 /**
+ * Find more pictures that belong in a set (#1489).
+ *
+ * The query is the set's centroid: the mean of its members' CLIP embeddings.
+ * Its members are excluded server-side, so the result is the not-yet-added
+ * candidates and its length is a count an "add these" button can promise.
+ *
+ * Every match carries `cohesion`, the median similarity of the set's own
+ * members to that centroid - the natural default cut, since a match strength
+ * that suits a tight photoshoot empties a loose set. Each also carries
+ * `tags_matched` / `tags_total` against the set's signature tags, which the
+ * second slider cuts on client-side. The fetch floor is zero, because the
+ * slider's useful range is unknown until `cohesion` comes back.
+ *
+ * @param {number|string} setId
+ * @returns {Promise<Array<Object>>} ranked matches (the response body).
+ */
+export async function setLikenessSearch(setId) {
+  const params = new URLSearchParams({
+    source_set_id: String(setId),
+    top_n: "500",
+    threshold: "0",
+    exclude_set_id: String(setId),
+    include_tag_counts: "true",
+  });
+  return unwrap(apiClient.post(
+    `/pictures/likeness-search?${params.toString()}`,
+  ));
+}
+
+/**
  * Find pictures visually similar to one or more source pictures.
  *
  * Several source ids are combined by MINIMUM similarity, i.e. a result must
@@ -299,6 +334,30 @@ export async function listPictureDetections(id) {
 }
 
 /**
+ * Read the text found in a picture (OCR), one entry per word with its box.
+ * @param {number|string} id
+ * @param {Object} [options]
+ * @param {string} [options.query] - the active text search; marks each word
+ *   the search matched (`matched: true`). Omitted when no text search is on.
+ * @returns {Promise<Object>} `{ state: "none"|"pending"|"read", lines }`, where
+ *   `lines` is `[[{ text, box: [x, y, w, h] as fractions, matched }]]`.
+ */
+export async function getPictureText(id, { query } = {}) {
+  const suffix = query ? `?query=${encodeURIComponent(query)}` : "";
+  return unwrap(apiClient.get(`/pictures/${id}/text${suffix}`));
+}
+
+/**
+ * Clear a picture's text and read it again in the background. A
+ * `pictures_changed` frame with `fields: ["ocr_text"]` follows when it lands.
+ * @param {number|string} id
+ * @returns {Promise<Object>} `{ state: "pending" }`.
+ */
+export async function readPictureText(id) {
+  return unwrap(apiClient.post(`/pictures/${id}/text/read`));
+}
+
+/**
  * Add a hand-drawn face box to a picture.
  * @param {number|string} id
  * @param {Object} body - `{ bbox: [x1, y1, x2, y2], frame_index }`.
@@ -320,7 +379,8 @@ export async function patchPicture(id, body) {
 
 /**
  * List the ComfyUI models referenced by pictures in the library.
- * @returns {Promise<Array<Object>>} the response body.
+ * @returns {Promise<Array<{value: string, name: string|null}>>} `value` is
+ *   the filter key; `name` is the shelf's name for that model, when it has one.
  */
 export async function listComfyuiModels() {
   return unwrap(apiClient.get(`/pictures/comfyui_models`));
@@ -328,7 +388,8 @@ export async function listComfyuiModels() {
 
 /**
  * List the ComfyUI LoRAs referenced by pictures in the library.
- * @returns {Promise<Array<Object>>} the response body.
+ * @returns {Promise<Array<{value: string, name: string|null}>>} as
+ *   {@link listComfyuiModels}.
  */
 export async function listComfyuiLoras() {
   return unwrap(apiClient.get(`/pictures/comfyui_loras`));
@@ -357,6 +418,34 @@ export async function deletePictures(pictureIds) {
   return unwrap(apiClient.delete(`/pictures`, {
     data: { picture_ids: pictureIds },
   }));
+}
+
+/**
+ * Move pictures into another library.
+ *
+ * The server copies each one there and then moves it to this library's
+ * Scrapheap. `moved` names the pictures that left, and those are the only
+ * tiles to drop; `skipped_locked`, `skipped_already_there`,
+ * `skipped_scrapheaped` and `failed` say why the others are still here.
+ *
+ * No timeout: the copy is one request, and a selection of videos outlasts the
+ * client's default.
+ *
+ * @param {Array<number|string>} pictureIds
+ * @param {string} libraryUuid - the target's stable id, from the libraries list.
+ * @param {string} [batchId] - one gesture id shared across request chunks.
+ * @returns {Promise<Object>} `{ library_name, moved_count, moved,
+ *   skipped_locked, copied_but_locked, skipped_already_there,
+ *   skipped_scrapheaped, failed }`.
+ */
+export async function movePicturesToLibrary(pictureIds, libraryUuid, batchId) {
+  return unwrap(
+    apiClient.post(
+      `/pictures/move-to-library`,
+      { picture_ids: pictureIds, library_uuid: libraryUuid },
+      { ...operationBatchHeaders(batchId), timeout: 0 },
+    ),
+  );
 }
 
 /**

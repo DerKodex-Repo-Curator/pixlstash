@@ -1789,7 +1789,7 @@ def test_restore_location_is_idempotent(library):
 
 
 def test_the_journal_is_pruned_past_its_retention_window(library):
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     from pixlstash.db_models.picture_move import RETENTION_S
 
@@ -1798,7 +1798,7 @@ def test_the_journal_is_pruned_past_its_retention_window(library):
         picture_id=library["picture_id"],
         old_path="a.png",
         new_path="b.png",
-        moved_at=datetime.utcnow() - timedelta(seconds=RETENTION_S * 2),
+        moved_at=datetime.now(timezone.utc) - timedelta(seconds=RETENTION_S * 2),
     )
     fresh = PictureMove(
         picture_id=library["picture_id"], old_path="c.png", new_path="d.png"
@@ -1916,9 +1916,9 @@ def test_an_off_layout_row_is_pruned_past_its_retention_window(library):
     Unlike unambiguous/ambiguous, nothing here waits on the owner - the
     row exists so the screen can say "already followed, nothing to decide"
     at least once, not so it can sit forever as unreachable, unclearable
-    state (see docs/backend_architecture.md §27).
+    state (see docs/backend_architecture.md §24.5).
     """
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     from pixlstash.db_models.picture_move import RETENTION_S
 
@@ -1935,7 +1935,7 @@ def test_an_off_layout_row_is_pruned_past_its_retention_window(library):
             picture_id=picture_id,
             old_path=f"{root}/2024 Shoots/a.png",
             new_path=f"{root}/_unsorted/a.png",
-            detected_at=datetime.utcnow() - timedelta(seconds=RETENTION_S * 2),
+            detected_at=datetime.now(timezone.utc) - timedelta(seconds=RETENTION_S * 2),
         )
     )
     session.commit()
@@ -1997,7 +1997,7 @@ def test_a_deleted_pictures_row_is_dropped_rather_than_crashing(library):
 
 def test_add_person_prefers_an_unassigned_face_and_never_steals_one(library):
     """An addition is supposed to be safe. Stealing Sara's face is not."""
-    from pixlstash.services.move_reconciliation_service import _add_person
+    from pixlstash.services.move_reconciliation_service import add_person
 
     session = library["session"]
     sara = Character(name="Sara (steal-test)")
@@ -2013,7 +2013,7 @@ def test_add_person_prefers_an_unassigned_face_and_never_steals_one(library):
     session.add_all([sara_face, free_face])
     session.commit()
 
-    changed = _add_person(session, picture, mira.id)
+    changed = add_person(session, picture, mira.id)
     session.commit()
 
     assert changed is True
@@ -2024,7 +2024,7 @@ def test_add_person_prefers_an_unassigned_face_and_never_steals_one(library):
 
 
 def test_add_person_is_a_safe_no_op_when_every_face_already_names_someone(library):
-    from pixlstash.services.move_reconciliation_service import _add_person
+    from pixlstash.services.move_reconciliation_service import add_person
 
     session = library["session"]
     sara = Character(name="Sara (no-room)")
@@ -2038,7 +2038,7 @@ def test_add_person_is_a_safe_no_op_when_every_face_already_names_someone(librar
     session.add(Face(picture_id=picture.id, character_id=sara.id))
     session.commit()
 
-    assert _add_person(session, picture, mira.id) is False
+    assert add_person(session, picture, mira.id) is False
     faces = session.exec(select(Face).where(Face.picture_id == picture.id)).all()
     assert [f.character_id for f in faces] == [sara.id]
 

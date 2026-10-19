@@ -3,14 +3,16 @@
     <button
       type="button"
       class="app-stepper__btn"
-      title="Decrease"
+      aria-label="Decrease"
       :disabled="disabled"
       @click="bump(-step)"
     >
+      <Tooltip text="Decrease" activator="parent" :describe="false" />
       <v-icon size="17">mdi-minus</v-icon>
     </button>
     <input
       class="app-stepper__input"
+      :class="{ 'app-stepper__input--mono': mono }"
       type="text"
       inputmode="numeric"
       :value="modelValue"
@@ -21,10 +23,11 @@
     <button
       type="button"
       class="app-stepper__btn"
-      title="Increase"
+      aria-label="Increase"
       :disabled="disabled"
       @click="bump(step)"
     >
+      <Tooltip text="Increase" activator="parent" :describe="false" />
       <v-icon size="17">mdi-plus</v-icon>
     </button>
   </div>
@@ -32,6 +35,7 @@
 
 <script setup>
 import { VIcon } from "vuetify/components";
+import Tooltip from "./Tooltip.vue";
 
 const props = defineProps({
   modelValue: { type: [String, Number], default: "" },
@@ -40,6 +44,8 @@ const props = defineProps({
   step: { type: Number, default: 1 },
   disabled: { type: Boolean, default: false },
   width: { type: Number, default: 116 },
+  // A port or an id takes the mono face (docs/design/buttons.md, "Fields").
+  mono: { type: Boolean, default: false },
 });
 
 const emit = defineEmits(["update:modelValue"]);
@@ -73,16 +79,28 @@ function onBlur(e) {
 .app-stepper {
   display: inline-flex;
   align-items: center;
-  height: 26px;
+  height: var(--control-h);
   overflow: hidden;
   border: 1px solid rgb(var(--v-theme-border));
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sm);
   background: rgb(var(--v-theme-input-background));
+}
+
+/* `overflow: hidden` clips an outline on anything inside, so the box rings
+   for its field and the flush buttons take the inset form. */
+.app-stepper:has(.app-stepper__input:focus-visible) {
+  outline: var(--focus-width) solid var(--focus-stroke);
+  outline-offset: var(--focus-offset);
+}
+
+.app-stepper__btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring-inset);
 }
 
 .app-stepper__btn {
   width: 30px;
-  height: 26px;
+  height: 100%;
   flex-shrink: 0;
   padding: 0;
   display: inline-flex;
@@ -115,6 +133,10 @@ function onBlur(e) {
   font-variant-numeric: tabular-nums;
   border-left: 1px solid rgb(var(--v-theme-border));
   border-right: 1px solid rgb(var(--v-theme-border));
+}
+
+.app-stepper__input--mono {
+  font-family: var(--font-mono);
 }
 
 .app-stepper__input:disabled {

@@ -53,6 +53,8 @@ function topLevelMenuLabels(rootLocator) {
       if (text) labels.push(text)
     })
     root.querySelectorAll('.ctx-item').forEach((btn) => {
+      // A flyout trigger is `.ate-btn.ctx-item`: counted once, above.
+      if (btn.matches('.ate-btn')) return
       if (btn.closest('.ctx-submenu') || btn.closest('.ate-menu')) return
       const text = label(btn)
       if (text) labels.push(text)
@@ -70,6 +72,12 @@ const CONTEXT_ONLY_SINGLE_IMAGE_ACTIONS = [
   'Find similar faces',
   'Remove all shares',
 ]
+
+// The entries gated on `comfyuiConfigured` are deliberately NOT asserted here.
+// They render in neither menu in this fixture - the e2e backend has no ComfyUI
+// address - so two absences would compare equal and the check would be
+// vacuous. They are pinned against the sources in
+// `src/components/panels/menuRunEntryParity.test.js`, which needs no browser.
 
 test.describe('selection / context menu parity (§4, #403)', () => {
   test('both menus list the same actions for a multi-picture selection', async ({
@@ -113,4 +121,5 @@ test.describe('selection / context menu parity (§4, #403)', () => {
     // made #403 diagnosable from CI output alone.
     expect(contextLabels).toEqual(selectionLabels)
   })
+
 })

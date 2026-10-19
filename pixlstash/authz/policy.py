@@ -120,8 +120,9 @@ class RoutePolicy:
             template is a boot failure, not a silent no-op.
         body_ids: For a batch route, the JSON body field holding the id(s) the
             gate must check. A list is checked element by element; a single scalar
-            (e.g. ``run_t2i``'s optional ``source_picture_id``) is checked as one
-            id; ``None`` / absent is a no-op.
+            is checked as one id; ``None`` / absent is a no-op. No route declares
+            the scalar shape since #1410 retired ``run_t2i``; the gate keeps it
+            for the next one that needs it.
         justification: Mandatory for the policies in
             :data:`JUSTIFICATION_REQUIRED`, and for ``resolved_inline`` routes; a
             written reason the route is public, grants local-owner filesystem
@@ -152,9 +153,14 @@ class RoutePolicy:
             A route qualifies for the exemption only if it satisfies *both*
             clauses: it returns no library content, **and** it cannot be used to
             acquire access to a different library. The second clause is what
-            keeps token minting pinned - a token stamped for library A that
+            keeps token management pinned - a token stamped for library A that
             could mint while B is active would hand itself a B-stamped token and
-            reopen the pivot the pin exists to close.
+            reopen the pivot the pin exists to close. It is also why the one
+            route that widens a token past its library
+            (``PUT /users/me/token/{token_id}/libraries``, #1787) is pinned
+            and local-owner-only: the pin is lifted by the owner's own
+            session on the local network, never by a token (which
+            ``AuthService._refuse_token_credential`` refuses outright).
         id_resolver: Names a registered resolver that maps the route's raw id(s)
             (from :attr:`id_param` or :attr:`body_ids`) to a **picture id** before
             the picture-membership check - for routes keyed by a non-picture id

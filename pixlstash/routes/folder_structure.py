@@ -98,7 +98,7 @@ class FolderStructureReadCancelResponse(BaseModel):
 
 
 class FolderStructureAssignmentPayload(BaseModel):
-    """One accepted folder from the mapping screen. See §22 for the shape."""
+    """One accepted folder from the mapping screen. Shape: integration §20.2."""
 
     relative_path: str
     kind: str
@@ -158,7 +158,7 @@ class FolderStructureCommitRequest(BaseModel):
     already held loose files. Those pictures become ordinary MANAGED pictures
     (relative `file_path`) instead of reference-folder ones. The commit fails
     (`status: "failed"`, polled via `GET .../commit/status`) if the root is
-    not actually inside `image_root`. See integration_architecture.md §22.
+    not actually inside `image_root`. See integration_architecture.md §20.2.
     """
 
 
@@ -278,7 +278,7 @@ def create_router(server) -> APIRouter:
         models. So each batch also renews the planner hold (``_WORKER_HOLD_S``)
         and nothing new is queued behind it while the read is alive. The
         deadline still matters: an URGENT task that cannot finish starves the
-        queue it jumped. See ``backend_architecture.md`` §24.
+        queue it jumped. See ``backend_architecture.md`` §24.1.
         """
         from pixlstash.tasks.face_detection_task import FaceDetectionTask
 
@@ -575,6 +575,87 @@ def create_router(server) -> APIRouter:
             )
         finally:
             server.library_coordinator.release_read(lease)
+        # Outside the lease, deliberately. Promotion closes and reopens the
+        # vault through the switch machinery, and `begin_switch` waits for
+        # readers of this generation to drain - including the lease this very
+        # thread held until the line above. Promoting inside it would wait
+        # thirty seconds on itself and then refuse.
+        _settle_first_import(task_id)
+
+    def _promotion_owed(mode: str) -> bool:
+        """Whether finishing this commit is also what makes the folder a library.
+
+        Only a `local_import` into a library still on its first import: a
+        reference-folder commit never had a temporary vault, and an abort or a
+        stop is an answer of the other kind, handled by the discard path.
+        """
+        if mode != "local_import":
+            return False
+        library = server.library_registry.active_library()
+        return bool(library and library.pending_import_at)
+
+    def _settle_first_import(task_id: str) -> None:
+        """Promote the temporary vault, or give the folder back, as the commit owes.
+
+        **Finishing** (stage ``finishing``) promotes, then reports the commit
+        completed - in that order, and that is the point. The promotion closes
+        and reopens the library, so a client told `completed` before it ran
+        would send its next request into a 503 - and the folder-mapping
+        wizard's own tests found exactly that. The import is not finished until
+        the folder holds a library.
+
+        **Abandoning** (stage ``discarding``, the owner aborted their first
+        import) gives the folder back: the temporary database and the
+        thumbnails this import made are deleted, the registration is dropped,
+        and not one picture file is touched. The session lands on the scratch
+        library, which offers to point PixlStash at a folder again. "Organise
+        later" is not this: it finished indexing and only declined the mapping,
+        so it promotes like any other finished import.
+
+        Runs outside the commit's read lease: `begin_switch` drains readers of
+        the current generation, and that lease was one of them.
+        """
+        with server.folder_structure_commit_lock:
+            state = server.folder_structure_commit
+            stage = state["stage"] if state and state["task_id"] == task_id else None
+        if stage not in ("finishing", "discarding"):
+            return
+        finishing = stage == "finishing"
+        library = server.library_registry.active_library()
+        outcome = {"stage": "done"}
+        try:
+            if library is None or not library.pending_import_at:
+                raise RuntimeError(
+                    "the library finished its import already"
+                    if finishing
+                    else "there is no unfinished import to discard"
+                )
+            if finishing:
+                server.library_switch.promote_pending_vault(library)
+                outcome["status"] = "completed"
+            else:
+                server.library_switch.discard_pending_library(library)
+        except Exception as exc:
+            if not finishing:
+                logger.exception(
+                    "Could not discard the abandoned first import: %s", exc
+                )
+            else:
+                # The pictures are indexed and the mapping is applied - only the
+                # rename did not happen, so the folder still holds no vault.db.
+                # Saying `completed` would claim a library that is not there.
+                logger.exception(
+                    "The import finished but the library could not be: %s", exc
+                )
+                outcome["status"] = "failed"
+                outcome["error"] = (
+                    "Your pictures were indexed, but the library could not "
+                    f"be finished: {exc}"
+                )
+        with server.folder_structure_commit_lock:
+            state = server.folder_structure_commit
+            if state and state["task_id"] == task_id:
+                state.update(outcome)
 
     def _run_commit_holding_the_library(
         task_id: str,
@@ -653,15 +734,22 @@ def create_router(server) -> APIRouter:
             # in: the assigning step is exactly what did not run.
             commit_service.settle_pending_commit(server, task_id, exc.state)
             logger.info(
-                "Folder-structure commit %s stopped by the owner (%s); "
-                "everything already indexed stays",
+                "Folder-structure commit %s stopped by the owner (%s)",
                 task_id,
                 exc.state,
             )
             with server.folder_structure_commit_lock:
                 state = server.folder_structure_commit
                 if state and state["task_id"] == task_id:
-                    state["stage"] = "done"
+                    # An abort of a first import has one more thing to do, and
+                    # it cannot happen here: the discard closes this library,
+                    # and this thread still holds its read lease. `_run_commit`
+                    # picks it up once the lease is gone.
+                    state["stage"] = (
+                        "discarding"
+                        if exc.state == STATE_ABANDONED and _promotion_owed(mode)
+                        else "done"
+                    )
                     state["status"] = exc.state
             return
         except commit_service.CommitError as exc:
@@ -700,8 +788,14 @@ def create_router(server) -> APIRouter:
             if not state or state["task_id"] != task_id:
                 return
             state["result"] = result.as_dict()
-            state["stage"] = "done"
-            state["status"] = "completed"
+            if _promotion_owed(mode):
+                # Not `completed` yet: `_settle_first_import` promotes the
+                # temporary vault and reports the commit finished once the
+                # folder actually holds a library.
+                state["stage"] = "finishing"
+            else:
+                state["stage"] = "done"
+                state["status"] = "completed"
         server.vault.notify(
             EventType.CHANGED_PICTURES,
             {"source": "folder-structure-commit", "change_kind": "updated"},
@@ -788,7 +882,7 @@ def create_router(server) -> APIRouter:
             "or inside it. Either way no file is moved, renamed or copied; "
             "then the accepted projects, people, sets and tags are created "
             "and every picture found is linked to them. Returns a task id to "
-            "poll; see integration_architecture.md §22."
+            "poll; see integration_architecture.md §20.2."
         ),
         response_model=FolderStructureCommitStartResponse,
         tags=["folders"],
@@ -880,7 +974,7 @@ def create_router(server) -> APIRouter:
         except commit_service.CommitError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if "captions" in payload.model_fields_set and payload.mode == "reference":
-            # The field being present at all is what §22 refuses, `null`
+            # The field being present at all is what integration §20.2 refuses, `null`
             # included, so this asks the request rather than the parsed
             # answer. A reference folder's suffixes are its own contract.
             raise HTTPException(
@@ -900,7 +994,7 @@ def create_router(server) -> APIRouter:
         # done must refuse a second one against the same read, or
         # `apply_mapping` runs twice over the same pictures and creates
         # duplicate projects, people, sets, tags and memberships. See
-        # backend_architecture.md §25 and integration_architecture.md §22
+        # backend_architecture.md §24.2 and integration_architecture.md §20.2
         # ("one-shot"). Reserving the (unrelated, single, global) commit slot
         # BEFORE marking this read committed: if a different read's commit is
         # already running there, this request must not spend this read's one
@@ -1006,10 +1100,16 @@ def create_router(server) -> APIRouter:
         description=(
             "`stop=abort` gives up on the commit; `stop=defer` is 'organise "
             "later' - the indexing already done stands and the mapping is not "
-            "applied. Neither un-indexes anything: no file is touched either "
-            "way, and every picture already indexed stays indexed. The commit "
-            "unwinds at its next chunk boundary, so a following status poll "
-            "can still report `running` briefly."
+            "applied.\n\n"
+            "**No picture file is touched either way.** What differs is what "
+            "PixlStash keeps: `defer` keeps every picture indexed so far, and "
+            "for a library's FIRST import it finishes the library. `abort` on "
+            "a first import discards it - the temporary database and the "
+            "folders PixlStash made are removed, the registration is dropped, "
+            "and the folder is left exactly as it was found. Aborting a later "
+            "import into a library that already exists un-indexes nothing.\n\n"
+            "The commit unwinds at its next chunk boundary, so a following "
+            "status poll can still report `running` briefly."
         ),
         response_model=FolderStructureCommitStopResponse,
         tags=["folders"],

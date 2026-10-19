@@ -24,7 +24,7 @@ import os
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -918,14 +918,14 @@ def test_decided_rows_carry_the_display_ready_decision_stamp():
             body = client.get(GROUPS_URL, params={"decided": True}).json()
             return {g["signature"]: g for g in body["groups"]}
 
-        # Both verdict kinds serve the stamp, byte-equal to the verdict row's
-        # isoformat: naive UTC, microseconds, no "Z", no "+00:00".
+        # Both verdict kinds serve the stamp as the verdict row's exact instant:
+        # UTC, microseconds, with an explicit "Z".
         rows = decided_rows()
         for signature in (sig_a, sig_b):
             stamp = rows[signature]["decided_at"]
-            assert stamp == _verdict_row(server, signature).decided_at.isoformat()
-            assert not stamp.endswith("Z") and "+" not in stamp
-            assert datetime.fromisoformat(stamp).tzinfo is None
+            decided_at = _verdict_row(server, signature).decided_at
+            assert stamp == decided_at.isoformat().replace("+00:00", "Z")
+            assert datetime.fromisoformat(stamp).utcoffset() == timedelta(0)
 
         # A redo's fresh stamp is what the listing serves afterwards.
         stamp_before = _verdict_row(server, sig_b).decided_at
@@ -933,7 +933,9 @@ def test_decided_rows_carry_the_display_ready_decision_stamp():
         assert client.post(f"{API}/operations/redo", json={}).status_code == 200
         restamped = _verdict_row(server, sig_b).decided_at
         assert restamped > stamp_before
-        assert decided_rows()[sig_b]["decided_at"] == restamped.isoformat()
+        assert decided_rows()[sig_b]["decided_at"] == restamped.isoformat().replace(
+            "+00:00", "Z"
+        )
 
         # The stale edge: a resolved group whose verdict is no longer live
         # (reopened directly, group left resolved) still lists - in the tail -
@@ -942,7 +944,7 @@ def test_decided_rows_carry_the_display_ready_decision_stamp():
             row = session.exec(
                 select(DedupVerdict).where(DedupVerdict.signature == sig_a)
             ).first()
-            row.reopened_at = datetime.utcnow()
+            row.reopened_at = datetime.now(timezone.utc)
             session.add(row)
             session.commit()
 
@@ -1011,7 +1013,7 @@ def test_decided_page_paging_is_stable_across_seams():
         # writes a same-instant run) and re-page. The id tie-break must carry
         # the seam: nothing skipped, nothing repeated, deterministic order.
         def flatten(session):
-            stamp = datetime.utcnow()
+            stamp = datetime.now(timezone.utc)
             for row in session.exec(select(DedupVerdict)).all():
                 row.decided_at = stamp
                 session.add(row)
@@ -1177,7 +1179,7 @@ def test_every_candidate_carries_a_thumbnail_cache_version():
     try:
         candidates = client.get(GROUPS_URL).json()["groups"][0]["candidates"]
         # Unprocessed pictures report the "0" sentinel rather than omitting it.
-        assert all(c["thumbnail_version"] == "0" for c in candidates)
+        assert all(c["thumbnail_version"].startswith("0-") for c in candidates)
 
         def set_thumbnail(session):
             pic = session.get(Picture, ids[0])
@@ -1185,14 +1187,18 @@ def test_every_candidate_carries_a_thumbnail_cache_version():
             pic.thumbnail_height = 240
             session.add(pic)
             session.commit()
+            return pic.file_path
 
-        _run(server, set_thumbnail)
+        file_path = _run(server, set_thumbnail)
         candidates = client.get(GROUPS_URL).json()["groups"][0]["candidates"]
         version = next(
             c["thumbnail_version"] for c in candidates if c["picture_id"] == ids[0]
         )
         # Exactly the version the batch-thumbnail endpoint puts in its ?v=.
-        assert version == ImageUtils.thumbnail_cache_version(320, 240) == "320x240"
+        assert version == ImageUtils.thumbnail_cache_version(
+            320, 240, file_path=file_path
+        )
+        assert version.startswith("320x240-")
     finally:
         _teardown(temp_dir, server)
 
@@ -1537,6 +1543,41 @@ def test_an_undo_of_a_shared_gesture_reverses_both_verdict_kinds():
         assert _signatures(client) == set()
         assert _verdict_row(server, kept_separate).reopened_at is None
         assert _verdict_row(server, stacked).reopened_at is None
+    finally:
+        _teardown(temp_dir, server)
+
+
+def test_a_duplicate_signature_is_refused_as_a_bad_request_not_a_crash():
+    """The batch's own validator must reach the caller as a 422.
+
+    ``VerdictBatchRequestModel.unique_signatures`` raises a bare ``ValueError``,
+    which pydantic hands to the app's ``RequestValidationError`` handler with the
+    exception OBJECT in the error's ``ctx``. Serialising that raw is a
+    ``TypeError`` INSIDE the handler, so a 422 came back as a 500 with no detail
+    — a live bug against a shipped release, not a hypothetical. The handler
+    encodes first (``server.py``); this is the assertion that says why, on the
+    endpoint that has the validator.
+    """
+    temp_dir, client, server, _ids, _token, _set_id = _env()
+    try:
+        _add_exact_groups(server, count=1)
+        _rescan(server)
+        signature = sorted(_signatures(client))[0]
+
+        response = client.post(
+            BATCH_VERDICTS_URL,
+            json={
+                "actions": [
+                    {"verdict": "stacked", "signature": signature},
+                    {"verdict": "stacked", "signature": signature},
+                ],
+            },
+        )
+
+        assert response.status_code == 422, f"{response.status_code}: {response.text}"
+        assert "signature twice" in response.text
+        # Refused whole: the duplicate did not apply the first copy on its way out.
+        assert _verdict_row(server, signature) is None
     finally:
         _teardown(temp_dir, server)
 
@@ -2066,11 +2107,12 @@ def test_a_queue_row_carries_the_stack_truth_behind_each_deck():
             "stack_id": stack_id,
             "member_count": 2,
             "leader_picture_id": ids[2],
-            "leader_thumbnail_version": "800x600",
+            "leader_thumbnail_version": deck["leader_thumbnail_version"],
             "matched_picture_ids": [ids[0]],
             "stackable": True,
             "blocked_by_sets": [],
         }
+        assert deck["leader_thumbnail_version"].startswith("800x600-")
         # The loose half of the pair is its own unit and adds no entry.
         assert len(group["stacks"]) == 1
     finally:
@@ -2107,7 +2149,7 @@ def test_the_owner_expands_a_deck_and_a_scoped_token_cannot():
         assert body["stack_id"] == stack_id
         assert body["member_count"] == 2
         assert body["leader_picture_id"] == ids[2]
-        assert body["leader_thumbnail_version"] == "800x600"
+        assert body["leader_thumbnail_version"].startswith("800x600-")
         assert body["stackable"] is True
         assert body["blocked_by_sets"] == []
         assert body["offset"] == 0
@@ -2117,7 +2159,7 @@ def test_the_owner_expands_a_deck_and_a_scoped_token_cannot():
         assert [m["is_leader"] for m in body["members"]] == [True, False]
         # The tile fields are the queue candidate's, so the strip reuses it.
         leader = body["members"][0]
-        assert leader["thumbnail_version"] == "800x600"
+        assert leader["thumbnail_version"] == body["leader_thumbnail_version"]
         assert leader["why"] == []
         assert leader["stackable"] is True
 

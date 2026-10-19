@@ -1,9 +1,11 @@
 # PixlStash Visual Language
 
 > **⚠️ Colors superseded (2026-07-24).** The color system moved to the unified
-> "Camp B" palette: ONE brand palette shared by both themes with warm-white
-> `#f7f1ea` labels — accent/amber **`#c47a1e`** (glow `#e08a2a`), primary/olive
-> `#567309`, secondary/raspberry `#bb3566`, tertiary/teal `#46707a`. The canonical
+> "Camp B" palette: one brand palette shared by both themes, except amber, with
+> warm-white `#f7f1ea` labels — accent/amber **`#c47a1e`** (glow `#e08a2a`; the
+> light theme's is `#9e6727` since 2026-09-23, #1413), primary/olive
+> `#567309`, secondary/raspberry `#bb3566`, tertiary/teal `#46707a`, quaternary/violet
+> `#7c55ae` (added 2026-09-13, with `info` moved to `#30558c`). The canonical
 > color sources are now **`frontend/DESIGN.md`** and the design-system
 > `tokens/colors.css`; the running values live in the Vuetify themes in
 > **`frontend/src/main.js`**. The color hexes, contrast tables, and per-theme
@@ -54,6 +56,11 @@ motif. Use it on a clear background; give it clear space equal to the height of 
 padlock "stud" on every side. Do not recolor it, add a drop shadow, or sit it on a
 busy photo without a solid backing.
 
+The one sanctioned exception is an ink silhouette: the padlock as a mask over
+`currentColor`, at the size of the text beside it, where it marks something as
+PixlStash's own in working chrome (the Tasks panel's resource-usage heading).
+It is never tinted any other way.
+
 ### Wordmark
 The word **PixlStash** set in Tiny5, rendered by `WordmarkLogo.vue`. Two-tone: "Pixl"
 in `currentColor`, "Stash" in `var(--wordmark-accent)` (which falls back to
@@ -99,6 +106,7 @@ why nested labels wander. **Size text from the ramp, in rem, full stop.**
 
 | Token | Size | Use |
 |---|---|---|
+| `--text-3xs` | 8px | a role word on a workflow card tile's tab (BASE fits the 32px tile in DejaVu Sans); nothing else |
 | `--text-2xs` | 11px | uppercase section labels, badge counts |
 | `--text-xs` | 12px | captions, metadata, dense secondary text |
 | `--text-sm` | 13px | secondary body, toolbar labels |
@@ -114,12 +122,18 @@ much as size** — a 14px 600-weight label in full-strength text over a 13px 400
 secondary in 60% text separates cleanly without changing point size.
 
 ### The section label
-The recurring uppercase label is already a global class. Use it; do not re-roll it:
+The recurring uppercase label is already a global class. Use it; do not re-roll it.
+It is the app's one voice for "here is a group": inspector sections, the lightbox
+panels, menu headings. A Title Case heading naming a group is drift (Settings still has
+two levels of them, waiting on its own screen design).
 ```css
 .section-label { /* in style.css */
   font-size: var(--text-2xs); font-weight: var(--weight-semibold);
   text-transform: uppercase; letter-spacing: var(--tracking-label);
-  color: rgba(var(--v-theme-on-surface), 0.7);
+  color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary)); /* 0.7 */
+}
+.section-label--on-dark { /* the lightbox: dark in both themes */
+  color: rgba(var(--v-theme-on-dark-surface), var(--opacity-text-secondary));
 }
 ```
 The alpha is `0.7` because 11px semibold is **small** text under §4 and owes 4.5:1;
@@ -137,7 +151,8 @@ Keep measure (line length) under ~75 characters for any real paragraph.
 ## 4. Color
 
 Color lives in two Vuetify themes in `frontend/src/main.js`: `pixlStashLight` (the
-default) and `pixlStashDark`. They are the source of truth. **You consume them as
+default) and `pixlStashDark`. Their values come from the Claude Design system's
+`tokens/colors.css`, which is the source of truth: change it there first. **You consume them as
 `rgb(var(--v-theme-<token>))` and `rgba(var(--v-theme-<token>), <alpha>)`. You never
 write a hex literal in a component.** The audit found 38 distinct hardcoded hex values
 across components — that is the color drift, and every one of them maps to a token
@@ -151,7 +166,7 @@ below.
   *brightest* surface and chrome (sidebar, toolbar, panels) recedes to a warm tinted
   grey; raised controls (cards, inputs) go pure white. In **dark**, chrome is a raised
   dark surface and elevation reads by *lightness*, not heavy shadow.
-- **One accent.** Amber: `#9e6727` (light) / `#b85c0c` (dark). It marks the primary
+- **One accent.** Amber: `#9e6727` (light) / `#c47a1e` (dark). It marks the primary
   action and key state. Spend it sparingly.
 
 ### Token map (what to reach for)
@@ -164,7 +179,10 @@ below.
 | Primary action button | `primary` / `onPrimary` |
 | Secondary / tertiary action | `secondary` / `tertiary` |
 | Divider line | `divider` (subtle) / `border` (visible) |
-| Success / error / warning / info | `success` / `error` / `warning` / `info` (+ `on-*`, see below) |
+| Success / error / warning / info as a **fill** | `success` / `error` / `warning` / `info` (+ `on-*`, see below) |
+| The same four as **text, a glyph, a rail or a border** | `surface-success` / `-error` / `-warning` / `-info` |
+| Olive as a **foreground** (a selected option's glyph or label) | `selected-ink` |
+| Teal as a **foreground**: the mark of what is not saved yet | `surface-tertiary` (on a dark chip: `dark-surface-tertiary`) |
 | The same four, **inside a `dark-surface`** | `dark-surface-success` / `-error` / `-warning` / `-info` |
 | `primary` as a foreground **inside a `dark-surface`** | `dark-surface-primary` |
 | Hover / selection wash | `--hover-wash` / `--active-wash` (in `style.css`) |
@@ -271,6 +289,10 @@ and (unchanged in value, now correct in ratio) `on-secondary`.
 
 #### Knock-ons this forces (all of them, measured)
 
+> **Superseded 2026-09-13 for items 1 and 2.** Focus and hover no longer read the
+> accent at all: the ring is ink and the hover wash is the text colour at 16%, so
+> neither moves with an action fill again. See §11. Kept as the record of why.
+
 Four things read the accent through an alpha and therefore move with it.
 
 1. **`--focus-ring` must go solid.** `rgba(accent, .55)` was **already failing** before
@@ -333,6 +355,40 @@ distinguishable but close, so the tallies keep their word labels ("+ 12 added" /
 "kept"). Status never rides on colour alone (below), and this is that rule applied to a
 non-status pair.
 
+### Teal marks what is not saved yet
+
+In the Workflow tab, teal has one meaning: **these changes are not saved**. The shelf
+above Run… is a teal band (`tertiary` as a `--rail-w` top edge and a 26% wash), *Save*
+is the filled teal button (`AppButton` `variant="save"`, `on-tertiary` at 4.85:1), and
+every row that differs wears a teal dot before *Edited* or *Removed*; the Workflows
+card's *Unsaved* badge wears the same dot. One mark in three places, so the eye is led
+from the row just changed to the place that keeps it. The dot never carries the
+meaning alone: the word stays. A saved value (*Yours*) takes no dot.
+
+Amber stays Run…'s: a footer with two amber buttons is the problem this solves, olive
+would read as selected, raspberry sits beside the error red, and violet is never an
+action. Teal is still a plain category and chart hue elsewhere; **as a button fill it
+means "keep what is not saved" and nothing else.**
+
+The `tertiary` fill is a glyph at only 2.73:1 on the dark rail, so the hue drawn as a
+foreground is its own token, the same shape as `surface-<status>`:
+
+| | `sidebar` | the shelf's wash (`tertiary` 26% over `sidebar`) |
+|---|---|---|
+| `surface-tertiary` light `#3b606a` | **5.87** | **4.21** |
+| `surface-tertiary` dark `#8fbcc6` | **7.19** | **5.63** |
+
+`dark-surface-tertiary` `#8fbcc6` is the sixth member of the `dark-surface-*` family,
+identical in both themes, for the dot on the card's badge (a photo scrim, dark in both
+themes): 7.36:1 on `#242628`, 8.37:1 on `#181b20`. All of these are measured by
+`npm run audit:contrast`.
+
+An outlined button on the wash takes `surface-tertiary` for its border: the theme's
+`border` is under 1.1:1 there in both themes.
+
+The Run popup and the Tasks tab offer to save a run's changes with neutral buttons.
+They are not part of this rule yet.
+
 ### Status colors, and the three ways to get them wrong
 
 There are three separate status jobs, and they need three different tokens. Reaching
@@ -340,9 +396,18 @@ for the wrong one is the single most common color bug in this codebase.
 
 | The job | Reach for | Floor |
 |---|---|---|
-| Status hue as a **foreground / border / tint** on the theme's own canvas | `success` `error` `warning` `info` | 3:1 (UI) |
+| Status hue as a **fill or a tint** (background, meter, wash) | `success` `error` `warning` `info` | - |
+| Status hue as **text, a glyph, a rail or a border** on the theme's own canvas | `surface-<status>` | 4:1 |
 | Text or a glyph **on a SOLID status fill** | the matching `on-<status>` | 4.5:1 |
-| Status hue anywhere inside a **`dark-surface`** (lightbox, review overlay) | `dark-surface-<status>` | 3:1 |
+| Status hue anywhere inside a **`dark-surface`** (lightbox, review overlay, photo scrim) | `dark-surface-<status>` | 4.5:1 text / 2.5:1 rail |
+
+The four fills are one value in both themes (`error` `#b0392b`, `warning` `#e8912f`
+with a near-black label, `success` `#2a7d3e`, `info` `#30558c`). That is why none of
+them can also be text: light `warning` is 2.46:1 on white and dark `info` 1.98:1 on
+`surface`. `surface-<status>` is the same hue deepened (light) or lifted (dark) until
+it reads as text (warning also turns a few degrees toward yellow, so it is never
+misread as the red beside it); it is the design system's `--surface-<status>`.
+`selected-ink` is the same idea for olive, and is what `--selected-ink` reads.
 
 **`on-<status>` means "on the solid fill" — literally.** It is authored against
 `rgb(var(--v-theme-<status>))` at full opacity. Put it on a translucent tint
@@ -362,9 +427,9 @@ with `on-primary`, `on-tertiary` and `on-secondary` — including light `--activ
 in a rule with no `<x>` background at all — is the tell.
 
 **`dark-surface` needs its own status set** because it stays dark in *both* themes,
-so a light-theme hue tuned for a near-white canvas is exactly wrong on it. The four
-`dark-surface-*` values are identical in both themes and measure 4.12:1 – 5.46:1
-there. This is why the light theme's status hues can be deepened at all.
+so neither theme's `surface-<status>` is right on it. The four `dark-surface-*` values
+are identical in both themes, sit within 3° of the fill hues, and measure 4.63:1 –
+7.01:1 there. `npm run audit:contrast` measures every pair.
 
 ### Contrast (proven, not eyeballed)
 WCAG floors: body text **≥ 4.5:1**, large text and meaningful UI **≥ 3:1**.
@@ -380,11 +445,8 @@ Findings to honour:
   white — the windows are disjoint. So they are for icons, borders, rails, ≥18px text,
   and ≥14px bold. Historically this rule was written about the amber accent alone
   (3.94:1 in light); it now covers the whole tier.
-- **The status hues on their own canvas** (light on `#faf9f7`, dark on `#1b1f24`):
-  `error` 4.62 / 4.50 · `warning` 3.09 / 5.32 · `success` 4.87 / 5.96 · `info`
-  4.90 / 5.30. All clear the 3:1 UI floor. Light `success` and `info` were Material
-  500s until 2026-07 and measured 2.64 / 2.97 — **below the floor** — which is the
-  reason they were deepened to `#2e7d32` and `#1a6ec4`.
+- **The status hues as text** are `surface-<status>`, never the fill; the pairs are
+  in `frontend/src/utils/contrastAudit.js` and gated by its test.
 - **A multi-segment meter steps its neutral to the extreme *away* from the canvas**,
   never to a mid-grey between the accent and the track. The range between the accent
   and the canvas is not wide enough for two 3:1 steps; the range *past* the accent is.
@@ -416,10 +478,9 @@ Findings to honour:
   drive a ghost, so it carries a 1px `outline` at 4.24 / 5.67 rather than relying on a
   colour step. A meter's own frame is a legitimate substitute for a fill boundary; a
   line *between two fills* is not.
-- **The eight `on-<status>` values, on their solid fill:** light `on-error` #ffffff
-  4.86 · `on-warning` #23211d 4.95 · `on-success` #ffffff 5.13 · `on-info` #ffffff
-  5.16; dark, all four `#1b1b1b`: `on-error` 4.68 · `on-warning` 5.53 · `on-success`
-  6.20 · `on-info` 5.51. All clear 4.5:1.
+- **The `on-<status>` values, on their solid fill, identical in both themes:**
+  `on-error` #f7f1ea 5.40 · `on-warning` #1b1b1b 6.99 · `on-success` #f7f1ea 4.57 ·
+  `on-info` #f7f1ea 6.68.
 
 **Author every `on-*` pair explicitly, and spell the key in kebab-case.** Vuetify
 emits one CSS variable per theme key *verbatim* — `--v-theme-<key>` — so a camelCase
@@ -599,7 +660,7 @@ warm canvas. Stop. Use the ladder:
 | `--elevation-1` | resting cards, hovered grid tiles |
 | `--elevation-2` | menus, dropdowns, raised controls |
 | `--elevation-3` | popovers, floating panels |
-| `--elevation-4` | dialogs, lightbox chrome |
+| `--elevation-4` | dialogs, lightbox chrome, the floating selection pill |
 
 In **dark mode**, lean on lightness for elevation and keep shadows subtle; a heavy
 shadow on a dark surface just muddies. In **light mode**, the warm shadow does the
@@ -641,8 +702,22 @@ directly at their own tuned opacity; these tokens are for the corner-chip case.
 **One family: Material Design Icons** (`@mdi/font`, already installed). One family,
 one weight, one grid. Mixing icon sets is an instant tell of an unloved UI.
 
-- Default icon size tracks the adjacent text; align icon optical center to the text
-  baseline, gap `--space-2` between icon and label.
+- **Icons have no scale of their own** (buttons.md, "Icon sizes"). Three rules:
+  1. **A component owns its icon slot.** `AppButton` (18px, 16px at `sm`),
+     `AppBarButton` (24px icon-only, 18px beside a label) and a menu row (both glyph
+     slots, the leading icon and the submenu chevron, 16px = `--gutter-glyph`). A call
+     site never passes a size into one.
+  2. **A free-standing icon tracks its adjacent text** on the type ramp. The default
+     is **16px**.
+  3. **An icon-only control 32px (`--control-h-bar`) or taller takes a 24px glyph**:
+     MDI is drawn on a 24-unit grid, so 24 is the only size that renders as drawn.
+     Below 32px the control keeps its own smaller glyph. The discriminator is the
+     control's height, not the icon's. The one exception: the dialog close button
+     stays 20px beside its 18px title.
+
+  13px and under is an inline mark (a lock inside a label) and follows the text it
+  sits in; above 28px is display art and is exempt. Align the icon's optical centre
+  to the text baseline, gap `--space-2` between icon and label.
 - Icons inherit `currentColor`. Tint with a theme token, never a hex.
 - Brand/source marks (e.g. the Google Photos glyph on the import source) are *content*,
   not chrome icons — they live in their own context and are exempt from the
@@ -657,7 +732,7 @@ The photos are the hero. The chrome frames them; it does not compete.
 - **Consistent aspect handling.** Tiles share a radius (`--radius-md`) and a restrained
   border. No per-tile bespoke framing.
 - **States are designed, not defaulted.** Every tile has a real hover, a real selected
-  state (`--active-wash` / `--active-bar`), and a focus state (`--focus-ring`). The
+  state (`--active-wash` / `--active-bar`), and a focus state (the ink ring, §11). The
   selected state is how bulk work feels confident; make it unambiguous.
 - **Empty, loading, error.** Use the existing `Empty.png` / `EmptyTrash.png` art for
   empty states with a `--text-2xl` Tiny5 headline and a `--text-sm` line of guidance.
@@ -676,6 +751,9 @@ Motion is feedback. Durations and easings live in `design-tokens.css`:
 - `--dur-4` (420ms): the one exception — an expressive **one-shot** for a delight
   moment (a chip flying into the sidebar, a badge landing, a sticker drop). Never
   for a routine interaction; a bulk action that animates this slow feels sluggish.
+- `--dur-attention` (500ms): the closed-inspector nudge only (§12, "Closed
+  inspector") — a one-shot that has to be *noticed* at the edge of the screen,
+  which is why it is longer than the routine ceiling.
 - `--ease-standard` for most; `--ease-decelerate` for elements entering the screen;
   `--ease-accelerate` for elements leaving it; `--ease-spring` for a physical
   **landing with a slight overshoot** — the punctuation at the end of a flight, not
@@ -693,12 +771,15 @@ These already exist hand-rolled; the tokens above consolidate them. Reuse the
 pattern, don't re-roll the numbers.
 
 - **Attention pulse** — a soft, looping "look here" on a live indicator. Reference:
-  `tb-stats-pulse` (Toolbar activity dot), `tm-dot-pulse` (stats). ~1.4s
+  `tb-stats-pulse` (Toolbar stats icon), `tm-dot-pulse` (stats). ~1.4s
   `ease-in-out infinite`, scale + opacity. Looping cadence is contextual, so it
   lives with the pattern, not as a raw duration token.
 - **Landing pulse (one-shot)** — a single glow-and-settle when something new
   arrives. Reference: `gridNewPulse` — a one-shot `--v-theme-accent` glow ring, no
-  layout shift. This is the model for the sidebar badge's *pulse-on-landing*.
+  layout shift. This is the model for the sidebar badge's *pulse-on-landing*, and for
+  the Workflow tab's shelf of unsaved changes (`wftab-draft-arrive`: the same 2.2s, in
+  `surface-tertiary`, when the first change is made and never for changes that were
+  already waiting).
 - **Flight / FLIP** — an element travels from A to B along an arc and lands.
   Reference: `rs-sticker-fly` / `rs-sticker-land`. Travel on `--ease-standard`
   (or `--ease-decelerate` into rest) over `--dur-4`; land on `--ease-spring` for
@@ -710,39 +791,45 @@ pattern, don't re-roll the numbers.
 
 These get skipped and that is exactly why a UI looks cheap.
 
-- **Focus:** every focusable element shows `--focus-ring`. Never remove an outline
-  without replacing it. This is a keyboard user's only cursor. **The ring is a solid
-  accent stroke, not a tinted one** — `0 0 0 3px rgb(var(--v-theme-accent))`. The
-  previous `rgba(accent, .55)` measured 1.96:1 (light) and 3.01:1 (dark) against the
-  canvas, i.e. it failed the 3:1 focus-indicator floor outright in the default theme.
-  A focus ring is the one place in this system where "subtle" is a defect.
-  The one exception to the stroke is a Vuetify field, whose floating label rides on the
-  top border: there the stroke is a bar through the label, so the field takes
-  `--focus-glow` (the same accent, 2px solid spread plus a 6px blur) painted beneath the
-  outline and clipped off the top edge, so it runs down the sides and under the field
-  and never behind the label. It steps aside while a select's menu is open, since the
-  menu drops flush against that bottom edge. Same colour, same contrast at the edge, and
-  keyboard-only via `:has(:focus-visible)`.
-  **There is exactly one focus language.** The theme's legacy `focus` key (`#7c4dff`
-  violet) is still consumed as `outline: 2px solid` by 10 review-surface components, so
-  the app currently shows an amber ring in the grid and a violet outline in reviews.
-  That is a consistency defect (the violet clears contrast at 3.15 – 4.81:1, which is
-  why nobody caught it). The review surfaces migrate onto `--focus-ring` and the `focus`
-  key retires after they do; `rgb(var(--v-theme-focus))` in new code is drift. Sites and
-  measurements: `design-system-handoff.md` §9.4.
-- **Hover:** `--hover-wash` (accent-tinted on light, on the chrome surfaces). Subtle.
-  The alpha is **per theme and is not a free number**: it is chosen so the wash's
-  contrast step against its own surface lands at ≈1.10 (light) and ≈1.26 (dark). If
-  the accent's lightness ever changes, the dark alpha has to be re-solved to hold that
-  step — see the action-fill knock-ons in §4.
-- **Selected:** `--active-wash` fill plus `--active-bar` edge and `--active-text`.
-  Tuned per theme in `style.css` because the same alpha reads differently on a
-  near-white canvas than a dark one. **`--active-text` is a foreground on the *wash*,
-  not on a solid fill**, so it is the surface's own text colour. The light theme had it
-  as `on-primary` (white) over an 18% olive tint — **1.32:1**, invisible; it is
-  `on-surface` (11.1 – 12.1:1), which is what the dark theme already did. This is the
-  same "`on-<x>` on a tint" trap as `on-<status>` (§4); it will keep recurring, so check
-  it every time an `on-*` token appears next to an `rgba(...)` fill.
+- **Focus is ink** (2026-09-13). Every focusable element shows one ring, drawn by
+  the single `:focus-visible` rule in `style.css`: a `--focus-width` (2px) outline in
+  `--focus-stroke` with a `--focus-offset` (2px) gap. `--focus-stroke` is its own
+  per-theme token and resolves to the text colour in both themes. The gap is the
+  point: the ring only ever meets the ground, never the fill it surrounds, so it never
+  has to contrast with amber or olive. Worst case 10.24:1 dark and 13.74:1 light, on
+  `panel`. The amber ring it replaces measured 1.27:1 against the Save button and read
+  as a second mark on an olive selection. **A component does not paint its own
+  focus colour.** A control that cannot take a gap (a 32px menu row flush in its menu)
+  uses `--focus-ring-inset`. A Vuetify field, whose label rides on its top border,
+  keeps `--focus-glow`, now in the same ink. Never remove an outline without replacing
+  it; a focus ring is the one place in this system where "subtle" is a defect.
+  **There is exactly one focus language.** The theme's legacy `focus` key and any
+  `rgb(var(--v-theme-accent))` ring are drift.
+- **Hover is an ink wash** (2026-09-13). A transparent control (row, tab, bar button,
+  segment, menu row) takes `--hover-wash`, the text colour at 16% per theme, and a
+  muted label or icon goes to full ink. It carries no hue, because amber is the action
+  and olive the selection: 1.57x on dark chrome, 1.56x on panel, 1.37x in light, 1.53x /
+  1.35x layered over a selection. A filled control darkens instead: `--hover-shade`,
+  a 20% black layer as `background-image`, which leaves the label untouched and lifts
+  white on amber from 4.75 to 6.74:1 in light and 3.41 to 5.01:1 in dark. A neutral fill takes `--hover-neutral`, which
+  lightens in dark and darkens in light. Never `filter: brightness()`, which moves the
+  label with the fill.
+- **Amber acts, olive selects.** Amber is the key action fill, the attention dot
+  and the scrollbar thumb (the scroll position is a mark to find; see Scrollbars
+  below), and nothing else. Everything merely chosen is olive: a selected tile,
+  the active sidebar row, a focused group, a selected tab or table row take `--active-bar` (edge
+  or ring) and `--active-wash`, the lifted olive at 0.20 in dark and the deep olive at
+  0.16 in light. **No olive text or icon on an olive wash:** the selected item's label,
+  icon and count take `--active-text`, the surface's own ink (7.5 - 11.2:1 at rest).
+  **Olive marks, words stay text:** a current value, a selected tab and an active bar
+  button keep olive on their check, underline or glyph (`--selected-ink`, lifted in
+  dark because the deep olive measures 2.72:1 on dark chrome) and set their words in
+  ink. A solid `primary` fill keeps its `on-primary` label. There is no olive button:
+  `primary_green` is retired. `--accent-on` is pure white: 4.75:1 in light, and in
+  dark 3.41:1, an accepted exception for one short word on a 28px target (buttons.md).
+  `--active-text` is a foreground on the *wash*, not on a solid fill, which is the
+  "`on-<x>` on a tint" trap (§4); check it every time an `on-*` token appears next to
+  an `rgba(...)` fill.
 - **Disabled:** drop to `--opacity-disabled` (0.38) of the token, never a
   different grey. The fade is legal here and only here: WCAG 1.4.3 exempts an
   inactive control, so a disabled label may sit below the contrast floor.
@@ -791,9 +878,14 @@ These get skipped and that is exactly why a UI looks cheap.
   is the exception `ActionReceipt`'s countdown hairline already takes (§10).
   Restore it with a scoped override on `::before`, where `@mdi/font` puts the
   animation. Never by weakening the global reset.
-- **Scrollbars:** a scroll region inside a `dark-surface` panel styles its own bar,
-  because the global `.is-desktop` treatment in `style.css` keys off `on-surface`
-  (the light-chrome pair) and does not apply in a plain browser at all. The pattern
+- **Scrollbars:** on the app's own chrome the thumb is **amber**, solid `accent`
+  over a transparent track: the global `.is-desktop` rule in `style.css` (every
+  scroller in the desktop app that sets no colour of its own), the grid
+  (`.grid-scroll-wrapper`) and the sidebar (`.sidebar-scroll`). It does not brighten
+  on hover: `accent-bright` measures 2.3 - 2.7:1 on the light chrome, under 3:1.
+  A grey thumb at 0.05 - 0.3 alpha, fading in only on hover, left the grid's scroll position impossible to find. A scroll region
+  inside a `dark-surface` panel styles its own bar, because the global
+  `.is-desktop` treatment does not apply in a plain browser at all. The pattern
   is `scrollbar-width: thin` plus
   `scrollbar-color: rgba(var(--v-theme-on-dark-surface), 0.4) transparent`, going to
   `0.55` on hover, with `scrollbar-gutter: stable` so content does not reflow when
@@ -826,7 +918,7 @@ rules and tokens they collapse onto.
 - **Why the split — and note the reason changed.** It used to be forced by contrast:
   `primary` + white was 4.84:1 and the amber `accent` + white was 3.94:1, so a numeral
   could not sit on amber. Since the action-fill tier landed (§4) **both pass** —
-  `accent` + white is 4.75:1 light / 4.59:1 dark, `primary` + white 4.84 / 4.60 — and
+  `accent` + white is 4.75:1 light / 3.41:1 dark, `primary` + white 4.84 / 4.60 — and
   the arithmetic no longer decides it. **The split stays anyway, now on meaning:** a
   count is information and reads on the workhorse fill; the accent is the brand's
   attention colour and is spent on the dot and the glow, where there is nothing to read.
@@ -879,9 +971,10 @@ bar** — is one pattern. It reuses the grid; only the bar changes.
   full width, at height **`--bar-height`** (48px).
 - **The shipped `SelectionBar.vue` is not this bar** — do not use it as the reference
   for the full-width pattern. It lives in `components/panels/` (not `widgets/`) and is
-  a **floating centred pill**: `--radius-pill`, `rgba(surface, .86)` with
-  `backdrop-filter: blur(12px)`, `--elevation-3`, `bottom: var(--space-5)` inside
-  `.grid-content-area`, sized to its content rather than to the viewport. That is
+  a **floating centred pill**: the shared `.selbar` surface (`--panel`, 1px `--border`,
+  `--radius-pill`, `--elevation-4`; issue #1301), `bottom: var(--space-5)` inside
+  `.grid-content-area`, sized to its content rather than to the viewport. The model
+  shelf and the training runs wear the same `.selbar`. That is
   deliberate for a bulk-selection affordance over a photo grid, and it is also why it
   owns `--floating-bottom-h` for the notice stack (`notice-surface.md` §2.2). Whether
   it converges on the full-width pattern or stays a pill is the **One band** open item
@@ -906,10 +999,10 @@ bar** — is one pattern. It reuses the grid; only the bar changes.
 When a 36px toolbar runs out of width, controls do not shrink, wrap, or
 vanish — they **fold** into the ⋯ overflow (`TbOverflowMenu`, a
 `bar-btn--icon` trigger wearing `mdi-dots-horizontal`, opening an in-place
-`.tbm` panel at `--z-dropdown`). The rules of the pattern:
+`.ctx-menu` at `--z-dropdown`). The rules of the pattern:
 
 - **Fold = CSS both ways.** A foldable control exists twice with one `v-if`:
-  as its bar button and as a `.tbm-action` row in the panel. The bar's
+  as its bar button and as a `.ctx-item` row in the menu. The bar's
   container queries flip which of the pair is visible; no JS ever measures
   the bar. Each bar's ladder is a decision, not an accident — recorded in
   `toolbar-responsive-decisions.md`.
@@ -920,9 +1013,53 @@ vanish — they **fold** into the ⋯ overflow (`TbOverflowMenu`, a
   compresses to its icon rather than folding — a filter that hides is a
   filter the user forgets.
 - **State travels with the row.** A folded toggle wears `aria-pressed` and
-  the primary-token pressed colour; the stats toggle's attention dot moves to
-  the ⋯ trigger while folded (same pulse recipe, `prefers-reduced-motion`
-  honoured), so background work never goes invisible.
+  the primary-token pressed colour. The right-rail toggle never folds, so its
+  pulsing amber icon (`prefers-reduced-motion` honoured) keeps background work
+  visible at every width.
+- **The right-rail toggle is one glyph on every screen**, `mdi-dock-right`
+  (where something will appear, not what is in it), with open as its pressed
+  state and never a second glyph. Its name is fixed per screen and says what
+  the rail holds: *Stats and tasks*, *Inspector*, *Models and tasks*, *Stats*.
+  Busy, the tooltip leads with the count: *3 tasks running · Models and
+  tasks*.
+
+### Closed inspector
+
+The app-wide standard for a right-edge inspector that **describes a
+selection** and has been closed by the reader (`InspectorEdgeTab`; first
+adopted by Workflows). The inspector is open by default so the grid is laid
+out around it from the first paint. The Models rail lists the shelf rather than
+describing a selection and starts closed, but closed it wears the same handle:
+it names the shelf's selection and takes the same nudge, and with nothing
+selected it is the same tab reading `All models`, without the selection stripe,
+which also bounces when a card's tray opens. Closed, it is **never re-opened by itself**
+— opening the docked rail takes a column away under the pointer — so the
+closed state has to say what it is hiding:
+
+| Part | Value |
+|---|---|
+| Width · max height | 34px · 260px, label ellipsised; a 20×52 chevron handle when nothing is selected (Workflows) |
+| Label | `writing-mode: vertical-rl`, `--text-sm`, `--weight-medium`, chevron-left above it. One item: its name. Several: `N workflows` (on Models: `N models`, `N sets`, `N missing models`, or `N selected` for a mix) |
+| Surface | `--panel`, `--border` on all but the right edge, `--elevation-2` |
+| Corners | `--radius-md`, left corners only |
+| Selection stripe | 3px `--active-bar` on the left edge; none on a label that names no selection (`plain`) |
+| Placement | the content's right edge, vertically centred, `--z-floating` |
+
+- **Click only**, never hover: the content's scrollbar is on that edge. It is a
+  `<button>` in the Tab order, named `Show inspector: <name>`, and opening from
+  it persists (it is the same act as the toolbar toggle) and puts focus on the
+  inspector's active tab. While it shows, the content reserves its width on
+  that edge, so a click on a card's edge never lands on it; the scrollbar
+  still runs under it.
+- **Nudge on a new selection, never on the same one again.** Over
+  `--dur-attention` the tab bounces left (0 → −16 → 0 → −7 → 0 → −2 → 0px) and
+  the rail toggle's glyph turns `--selected-ink` and fades back — **glyph colour
+  only**, no background, ring or border, so it cannot read as the pressed state.
+  While tasks run the amber busy pulse owns that glyph and the flash is skipped;
+  the tab still bounces.
+- **Reduced motion:** neither plays. The label changing is the cue.
+- A deep link that lands on a selection (a picture's Recipe → *Open*) opens the
+  inspector for that visit without persisting it.
 
 ---
 
@@ -939,7 +1076,7 @@ number.**
 | `--z-base` | 0 | in-flow content; the grid itself |
 | `--z-raised` | 10 | lifted over an immediate sibling: a tile badge, a hover scrim |
 | `--z-sticky` | 100 | sticky headers/toolbars inside a scroll container |
-| `--z-floating` | 200 | chrome anchored to the content area: selection pill, breadcrumb, range pill |
+| `--z-floating` | 200 | chrome anchored to the content area: selection pill, action receipt, progress pill |
 | `--z-dropdown` | 300 | menus, popovers, tooltips anchored to a control |
 | `--z-drawer` | 1000 | full-panel overlays inside the shell: the lightbox |
 | `--z-overlay` | 2000 | app-level overlays and context menus |
@@ -966,9 +1103,8 @@ sub-scrims would win that tie on DOM order. A notice then needs one rung above t
 
 **The ladder lives inside one stacking context.** `.app-viewport` is
 `position: fixed; z-index: 0`, so every value here competes only with its siblings
-inside the app shell, and a raw `9999` nested inside the lightbox or the review
-overlay is trapped at its parent's rung — which is why four such values survive
-harmlessly. Only two squatters were ever in `.app-viewport`'s own context
+inside the app shell, and a value nested inside the lightbox or the review overlay
+is trapped at its parent's rung. Only two squatters were ever in `.app-viewport`'s own context
 (`TitleBar.vue` at 100000 and `ImageImporter.vue`'s `.dlg-scrim` at 99999); both are
 migrated. `.import-fly-chip` is appended to `<body>`, so it lives in the ROOT context
 where any positive value already clears the shell.
@@ -978,11 +1114,34 @@ later sibling of `.app-viewport` — moving it earlier silently hid every notice
 the chrome. Stacking now holds by value, proven by moving the host to first child and
 re-checking.
 
-**Migration is opportunistic, not a big-bang.** Touch a rule that carries a raw
-z-index, move that rule onto the ladder. A wholesale rewrite is not worth it: each
-move is pixel-visible on a different screen and has to be eyeballed there, and a
-mistake in stacking order is invisible until the exact combination of overlays that
-exposes it. From now on a raw z-index in new code is drift.
+**The ladder stops at `--z-drawer`** (buttons.md, "Off-token values"). Vuetify
+assigns each overlay its z-index at runtime, the top of its stack plus ten from a base
+of 2000, so a menu inside a dialog inside an overlay is wherever that stack has
+climbed to. A hand-written number above 1000 is betting against a number that moves.
+**If it must clear a modal, it must *be* an overlay** (teleported, ordered by the
+stack), not a positioned element with a bigger number. The rungs above `--z-drawer`
+stay only for the surfaces that remain in the document, and no fourth one is added.
+`StackLayer` (`components/widgets/StackLayer.vue`) is the way to be one: it puts a
+hand-positioned layer (a completion list under a field, a full-window preview) on
+Vuetify's stack with no scrim, focus handling or transition, so it orders above the
+dialog it was opened from without a number of its own.
+
+**Inside a component's own stacking context the rungs order its parts.** A picture
+tile (`.image-card`, `--z-base`) and the lightbox are stacking contexts, so a badge
+on `--z-sticky` inside a tile is not competing with the grid's toolbar: it is above
+that tile's overlays and nothing else. Where a context has more layers than rungs,
+equal rungs are ordered by DOM order, and the comment beside the rule says which
+sibling has to stay later in the template.
+
+**There is no "just above my own layer".** A `1001` over `1000`, a `301` over `300`:
+two elements that need a plus-one belong in one stacking context, ordered by DOM
+order. A raw z-index is drift, and a raw value equal to a rung is a bug.
+
+**A tip over a surface on `--z-overlay` joins that surface's stacking context.** The
+grid context menu is teleported at 2000, the base Vuetify gives a lone tooltip, and won
+that tie on DOM order. It carries `data-tooltip-layer`, and `Tooltip` renders a tip
+whose control sits inside it *inside* it, so the tip is ordered by the menu, not by a
+bigger number. Such a surface must not clip (`overflow`, `transform`).
 
 ---
 

@@ -17,6 +17,7 @@ from pixlstash.db_models import (
     Tag,
     TAG_SENTINEL_LIKE_PATTERN,
     TAG_SENTINEL_ESCAPE_CHAR,
+    is_tag_sentinel,
 )
 from pixlstash.db_models.tag_prediction import (
     feeds_anomaly_score,
@@ -36,6 +37,7 @@ from pixlstash.inference.workflows.tagging import TaggingWorkflow
 from pixlstash.inference.engine import InferenceEngine
 from pixlstash.tagger_plugins.pixlstash_tagger import (
     CENTRE_CROP_TAG_WHITELIST,
+    FACE_QUALITY_CROP_TAGS,
     QUALITY_CROP_TAG_WHITELIST,
 )
 from pixlstash.pixl_logging import get_logger
@@ -49,6 +51,32 @@ logger = get_logger(__name__)
 # hint for picking the *first* decoder to try: a file whose extension lies is
 # still resolved by the shared loader in `_load_pic`.
 _VIDEO_EXTS = frozenset({".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"})
+
+# A face's quality crop is this multiple of its box's long side, so the chin,
+# hairline and both eyes are in the window however large the face is (#1648).
+FACE_CROP_SCALE = 1.4
+
+# Faces whose box long side is below this get no face crop: at 1.4x and a 512
+# resize they are magnified 10x or more, and face tags would be judged on blur
+# (#1747). Applies to the face-sized crop only; the fixed window is not resized
+# up.
+MIN_FACE_CROP_PX = 48
+
+# The tags each kind of quality crop owns: it replaces the full pass's verdict
+# on them with its own, and boosts their confidences.
+#
+# An upscaled face crop is soft and smeared, so its "blocky" describes the
+# resize, not the picture (#1747): it keeps the face tags, which the tagger
+# learned from close-up crops, and leaves "blocky" to the full pass. A face too
+# small to judge takes the centre crop, and the merge in `_tag_pictures_batch`
+# also strips the full pass's face tags from it: a face too small for a 512
+# crop is too small in the downscaled full image.
+CROP_TAGS_BY_KIND = {
+    "face": QUALITY_CROP_TAG_WHITELIST,
+    "upscaled_face": FACE_QUALITY_CROP_TAGS,
+    "centre": CENTRE_CROP_TAG_WHITELIST,
+    "small_face": CENTRE_CROP_TAG_WHITELIST,
+}
 
 
 def _is_transient_load_error(exc: BaseException) -> bool:
@@ -128,6 +156,7 @@ class TagTask(BaseTask):
         pictures: list,
         interactive: bool = False,
         engine_override: str | None = None,
+        reset_generation: int | None = None,
     ):
         picture_ids = [pic.id for pic in (pictures or []) if getattr(pic, "id", None)]
         super().__init__(
@@ -142,6 +171,15 @@ class TagTask(BaseTask):
         self._pictures = pictures or []
         self._interactive = interactive
         self._engine_override = engine_override
+        # `reset_generation` is `database.tag_resets.current()` read BEFORE the
+        # pictures were: a picture reset after it gets no write from this task
+        # (#1361). The default, "now", is only right when they were read just
+        # before. The registry is optional on the database object, like
+        # `unprocessable_images`.
+        self._tag_resets = getattr(database, "tag_resets", None)
+        if reset_generation is None and self._tag_resets is not None:
+            reset_generation = self._tag_resets.current()
+        self._reset_generation = reset_generation
         self._preloaded_images: dict[str, PILImage.Image] = {}
         self._preload_lock = threading.Lock()
         self._preload_thread: threading.Thread | None = None
@@ -245,7 +283,7 @@ class TagTask(BaseTask):
 
         try:
             ext = os.path.splitext(str(file_path))[1].lower()
-            if ext in _VIDEO_EXTS:
+            if ext in _VIDEO_EXTS or VideoUtils.is_animated_gif(str(file_path)):
                 frames = VideoUtils.extract_representative_video_frames(
                     str(file_path), count=1
                 )
@@ -264,7 +302,8 @@ class TagTask(BaseTask):
                 # bottom of the frame this loader used to return.
                 # `expand_bbox_to_square` then clamped one edge and not the
                 # other, and PIL refused the crop ("Coordinate 'lower' is less
-                # than 'upper'").
+                # than 'upper'"). `_build_quality_crop` now refuses such a box
+                # itself, before cropping.
                 #
                 # The refusal was the loud half. The quiet half is worse: with
                 # the face nearer the top the box stayed valid and the crop came
@@ -298,19 +337,28 @@ class TagTask(BaseTask):
             return file_path, PILImage.fromarray(array), False
         return file_path, None, _file_is_readable(str(file_path))
 
-    def _build_quality_crop(self, pic, faces, target, preloaded_images):
+    def _build_quality_crop(
+        self, pic, faces, target, preloaded_images, face_scale=FACE_CROP_SCALE
+    ):
         """Build the high-resolution quality crop for one picture.
 
         Args:
             pic: The picture to crop.
             faces: That picture's `Face` rows, unfiltered.
-            target: Square side length the crop is expanded to.
+            target: Side of the faceless centre crop, and of the face crop
+                when `face_scale` is None. The tagger resizes every crop to its
+                own input size either way.
             preloaded_images: The task's path -> image cache; populated on a miss.
+            face_scale: A face crop's side as a multiple of the face box's long
+                side; None takes the fixed `target` window instead (the
+                `whole_face_crop` setting turned off).
 
         Returns:
-            ``(key, crop, file_path, is_centre_crop)``, or **None** when this
-            picture cannot contribute a crop. `is_centre_crop` marks the faceless
-            fallback, which is judged against the reduced whitelist.
+            ``(key, crop, file_path, kind)``, or **None** when this picture
+            cannot contribute a crop. `kind` is a `CROP_TAGS_BY_KIND` key:
+            ``"face"``; ``"upscaled_face"``, a face-sized square smaller than
+            `target`; ``"centre"``, the faceless fallback; or ``"small_face"``,
+            the same fallback for a face under `MIN_FACE_CROP_PX`.
 
         **Never raises**, and that is the point of it being a separate method.
         Everything here runs on data the caller does not control: `Face.bbox` is
@@ -327,7 +375,10 @@ class TagTask(BaseTask):
             valid_faces = [
                 face
                 for face in faces
-                if face.bbox and getattr(face, "face_index", 0) >= 0
+                if face.bbox
+                and getattr(face, "face_index", 0) >= 0
+                # The crop is taken from frame 0; a later frame's box is not in it.
+                and getattr(face, "frame_index", 0) == 0
             ]
             img = preloaded_images.get(file_path)
             if img is None:
@@ -353,21 +404,41 @@ class TagTask(BaseTask):
                         * (float(face.bbox[3]) - float(face.bbox[1])),
                     ),
                 )
-                expanded = expand_bbox_to_square(largest_face.bbox, w, h, target)
-                return (
-                    f"{file_path}#face{largest_face.id}",
-                    img.crop(expanded),
-                    file_path,
-                    False,
-                )
-            # No face detected: fall back to a centre crop so whole-image quality
-            # defects (blockiness, blur, jpeg artifacts) still get a high-
-            # resolution pass instead of relying only on the downscaled full-image
-            # pass. A zero-size box at the image centre expands to the same
-            # target-sized square the face path uses.
+                # Sized by the face, not by `target`: a fixed window cut into
+                # the majority of faces (median long side 384px against the
+                # 320px window) and could miss the chin or an eye.
+                x1, y1, x2, y2 = (float(v) for v in largest_face.bbox)
+                long_side = max(x2 - x1, y2 - y1)
+                if not long_side > 0:
+                    raise ValueError(f"degenerate face bbox {largest_face.bbox}")
+                # The square slides inward at an edge, so a box that does not
+                # belong to this frame would still crop - a corner with no face
+                # in it, judged for face tags. Refuse it instead.
+                if not (0 <= (x1 + x2) / 2 <= w and 0 <= (y1 + y2) / 2 <= h):
+                    raise ValueError(
+                        f"face bbox {largest_face.bbox} lies outside the {w}x{h} frame"
+                    )
+                if not (face_scale and long_side < MIN_FACE_CROP_PX):
+                    side = face_scale * long_side if face_scale else target
+                    expanded = expand_bbox_to_square(largest_face.bbox, w, h, side)
+                    # Short of `target` means the tagger resizes it up. True of
+                    # a large face in a picture under 512 too: still magnified.
+                    upscaled = face_scale and expanded[2] - expanded[0] < target
+                    return (
+                        f"{file_path}#face{largest_face.id}",
+                        img.crop(expanded),
+                        file_path,
+                        "upscaled_face" if upscaled else "face",
+                    )
+            # No face detected, or one too small to judge: fall back to a centre
+            # crop so whole-image quality defects (blockiness, blur, jpeg
+            # artifacts) still get a high-resolution pass instead of relying only on the downscaled full-image
+            # pass. A zero-size box at the image centre expands to a target-sized
+            # square, so the crop is judged at its native resolution.
             centre_bbox = [w / 2.0, h / 2.0, w / 2.0, h / 2.0]
             expanded = expand_bbox_to_square(centre_bbox, w, h, target)
-            return f"{file_path}#centre", img.crop(expanded), file_path, True
+            kind = "small_face" if valid_faces else "centre"
+            return f"{file_path}#centre", img.crop(expanded), file_path, kind
         except Exception as exc:
             logger.warning(
                 "Could not build the quality crop for picture %s (%s): %s",
@@ -598,8 +669,26 @@ class TagTask(BaseTask):
             target = human_pos_by_pic if state == "POS" else human_neg_by_pic
             target.setdefault(pid, set()).add(tag_val)
 
-        # Determine which pictures need updating and their new effective tags.
+        # The tagger never deletes a tag it did not write (#1357). Every writer of
+        # a retag sentinel either creates the picture or deletes all of its Tag
+        # rows first (`reset_pictures_tags`, sidecar reconciliation), except
+        # `retag_face_crops` (#1662), which deletes only the crop-owned tags and
+        # keeps the rest on purpose - so after it, a kept tag the model did not
+        # reproduce is expected and the warning below is benign. And this
+        # pass is the only thing that removes the sentinel, and a pass that read
+        # the picture before such a reset is dropped by `_add_tags_unless_reset`
+        # (#1361). So a non-sentinel row present now was written by someone
+        # else - most often a manual add made
+        # while this task was queued, which also removed the sentinel. The write
+        # therefore only removes sentinels and adds what is missing; it used to
+        # delete every row and re-insert `model | human POS`, which silently
+        # dropped a manual tag outside the anomaly vocabulary.
+        #
+        # When the tagger found no applicable tags, only the sentinel goes: an
+        # empty tag set means "processed but no tags found", and MissingTagFinder
+        # only re-queues pictures that still carry a retag sentinel.
         pics_to_update: list[tuple[int, set]] = []
+        preserved_by_pic: dict[int, int] = {}
         for update in updates:
             pic_id = update.get("pic_id")
             if pic_id is None:
@@ -607,21 +696,32 @@ class TagTask(BaseTask):
             if pic_id not in existing_picture_ids:
                 logger.debug("Skipping tag update for missing picture_id=%s", pic_id)
                 continue
-            tags = update.get("tags") or []
-
-            # When the tagger found no applicable tags, leave the tag set empty.
-            # An empty tag set means "processed but no tags found"; MissingTagFinder
-            # only re-queues pictures that still carry a retag sentinel, so a
-            # picture with no tags at all will not be reprocessed.
-            effective_tags = set(tags) if tags else set()
-            # Apply durable human supervision on top of the model's call.
-            effective_tags |= human_pos_by_pic.get(pic_id, set())
+            existing = existing_tags_map.get(pic_id, set())
+            # A human NEG vetoes the model's call; a human POS is re-applied.
+            effective_tags = set(update.get("tags") or [])
             effective_tags -= human_neg_by_pic.get(pic_id, set())
+            effective_tags |= human_pos_by_pic.get(pic_id, set())
 
-            if effective_tags == existing_tags_map.get(pic_id, set()):
+            tags_to_add = effective_tags - existing
+            if not tags_to_add and not any(is_tag_sentinel(t) for t in existing):
                 continue
+            preserved = {
+                t
+                for t in existing
+                if not is_tag_sentinel(t) and t not in effective_tags
+            }
+            if preserved:
+                preserved_by_pic[pic_id] = len(preserved)
+            pics_to_update.append((pic_id, tags_to_add))
 
-            pics_to_update.append((pic_id, effective_tags))
+        if preserved_by_pic:
+            logger.warning(
+                "Tagger: kept %d tag(s) the model did not produce on %d picture(s) "
+                "(added while tagging was pending); per picture: %s",
+                sum(preserved_by_pic.values()),
+                len(preserved_by_pic),
+                preserved_by_pic,
+            )
 
         # A locked set freezes a picture's CONFIRMED tags (the Tag table, not just
         # predictions), so the background tagger must never rewrite them - even if
@@ -644,7 +744,7 @@ class TagTask(BaseTask):
         if not pics_to_update:
             return updated_ids
 
-        # Bulk delete old tags and insert new ones in a single transaction.
+        # Clear the sentinels and insert the missing tags in a single transaction.
         #
         # The rewrite is wrapped in invalidate_on_anomaly_change because an applied Tag
         # row is now an *input* to the scorer's anomaly penalty
@@ -655,14 +755,25 @@ class TagTask(BaseTask):
         # nothing observing it and the cached value would stay stale. update_pic_ids is
         # already lock-filtered above, so frozen pictures are never invalidated.
         update_pic_ids = [pid for pid, _ in pics_to_update]
+
+        def _write(batch: list[tuple[int, set]]) -> None:
+            session.exec(
+                delete(Tag).where(
+                    Tag.picture_id.in_([pid for pid, _ in batch]),
+                    Tag.tag.like(
+                        TAG_SENTINEL_LIKE_PATTERN, escape=TAG_SENTINEL_ESCAPE_CHAR
+                    ),
+                )
+            )
+            for pic_id, tags_to_add in batch:
+                for tag_value in tags_to_add:
+                    session.add(Tag(picture_id=pic_id, tag=tag_value))
+
         try:
             with invalidate_on_anomaly_change(
                 session, update_pic_ids, context="tagger tag rewrite"
             ):
-                session.exec(delete(Tag).where(Tag.picture_id.in_(update_pic_ids)))
-                for pic_id, effective_tags in pics_to_update:
-                    for tag_value in effective_tags:
-                        session.add(Tag(picture_id=pic_id, tag=tag_value))
+                _write(pics_to_update)
             session.commit()
             updated_ids.extend(update_pic_ids)
         except IntegrityError as exc:
@@ -672,14 +783,12 @@ class TagTask(BaseTask):
                 len(update_pic_ids),
                 exc,
             )
-            for pic_id, effective_tags in pics_to_update:
+            for pic_id, tags_to_add in pics_to_update:
                 try:
                     with invalidate_on_anomaly_change(
                         session, [pic_id], context="tagger tag rewrite (per-picture)"
                     ):
-                        session.exec(delete(Tag).where(Tag.picture_id == pic_id))
-                        for tag_value in effective_tags:
-                            session.add(Tag(picture_id=pic_id, tag=tag_value))
+                        _write([(pic_id, tags_to_add)])
                     session.commit()
                     updated_ids.append(pic_id)
                 except IntegrityError as inner_exc:
@@ -691,6 +800,48 @@ class TagTask(BaseTask):
                     )
 
         return updated_ids
+
+    def _reset_since_capture(self, picture_ids) -> set[int]:
+        """Ids whose tags were reset after this task read them (#1361).
+
+        Such a task's output belongs to the tags that were replaced: written, it
+        would clear the new sentinel, and the retag's own task would then keep
+        the stale rows as another writer's. Dropping it leaves the sentinel for
+        that task. Must run on the writer thread, where the resets also run.
+        """
+        if self._tag_resets is None:
+            return set()
+        stale = self._tag_resets.reset_since(picture_ids, self._reset_generation)
+        if stale:
+            logger.info(
+                "TagTask %s: dropping output for %d picture(s) retagged since "
+                "it read them: %s",
+                self.id,
+                len(stale),
+                sorted(stale),
+            )
+        return stale
+
+    def _add_tags_unless_reset(self, session: Session, updates: list[dict]):
+        stale = self._reset_since_capture([u["pic_id"] for u in updates])
+        return self._add_tags_bulk(
+            session, [u for u in updates if u["pic_id"] not in stale]
+        )
+
+    def _write_predictions_unless_reset(
+        self,
+        session: Session,
+        label_scores_by_pic_id: dict,
+        tags_by_pic_id: dict,
+        model_version: str,
+    ) -> int:
+        stale = self._reset_since_capture(label_scores_by_pic_id)
+        return self._write_predictions_from_tags(
+            session,
+            {p: v for p, v in label_scores_by_pic_id.items() if p not in stale},
+            tags_by_pic_id,
+            model_version,
+        )
 
     @staticmethod
     def _fetch_faces_for_pictures(session: Session, picture_ids: list) -> dict:
@@ -865,11 +1016,13 @@ class TagTask(BaseTask):
                     )
                     crop_fetch_s = time.perf_counter() - crop_fetch_start
                     target = active_workflow.pixlstash_tagger_image_size_quality_crop()
+                    face_scale = (
+                        FACE_CROP_SCALE if active_workflow.whole_face_crop() else None
+                    )
                     quality_items = []
                     key_to_path = {}
-                    # Paths whose crop is the faceless centre-crop fallback; these are
-                    # judged against the reduced CENTRE_CROP_TAG_WHITELIST (no face tags).
-                    centre_crop_paths: set = set()
+                    # Path -> the `CROP_TAGS_BY_KIND` key of the crop built for it.
+                    crop_kind_by_path: dict = {}
                     # CPU work, and it sits between the two GPU timers: PIL
                     # crops and resizes, plus a decode for any picture the
                     # preload missed.
@@ -880,14 +1033,14 @@ class TagTask(BaseTask):
                             faces_by_pic.get(pic.id, []),
                             target,
                             preloaded_images,
+                            face_scale,
                         )
                         if built is None:
                             continue
-                        key, crop, file_path, is_centre_crop = built
+                        key, crop, file_path, kind = built
                         quality_items.append((key, crop))
                         key_to_path[key] = file_path
-                        if is_centre_crop:
-                            centre_crop_paths.add(file_path)
+                        crop_kind_by_path[file_path] = kind
                     crop_build_s = time.perf_counter() - crop_build_start
                     if quality_items:
                         # Single GPU pass: get quality tags AND raw scores for predictions.
@@ -900,16 +1053,11 @@ class TagTask(BaseTask):
                             else None,
                         )
                         crop_inference_s = time.perf_counter() - crop_inf_start
-                        # The crop's authoritative tag set depends on its type: a face
-                        # crop owns the full whitelist; the faceless centre-crop fallback
-                        # owns only the non-face quality tags.
+                        # The crop's authoritative tag set depends on its kind; see
+                        # `CROP_TAGS_BY_KIND`.
                         whitelist_by_path = {
-                            path: (
-                                CENTRE_CROP_TAG_WHITELIST
-                                if path in centre_crop_paths
-                                else QUALITY_CROP_TAG_WHITELIST
-                            )
-                            for path in key_to_path.values()
+                            path: CROP_TAGS_BY_KIND[kind]
+                            for path, kind in crop_kind_by_path.items()
                         }
                         # Accumulate quality tags found across all crops per picture path,
                         # keeping only those the crop is allowed to own.
@@ -941,11 +1089,12 @@ class TagTask(BaseTask):
                         # so its full pass writes no prediction rows and the
                         # strip stays exactly as shipped; a plugin that does
                         # report them keeps its output.
+                        may_strip = crop_is_full_pass_model or not full_scores_by_path
                         for path, crop_quality in quality_tags_by_path.items():
                             if path not in tag_results:
                                 continue
                             allowed = whitelist_by_path[path]
-                            if crop_is_full_pass_model or not full_scores_by_path:
+                            if may_strip:
                                 kept = [
                                     t for t in tag_results[path] if t not in allowed
                                 ]
@@ -958,6 +1107,21 @@ class TagTask(BaseTask):
                                 logger.debug(
                                     "Quality crop tags for %s: %s", path, crop_quality
                                 )
+                        # A face too small to judge loses the full pass's face
+                        # tags whatever its centre crop found, so not in the loop
+                        # above: `tag_quality_crops` omits a crop it tagged
+                        # nothing on (#1747).
+                        for path, kind in crop_kind_by_path.items():
+                            if (
+                                kind == "small_face"
+                                and may_strip
+                                and path in tag_results
+                            ):
+                                tag_results[path] = [
+                                    t
+                                    for t in tag_results[path]
+                                    if t not in FACE_QUALITY_CROP_TAGS
+                                ]
                         # Boost prediction scores using crop confidence, limited to the
                         # tags the crop is allowed to own (centre crops don't boost face
                         # tags).
@@ -995,7 +1159,7 @@ class TagTask(BaseTask):
                 if update_payloads:
                     db_tags_start = time.perf_counter()
                     updated_ids = self._db.run_task(
-                        self._add_tags_bulk,
+                        self._add_tags_unless_reset,
                         update_payloads,
                         priority=DBPriority.LOW,
                     )
@@ -1042,7 +1206,7 @@ class TagTask(BaseTask):
                             )
                             db_pred_start = time.perf_counter()
                             self._db.run_task(
-                                self._write_predictions_from_tags,
+                                self._write_predictions_unless_reset,
                                 label_scores_by_pic_id,
                                 tags_by_pic_id,
                                 model_version,
@@ -1132,7 +1296,7 @@ class TagTask(BaseTask):
         Returns:
             Number of TagPrediction rows written or updated.
         """
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now = datetime.now(timezone.utc)
         picture_ids = [pid for pid, scores in label_scores_by_pic_id.items() if scores]
         if not picture_ids:
             return 0

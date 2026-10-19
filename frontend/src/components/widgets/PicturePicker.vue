@@ -3,7 +3,7 @@
     :open="open"
     title="Choose a picture"
     :subtitle="subtitle"
-    :width="820"
+    size="xl"
     :pad-body="false"
     @close="emit('close')"
     @accept="use"
@@ -84,6 +84,18 @@
                import and `ImageImporter` announces it from inside, which is the
                only place that knows whether it happened. See the Paste note in
                the script block for why announcing it from here was removed. -->
+          <!-- Offered only where a video is usable: a caller that takes the
+               picture's thumbnail gets a frame from a video for free. A
+               workflow's LoadImage cannot read a video file at all, so the Run
+               popup never offers this. -->
+          <v-checkbox
+            v-if="offerVideos"
+            v-model="includeVideos"
+            class="pp-videos"
+            label="Include videos"
+            density="compact"
+            hide-details
+          />
           <span class="pp-paste">
             or press <kbd>Ctrl</kbd><kbd>V</kbd>
           </span>
@@ -99,12 +111,7 @@
             :class="{ 'pp-note--error': error }"
             role="status"
           >
-            {{
-              error ||
-              (loading
-                ? "Loading pictures…"
-                : "No pictures here. Try another grouping, search, or paste one in.")
-            }}
+            {{ error || (loading ? "Loading pictures…" : emptyNote) }}
           </p>
           <div v-if="pictures.length" class="pp-grid">
             <button
@@ -120,11 +127,16 @@
               :aria-pressed="chosen?.id === pic.id"
               :aria-disabled="unavailable.has(pic.id) || undefined"
               :tabindex="i === tabStop ? 0 : -1"
-              :title="tileTitle(pic)"
+              :aria-label="tileTitle(pic)"
               @click="pick(pic)"
               @dblclick="useTile(pic)"
               @keydown="onCellKeydown($event, i)"
             >
+              <Tooltip
+                :text="tileTitle(pic)"
+                activator="parent"
+                :describe="false"
+              />
               <img
                 v-if="!unavailable.has(pic.id)"
                 :src="thumbUrl(pic)"
@@ -214,6 +226,7 @@ import { computed, nextTick, reactive, ref, watch } from "vue";
 import AppButton from "./AppButton.vue";
 import AppDialog from "./AppDialog.vue";
 import AppInput from "./AppInput.vue";
+import Tooltip from "./Tooltip.vue";
 import {
   getPictureCount,
   pictureThumbnailUrl,
@@ -221,6 +234,7 @@ import {
   streamPictures,
 } from "../../api/pictures";
 import { errorDetail } from "../../utils/apiError";
+import { PIL_IMAGE_EXTENSIONS } from "../../utils/media";
 import { useEntityListsStore } from "../../stores/useEntityListsStore";
 import { useTasksStore } from "../../stores/useTasksStore";
 
@@ -229,6 +243,10 @@ const props = defineProps({
   // What the picture is FOR, said in the caller's own words ("for Reference",
   // "for Flux Realism"). The title never changes; this does.
   subtitle: { type: String, default: "" },
+  // Still images only unless this is set AND the reader ticks "Include
+  // videos". Set it only where a video is usable as a frame - see the
+  // checkbox in the template.
+  offerVideos: { type: Boolean, default: false },
 });
 
 const emit = defineEmits(["close", "pick"]);
@@ -258,6 +276,7 @@ const searchRef = ref(null);
 const facet = reactive({ kind: "", id: null });
 const expanded = reactive({ character: false, set: false });
 const search = ref("");
+const includeVideos = ref(false);
 const pictures = ref([]);
 const chosen = ref(null);
 const loading = ref(false);
@@ -277,6 +296,8 @@ const unavailable = ref(new Set());
 // list the reader is now looking at. Asserted in the suite by resolving two
 // reads out of order.
 let loadSeq = 0;
+// The same guard for the Everything count, which the checkbox re-reads.
+let countSeq = 0;
 
 const facets = computed(() => ({
   character: entityLists.characters
@@ -293,6 +314,18 @@ const projectFacets = computed(() =>
     .map((p) => ({ id: p.id, name: p.name, count: p.image_count ?? 0 }))
     .sort((a, b) => b.count - a.count),
 );
+
+// What an empty grid says, which has to name the way out: where videos are
+// hidden but can be shown, that is the checkbox above.
+const emptyNote = computed(() => {
+  if (includeVideos.value) {
+    return "No pictures here. Try another grouping, search, or paste one in.";
+  }
+  if (props.offerVideos) {
+    return "No still images here. Tick Include videos to show videos too.";
+  }
+  return "No still images here. Videos are not offered for this. Try another grouping, search, or paste one in.";
+});
 
 function shown(group) {
   const rows = facets.value[group];
@@ -332,9 +365,18 @@ function choose(kind, id) {
   reload();
 }
 
+/** Restrict a query to still images, unless videos were asked for. */
+function mediaParams() {
+  const params = new URLSearchParams();
+  if (includeVideos.value) return params;
+  // The grid's own "Images" filter, so the two agree on what an image is.
+  for (const ext of PIL_IMAGE_EXTENSIONS) params.append("format", ext.toUpperCase());
+  return params;
+}
+
 /** The facet as listing query params, shared by the stream and the search. */
 function scopeParams() {
-  const params = new URLSearchParams();
+  const params = mediaParams();
   if (facet.kind === "project") params.set("project_id", String(facet.id));
   if (facet.kind === "character") params.set("character_id", String(facet.id));
   if (facet.kind === "set") params.set("set_id", String(facet.id));
@@ -490,6 +532,27 @@ function onCellKeydown(event, index) {
 // the reader has made in the meantime, and any import may be one this reader
 // never started.
 
+function readTotal() {
+  const seq = ++countSeq;
+  getPictureCount(mediaParams().toString())
+    .then((body) => {
+      if (seq === countSeq) totalCount.value = Number(body?.count);
+    })
+    .catch((err) => {
+      if (seq !== countSeq) return;
+      // A missing headline count is cosmetic: the rail still narrows and the
+      // grid still fills. Logged rather than surfaced.
+      console.warn("[PicturePicker] could not read the library count", err);
+      totalCount.value = null;
+    });
+}
+
+watch(includeVideos, () => {
+  if (!props.open) return;
+  readTotal();
+  reload();
+});
+
 const importsRunning = computed(() => Object.keys(tasks.importRuns).length);
 
 watch(importsRunning, (now, before) => {
@@ -500,7 +563,12 @@ watch(importsRunning, (now, before) => {
 watch(
   () => props.open,
   (isOpen) => {
-    if (!isOpen) return;
+    // Reset on CLOSE, so the checkbox's own watcher sees a closed picker and
+    // does not read the list a second time on the next open.
+    if (!isOpen) {
+      includeVideos.value = false;
+      return;
+    }
     facet.kind = "";
     facet.id = null;
     search.value = "";
@@ -512,16 +580,7 @@ watch(
     entityLists.refresh("characters");
     entityLists.refresh("sets");
     if (entityLists.canSeeProjects) entityLists.refresh("projects");
-    getPictureCount()
-      .then((body) => {
-        totalCount.value = Number(body?.count);
-      })
-      .catch((err) => {
-        // A missing headline count is cosmetic: the rail still narrows and the
-        // grid still fills. Logged rather than surfaced.
-        console.warn("[PicturePicker] could not read the library count", err);
-        totalCount.value = null;
-      });
+    readTotal();
     load();
     // The search field is where a reader who did not come for a facet starts,
     // and the dialog would otherwise open with focus on its Close button.
@@ -566,7 +625,7 @@ watch(
   align-items: center;
   gap: var(--space-2);
   width: 100%;
-  min-height: 32px;
+  min-height: var(--control-h-bar);
   padding: var(--space-2) var(--space-3);
   border: 0;
   border-radius: var(--radius-sm);
@@ -599,7 +658,6 @@ watch(
 }
 .pp-more {
   font-size: var(--text-2xs);
-  color: rgb(var(--v-theme-accent));
 }
 
 .pp-main {
@@ -618,6 +676,9 @@ watch(
 }
 .pp-search {
   flex: 1;
+}
+.pp-videos {
+  flex: none;
 }
 .pp-paste {
   display: flex;
@@ -672,19 +733,15 @@ watch(
 /* The chosen tile wears the whole §11 selected vocabulary - `--active-wash`
    fill AND `--active-bar` edge - not the edge alone. The edge on its own is a
    2px stroke drawn INSIDE a photograph that can be any colour, so whether it
-   registers depends on the frame behind it: `--active-bar` is `primary` on
-   dark and the `accent` amber on light, and either can land on a picture that
-   already contains it. That is what "the picker doesn't get any selection
+   registers depends on the frame behind it: `--active-bar` is an olive, and
+   it can land on a picture that already contains it. That is what "the picker doesn't get any selection
    marker" was - checked in a browser against real thumbnails, in both themes.
 
-   Outline rather than a box-shadow, because the focus ring below is a
-   box-shadow and the two would fight over one property - which is how the
-   chosen state was once hidden from the reader who has no other way to see it
-   (a focused, chosen tile showed only the ring). */
-.pp-cell--on {
-  outline: var(--space-1) solid var(--active-bar);
-  outline-offset: calc(-1 * var(--space-1));
-}
+   The edge is an inset shadow on the wash pseudo-element, never the tile's
+   own outline: the global focus ring IS an outline, and the two would fight
+   over one property - which is how the chosen state was once hidden from the
+   reader who has no other way to see it (a focused, chosen tile showed only
+   the ring). */
 /* The wash, over the image rather than under it - a tile IS its picture, so
    there is no surface left to tint. A pseudo-element because it carries no
    text: nothing for the accessibility tree to pick up (unlike the tick, see
@@ -693,7 +750,9 @@ watch(
   content: "";
   position: absolute;
   inset: 0;
+  border-radius: inherit;
   background: var(--active-wash);
+  box-shadow: var(--selection-ring);
   pointer-events: none;
 }
 /* The tick. `z-index` to clear the wash, which is an ::after and therefore
@@ -701,7 +760,7 @@ watch(
    photograph, the same job it does on the image grid's own check badge. */
 .pp-tick {
   position: absolute;
-  z-index: 1;
+  z-index: var(--z-raised);
   top: var(--space-2);
   right: var(--space-2);
   width: var(--space-6);
@@ -710,16 +769,15 @@ watch(
   align-items: center;
   justify-content: center;
   border-radius: var(--radius-pill);
-  background: var(--active-bar);
-  color: var(--active-text);
+  /* A checked mark on a solid fill: deep olive with its own on- label, as the
+     checked checkbox is, in both themes. */
+  background: rgb(var(--v-theme-primary));
+  color: rgb(var(--v-theme-on-primary));
   box-shadow: var(--elevation-2);
   font-size: var(--text-sm);
   font-weight: var(--weight-bold);
   line-height: 1;
   pointer-events: none;
-}
-.pp-cell:focus-visible {
-  box-shadow: var(--focus-ring);
 }
 .pp-cell--gone {
   display: flex;
@@ -737,7 +795,7 @@ watch(
   color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
 }
 .pp-note--error {
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
 }
 .pp-note--after {
   padding-top: var(--space-5);

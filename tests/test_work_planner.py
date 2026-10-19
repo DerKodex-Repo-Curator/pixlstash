@@ -1052,6 +1052,9 @@ class _FakeTaggingWorkflow:
     def tag_images(self, image_paths, **kwargs):
         return {path: ["tag"] for path in image_paths}
 
+    def whole_face_crop(self) -> bool:
+        return True
+
     def pixlstash_tagger_image_size_quality_crop(self) -> int:
         return 32
 
@@ -1134,9 +1137,10 @@ def test_hold_is_from_now_and_does_not_accumulate():
     planner.hold(60)
     planner.hold(60)
     # Bounded on both sides: a lease that accumulated would read near 120, and
-    # the upper bound holds by construction because monotonic() never runs
-    # backwards between the hold and the read.
-    assert 59.0 < planner._held_for() <= 60.0
+    # the upper bound holds because monotonic() never runs backwards between
+    # the hold and the read - up to float rounding, since `(t + 60) - t` on a
+    # large clock reading can come out a hair over 60.
+    assert 59.0 < planner._held_for() <= 60.0 + 1e-6
 
 
 def test_release_ends_the_hold_without_waiting_for_the_lease():

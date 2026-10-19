@@ -1,0 +1,727 @@
+<template>
+  <!-- `rowgroup`, not a bare div: the tray is a child of the grid's `treegrid`,
+       where only rows and rowgroups are allowed, and the header below is a row of
+       its own. -->
+  <div
+    :id="panelId"
+    class="msp"
+    role="rowgroup"
+    :style="notchStyle"
+    data-testid="model-set-panel"
+  >
+    <!-- One column has no centre worth pointing at, so the caret takes the
+         shipped `--start` inset rather than a hand-copy of its 22px. -->
+    <span
+      class="tbm-caret"
+      :class="columns > 1 ? 'msp__notch' : 'tbm-caret--start'"
+      aria-hidden="true"
+    ></span>
+
+    <div class="msp__header" role="row" aria-level="2">
+      <div role="gridcell">
+        <!-- No `role="toolbar"`: the bar opens with two runs of static text, and
+             the switch and Close name themselves. -->
+        <div class="msp__bar">
+          <span class="msp__name">{{ name }}</span>
+          <span class="msp__count num">{{ countLabel }}</span>
+          <span class="msp__spacer"></span>
+          <!-- A set from pictures cannot be edited, and this is where a reader
+               finds that out: its clone is a set of their own, which can. Not
+               for a set whose base model is off the shelf, which no set of
+               theirs can hold. -->
+          <AppButton
+            v-if="!missing"
+            variant="ghost"
+            size="sm"
+            icon-left="content-duplicate"
+            tooltip="A &quot;Grouped by you&quot; copy of this set, which you can edit. No file is touched."
+            data-testid="set-clone"
+            @click="emit('clone')"
+            >Clone to edit</AppButton
+          >
+          <!-- The Workflows grid's own switch, by name and by behaviour: same two
+               options, same icon-label variant, same remembered-for-every-tray
+               rule. What differs is the List columns, because a set's members are
+               models where a stack's are workflows. -->
+          <Segmented
+            :options="VIEW_OPTIONS"
+            orientation="horizontal"
+            :model-value="view"
+            variant="icon-label"
+            aria-label="Show the models as"
+            @update:model-value="(value) => emit('view', value)"
+          />
+          <AppButton
+            variant="ghost"
+            size="sm"
+            icon-left="close"
+            icon-only
+            tooltip="Close this set"
+            @click="emit('close')"
+          />
+        </div>
+      </div>
+    </div>
+
+    <!-- **The one thing a union cannot claim, said before the list of it.** A
+         group is every model its base model has co-occurred with across all of its
+         recipes, so two files here may never have run together and nothing in the
+         tray can tell which did. Without this line the tray reads as a
+         reproducible set, which is the one claim this feature must not make. -->
+    <SetVerdictNotes
+      ref="notes"
+      :check="check"
+      :members="members"
+      :save-set="saveSet"
+      :save-member="saveMember"
+    >
+      <template #plain
+        >Each of these has run with <strong>{{ name }}</strong
+        >. They have not necessarily run with <em>each other</em>. To see the
+        exact files one picture used, open a model and read what it works
+        with.</template
+      >
+    </SetVerdictNotes>
+
+    <!-- The base model these pictures were made with is not on the shelf.
+         Replacing it is a workflow's model fix, so the note links there; once
+         the fix loads a shelf model, the server files these recipes under that
+         model and this card folds into its set. -->
+    <div
+      v-if="missing"
+      class="msp__note msp__note--missing"
+      role="row"
+      aria-level="2"
+      data-testid="model-set-missing"
+    >
+      <div role="gridcell">
+        <v-icon size="16">mdi-alert-outline</v-icon>
+        <span
+          >Made with
+          <template v-for="(file, i) in missing.names" :key="file"
+            >{{ i ? (i === missing.names.length - 1 ? " and " : ", ") : ""
+            }}<strong>{{ file }}</strong></template
+          >, {{ missing.names.length === 1 ? "which is" : "which are" }} not on
+          your shelf.
+          <template v-if="fixableIds.length">
+            {{
+              fixableIds.length === 1
+                ? "It is loaded by"
+                : "It is loaded by these workflows:"
+            }}
+            <template v-for="(id, i) in fixableIds" :key="id"
+              >{{ i ? " · " : " " }}<router-link
+                :to="workflowLink(id)"
+                class="msp__link"
+                >{{ nameOf(id) || `workflow ${i + 1}` }}</router-link
+              ></template
+            >. Replace it and these pictures join that model's set.
+          </template>
+          <template v-if="manualIds.length">
+            {{
+              manualIds.length === 1
+                ? "A manual workflow loads it"
+                : "Manual workflows load it"
+            }}{{ fixableIds.length ? " too" : "" }}:
+            <template v-for="(id, i) in manualIds" :key="id"
+              >{{ i ? " · " : "" }}<router-link
+                :to="workflowLink(id)"
+                class="msp__link"
+                >{{ nameOf(id) || `manual workflow ${i + 1}` }}</router-link
+              ></template
+            >; pick another model on
+            {{ manualIds.length === 1 ? "its Workflow tab" : "each one's Workflow tab" }}
+            and save to change that.
+          </template>
+        </span>
+        <AppButton
+          v-if="fixableIds.length"
+          class="msp__replace"
+          size="sm"
+          icon-left="file-replace-outline"
+          data-testid="model-set-replace-missing"
+          @click.stop="emit('replace-missing', missing)"
+        >
+          {{
+            fixableIds.length === 1
+              ? "Replace…"
+              : `Replace in all ${fixableIds.length} workflows…`
+          }}
+        </AppButton>
+      </div>
+    </div>
+
+    <!-- Grid. `presentation`, so the member rows below are exposed to the rowgroup
+         above rather than to an unroled div, which would break the chain a
+         treegrid needs: rowgroup owns rows, rows own gridcells. -->
+    <div v-if="view === 'grid'" class="msp__grid" role="presentation">
+      <div
+        v-for="(member, index) in members"
+        :id="`${panelId}-row-${member.id}`"
+        :key="member.id"
+        class="msp__member"
+        role="row"
+        aria-level="2"
+        :aria-posinset="index + 1"
+        :aria-setsize="members.length"
+        :aria-selected="
+          selectable(member) ? String(isSelected(member)) : undefined
+        "
+        :tabindex="cursorKey === String(member.id) ? 0 : -1"
+        :data-key="String(member.id)"
+        @click="emit('select', { member, event: $event })"
+        @contextmenu="emit('menu', { member, event: $event })"
+      >
+        <div class="msp__cell" role="gridcell">
+          <ModelSetMemberCard
+            :member="member"
+            :shelf-mark="marks.get(member.id) ?? null"
+            :selected="isSelected(member)"
+            :verdict="memberVerdict(member)"
+            :verdict-label="memberVerdictLabel(member)"
+            :possible-problem="possibleProblem(member)"
+            @reopen="reopen(member)"
+            @pick="(model) => emit('pick', model)"
+          />
+        </div>
+      </div>
+    </div>
+
+    <!-- List. The SAME level-2 rows with the same gridcells, drawn on a CSS grid
+         rather than a `<table>`: the tray already sits inside the view's
+         `treegrid`, and a table here would put a second, conflicting grid
+         structure inside it. The header row is one of the treegrid's rows too, so
+         its cells are `columnheader`. The shape is the Workflows stack panel's;
+         the columns are a model's. -->
+    <div v-else class="msp__list" role="presentation">
+      <div class="msp__listhead" role="row" aria-level="2">
+        <span
+          v-for="column in COLUMNS"
+          :key="column.id"
+          class="section-label"
+          :class="column.cls"
+          role="columnheader"
+          >{{ column.label }}</span
+        >
+      </div>
+      <div
+        v-for="(member, index) in members"
+        :id="`${panelId}-row-${member.id}`"
+        :key="member.id"
+        class="msp__member msp__row"
+        role="row"
+        aria-level="2"
+        :aria-posinset="index + 1"
+        :aria-setsize="members.length"
+        :aria-label="rowName(member)"
+        :aria-selected="
+          selectable(member) ? String(isSelected(member)) : undefined
+        "
+        :class="{ 'msp__row--on': isSelected(member) }"
+        :tabindex="cursorKey === String(member.id) ? 0 : -1"
+        :data-key="String(member.id)"
+        @click="emit('select', { member, event: $event })"
+        @dblclick="emit('pick', member)"
+        @contextmenu="emit('menu', { member, event: $event })"
+      >
+        <!-- Everything the row draws is `aria-hidden`: the row's own label reads
+             all of it, exactly as the card does in Grid. -->
+        <span class="msp__ident" role="gridcell">
+          <ModelMark
+            aria-hidden="true"
+            :row="markOf(member).row"
+            :ring="markOf(member).ring"
+            :style="markOf(member).style"
+          />
+          <span class="msp__rowname" aria-hidden="true"
+            ><Tooltip
+              :text="modelFileTitle(marks.get(member.id)?.row ?? member)"
+              activator="parent"
+            />{{ member.name }}</span
+          >
+          <span v-if="member.head" class="msp__pill" aria-hidden="true"
+            >Names this set</span
+          >
+          <span v-if="possibleProblem(member)" class="msp__pill" aria-hidden="true"
+            >Possible problem</span
+          >
+          <!-- A button inside a row the grid's cursor owns: off the tab order
+               like the card's own buttons, and it stops its click. -->
+          <VerdictIcon
+            v-if="memberVerdict(member)"
+            interactive
+            tabindex="-1"
+            :data-verdict-member="member.id"
+            :verdict="memberVerdict(member)"
+            :label="memberVerdictLabel(member)"
+            @click="reopen(member)"
+          />
+        </span>
+        <span class="msp__kindcol" role="gridcell" aria-hidden="true">{{
+          member.kindLabel
+        }}</span>
+        <span class="msp__num num" role="gridcell" aria-hidden="true">{{
+          formatModelSize(member.file_size)
+        }}</span>
+        <span class="msp__num num" role="gridcell" aria-hidden="true">{{
+          member.recipes
+        }}</span>
+        <span class="msp__num num" role="gridcell" aria-hidden="true">{{
+          member.pictures
+        }}</span>
+        <span
+          class="msp__shared"
+          :class="{ 'msp__shared--warn': member.ambiguous }"
+          role="gridcell"
+          aria-hidden="true"
+        >
+          <v-icon v-if="member.ambiguous" size="14">mdi-alert-outline</v-icon>
+          {{
+            member.ambiguous
+              ? "Not recorded"
+              : member.otherSets || "Only this one"
+          }}
+        </span>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup>
+/**
+ * One open workflow set's tray (#1438): the models that have run with its base
+ * model, as cards or as a comparison list.
+ *
+ * The tray is ONE element in the card grid at `grid-column: 1 / -1`, placed after
+ * the last card of the open card's row, so opening it pushes the later rows down
+ * rather than floating over them. The caret points back at the card that opened
+ * it: `--notch` is derived from that card's COLUMN INDEX every time the container
+ * resizes, never stored as a pixel offset, which is what would leave it pointing
+ * at the wrong card after a resize.
+ *
+ * **Grid | List is the Workflows stack panel's, deliberately** — the same two
+ * options, the same `icon-label` Segmented, the same remembered-for-every-tray
+ * rule, so a reader learns one switch. The component is not shared because that
+ * panel's List columns are workflow columns and its member menu is workflow verbs;
+ * what is shared is the design. The remembered choice lives in the shelf's own
+ * view blob (`view.trayView`), which already persists, validates and migrates.
+ *
+ * **Not `StackPanel`.** Beyond the columns: that panel carries a per-member menu
+ * of workflow verbs and its own selection contract over workflow keys, and
+ * threading slots through all of it to draw models would bend one component's
+ * contract around two screens. The notch arithmetic and the treegrid roles are
+ * ~40 lines and are copied instead.
+ *
+ * **A tray row is one model, so it selects like one.** The row reports the click
+ * and the right-click up to `ModelSetGrid.vue`, which owns the drawn order a
+ * Shift-range is measured over and the one `ShelfSelectionBar` both views feed;
+ * this component only says which rows are ticked. In List a single click selects
+ * and a DOUBLE click asks what the file has run with, because the row is the
+ * selection target and *Works with* is its default action - in Grid that question
+ * keeps its own named button on the card.
+ */
+import { computed, ref } from "vue";
+import { VIcon } from "vuetify/components";
+
+import {
+  formatModelSize,
+  modelFileTitle,
+} from "../../utils/modelShelf";
+import { useWorkflowNames } from "../../composables/useWorkflowNames";
+import {
+  isOpenSuspect,
+  memberVerdictOf,
+  memberVerdictText,
+} from "../../utils/setVerdicts";
+import { pictureCount } from "../../utils/workflowSets";
+import AppButton from "../widgets/AppButton.vue";
+import ModelMark from "../widgets/ModelMark.vue";
+import SetVerdictNotes from "./SetVerdictNotes.vue";
+import ModelSetMemberCard from "../widgets/ModelSetMemberCard.vue";
+import Segmented from "../widgets/Segmented.vue";
+import Tooltip from "../widgets/Tooltip.vue";
+import VerdictIcon from "../widgets/VerdictIcon.vue";
+
+/** The two views, spelled as the Workflows stack panel spells them. */
+const VIEW_OPTIONS = [
+  { id: "grid", label: "Grid", icon: "view-grid-outline" },
+  { id: "list", label: "List", icon: "view-list" },
+];
+
+/** The List columns, in one place: the header row and the rows share them. */
+const COLUMNS = [
+  { id: "model", label: "Model", cls: "msp__ident" },
+  { id: "kind", label: "Kind", cls: "msp__kindcol" },
+  { id: "size", label: "Size", cls: "msp__num" },
+  { id: "recipes", label: "Recipes", cls: "msp__num" },
+  { id: "pictures", label: "Pictures", cls: "msp__num" },
+  { id: "shared", label: "In other sets", cls: "msp__shared" },
+];
+
+const props = defineProps({
+  /** The tray's DOM id - the open card's `aria-controls`. */
+  panelId: { type: String, required: true },
+  /** The group's name, as its card carries it. */
+  name: { type: String, default: "" },
+  /**
+   * `{name, names, workflowIds}` when the group is named after a base model the shelf
+   * does not hold (see `headModel`), else null.
+   */
+  missing: { type: Object, default: null },
+  /** The group's members, the head first (see `setGroups`). */
+  members: { type: Array, default: () => [] },
+  /** `"grid"` | `"list"` - how to draw them. */
+  view: { type: String, default: "grid" },
+  /** The grid's current column count, from its ResizeObserver. */
+  columns: { type: Number, default: 1 },
+  /** The open card's 0-based column in that grid. */
+  columnIndex: { type: Number, default: 0 },
+  /** The roving cursor's key, when it is inside this tray. */
+  cursorKey: { type: String, default: "" },
+  /** The grid's column gutter in px, so the members line up with the cards. */
+  gap: { type: Number, default: 12 },
+  /** The shelf's selected model ids, so a tray row can mark itself. */
+  selectedIds: { type: Object, default: () => new Set() },
+  /** The model ids this screen has a shelf row for; see `setGridModelIds`. */
+  selectableIds: { type: Object, default: () => new Set() },
+  /**
+   * `model.id` → `{row, ring, style}`, the shelf row's own mark, so a member
+   * assigned to a person wears their face as it does in the row list. A member
+   * with no shelf row falls back to the generated initials.
+   */
+  marks: { type: Object, default: () => new Map() },
+  /**
+   * This group's `set_checks` entry (PixlStash's check and the owner's
+   * verdicts), or null when the server served none for exactly these members:
+   * then no check or verdict is drawn, only the plain no-evidence sentence.
+   */
+  check: { type: Object, default: null },
+  /** `(verdict) => Promise`: record the set's verdict; rejects on failure. */
+  saveSet: { type: Function, default: async () => {} },
+  /** `(modelId, verdict) => Promise`: the same for one member. */
+  saveMember: { type: Function, default: async () => {} },
+});
+
+const emit = defineEmits([
+  "close",
+  "clone",
+  "view",
+  "pick",
+  "select",
+  "menu",
+  "replace-missing",
+]);
+
+const { nameOf } = useWorkflowNames();
+
+const notes = ref(null);
+
+function memberVerdict(member) {
+  return memberVerdictOf(props.check, member.id);
+}
+
+function memberVerdictLabel(member) {
+  const verdict = memberVerdict(member);
+  return verdict
+    ? `Your verdict: ${memberVerdictText(verdict, member.name)}`
+    : "";
+}
+
+function possibleProblem(member) {
+  return isOpenSuspect(props.check, member.id);
+}
+
+/** A member's icon was pressed: its question reopens in the notes above. */
+function reopen(member) {
+  notes.value?.reopenMember(member.id);
+}
+
+/**
+ * The workflows Replace can write: not the manual ones, which change by
+ * cloning, so neither the count nor the button promises them.
+ */
+const fixableIds = computed(() =>
+  (props.missing?.workflowIds ?? []).filter((id) => !id.startsWith("manual:")),
+);
+const manualIds = computed(() =>
+  (props.missing?.workflowIds ?? []).filter((id) => id.startsWith("manual:")),
+);
+
+/** The Workflows screen with one workflow open, where its model fix is made. */
+function workflowLink(id) {
+  return { name: "workflows", query: { workflow: id } };
+}
+
+function isSelected(member) {
+  return props.selectedIds.has(member.id);
+}
+
+/**
+ * Is there a shelf row behind this member for a verb to write?
+ *
+ * A combination can name a file from a block this session never fetched, and a
+ * row that cannot be renamed, moved or deleted must not claim to be selectable -
+ * `aria-selected` is left off it entirely rather than reading a permanent
+ * `false`, which would announce a state it can never leave.
+ */
+function selectable(member) {
+  return props.selectableIds.has(member.id);
+}
+
+const countLabel = computed(() =>
+  props.members.length === 1 ? "1 model" : `${props.members.length} models`,
+);
+
+/**
+ * What a row's mark draws: the shelf's own for a model on the shelf, and for one
+ * that has none a generated mark from its kept name, with no ring.
+ */
+function markOf(member) {
+  return (
+    props.marks.get(member.id) ?? {
+      row: {
+        display_name: member.name,
+        filename: member.filename,
+        base_model: member.base_model ?? null,
+      },
+      ring: null,
+      style: {},
+    }
+  );
+}
+
+/** A List row's whole accessible name; everything inside it is `aria-hidden`. */
+function rowName(member) {
+  return [
+    member.name,
+    member.head ? "names this set" : null,
+    possibleProblem(member) ? "possible problem" : null,
+    memberVerdict(member) ? memberVerdictLabel(member) : null,
+    member.kindLabel,
+    formatModelSize(member.file_size),
+    `${member.recipes} recipes`,
+    pictureCount(member.pictures),
+    member.ambiguous
+      ? "which file ran is not recorded"
+      : member.otherSets
+        ? `also in ${member.otherSets} other sets`
+        : "only in this set",
+  ]
+    .filter(Boolean)
+    .join(", ");
+}
+
+// The centre of the column the open card sits in, as a share of the tray's own
+// width - the tray spans every column, so the two grids share an origin. At one
+// column the caret falls back to the shipped `--start` class instead, so nothing
+// here hand-copies that rule's inset.
+const notchStyle = computed(() => {
+  const style = { "--wf-columns": props.columns, "--wf-gap": `${props.gap}px` };
+  if (props.columns > 1) {
+    style["--notch"] = `${((props.columnIndex + 0.5) / props.columns) * 100}%`;
+  }
+  return style;
+});
+</script>
+
+<style scoped>
+.msp {
+  position: relative;
+  grid-column: 1 / -1;
+  margin-bottom: var(--space-4);
+  border: 1px solid rgb(var(--v-theme-border));
+  border-radius: var(--radius-lg);
+  background: rgb(var(--v-theme-panel));
+  color: rgb(var(--v-theme-on-panel));
+}
+
+/* The shipped `.tbm-caret`, aimed by `--notch` rather than by a modifier: the
+   column it points at is a number this component computes, not one of the four
+   fixed insets the toolbar menus use. `translateX(-50%)` re-centres it on that
+   point; the rotation is the shipped one and has to be restated because the two
+   live in one `transform`. */
+.msp__notch {
+  left: var(--notch);
+  transform: translateX(-50%) rotate(45deg);
+}
+
+.msp__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: var(--bar-height);
+  padding: 0 var(--space-4);
+  border-bottom: 1px solid rgb(var(--v-theme-divider));
+}
+
+.msp__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.msp__count {
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  color: rgba(var(--v-theme-on-panel), var(--opacity-text-secondary));
+}
+
+.msp__spacer {
+  flex: 1;
+}
+
+/* The honesty line. An info wash rather than a plain muted paragraph, because it
+   is a caveat about what the list below means rather than a caption for it. */
+.msp__note > [role="gridcell"] {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  margin: var(--space-4) var(--space-4) 0;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: rgba(var(--v-theme-surface-info), 0.14);
+  font-size: var(--text-xs);
+}
+
+.msp__note [role="gridcell"] > .v-icon {
+  flex-shrink: 0;
+  color: rgb(var(--v-theme-surface-info));
+}
+
+.msp__note--missing > [role="gridcell"] {
+  background: rgba(var(--v-theme-warning), 0.16);
+}
+
+.msp__note--missing [role="gridcell"] > .v-icon {
+  color: rgb(var(--v-theme-surface-warning));
+}
+
+.msp__link {
+  color: inherit;
+  text-decoration: underline;
+}
+
+.msp__replace {
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+/* The SAME column count as the grid above, taken from `--wf-columns` rather than
+   recomputed with `auto-fill`: the tray's padding narrows the track, and an
+   auto-fill here would quietly drop to one column fewer - at which point a
+   member's index stops naming the column it is drawn in and Down lands somewhere
+   else. `minmax(0, 1fr)` so a wide card cannot push the track out. */
+.msp__grid {
+  display: grid;
+  grid-template-columns: repeat(var(--wf-columns), minmax(0, 1fr));
+  /* The GRID's own gutter, inherited through `--wf-gap`: the tray shares the
+     grid's column count so that a member's index names the column it is drawn in,
+     and a different gutter breaks the alignment that makes true. */
+  gap: var(--wf-gap, var(--space-4));
+  padding: var(--space-4);
+  align-items: start;
+}
+
+/* No focus rule: `style.css` paints the one ring, and a row that stays silent
+   gets it. */
+.msp__cell {
+  position: relative;
+  border-radius: var(--radius-md);
+}
+
+/* ── List ──────────────────────────────────────────────────────────────────
+   One track set, shared by the header and the rows, so a column cannot be one
+   width in the head and another in the body. */
+.msp__list {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-4);
+}
+
+.msp__listhead,
+.msp__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 90px 80px 72px 72px 120px;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.msp__listhead {
+  padding: 0 var(--space-3) var(--space-2);
+  border-bottom: 1px solid rgb(var(--v-theme-divider));
+}
+
+.msp__row {
+  min-height: var(--control-h);
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.msp__row:hover {
+  background: var(--hover-wash);
+}
+
+/* The row list's own selected treatment, restated: a wash and an inset bar, not
+   a border, because a 1px outline would shift every glyph in the row by a pixel.
+   The bar is the greyscale half - the wash alone is a hue. */
+.msp__row--on {
+  background: var(--active-wash);
+  box-shadow: var(--selection-edge);
+}
+
+.msp__ident {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.msp__rowname {
+  overflow: hidden;
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msp__pill {
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  height: var(--tag-h-xs);
+  padding: 0 var(--space-2);
+  border: 1px solid rgb(var(--v-theme-border));
+  border-radius: var(--radius-pill);
+  color: rgba(var(--v-theme-on-panel), var(--opacity-text-secondary));
+  font-size: var(--text-2xs);
+  line-height: var(--leading-snug);
+}
+
+.msp__kindcol,
+.msp__shared {
+  overflow: hidden;
+  font-size: var(--text-xs);
+  color: rgba(var(--v-theme-on-panel), var(--opacity-text-secondary));
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msp__shared {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.msp__shared--warn {
+  color: rgb(var(--v-theme-surface-warning));
+}
+
+.msp__num {
+  font-size: var(--text-xs);
+  color: rgba(var(--v-theme-on-panel), var(--opacity-text-secondary));
+  text-align: right;
+}
+</style>

@@ -12,10 +12,18 @@ import pathlib
 
 import pytest
 
+from pixlstash.services.comfyui_recipe_service import MODEL_FILENAME_FIELDS
+from pixlstash.services.workflow_card_service import slot_kind
+from pixlstash.services.workflow_identity import is_lora_widget
+from pixlstash.utils.comfyui_utilities import _NOT_A_MODEL_WIDGET
+from pixlstash.services.workflow_identity import CHECKPOINT_WIDGETS
+from pixlstash.services.workflow_io import detect_workflow_io
 from pixlstash.utils.comfyui_utilities import (
     extract_comfy_workflow_info,
     extract_generation_info,
+    extract_recipe_extras,
     find_comfy_workflow,
+    loaded_model_widgets,
 )
 
 WORKFLOWS_DIR = pathlib.Path(__file__).parent / "comfyui_workflows"
@@ -24,6 +32,10 @@ EXPECTED_CSV = WORKFLOWS_DIR / "expected_results.csv"
 
 def _workflow_files() -> list[pathlib.Path]:
     return sorted(WORKFLOWS_DIR.glob("*.json"))
+
+
+def _load_fixture(name: str) -> dict:
+    return json.loads((WORKFLOWS_DIR / name).read_text())
 
 
 def _load_expected() -> dict[str, dict]:
@@ -60,6 +72,305 @@ def test_extract_generation_info(workflow_file: pathlib.Path) -> None:
     assert actual_prompt == expected["positive_prompt"], (
         f"positive_prompt mismatch for {workflow_file.name}"
     )
+
+
+@pytest.mark.parametrize("workflow_file", _workflow_files(), ids=lambda p: p.name)
+def test_loaded_model_widgets_agrees_with_the_csv_and_keeps_the_widget(
+    workflow_file: pathlib.Path,
+) -> None:
+    """The same names as the CSV, each still saying which loader it came off.
+
+    `extract_generation_info` folds checkpoints and UNETs into one `models`
+    list; a workflow card built out of these has to tell a `checkpoint` slot
+    from a `unet` one (#1466), so this reader keeps the widget. The names must
+    not drift from the ones already pinned in `expected_results.csv`, which is
+    what the two halves of this assertion hold together.
+    """
+    expected = _load_expected()[workflow_file.name]
+    found = loaded_model_widgets(json.loads(workflow_file.read_text()))
+
+    loras = [name for widget, name in found if widget == "lora_name"]
+    base = [name for widget, name in found if widget in CHECKPOINT_WIDGETS]
+    assert "|".join(base) == expected["models"]
+    assert "|".join(loras) == expected["loras"]
+    # Every widget is one `slot_kind` turns into a real slot kind, rather
+    # than falling through to its own raw name - which a card row branches on
+    # and `cardAccessibleName` reads out loud ("model_path Krea 2").
+    #
+    # Asserted against `slot_kind` and NOT against `MODEL_FILENAME_FIELDS`:
+    # the widgets come off that map, so a subset relation to it holds by
+    # construction for every possible input and says nothing. `lora_name` is
+    # excluded because a LoRA is not a slot kind - it is its own list.
+    assert all(
+        slot_kind(widget) != widget for widget, _ in found if widget != "lora_name"
+    )
+
+
+def test_every_widget_recovery_can_emit_has_a_slot_kind() -> None:
+    """No recovered slot reaches a card under its own raw widget name.
+
+    ``_describe_slots`` falls through to the widget's own name (``slot_kind``),
+    and ``kind`` is not internal: ``cardAccessibleName`` renders it, so a
+    widget missing from that map is read out loud - "model_path Krea 2" (#1483).
+
+    This is the class, not the corpus. The parametrised test above can only
+    see widgets the sample workflows happen to contain, and none of them
+    carries a Diffusers or PhotoMaker loader, so five widgets went unmapped
+    with every sample green. The two sets here have different sources - the
+    pre-flight map plus ``CHECKPOINT_WIDGETS`` on one side, the kind map on
+    the other - so this is an agreement between them and not a restatement of
+    either.
+
+    LoRA widgets are excluded on purpose: a LoRA is not a slot kind, it is its
+    own list on the card.
+    """
+    emittable = {
+        field
+        for fields in MODEL_FILENAME_FIELDS.values()
+        for field in fields
+        if field not in _NOT_A_MODEL_WIDGET
+    } | set(CHECKPOINT_WIDGETS)
+    unmapped = sorted(
+        widget
+        for widget in emittable
+        if slot_kind(widget) == widget and not is_lora_widget(widget)
+    )
+    assert not unmapped, (
+        f"{unmapped} can be recovered off a workflow file but has no "
+        "slot kind, so the slot reaches the card - and a screen "
+        "reader - under its raw widget name."
+    )
+
+
+def test_loaded_model_widgets_reads_the_accessory_loaders_too() -> None:
+    """Not only the base model and the LoRAs.
+
+    `extract_generation_info` reports those two and nothing else, which is all
+    a picture's recipe line needs. A card drawn out of its models shows what
+    the cached slot list would have shown, and that list covers the VAE, the
+    CLIP, the ControlNet and the upscaler too - so the two paths describe one
+    workflow the same way rather than two.
+    """
+    found = loaded_model_widgets(_load_fixture("image_z_image.json"))
+    assert {widget for widget, _ in found} == {
+        "unet_name",
+        "vae_name",
+        "clip_name",
+    }
+
+
+def test_loaded_model_widgets_says_nothing_rather_than_guessing() -> None:
+    """A template-style export, and the shapes a malformed file can take.
+
+    An editor-format loader whose widget was never filled in carries no value
+    at all, and this reader must come back EMPTY rather than inventing one:
+    the caller reads empty as "this document did not say", which is a
+    different answer from "this workflow loads no models".
+    """
+    template = {
+        "nodes": [
+            {"id": 1, "type": "CheckpointLoaderSimple", "widgets_values": []},
+            {"id": 2, "type": "LoraLoader", "widgets_values": []},
+        ],
+        "links": [],
+    }
+    assert loaded_model_widgets(template) == []
+
+    # A muted (2) and a bypassed (4) loader load nothing when the graph runs.
+    silenced = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "CheckpointLoaderSimple",
+                "mode": 0,
+                "widgets_values": ["base.safetensors"],
+            }
+        ],
+        "links": [],
+    }
+    for mode in (2, 4):
+        silenced["nodes"][0]["mode"] = mode
+        assert loaded_model_widgets(silenced) == []
+
+    # API format, where the value is a named input rather than a position.
+    assert loaded_model_widgets(
+        {"1": {"class_type": "UNETLoader", "inputs": {"unet_name": "flux.safetensors"}}}
+    ) == [("unet_name", "flux.safetensors")]
+
+    # And nothing that is not a graph at all.
+    assert loaded_model_widgets({}) == []
+    assert loaded_model_widgets({"nodes": [None, 7]}) == []
+    assert loaded_model_widgets([]) == []
+
+
+def test_loaded_model_widgets_reads_a_numeric_shelf_id() -> None:
+    """The shelf loader runs `str(checkpoint_id)`, so `77` is the id `"77"`."""
+    api = {
+        "1": {
+            "class_type": "PixlStashCheckpointLoader",
+            "inputs": {"checkpoint_id": 77},
+        }
+    }
+    ui = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "PixlStashCheckpointLoader",
+                "inputs": [
+                    {"name": "checkpoint_id", "widget": {"name": "checkpoint_id"}}
+                ],
+                "widgets_values": [77],
+            }
+        ],
+        "links": [],
+    }
+    assert loaded_model_widgets(api) == [("checkpoint_id", "77")]
+    assert loaded_model_widgets(ui) == [("checkpoint_id", "77")]
+    # A boolean is not an id.
+    api["1"]["inputs"]["checkpoint_id"] = True
+    assert loaded_model_widgets(api) == []
+
+
+def test_loaded_model_widgets_reads_the_pack_loaders_digests() -> None:
+    """The pack's ControlNet and upscale loaders name their file by digest
+    (#1939), in both serialisations, under the digest widget."""
+    cn, up = "a" * 64, "b" * 64
+    api = {
+        "1": {
+            "class_type": "PixlStashControlNetLoader",
+            "inputs": {"control_net_sha256": cn},
+        },
+        "2": {
+            "class_type": "PixlStashUpscaleModelLoader",
+            "inputs": {"upscale_model_sha256": up},
+        },
+    }
+    ui = {
+        "nodes": [
+            {
+                "id": int(node_id),
+                "type": node["class_type"],
+                "inputs": [{"name": widget, "widget": {"name": widget}}],
+                "widgets_values": [value],
+            }
+            for node_id, node in api.items()
+            for widget, value in node["inputs"].items()
+        ],
+        "links": [],
+    }
+    expected = [("control_net_sha256", cn), ("upscale_model_sha256", up)]
+    assert loaded_model_widgets(api) == expected
+    assert loaded_model_widgets(ui) == expected
+    # A node that is not an object names nothing and stops nothing.
+    assert loaded_model_widgets({**api, "3": "junk"}) == expected
+    # Only a digest names a model there, as the structural hash reads it.
+    api["1"]["inputs"]["control_net_sha256"] = "canny.safetensors"
+    assert loaded_model_widgets(api) == expected[1:]
+    api["1"]["inputs"]["control_net_sha256"] = cn + "\n"
+    assert loaded_model_widgets(api) == expected[1:]
+    api["1"]["inputs"]["control_net_sha256"] = cn
+    # An editor file that declares no inputs: the digest is the loader's only
+    # widget, so it is slot 0.
+    for node in ui["nodes"]:
+        del node["inputs"]
+    assert loaded_model_widgets(ui) == expected
+
+
+def test_a_one_widget_loader_is_read_from_a_bare_array() -> None:
+    """Core ControlNet, upscale and style loaders have one widget, the model
+    (#1939), so an editor file that declares no inputs still names it."""
+    nodes = [
+        ("ControlNetLoader", ["canny.safetensors"]),
+        ("DiffControlNetLoader", ["depth.safetensors"]),
+        ("UpscaleModelLoader", ["4x.pth"]),
+        ("StyleModelLoader", ["redux.safetensors"]),
+    ]
+    ui = {
+        "nodes": [
+            {"id": i, "type": cls, "widgets_values": values}
+            for i, (cls, values) in enumerate(nodes, start=1)
+        ],
+        "links": [],
+    }
+    assert loaded_model_widgets(ui) == [
+        ("control_net_name", "canny.safetensors"),
+        ("control_net_name", "depth.safetensors"),
+        ("model_name", "4x.pth"),
+        ("style_model_name", "redux.safetensors"),
+    ]
+
+
+def test_a_subgraph_loader_reads_the_file_its_instance_names() -> None:
+    """The instance's value, not the definition's default.
+
+    ComfyUI's Krea 2 templates keep their loaders in a subgraph whose inner
+    ``UNETLoader`` still holds the file the template shipped with, wired to a
+    subgraph input; the instance's own ``widgets_values`` holds the file that
+    runs. Read off the definition, the card named a file the shelf did not
+    have, and the people loader said the base model was not known.
+    """
+    definition_id = "b0e5ca93-2731-42b9-8e0a-d28ea851ff81"
+    unet = {"name": "unet_name", "widget": {"name": "unet_name"}, "link": 1}
+    lora = {"name": "lora_name", "widget": {"name": "lora_name"}, "link": 2}
+    workflow = {
+        "nodes": [
+            {
+                "id": 30,
+                "type": definition_id,
+                "mode": 0,
+                "inputs": [
+                    {"name": "unet_name_1", "widget": {"name": "unet_name_1"}},
+                    {"name": "lora_name_1", "widget": {"name": "lora_name_1"}},
+                ],
+                "widgets_values": ["Mixed_Case_Pick.safetensors", "own.safetensors"],
+            }
+        ],
+        "links": [],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": definition_id,
+                    "inputs": [{"name": "unet_name_1"}, {"name": "lora_name_1"}],
+                    "nodes": [
+                        {
+                            "id": 10,
+                            "type": "UNETLoader",
+                            "mode": 0,
+                            "inputs": [unet],
+                            "widgets_values": ["template.safetensors", "default"],
+                        },
+                        {
+                            "id": 15,
+                            "type": "LoraLoaderModelOnly",
+                            "mode": 0,
+                            "inputs": [lora],
+                            "widgets_values": ["template_lora.safetensors", 1],
+                        },
+                    ],
+                    "links": [
+                        {"id": 1, "origin_id": -10, "origin_slot": 0},
+                        {"id": 2, "origin_id": -10, "origin_slot": 1},
+                    ],
+                }
+            ]
+        },
+    }
+    for link, (target, slot) in zip(
+        workflow["definitions"]["subgraphs"][0]["links"], ((10, 0), (15, 0))
+    ):
+        link.update(target_id=target, target_slot=slot)
+
+    assert loaded_model_widgets(workflow) == [
+        ("unet_name", "Mixed_Case_Pick.safetensors"),
+        ("lora_name", "own.safetensors"),
+    ]
+    info = extract_generation_info(workflow)
+    assert info["models"] == ["Mixed_Case_Pick.safetensors"]
+    assert info["loras"] == ["own.safetensors"]
+
+    # A bypassed instance loads nothing, whatever its definition holds.
+    workflow["nodes"][0]["mode"] = 4
+    assert loaded_model_widgets(workflow) == []
 
 
 @pytest.mark.parametrize("workflow_file", _workflow_files(), ids=lambda p: p.name)
@@ -150,3 +461,385 @@ class TestFindComfyWorkflowPromptFallback:
         # is_comfy_workflow.
         metadata = {"png": {"prompt": json.dumps({"text": "a cat", "steps": 20})}}
         assert find_comfy_workflow(metadata) is None
+
+
+# ===========================================================================
+# What `extract_comfy_workflow_info` surfaces for the Recipe tab (#1313)
+#
+# The negative prompt itself is `extract_recipe_extras`' job, added and unit
+# tested by B5 (`tests/test_comfyui_recipe_preflight.py`). What is asserted here
+# is only what this branch added on top: that the workflow read SURFACES it, and
+# that the seed is carried as text so a 64-bit one survives a JS `Number`.
+# ===========================================================================
+
+_SAMPLER_GRAPH = {
+    "3": {
+        "class_type": "KSampler",
+        "inputs": {
+            "seed": 18446744073709551615,
+            "positive": ["6", 0],
+            "negative": ["7", 0],
+        },
+    },
+    "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "a castle on a hill"}},
+    "7": {"class_type": "CLIPTextEncode", "inputs": {"text": "blurry, watermark"}},
+}
+
+
+def test_the_workflow_read_surfaces_both_prompts():
+    info = extract_comfy_workflow_info({"prompt": json.dumps(_SAMPLER_GRAPH)})
+    assert info["positive_prompt"] == "a castle on a hill"
+    assert info["negative_prompt"] == "blurry, watermark"
+
+
+def test_a_ui_only_workflow_surfaces_no_negative_prompt():
+    """`extract_recipe_extras` reads the API format only, so a UI graph has to
+    report None rather than reach it with the wrong shape."""
+    ui = {"nodes": [], "links": [], "last_node_id": 1}
+    info = extract_comfy_workflow_info({"workflow": json.dumps(ui)})
+    assert info["is_api_format"] is False
+    assert info["negative_prompt"] is None
+
+
+def test_the_seed_is_carried_as_text_so_a_64_bit_one_survives_javascript():
+    """`2**64-1` through a JS Number comes back 18446744073709552000."""
+    info = extract_comfy_workflow_info({"prompt": json.dumps(_SAMPLER_GRAPH)})
+    assert info["seed_text"] == "18446744073709551615"
+    assert int(info["seed_text"]) == info["seed"]
+
+
+def test_a_loader_wired_into_nothing_is_not_credited():
+    """A left-over UNET and LoRA no output reads never ran, so the picture was
+    not made with them: crediting them showed a LoRA on a look that never
+    loaded one."""
+    graph = {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "live.safetensors"}},
+        "2": {
+            "class_type": "KSampler",
+            "inputs": {"seed": 1, "model": ["1", 0], "positive": ["6", 0]},
+        },
+        "3": {"class_type": "VAEDecode", "inputs": {"samples": ["2", 0]}},
+        # A numeric pair is a widget value, not a link to node 8.
+        "4": {
+            "class_type": "SaveImage",
+            "inputs": {"images": ["3", 0], "size": [8, 8]},
+        },
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "a castle"}},
+        "8": {"class_type": "UNETLoader", "inputs": {"unet_name": "dead.safetensors"}},
+        "9": {
+            "class_type": "LoraLoaderModelOnly",
+            "inputs": {"lora_name": "unused.safetensors", "model": ["8", 0]},
+        },
+    }
+    result = extract_generation_info(graph)
+    assert result["models"] == ["live.safetensors"]
+    assert result["loras"] == []
+    # The same LoRA wired into the sampler is credited.
+    graph["2"]["inputs"]["model"] = ["9", 0]
+    result = extract_generation_info(graph)
+    assert result["models"] == ["dead.safetensors"]
+    assert result["loras"] == ["unused.safetensors"]
+
+
+def test_a_lora_feeding_an_unnamed_saver_is_still_credited():
+    """A sampler that saves its own picture (Easy-Use's, with image_output
+    "Save") is read by nothing and is named like no saver; beside a live
+    branch, its LoRA must still count."""
+    graph = {
+        "1": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": "a.ckpt"},
+        },
+        "2": {"class_type": "KSampler", "inputs": {"seed": 1, "model": ["1", 0]}},
+        "3": {"class_type": "PreviewImage", "inputs": {"images": ["2", 0]}},
+        "4": {
+            "class_type": "LoraLoader",
+            "inputs": {"lora_name": "style.safetensors", "model": ["1", 0]},
+        },
+        "5": {"class_type": "easy kSampler", "inputs": {"model": ["4", 0]}},
+    }
+    assert extract_generation_info(graph)["loras"] == ["style.safetensors"]
+
+
+def test_a_graph_of_loaders_alone_credits_them_all():
+    """Nothing in it says what ran, so nothing is taken out."""
+    graph = {
+        "1": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": "a.ckpt"},
+        },
+        "2": {
+            "class_type": "LoraLoader",
+            "inputs": {"lora_name": "b.safetensors", "model": ["1", 0]},
+        },
+    }
+    result = extract_generation_info(graph)
+    assert result["models"] == ["a.ckpt"]
+    assert result["loras"] == ["b.safetensors"]
+
+
+def test_a_graph_with_no_seed_has_no_seed_text_rather_than_the_string_none():
+    graph = {"9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "x"}}}
+    info = extract_comfy_workflow_info({"prompt": json.dumps(graph)})
+    assert info["seed"] is None and info["seed_text"] is None
+
+
+# ===========================================================================
+# The facts come from the graph that RAN, not the editor's view
+#
+# Reported against the shipped Recipe tab: "the prompt has nothing to do with
+# reality, but Generate variants shows the correct one". Generate variants reads
+# `GET /comfyui/pictures/{id}/recipe`, which uses the API `prompt` chunk; this
+# read preferred the UI `workflow` chunk, whose text is recovered by mapping
+# named inputs onto positional `widgets_values` and, failing that, taking the
+# longest string in the node. A custom prompt-builder feeding the encoder is
+# enough to make the two disagree completely.
+# ===========================================================================
+
+_EXECUTED = {
+    "3": {
+        "class_type": "KSampler",
+        "inputs": {
+            "seed": 777,
+            "positive": ["6", 0],
+            "negative": ["7", 0],
+            "model": ["4", 0],
+        },
+    },
+    "4": {
+        "class_type": "CheckpointLoaderSimple",
+        "inputs": {"ckpt_name": "realvisXL_v5.safetensors"},
+    },
+    "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "a castle on a hill"}},
+    "7": {"class_type": "CLIPTextEncode", "inputs": {"text": "blurry"}},
+}
+
+# The same graph as the editor stores it: the encoder's text arrives over a link
+# from a builder node, so the encoder's own widget is empty and the only string
+# to be found on the builder is its template.
+_EDITOR_VIEW = {
+    "last_node_id": 9,
+    "last_link_id": 5,
+    "nodes": [
+        {
+            "id": 3,
+            "type": "KSampler",
+            "inputs": [{"name": "positive", "link": 2, "type": "CONDITIONING"}],
+            "widgets_values": [777, "randomize", 25],
+        },
+        {
+            "id": 6,
+            "type": "CLIPTextEncode",
+            "inputs": [
+                {"name": "clip", "link": 4},
+                {"name": "text", "link": 5, "type": "STRING"},
+            ],
+            "widgets_values": [""],
+        },
+        {
+            "id": 9,
+            "type": "LoRACharacterPromptBuilder",
+            "inputs": [],
+            "widgets_values": ["wildcards_v3", "a template, not the prompt", "off"],
+        },
+    ],
+    "links": [[5, 9, 0, 6, 1, "STRING"], [2, 6, 0, 3, 1, "CONDITIONING"]],
+}
+
+_BOTH_CHUNKS = {
+    "png": {
+        "workflow": json.dumps(_EDITOR_VIEW),
+        "prompt": json.dumps(_EXECUTED),
+    }
+}
+
+
+def test_the_prompt_is_the_one_that_ran_not_the_editors_longest_string():
+    info = extract_comfy_workflow_info(_BOTH_CHUNKS)
+    assert info["positive_prompt"] == "a castle on a hill"
+    assert info["negative_prompt"] == "blurry"
+
+
+def test_a_prompt_wired_from_a_builder_is_the_builders_own_text():
+    """The executed graph of a builder-fed encoder holds a link, not a literal:
+    the builder's text is all the file says, and the Recipe tab showed nothing."""
+    executed = json.loads(json.dumps(_EXECUTED))
+    executed["6"]["inputs"]["text"] = ["9", 0]
+    executed["9"] = {
+        "class_type": "LoRACharacterPromptBuilder",
+        "inputs": {
+            "seed": 5,
+            "character_trigger_word": "",
+            "character_description": "a plump gnome in a garden",
+            "facial_expression": "Random",
+            "outfit": ["7", 0],
+        },
+    }
+    info = extract_comfy_workflow_info({"png": {"prompt": json.dumps(executed)}})
+    assert info["positive_prompt"] == "a plump gnome in a garden"
+    assert info["negative_prompt"] == "blurry"
+
+    # A node whose only strings are a file and a choice says nothing: its
+    # longest string is a path, and that would be stored as the prompt.
+    executed["9"] = {
+        "class_type": "LoadTextFile",
+        "inputs": {
+            "file_path": "prompts/portraits/long_list_v3.txt",
+            "mode": "Random",
+            # Several words, and still a file.
+            "lora_name": "Realistic Vision v5 detail.safetensors",
+        },
+    }
+    info = extract_comfy_workflow_info({"png": {"prompt": json.dumps(executed)}})
+    assert info["positive_prompt"] is None
+
+
+def test_the_models_and_seed_come_from_the_executed_graph_too():
+    """The same defect, and the reason the fix is not scoped to the prompt: the
+    editor's view surrenders these entirely."""
+    info = extract_comfy_workflow_info(_BOTH_CHUNKS)
+    assert info["models"] == ["realvisXL_v5.safetensors"]
+    assert info["seed"] == 777
+
+
+def test_the_graph_shown_is_still_the_editors_view():
+    """Copy and Download exist so a workflow can be pasted back into ComfyUI,
+    and the API graph is not what the editor opens."""
+    info = extract_comfy_workflow_info(_BOTH_CHUNKS)
+    assert info["is_api_format"] is False
+    assert info["workflow"] == _EDITOR_VIEW
+
+
+def test_a_file_with_only_an_editor_view_still_reads_what_it_can():
+    """No `prompt` chunk: the editor's view is genuinely all there is, so the
+    read falls back to it rather than reporting nothing.
+
+    Drawn with the text on the encoder's own widget, which is where the UI walk
+    is reliable - the point is that the fallback still runs, not that the
+    heuristic behind it is good.
+    """
+    ui_only = {
+        "last_node_id": 6,
+        "last_link_id": 2,
+        "nodes": [
+            {
+                "id": 3,
+                "type": "KSampler",
+                "inputs": [{"name": "positive", "link": 2, "type": "CONDITIONING"}],
+                "widgets_values": [4242, "randomize", 25],
+            },
+            {
+                "id": 6,
+                "type": "CLIPTextEncode",
+                "inputs": [{"name": "clip", "link": 1, "widget": {"name": "text"}}],
+                "widgets_values": ["a lighthouse in fog"],
+            },
+        ],
+        "links": [[2, 6, 0, 3, 1, "CONDITIONING"]],
+    }
+    info = extract_comfy_workflow_info({"png": {"workflow": json.dumps(ui_only)}})
+    assert info["workflow"] == ui_only
+    assert info["positive_prompt"] == "a lighthouse in fog"
+    # `extract_recipe_extras` reads the API format only, so there is none.
+    assert info["negative_prompt"] is None
+
+
+# ===========================================================================
+# The recipe finds a prompt wherever the Run popup would write one
+#
+# The recipe's reader and `workflow_io`'s detector used to disagree: a video
+# graph (a `BasicGuider` fed by an encoder that is not a `CLIPTextEncode`) ran
+# with a prompt the Run popup could set and the recipe then reported none, and
+# a look with no prompt and no LoRA is listed nowhere.
+# ===========================================================================
+
+_VIDEO_GRAPH = {
+    "14": {"class_type": "SamplerCustomAdvanced", "inputs": {"guider": ["16", 0]}},
+    "16": {
+        "class_type": "BasicGuider",
+        "inputs": {"model": ["6", 0], "conditioning": ["104", 0]},
+    },
+    "104": {
+        "class_type": "MiniMaxH3ImageToVideo",
+        "inputs": {
+            "prompt": "a lighthouse turning in fog",
+            "width": 640,
+            "clip": ["13", 0],
+            "vae": ["11", 0],
+            "first_frame": ["114", 0],
+        },
+    },
+}
+
+
+def test_a_video_graphs_prompt_is_read_off_its_own_encoder():
+    info = extract_generation_info(_VIDEO_GRAPH)
+    assert info["positive_prompt"] == "a lighthouse turning in fog"
+    # The node the Run popup writes a prompt into is the one read back.
+    assert detect_workflow_io(_VIDEO_GRAPH).positive_prompts == ("104",)
+
+
+def test_an_edit_encoder_keeps_its_prompt_in_a_field_of_its_own():
+    graph = {
+        "3": {
+            "class_type": "KSampler",
+            "inputs": {"positive": ["6", 0], "negative": ["6", 1]},
+        },
+        "6": {
+            "class_type": "TextEncodeBooguEdit",
+            "inputs": {
+                "prompt": "make it night",
+                "negative_prompt": "daylight",
+                "clip": ["1", 0],
+            },
+        },
+    }
+    assert extract_generation_info(graph)["positive_prompt"] == "make it night"
+    # Never its positive: that is what the negative walk would otherwise find.
+    assert extract_recipe_extras(graph)["negative_prompt"] == "daylight"
+
+
+def test_a_node_that_takes_clip_and_conditioning_is_walked_through_not_read():
+    graph = {
+        "3": {"class_type": "KSampler", "inputs": {"positive": ["8", 0]}},
+        "8": {
+            "class_type": "SomePackStyleApply",
+            "inputs": {
+                "text": "the style, not the prompt",
+                "clip": ["1", 0],
+                "conditioning": ["6", 0],
+            },
+        },
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "a castle"}},
+    }
+    assert extract_generation_info(graph)["positive_prompt"] == "a castle"
+
+
+def test_the_editor_view_of_a_video_graph_reads_the_same_prompt():
+    ui_only = {
+        "last_node_id": 104,
+        "last_link_id": 2,
+        "nodes": [
+            {
+                "id": 16,
+                "type": "BasicGuider",
+                "inputs": [
+                    {"name": "model", "link": 1, "type": "MODEL"},
+                    {"name": "conditioning", "link": 2, "type": "CONDITIONING"},
+                ],
+            },
+            {
+                "id": 104,
+                "type": "MiniMaxH3ImageToVideo",
+                "inputs": [
+                    {"name": "clip", "link": 3, "type": "CLIP"},
+                    {"name": "prompt", "type": "STRING", "widget": {"name": "prompt"}},
+                    {"name": "width", "type": "INT", "widget": {"name": "width"}},
+                ],
+                "widgets_values": ["a lighthouse turning in fog", 640],
+            },
+        ],
+        "links": [[2, 104, 0, 16, 1, "CONDITIONING"]],
+    }
+    info = extract_generation_info(ui_only)
+    assert info["positive_prompt"] == "a lighthouse turning in fog"

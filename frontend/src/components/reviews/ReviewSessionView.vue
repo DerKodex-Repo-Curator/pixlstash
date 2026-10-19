@@ -13,14 +13,17 @@
       <span class="rs-session-receipt">{{ receiptLine }}</span>
       <span class="rs-session-spacer"></span>
       <span v-if="session.stale" class="rs-session-stale">
-        <v-icon size="15">mdi-clock-alert-outline</v-icon>
+        <v-icon size="16">mdi-clock-alert-outline</v-icon>
         Vault changed since scan
         <button
           class="rs-session-refresh"
           type="button"
-          title="Append newly-found suspects - decided cards are never resurrected"
           @click="store.refreshSession(session.id)"
         >
+          <Tooltip
+            text="Append newly-found suspects - decided cards are never resurrected"
+            activator="parent"
+          />
           <v-icon size="14">mdi-refresh</v-icon> Refresh
         </button>
       </span>
@@ -35,14 +38,14 @@
       <!-- `progress.locked`: suspects frozen mid-session and held out of the
            queue. Surfaced so a review that visibly shrinks explains itself
            instead of silently dropping its count. -->
-      <span
-        v-if="lockedProgress"
-        class="rs-session-locked"
-        :title="lockedProgressNote(lockedProgress)"
-      >
-        <v-icon size="14">mdi-lock-outline</v-icon>
-        {{ lockedProgress }} frozen
-      </span>
+      <Tooltip v-if="lockedProgress" :text="lockedProgressNote(lockedProgress)">
+        <template #activator="{ props: tipProps }">
+          <span class="rs-session-locked" v-bind="tipProps">
+            <v-icon size="14">mdi-lock-outline</v-icon>
+            {{ lockedProgress }} frozen
+          </span>
+        </template>
+      </Tooltip>
       <span class="rs-session-tally">
         <span class="rs-tally-removed">✗ {{ tally.removed }}</span>
         <span class="rs-tally-added">+ {{ tally.added }}</span>
@@ -146,9 +149,12 @@
             v-if="reopenableSkips > 0"
             class="rs-state-btn rs-state-btn--accent"
             type="button"
-            title="Put the cards you skipped back in the queue"
             @click="store.reopenSkipped(session.id)"
           >
+            <Tooltip
+              text="Put the cards you skipped back in the queue"
+              activator="parent"
+            />
             <v-icon size="16">mdi-restart</v-icon> Reopen
             {{ reopenableSkips }} skipped
           </button>
@@ -194,17 +200,19 @@
           <button
             class="rs-confirm-btn rs-confirm-btn--apply"
             type="button"
-            title="Apply this decision despite the earlier call (Enter)."
             @click="confirmPending"
           >
+            <Tooltip
+              text="Apply this decision despite the earlier call (Enter)."
+              activator="parent"
+            />
             <kbd>↵</kbd> Apply
           </button>
-          <button
-            class="rs-confirm-btn"
-            type="button"
-            title="Leave the card unchanged (Esc)."
-            @click="cancelPending"
-          >
+          <button class="rs-confirm-btn" type="button" @click="cancelPending">
+            <Tooltip
+              text="Leave the card unchanged (Esc)."
+              activator="parent"
+            />
             <kbd>Esc</kbd> Cancel
           </button>
         </div>
@@ -258,6 +266,7 @@ import {
 import ReviewBinaryCard from "./ReviewBinaryCard.vue";
 import ReviewPairCard from "./ReviewPairCard.vue";
 import ReviewDecisionBar from "./ReviewDecisionBar.vue";
+import Tooltip from "../widgets/Tooltip.vue";
 import ReviewCelebration from "./ReviewCelebration.vue";
 
 const props = defineProps({
@@ -726,12 +735,12 @@ defineExpose({ handleKey });
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-4);
   flex-wrap: wrap;
-  padding: 20px 24px 12px;
+  padding: 20px var(--space-6) var(--space-4);
 }
 .rs-session-title {
-  font-size: 18px;
+  font-size: var(--text-lg);
   font-weight: var(--weight-bold);
 }
 .rs-session-receipt {
@@ -747,19 +756,19 @@ defineExpose({ handleKey });
   align-items: center;
   gap: 7px;
   font-size: var(--text-2xs);
-  color: rgb(var(--v-theme-warning));
+  color: rgb(var(--v-theme-dark-surface-warning));
   font-weight: var(--weight-semibold);
 }
 .rs-session-refresh {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  padding: 2px 8px;
+  padding: var(--space-1) var(--space-3);
   border: 1px solid
-    color-mix(in srgb, rgb(var(--v-theme-warning)) 55%, transparent);
+    color-mix(in srgb, rgb(var(--v-theme-dark-surface-warning)) 55%, transparent);
   border-radius: var(--radius-sm);
   background: color-mix(in srgb, rgb(var(--v-theme-warning)) 12%, transparent);
-  color: rgb(var(--v-theme-warning));
+  color: rgb(var(--v-theme-dark-surface-warning));
   font-size: var(--text-2xs);
   font-weight: var(--weight-semibold);
 }
@@ -768,8 +777,8 @@ defineExpose({ handleKey });
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  padding: 5px 12px;
-  border-radius: 999px;
+  padding: 5px var(--space-4);
+  border-radius: var(--radius-pill);
   background: linear-gradient(
     90deg,
     color-mix(in srgb, rgb(var(--v-theme-accent)) 22%, rgb(var(--v-theme-dark-surface))),
@@ -789,16 +798,16 @@ defineExpose({ handleKey });
 .rs-xp-points {
   font-size: var(--text-2xs);
   font-weight: var(--weight-bold);
-  color: rgb(var(--v-theme-accent));
+  color: rgb(var(--v-theme-on-dark-surface));
   font-variant-numeric: tabular-nums;
 }
 .rs-xp-streak {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--space-1);
   font-size: var(--text-2xs);
   font-weight: var(--weight-bold);
-  color: rgb(var(--v-theme-tertiary));
+  color: rgb(var(--v-theme-on-dark-surface));
 }
 
 /* `progress.locked` - the suspects this review is holding back. Warning-toned
@@ -811,10 +820,10 @@ defineExpose({ handleKey });
   border-radius: var(--radius-pill);
   font-size: var(--text-2xs);
   font-weight: var(--weight-semibold);
-  color: rgb(var(--v-theme-warning));
+  color: rgb(var(--v-theme-dark-surface-warning));
   background: color-mix(in srgb, rgb(var(--v-theme-warning)) 12%, transparent);
   border: 1px solid
-    color-mix(in srgb, rgb(var(--v-theme-warning)) 45%, transparent);
+    color-mix(in srgb, rgb(var(--v-theme-dark-surface-warning)) 45%, transparent);
 }
 
 .rs-session-tally {
@@ -843,7 +852,7 @@ defineExpose({ handleKey });
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 0 24px 20px;
+  padding: 0 var(--space-6) 20px;
 }
 
 .rs-card {
@@ -859,9 +868,9 @@ defineExpose({ handleKey });
    full-card purple ring after every decision (GH #578, most visible in Electron
    on Windows). The ring is always spurious here - the real focus indicators live
    on the buttons/thumbnails - so suppress it on the container. Both properties:
-   the app-wide `:focus-visible` rule in style.css paints the ring with
-   `box-shadow`, so staying silent about it would put the #578 ring straight
-   back, in amber instead of purple. */
+   the app-wide `:focus-visible` rule in style.css paints the ring as an
+   `outline` (and once did as a `box-shadow`), so staying silent about either
+   would put the #578 ring straight back. */
 .rs-card:focus,
 .rs-card:focus-visible {
   outline: none;
@@ -894,7 +903,7 @@ defineExpose({ handleKey });
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-4);
   color: rgba(var(--v-theme-on-dark-surface), 0.85);
 }
 .rs-state--error {
@@ -939,7 +948,7 @@ defineExpose({ handleKey });
   color: rgb(var(--v-theme-on-dark-surface));
 }
 .rs-state-btn:hover {
-  background: rgba(var(--v-theme-on-dark-surface), 0.14);
+  background: rgba(var(--v-theme-on-dark-surface), 0.16);
 }
 .rs-state-btn--archive {
   border-color: color-mix(in srgb, rgb(var(--v-theme-dark-surface-success)) 60%, transparent);
@@ -990,7 +999,7 @@ defineExpose({ handleKey });
   gap: var(--space-3);
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-sm);
-  border: 1px solid color-mix(in srgb, rgb(var(--v-theme-warning)) 55%, transparent);
+  border: 1px solid color-mix(in srgb, rgb(var(--v-theme-dark-surface-warning)) 55%, transparent);
   background: color-mix(in srgb, rgb(var(--v-theme-warning)) 12%, transparent);
 }
 .rs-confirm-msg {
@@ -1015,14 +1024,14 @@ defineExpose({ handleKey });
   color: rgb(var(--v-theme-on-dark-surface));
 }
 .rs-confirm-btn--apply {
-  border-color: rgb(var(--v-theme-warning));
-  color: rgb(var(--v-theme-warning));
+  border-color: rgb(var(--v-theme-dark-surface-warning));
+  color: rgb(var(--v-theme-dark-surface-warning));
 }
 .rs-confirm-btn kbd {
   font-family: var(--font-mono, monospace);
   font-size: 10px;
-  padding: 0 4px;
-  border-radius: 3px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
   border: 1px solid rgba(var(--v-theme-on-dark-surface), 0.3);
 }
 </style>

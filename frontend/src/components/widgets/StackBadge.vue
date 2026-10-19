@@ -8,13 +8,13 @@
       'sbadge--tinted': variant === 'tinted',
       'sbadge--flagged': variant === 'flagged',
     }"
-    :title="title"
     :aria-label="title"
     :aria-expanded="expanded === null ? undefined : String(expanded)"
     :data-flagged="variant === 'flagged' ? 'true' : undefined"
     data-testid="stack-badge"
     @click.stop="emit('activate')"
   >
+    <Tooltip :text="title" activator="parent" :describe="false" />
     <v-icon v-if="showsGlyph" class="sbico" size="14" :style="glyphStyle">{{
       glyph
     }}</v-icon>
@@ -50,6 +50,7 @@
 // the disclosure it is on that surface and as a plain count everywhere else.
 
 import { computed } from "vue";
+import Tooltip from "./Tooltip.vue";
 
 const props = defineProps({
   /** How many pictures this tile stands for. Below 2 there is nothing to say. */
@@ -193,9 +194,14 @@ const title = computed(() => {
 }
 
 /* Layered as an image so the scrim underneath is preserved: a `background`
-   shorthand on hover would drop the backing and leave the glyph on the photo. */
+   shorthand on hover would drop the backing and leave the glyph on the photo.
+   The scrim is dark in both themes, so the wash is the dark-surface ink, not the
+   per-theme `--hover-wash` (dark ink on a dark scrim in light). */
 .sbadge:hover {
-  background-image: linear-gradient(var(--hover-wash), var(--hover-wash));
+  background-image: linear-gradient(
+    rgba(var(--v-theme-on-dark-surface), 0.16),
+    rgba(var(--v-theme-on-dark-surface), 0.16)
+  );
 }
 
 /* A coloured glyph cannot reach `on-dark-surface`'s luminance, so the chip it
@@ -218,28 +224,21 @@ const title = computed(() => {
    (visual-language.md §7). The 1px inset ring is the second, non-colour
    channel (the flag must not be carried by hue alone), and it is inset rather
    than an outline so it cannot grow the badge's box on a tile that is already
-   short of corner. `warning` here is a foreground/border on the chip, which is
-   the 3:1 UI job the token is authored for; `on-warning` would be the wrong
-   token, since there is no solid warning fill under it.
+   short of corner. The chip sits on a photo scrim, which is dark in both
+   themes, so the hue is `dark-surface-warning`, the foreground family for a
+   dark ground; `on-warning` would be the wrong token, since there is no solid
+   warning fill under it.
 
    No motion, deliberately: the flag is a standing fact about the stack, not an
    event that just happened. Moving `--v-theme-warning` in this app means a
    refused press. */
 .sbadge--flagged {
   background-color: var(--scrim-photo-strong);
-  box-shadow: inset 0 0 0 1px rgb(var(--v-theme-warning));
+  box-shadow: inset 0 0 0 1px rgb(var(--v-theme-dark-surface-warning));
 }
 
 .sbadge--flagged .sbico {
-  color: rgb(var(--v-theme-warning));
-}
-
-/* The focus ring has to win over the inset flag ring, or a keyboard user
-   loses the one indicator they cannot do without. */
-.sbadge--flagged:focus-visible {
-  box-shadow:
-    inset 0 0 0 1px rgb(var(--v-theme-warning)),
-    var(--focus-ring);
+  color: rgb(var(--v-theme-dark-surface-warning));
 }
 
 /* Quieter than a real stack, deliberately. Same scrim so it stays legible over

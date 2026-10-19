@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, ref } from "vue";
 import { VIcon } from "vuetify/components";
 import { API_BASE_URL, isReadOnly } from "../../utils/apiClient";
 import { sleep } from "../../utils/utils";
+import { cssDurationMs } from "../../utils/dom.js";
 import { useTasksStore } from "../../stores/useTasksStore";
 import { useNoticeStore } from "../../stores/useNoticeStore";
 import {
@@ -17,6 +18,7 @@ import {
 // import module owns the staging session, not the whole picture domain).
 import { restoreScrapheap } from "../../api/pictures";
 import { errorDetail } from "../../utils/apiError";
+import AppButton from "../widgets/AppButton.vue";
 
 // ── Async streaming-staging import (#459) ────────────────────────────────────
 // This component owns the two-phase import experience over the finalised
@@ -307,7 +309,7 @@ function finalizeError(message) {
   importActive.value = false;
   if (transitioned && importRunId) {
     // Phase B failure: the dialog is already gone. Surface it on the task row,
-    // which the toolbar activity dot / Tasks-tab pulse point the user to.
+    // which the toolbar activity light / Tasks-tab pulse point the user to.
     tasksStore.setImportRun(importRunId, {
       status: "failed",
       percent: 0,
@@ -413,7 +415,7 @@ function flyChipToTaskRow(runId) {
     const dy = to.top + to.height / 2 - (from.top + from.height / 2);
     const lift = Math.max(40, Math.abs(dx) * 0.12); // a slight arc
     const css = getComputedStyle(document.documentElement);
-    const dur = parseFloat(css.getPropertyValue("--dur-4")) || 420;
+    const dur = cssDurationMs(css, "--dur-4", 420);
     const ease = (
       css.getPropertyValue("--ease-standard") || "cubic-bezier(0.4,0,0.2,1)"
     ).trim();
@@ -507,7 +509,7 @@ async function startImport(files, options = {}) {
   importRunId = `import-${crypto?.randomUUID?.() ?? Date.now().toString(36)}`;
   // Make the (otherwise dead) import-abort subsystem live: register the real
   // client-side abort so tasksStore.abortImportRun(runId) actually stops the
-  // in-flight upload. Mirrors ComfyUiRunner's registerComfyuiAbort. Unregistered
+  // in-flight upload. Unregistered
   // on every terminal path (finalizeCancelled / finalizeError / completion) and
   // on unmount.
   tasksStore.registerImportAbort(importRunId, () => handleCancelImport());
@@ -941,22 +943,20 @@ defineExpose({ startImport });
       <!-- Phase A holds exactly one action: Cancel. No close/minimize control
            exists; the safe path auto-hides. -->
       <div class="dlg-foot">
-        <button
+        <AppButton
           v-if="showCancelButton"
-          class="dlg-btn dlg-btn--danger"
-          type="button"
+          variant="danger"
           @click="handleCancelImport"
         >
           Cancel import
-        </button>
-        <button
+        </AppButton>
+        <AppButton
           v-if="importPhase === 'error'"
-          class="dlg-btn dlg-btn--quiet"
-          type="button"
+          variant="secondary"
           @click="dismissError"
         >
           Dismiss
-        </button>
+        </AppButton>
       </div>
     </div>
   </div>
@@ -1063,7 +1063,7 @@ defineExpose({ startImport });
 }
 
 .note-icon--error {
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
 }
 
 .note-title {
@@ -1094,7 +1094,7 @@ defineExpose({ startImport });
 }
 
 .stall {
-  color: rgb(var(--v-theme-warning));
+  color: rgb(var(--v-theme-surface-warning));
 }
 
 .bar-track {
@@ -1124,35 +1124,6 @@ defineExpose({ startImport });
   justify-content: flex-start;
   gap: var(--space-3);
   margin-top: var(--space-6);
-}
-
-.dlg-btn {
-  font: inherit;
-  font-size: var(--text-sm);
-  font-weight: var(--weight-medium);
-  line-height: var(--leading-snug);
-  padding: var(--space-3) var(--space-5);
-  border-radius: var(--radius-sm);
-  border: 1px solid transparent;
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  transition: filter var(--dur-1) var(--ease-standard);
-}
-
-.dlg-btn:hover {
-  filter: brightness(1.05);
-}
-
-.dlg-btn--danger {
-  background: rgba(var(--v-theme-error), 0.1);
-  border-color: rgba(var(--v-theme-error), 0.55);
-  color: rgb(var(--v-theme-error));
-}
-
-.dlg-btn--quiet {
-  background: rgb(var(--v-theme-cancel-button));
-  color: rgb(var(--v-theme-cancel-button-text));
 }
 </style>
 

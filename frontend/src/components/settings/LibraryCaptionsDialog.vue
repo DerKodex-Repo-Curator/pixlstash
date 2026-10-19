@@ -10,9 +10,10 @@
  * the library root.
  */
 import { computed, ref, watch } from "vue";
-import { VCheckbox, VTextField } from "vuetify/components";
+import { VCheckbox } from "vuetify/components";
 import AppButton from "../widgets/AppButton.vue";
 import AppDialog from "../widgets/AppDialog.vue";
+import AppInput from "../widgets/AppInput.vue";
 import { useLibrariesStore } from "../../stores/useLibrariesStore";
 import { getCaptionSettings, setCaptionSettings } from "../../api/serverConfig";
 import { errorDetail } from "../../utils/apiError";
@@ -122,7 +123,6 @@ watch(
 <template>
   <AppDialog
     :open="open"
-    :width="520"
     title="Caption files"
     @close="emit('close')"
     @accept="save"
@@ -154,13 +154,11 @@ watch(
           :disabled="loading || saving"
         />
         <div v-if="syncTags" class="captions-dlg__suffix">
-          <VTextField
+          <AppInput
             v-model="tagsSuffix"
             label="Suffix for new tags files"
             :placeholder="defaults.tags"
-            density="compact"
-            variant="filled"
-            hide-details
+            mono
             :disabled="loading || saving"
           />
           <div class="captions-dlg__hint">
@@ -178,13 +176,11 @@ watch(
           :disabled="loading || saving"
         />
         <div v-if="syncDescriptions" class="captions-dlg__suffix">
-          <VTextField
+          <AppInput
             v-model="descriptionSuffix"
             label="Suffix for new description files"
             :placeholder="defaults.description"
-            density="compact"
-            variant="filled"
-            hide-details
+            mono
             :disabled="loading || saving"
           />
           <div class="captions-dlg__hint">
@@ -224,20 +220,19 @@ watch(
   font-size: var(--text-xs);
   line-height: var(--leading-snug);
   color: rgba(var(--v-theme-on-surface), var(--opacity-text-secondary));
-  margin: 0 0 var(--space-5);
+  margin: 0;
 }
 
 .captions-dlg__error {
   font-size: var(--text-xs);
-  color: rgb(var(--v-theme-error));
-  margin: 0 0 var(--space-4);
+  color: rgb(var(--v-theme-surface-error));
+  margin: 0;
 }
 
 .captions-dlg__row {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  margin-bottom: var(--space-4);
 }
 
 .captions-dlg__suffix {

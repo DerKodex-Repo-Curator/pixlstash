@@ -60,7 +60,7 @@ import io
 import json
 import tempfile
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -81,8 +81,12 @@ from pixlstash.db_models import (
     Tag,
     UserToken,
 )
+from pixlstash.hub.workflow_group_writes import create_manual_workflow
+from pixlstash.hub.workflows import record_api_graph
 from pixlstash.server import Server
+from pixlstash.services.workflow_hash import asset_reference, normalized_filename
 from pixlstash.utils.rate_limiter import RateLimitMiddleware
+from tests.test_workflow_identity import _graph as _workflow_graph
 from tests.utils import upload_pictures_and_wait
 
 # ---------------------------------------------------------------------------
@@ -1222,6 +1226,46 @@ class TestResourceScopedReadTokenIsolation:
             f"Token for set A was wrongly blocked from its own picture: {r.text}"
         )
 
+    def test_a_manual_workflow_lora_filter_stays_inside_the_set(self, env):
+        """``?workflow=<manual id>&workflow_lora=<asset>`` is narrowed by the
+        set scope like any other filter (#1696): both pictures are runs of the
+        workflow loading the LoRA, and the set-A token still sees only pic_a."""
+        hub = env.server.hub
+        graph = _workflow_graph(loras=("test-share-lora.safetensors",))
+        keys = record_api_graph(hub, graph, library_uuid=env.server.vault.library_uuid)
+        manual = create_manual_workflow(hub, "Shared run", graph, "import")
+        lora = asset_reference(normalized_filename("test-share-lora.safetensors"))
+        both = (env.pic_a, env.pic_b)
+
+        def stamp(structural_hash, workflow_id):
+            def write(session):
+                session.exec(
+                    update(Picture)
+                    .where(Picture.id.in_(both))
+                    .values(
+                        workflow_structural_hash=structural_hash,
+                        run_workflow_id=workflow_id,
+                    )
+                )
+                session.commit()
+
+            env.server.vault.db.run_task(write)
+
+        params = {"workflow": manual, "workflow_lora": lora}
+        stamp(keys.structural_hash, manual)
+        try:
+            r = env.owner_client.get(f"{API}/pictures", params=params)
+            assert r.status_code == 200, r.text
+            assert {p["id"] for p in r.json()} == set(both), (
+                "the filter does not match both runs, so the scoped check "
+                "below would prove nothing"
+            )
+            assert _prove_token_reads(
+                env.server, env.token_a, "/pictures", **params
+            ) == {env.pic_a}, "set-A token saw past its set, or lost its picture"
+        finally:
+            stamp(None, None)
+
     def test_stats_cannot_leak_out_of_scope_pictures(self, env):
         """GET /pictures/stats must be limited to the token's authorised set."""
         r = TestClient(env.server.api).get(
@@ -1775,10 +1819,51 @@ class TestResourceScopedReadTokenIsolation:
 
         server.vault.db.run_task(_set)
 
+    @staticmethod
+    def _seed_shelf_names(server):
+        """Shelf rows naming the in-scope model and LoRA.
+
+        So a negative on ``name`` is a refusal, not merely an empty shelf.
+        """
+        with server.hub.transaction() as conn:
+            for file_kind, filename, name in (
+                ("checkpoint", "model-a-only", "Shelf Name A"),
+                ("unknown", "lora-a-only", "Shelf LoRA A"),
+            ):
+                conn.execute(
+                    "INSERT INTO model (file_kind, filename, display_name, "
+                    "provenance) SELECT ?, ?, ?, 'external' "
+                    "WHERE NOT EXISTS (SELECT 1 FROM model WHERE filename = ?)",
+                    (file_kind, filename, name, filename),
+                )
+
+    def _assert_names_are_owner_only(self, env, path, value, name):
+        """The owner reads the shelf's name; no READ token does, scoped or not.
+
+        A READ token with no resource restriction sees every picture's
+        vocabulary, but is refused the shelf, so it must not read the shelf's
+        names through the filter list either.
+        """
+        r = env.owner_client.get(f"{API}{path}")
+        assert r.status_code == 200, r.text
+        names = {option["value"]: option["name"] for option in r.json()}
+        assert names[value] == name, names
+
+        whole_library = _mint_read_token(env.owner_client, "whole-library READ")
+        r = TestClient(env.server.api).get(
+            f"{API}{path}", headers={"Authorization": f"Bearer {whole_library}"}
+        )
+        assert r.status_code == 200, r.text
+        names = {option["value"]: option["name"] for option in r.json()}
+        # Positive control: the token does see the vocabulary itself.
+        assert value in names, names
+        assert all(n is None for n in names.values()), names
+
     def test_comfyui_models_cannot_leak_out_of_scope_vocab(self, env):
         """GET /pictures/comfyui_models must only return model names drawn from
         pictures inside the token's grant; owner/unscoped sees the union."""
         self._seed_comfyui_vocab(env.server, env.pic_a, env.pic_b)
+        self._seed_shelf_names(env.server)
 
         # Negative: Set-A token must not see Set-B-only models.
         r = TestClient(env.server.api).get(
@@ -1786,7 +1871,9 @@ class TestResourceScopedReadTokenIsolation:
             headers={"Authorization": f"Bearer {env.token_a}"},
         )
         assert r.status_code == 200, r.text
-        scoped = set(r.json())
+        scoped = {option["value"] for option in r.json()}
+        # The shelf's names are a fact about the library, never the grant's.
+        assert all(option["name"] is None for option in r.json()), r.json()
         assert "model-b-only" not in scoped, (
             f"Set-A token leaked out-of-scope model vocab: {scoped}"
         )
@@ -1797,15 +1884,19 @@ class TestResourceScopedReadTokenIsolation:
         # Positive: owner/unscoped sees the union (no over-block).
         r = env.owner_client.get(f"{API}/pictures/comfyui_models")
         assert r.status_code == 200, r.text
-        owner_models = set(r.json())
+        owner_models = {option["value"] for option in r.json()}
         assert {"model-a-only", "model-b-only"} <= owner_models, (
             f"Owner did not see full model vocab: {owner_models}"
+        )
+        self._assert_names_are_owner_only(
+            env, "/pictures/comfyui_models", "model-a-only", "Shelf Name A"
         )
 
     def test_comfyui_loras_cannot_leak_out_of_scope_vocab(self, env):
         """GET /pictures/comfyui_loras must only return LoRA names drawn from
         pictures inside the token's grant; owner/unscoped sees the union."""
         self._seed_comfyui_vocab(env.server, env.pic_a, env.pic_b)
+        self._seed_shelf_names(env.server)
 
         # Negative: Set-A token must not see Set-B-only LoRAs.
         r = TestClient(env.server.api).get(
@@ -1813,7 +1904,9 @@ class TestResourceScopedReadTokenIsolation:
             headers={"Authorization": f"Bearer {env.token_a}"},
         )
         assert r.status_code == 200, r.text
-        scoped = set(r.json())
+        scoped = {option["value"] for option in r.json()}
+        # The shelf's names are a fact about the library, never the grant's.
+        assert all(option["name"] is None for option in r.json()), r.json()
         assert "lora-b-only" not in scoped, (
             f"Set-A token leaked out-of-scope LoRA vocab: {scoped}"
         )
@@ -1824,9 +1917,12 @@ class TestResourceScopedReadTokenIsolation:
         # Positive: owner/unscoped sees the union (no over-block).
         r = env.owner_client.get(f"{API}/pictures/comfyui_loras")
         assert r.status_code == 200, r.text
-        owner_loras = set(r.json())
+        owner_loras = {option["value"] for option in r.json()}
         assert {"lora-a-only", "lora-b-only"} <= owner_loras, (
             f"Owner did not see full LoRA vocab: {owner_loras}"
+        )
+        self._assert_names_are_owner_only(
+            env, "/pictures/comfyui_loras", "lora-a-only", "Shelf LoRA A"
         )
 
     def test_list_all_tags_cannot_leak_out_of_scope_vocab(self, env):
@@ -2256,7 +2352,7 @@ class TestExpiredToken(_SharedPictureLibrary):
     """
 
     def test_expired_token_is_rejected(self, library_env):
-        past = (datetime.utcnow() - timedelta(days=1)).isoformat()
+        past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
         r = library_env.owner_client.post(
             f"{API}/users/me/token",
             json={
@@ -2278,7 +2374,7 @@ class TestExpiredToken(_SharedPictureLibrary):
 
     def test_today_token_still_valid(self, library_env):
         """A token with expires_at=today (normalized to end-of-day) should still work."""
-        today_str = datetime.utcnow().strftime("%Y-%m-%d")
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         r = library_env.owner_client.post(
             f"{API}/users/me/token",
             json={

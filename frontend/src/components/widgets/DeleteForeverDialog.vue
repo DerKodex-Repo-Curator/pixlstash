@@ -23,6 +23,8 @@ import {
   buildLockedPurgeNote,
   deleteForeverDestroyCounts,
 } from "../../utils/lockedDelete.js";
+import AppButton from "./AppButton.vue";
+import AppDialog from "./AppDialog.vue";
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -100,7 +102,9 @@ const protectedBody = computed(() => {
   // NOT `totalCount` - locked pictures are counted in the total but survive.
   const count = destroyCounts.value.deleteAll;
   const isAre =
-    p === 1 ? "is a reference-folder original" : "are reference-folder originals";
+    p === 1
+      ? "is a reference-folder original"
+      : "are reference-folder originals";
   const itThem = p === 1 ? "it" : "them";
   const fileFiles = p === 1 ? "file" : "files";
   return `This permanently deletes ${count} pictures. ${p} of ${itThem} ${isAre} - deleting ${itThem} also destroys the original ${fileFiles} on disk. This cannot be undone.`;
@@ -144,12 +148,6 @@ function requestCancel() {
   emit("update:open", false);
 }
 
-// Vuetify emits update:model-value(false) for Escape and scrim (outside) clicks;
-// both are cancel. The parent closes the dialog on confirm, so we don't self-close.
-function onModelValue(value) {
-  if (!value) requestCancel();
-}
-
 function confirmStandard() {
   // No protected originals - include_protected is moot; false purges everything.
   emit("confirm", { includeProtected: false });
@@ -165,136 +163,100 @@ function confirmDeleteUnprotected() {
 </script>
 
 <template>
-  <v-dialog
-    :model-value="open"
-    max-width="440"
-    @update:model-value="onModelValue"
+  <!-- Destructive: no @accept, Enter never deletes. Escape, the scrim and the
+       close button cancel; the parent closes the dialog on confirm. -->
+  <AppDialog
+    :open="open"
+    role="alertdialog"
+    title="Delete forever?"
+    size="sm"
+    @close="requestCancel"
   >
-    <div class="confirm" role="alertdialog" aria-label="Delete forever">
-      <h4>Delete forever?</h4>
+    <!-- Pictures a locked set freezes: destroyed by neither action below. -->
+    <div v-if="hasLocked" class="lock-note">
+      <v-icon size="18">mdi-lock-outline</v-icon>
+      <span>{{ lockedNote }}</span>
+    </div>
 
-      <!-- Pictures a locked set freezes: destroyed by neither action below. -->
-      <div v-if="hasLocked" class="lock-note">
-        <v-icon size="18">mdi-lock-outline</v-icon>
-        <span>{{ lockedNote }}</span>
+    <!-- ── Standard case: no protected originals ─────────────────────────── -->
+    <p v-if="!hasProtected" class="confirm-body">{{ standardBody }}</p>
+
+    <!-- ── Protected case: three-way confirmation ────────────────────────── -->
+    <template v-else>
+      <p class="confirm-body">{{ protectedBody }}</p>
+
+      <div class="ref-warn">
+        <div class="ref-warn-head">
+          <v-icon size="18">mdi-alert-outline</v-icon>
+          <span>{{ refWarnTitle }}</span>
+        </div>
+        <ul class="ref-warn-paths">
+          <li v-for="path in protectedPaths" :key="path">{{ path }}</li>
+          <li v-if="moreCount > 0" class="ref-warn-more">{{ moreText }}</li>
+        </ul>
       </div>
 
-      <!-- ── Standard case: no protected originals ─────────────────────────── -->
+      <label class="type-confirm">
+        <span class="type-confirm-hint">{{ typeHint }}</span>
+        <input
+          v-model="confirmInput"
+          class="type-confirm-input"
+          type="text"
+          autocomplete="off"
+          autocapitalize="off"
+          spellcheck="false"
+          :placeholder="CONFIRM_WORD"
+          :aria-label="`Type ${CONFIRM_WORD} to confirm`"
+        />
+      </label>
+    </template>
+
+    <template #footer>
       <template v-if="!hasProtected">
-        <p>{{ standardBody }}</p>
-        <div class="row">
-          <button type="button" class="btn btn-quiet" @click="requestCancel">
-            Cancel
-          </button>
-          <button
-            type="button"
-            class="btn btn-danger"
-            :disabled="busy"
-            @click="confirmStandard"
-          >
-            <v-progress-circular
-              v-if="busy"
-              indeterminate
-              size="16"
-              width="2"
-            />
-            <template v-else>Delete forever</template>
-          </button>
-        </div>
+        <AppButton variant="secondary" @click="requestCancel">
+          Cancel
+        </AppButton>
+        <AppButton variant="danger" :loading="busy" @click="confirmStandard">
+          Delete forever
+        </AppButton>
       </template>
-
-      <!-- ── Protected case: three-way confirmation ────────────────────────── -->
-      <template v-else>
-        <p>{{ protectedBody }}</p>
-
-        <div class="ref-warn">
-          <div class="ref-warn-head">
-            <v-icon size="18">mdi-alert-outline</v-icon>
-            <span>{{ refWarnTitle }}</span>
-          </div>
-          <ul class="ref-warn-paths">
-            <li v-for="path in protectedPaths" :key="path">{{ path }}</li>
-            <li v-if="moreCount > 0" class="ref-warn-more">{{ moreText }}</li>
-          </ul>
-        </div>
-
-        <label class="type-confirm">
-          <span class="type-confirm-hint">{{ typeHint }}</span>
-          <input
-            v-model="confirmInput"
-            class="type-confirm-input"
-            type="text"
-            autocomplete="off"
-            autocapitalize="off"
-            spellcheck="false"
-            :placeholder="CONFIRM_WORD"
-            :aria-label="`Type ${CONFIRM_WORD} to confirm`"
-          />
-        </label>
-
-        <div class="row row--wrap">
-          <button type="button" class="btn btn-quiet" @click="requestCancel">
-            Cancel
-          </button>
-          <button
-            type="button"
-            class="btn btn-outline"
-            :disabled="unprotectedCount === 0 || busy"
-            @click="confirmDeleteUnprotected"
-          >
-            {{ deleteUnprotectedLabel }}
-          </button>
-          <button
-            type="button"
-            class="btn btn-danger"
-            :disabled="!typedOk || busy"
-            @click="confirmDeleteAll"
-          >
-            <v-progress-circular
-              v-if="busy"
-              indeterminate
-              size="16"
-              width="2"
-            />
-            <template v-else>{{ deleteAllLabel }}</template>
-          </button>
-        </div>
-      </template>
-    </div>
-  </v-dialog>
+      <!-- Three long labels in a 420px dialog: let them wrap onto two rows. -->
+      <div v-else class="footer-wrap">
+        <AppButton variant="secondary" @click="requestCancel">
+          Cancel
+        </AppButton>
+        <AppButton
+          variant="danger"
+          :disabled="unprotectedCount === 0 || busy"
+          @click="confirmDeleteUnprotected"
+        >
+          {{ deleteUnprotectedLabel }}
+        </AppButton>
+        <AppButton
+          variant="danger"
+          :disabled="!typedOk"
+          :loading="busy"
+          @click="confirmDeleteAll"
+        >
+          {{ deleteAllLabel }}
+        </AppButton>
+      </div>
+    </template>
+  </AppDialog>
 </template>
 
 <style scoped>
-/* Confirm dialog (Delete forever) - standard dialog pattern, tokenized. */
-.confirm {
-  background: rgb(var(--v-theme-surface));
-  color: rgb(var(--v-theme-on-surface));
-  border-radius: var(--radius-lg);
-  box-shadow: var(--elevation-4);
-  padding: var(--space-7);
-}
-
-.confirm h4 {
-  font-size: var(--text-lg);
-  font-weight: var(--weight-semibold);
-  line-height: var(--leading-tight);
-  margin: 0 0 var(--space-3);
-}
-
-.confirm p {
+.confirm-body {
   font-size: var(--text-md);
   color: rgba(var(--v-theme-on-surface), 0.8);
-  margin: 0 0 var(--space-5);
+  margin: 0;
 }
 
-.confirm .row {
+.footer-wrap {
   display: flex;
-  justify-content: flex-end;
-  gap: var(--space-3);
-}
-
-.confirm .row--wrap {
   flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-4);
 }
 
 /* Locked-set note. Deliberately `info`-tinted, NOT `error`: nothing is at risk
@@ -303,8 +265,7 @@ function confirmDeleteUnprotected() {
   display: flex;
   align-items: flex-start;
   gap: var(--space-3);
-  margin: 0 0 var(--space-5);
-  border: 1px solid rgba(var(--v-theme-info), 0.5);
+  border: 1px solid rgba(var(--v-theme-surface-info), 0.5);
   background: rgba(var(--v-theme-info), 0.08);
   border-radius: var(--radius-md);
   padding: var(--space-4);
@@ -317,8 +278,7 @@ function confirmDeleteUnprotected() {
    disk, not just a library entry. error-tinted panel, tokenized. */
 .ref-warn {
   display: block;
-  margin: 0 0 var(--space-5);
-  border: 1px solid rgba(var(--v-theme-error), 0.5);
+  border: 1px solid rgba(var(--v-theme-surface-error), 0.5);
   background: rgba(var(--v-theme-error), 0.08);
   border-radius: var(--radius-md);
   padding: var(--space-4);
@@ -331,7 +291,7 @@ function confirmDeleteUnprotected() {
   font-size: var(--text-sm);
   font-weight: var(--weight-semibold);
   line-height: var(--leading-snug);
-  color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-surface-error));
 }
 
 .ref-warn-paths {
@@ -370,7 +330,6 @@ function confirmDeleteUnprotected() {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  margin: 0 0 var(--space-6);
 }
 
 .type-confirm-hint {
@@ -388,46 +347,5 @@ function confirmDeleteUnprotected() {
   border-radius: var(--radius-sm);
   padding: var(--space-2) var(--space-3);
   letter-spacing: 0.08em;
-}
-
-.type-confirm-input:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-  border-color: rgba(var(--v-theme-accent), 0.55);
-}
-
-/* Action buttons - quiet cancel, outline unprotected-only, destructive delete-all. */
-.btn {
-  font-size: var(--text-sm);
-  font-weight: var(--weight-medium);
-  padding: var(--space-3) var(--space-5);
-  border-radius: var(--radius-sm);
-  border: 1px solid transparent;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-2);
-}
-
-.btn:disabled {
-  /* The named token, same value: it is the one state the system lets fade. */
-  opacity: var(--opacity-disabled);
-  cursor: default;
-}
-
-.btn-quiet {
-  background: rgb(var(--v-theme-cancel-button));
-  color: rgb(var(--v-theme-cancel-button-text));
-}
-
-.btn-outline {
-  border: 1px solid rgb(var(--v-theme-border));
-  color: rgba(var(--v-theme-on-surface), 0.85);
-}
-
-.btn-danger {
-  background: rgba(var(--v-theme-error), 0.1);
-  border: 1px solid rgba(var(--v-theme-error), 0.55);
-  color: rgb(var(--v-theme-error));
 }
 </style>

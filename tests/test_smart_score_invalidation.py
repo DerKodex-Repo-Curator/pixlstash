@@ -13,7 +13,7 @@ import json
 import os
 import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import numpy as np
@@ -97,7 +97,7 @@ def _seed_prediction(server, pic_id, tag, confidence=0.9, status="PENDING"):
                 confidence=confidence,
                 model_version="test-v1",
                 status=status,
-                predicted_at=datetime.utcnow(),
+                predicted_at=datetime.now(timezone.utc),
             )
         )
         session.commit()
@@ -116,7 +116,7 @@ def _seed_human_prediction(server, pic_id, tag, label_state, confidence=0.9):
                 confidence=confidence,
                 model_version="test-v1",
                 status="PENDING",
-                predicted_at=datetime.utcnow(),
+                predicted_at=datetime.now(timezone.utc),
                 label_state=label_state,
                 label_source=HUMAN,
             )
@@ -733,27 +733,28 @@ def test_unapplied_prediction_is_dropped_from_the_ungated_signature_too():
         temp_dir.cleanup()
 
 
-def test_tagger_rewrite_dropping_anomaly_tag_invalidates_cached_score():
-    """A re-tag that drops an anomaly tag must clear the cached score.
+def test_tagger_rewrite_adding_anomaly_tag_invalidates_cached_score():
+    """A re-tag that applies an anomaly tag must clear the cached score.
 
-    ``_add_tags_bulk`` commits its ``Tag`` rewrite in its own DB task, *before*
+    ``_add_tags_bulk`` commits its ``Tag`` write in its own DB task, *before*
     ``_write_predictions_from_tags`` takes its anomaly snapshot. Now that an applied tag
-    is a scorer input, the rewrite has to guard its own mutation or the score change goes
+    is a scorer input, the write has to guard its own mutation or the score change goes
     unobserved. Without the ``invalidate_on_anomaly_change`` wrapper in ``_add_tags_bulk``
-    this test fails.
+    this test fails. (The tagger only adds tags - it never deletes one it did not write,
+    #1357 - so adding is the direction that can move the score.)
     """
     temp_dir, client, server = _setup()
     try:
         pic_id = _upload_picture(client)
-        _seed_tag(server, pic_id, PENALISED_TAG)
+        _seed_tag(server, pic_id, CONTENT_TAG)
         _seed_prediction(server, pic_id, PENALISED_TAG, confidence=0.9)
         _set_smart_score(server, pic_id, 0.5)
         assert _get_smart_score(server, pic_id) == 0.5
 
-        # The fresh pass no longer finds the defect, so the rewrite drops the tag.
+        # The fresh pass finds the defect, so the write applies the tag.
         server.vault.db.run_task(
             lambda s: TagTask._add_tags_bulk(
-                s, [{"pic_id": pic_id, "tags": [CONTENT_TAG]}]
+                s, [{"pic_id": pic_id, "tags": [CONTENT_TAG, PENALISED_TAG]}]
             )
         )
 
@@ -762,7 +763,7 @@ def test_tagger_rewrite_dropping_anomaly_tag_invalidates_cached_score():
                 s.exec(select(Tag.tag).where(Tag.picture_id == pic_id)).all()
             )
         )
-        assert remaining == [CONTENT_TAG]
+        assert remaining == sorted([CONTENT_TAG, PENALISED_TAG])
         assert _get_smart_score(server, pic_id) is None
         assert pic_id in _find_missing_ids(server)
     finally:

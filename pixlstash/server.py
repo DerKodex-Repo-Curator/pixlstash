@@ -1,3 +1,4 @@
+import logging
 import gc
 import uvicorn
 import os
@@ -8,6 +9,7 @@ import socket
 import asyncio
 import threading
 import time
+from functools import lru_cache
 from pathlib import Path
 from importlib.metadata import PackageNotFoundError, version as package_version
 from alembic.util.exc import CommandError as AlembicCommandError
@@ -25,6 +27,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, ConfigDict, Field
 from pillow_heif import register_heif_opener
@@ -47,7 +50,12 @@ from pixlstash.openapi_custom import (
 from pixlstash.ssl_setup import SslSetupMixin
 from pixlstash.ws.broadcaster import WsBroadcasterMixin
 from pixlstash.pixl_logging import get_logger, uvicorn_log_config
-from pixlstash.services import library_settings_service, scrapheap_service
+from pixlstash.services import (
+    comfyui_link_service,
+    library_settings_service,
+    scrapheap_service,
+    workflow_ghost_service,
+)
 from pixlstash.utils.quality.smart_score_utils import smart_score_penalised_tags
 from pixlstash.db_models.tag import DEFAULT_SMART_SCORE_PENALIZED_TAGS
 from pixlstash.startup_checks import StartupChecks
@@ -61,6 +69,13 @@ from pixlstash.hub.bootstrap import (
 )
 from pixlstash.hub.registry import LibraryRegistry
 from pixlstash.services.library_switch_service import LibrarySwitchService
+from pixlstash.services.workflow_bindings import migrate_workflow_folder
+from pixlstash.services.workflow_events import announce_changed_workflows
+from pixlstash.services.workflow_inbox import (
+    WorkflowInboxWatcher,
+    reconcile as reconcile_workflow_inbox,
+    workflow_inbox_dir,
+)
 from pixlstash.services.library_generation_coordinator import (
     LibraryGenerationCoordinator,
 )
@@ -90,7 +105,11 @@ from pixlstash.routes.dedup import create_router as create_dedup_router
 from pixlstash.routes.pictures import (
     create_router as create_pictures_router,
 )
-from pixlstash.routes.comfyui import create_router as create_comfyui_router
+from pixlstash.routes.comfyui import (
+    create_router as create_comfyui_router,
+    store_inbox_workflow,
+    workflow_user_dir,
+)
 from pixlstash.routes.tag_predictions import (
     create_router as create_tag_predictions_router,
 )
@@ -98,6 +117,7 @@ from pixlstash.routes.tag_suggestions import (
     create_router as create_tag_suggestions_router,
 )
 from pixlstash.routes.operations import create_router as create_operations_router
+from pixlstash.routes.recipes import create_router as create_recipes_router
 from pixlstash.routes.reviews import create_router as create_reviews_router
 from pixlstash.routes.insights import create_router as create_insights_router
 from pixlstash.routes.moves import create_router as create_moves_router
@@ -135,7 +155,9 @@ from pixlstash.routes.taggers import create_router as create_taggers_router
 from pixlstash.routes.snapshots import create_router as create_snapshots_router
 from pixlstash.routes.telemetry import create_router as create_telemetry_router
 from pixlstash.routes.test_hooks import create_router as create_test_hooks_router
+from pixlstash.routes.workflows import create_router as create_workflows_router
 from pixlstash.server_config_io import DEVICE_ON_DISK_KEY, persist_server_config
+from pixlstash.utils.accelerator import VALID_DEVICE_SETTINGS
 from pixlstash.utils.atomic_write import write_json_atomic
 from pixlstash.utils.path_mapper import PathMapper
 from pixlstash.utils.rate_limiter import RateLimitMiddleware
@@ -144,6 +166,36 @@ from pixlstash.utils.request_origin import OriginClientMiddleware
 
 # Logging will be set up after config is loaded
 logger = get_logger(__name__)
+
+
+@lru_cache(maxsize=None)
+def _log_install_detection_once(level: int, message: str, *args: object) -> None:
+    """Log one install-type detection line the first time it is produced.
+
+    :meth:`Server.detect_install_type` explains itself every time it runs, and
+    it runs per request: ``GET /version`` plus every SPA document the frontend
+    fallback answers. Every one of those explanations repeated per request, and
+    every shipped channel hits one of them - the desktop shell exports
+    ``PIXLSTASH_INSTALL_TYPE=electron`` on every launch, so the override line
+    was the flood on ordinary installs long before a dev machine's
+    ``PIXLSTASH_TELEMETRY_DEV`` line was the flood here. A grid of thumbnails
+    buried the log either way.
+
+    The cache key is ``(level, template, *args)``, so this suppresses a repeat
+    of the *same* explanation and nothing else: if the situation genuinely
+    changes - a marker file created under a running server, a different
+    unreadable-path errno - that is a new key and it is still said out loud.
+    Unbounded on purpose: the set of templates is closed (seven today, every
+    one of them in this module) and their arguments come from the environment
+    and one fixed path, so there is nothing here to evict.
+
+    Two consequences worth knowing. Arguments must be hashable **by value**, so
+    callers pass ``str(exc)`` rather than the exception object, which would hash
+    by identity and defeat the whole thing. And "once" is once per *outcome*,
+    not a lock: two concurrent first requests can both miss and both log, which
+    is two lines rather than thousands and is not worth serialising for.
+    """
+    logger.log(level, message, *args, stacklevel=2)
 
 
 class VersionResponse(BaseModel):
@@ -264,6 +316,14 @@ class Server(
             them at a temp directory instead is no longer an option - since #905
             the downloaders read the same accessor, so a temp directory means
             every engine is downloaded again.
+        DEFAULT_MIGRATE_WORKFLOW_TOKENS: Whether start-up migrates the user
+            workflow folder's placeholder tokens to bindings. ``False`` in the
+            test suite for the same reason as the model roots: the folder is
+            machine-global, so a test server would rewrite the developer's own
+            workflows.
+        DEFAULT_WATCH_WORKFLOW_INBOX: Whether start-up imports the watched
+            ``workflows/`` folder and keeps watching it. ``False`` in the test
+            suite: that folder is machine-global too.
     """
 
     DEFAULT_MAX_VRAM_GB: float | None = None
@@ -273,6 +333,8 @@ class Server(
     DEFAULT_CLEANUP_MISSING_PICTURES: bool = False
     DEFAULT_INSIGHTFACE_MODEL_PACK: str | None = None
     DEFAULT_DECLARE_MODEL_ROOTS: bool = True
+    DEFAULT_MIGRATE_WORKFLOW_TOKENS: bool = True
+    DEFAULT_WATCH_WORKFLOW_INBOX: bool = True
 
     @staticmethod
     def running_in_docker() -> bool:
@@ -301,7 +363,8 @@ class Server(
         # positive result means an unexpected-but-still-docker deployment.
         try:
             if os.path.exists("/.dockerenv"):
-                logger.info(
+                _log_install_detection_once(
+                    logging.INFO,
                     "Detected Docker via /.dockerenv marker file while "
                     "PIXLSTASH_IN_DOCKER was unset (value=%r); treating install "
                     "as docker.",
@@ -312,10 +375,11 @@ class Server(
             # A failed stat must not crash version reporting; fall through to
             # the non-docker default but record why the fallback signal was
             # inconclusive.
-            logger.warning(
+            _log_install_detection_once(
+                logging.WARNING,
                 "Could not stat /.dockerenv while detecting Docker "
                 "(error=%s); assuming not running in Docker.",
-                exc,
+                str(exc),
             )
         return False
 
@@ -381,7 +445,8 @@ class Server(
         """
         dev_marker = os.environ.get(Server.DEV_MACHINE_ENV_VAR, "").strip().lower()
         if dev_marker in {"1", "true", "yes", "on"}:
-            logger.info(
+            _log_install_detection_once(
+                logging.INFO,
                 "%s=%r declares a development machine; reporting install_type='dev'.",
                 Server.DEV_MACHINE_ENV_VAR,
                 dev_marker,
@@ -408,16 +473,18 @@ class Server(
             declared = False
         except OSError as exc:
             declared = False
-            logger.warning(
+            _log_install_detection_once(
+                logging.WARNING,
                 "Could not read the dev-machine marker at %s (%s). Falling back "
                 "to automatic detection: if this IS a maintainer machine, its "
                 "check-ins will be counted as a real install until the "
                 "directory is readable again.",
                 marker_file,
-                exc,
+                str(exc),
             )
         if declared:
-            logger.info(
+            _log_install_detection_once(
+                logging.INFO,
                 "Found dev machine marker file at %s; reporting install_type='dev'.",
                 marker_file,
             )
@@ -426,12 +493,14 @@ class Server(
         override = os.environ.get("PIXLSTASH_INSTALL_TYPE", "").strip().lower()
         if override:
             if override in Server.INSTALL_TYPES:
-                logger.info(
+                _log_install_detection_once(
+                    logging.INFO,
                     "Using PIXLSTASH_INSTALL_TYPE override for install_type=%r.",
                     override,
                 )
                 return override
-            logger.warning(
+            _log_install_detection_once(
+                logging.WARNING,
                 "Ignoring invalid PIXLSTASH_INSTALL_TYPE=%r (allowed: %s); "
                 "falling back to automatic detection.",
                 override,
@@ -614,6 +683,40 @@ class Server(
                         exc,
                     )
         _log_stage("model shelf declarations (builtin/insightface/huggingface)")
+        if Server.DEFAULT_MIGRATE_WORKFLOW_TOKENS:
+            # Workflows are stored as imported now, so a file still carrying
+            # {{image_path}} / {{caption}} tokens from the old import dialog
+            # gets bindings instead. One pass; a migrated file has no token.
+            migrate_workflow_folder(workflow_user_dir())
+            _log_stage("workflow placeholder migration")
+        self._workflow_inbox_watcher = None
+        if Server.DEFAULT_WATCH_WORKFLOW_INBOX:
+            # After the migration, so a file the inbox matches against has
+            # its bindings already.
+            inbox = workflow_inbox_dir()
+            try:
+                reconcile_workflow_inbox(inbox, self._store_inbox_workflow)
+            except Exception as exc:
+                # A strange file must not stop start-up; the watcher retries.
+                logger.error(
+                    "Reconciling the workflow inbox %s failed with %s: %s",
+                    inbox,
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
+            try:
+                watcher = WorkflowInboxWatcher(inbox, self._store_inbox_workflow)
+                watcher.start()
+                self._workflow_inbox_watcher = watcher
+            except OSError as exc:
+                logger.error(
+                    "Could not watch the workflow inbox %s; files put there are "
+                    "imported at the next start only: %s",
+                    inbox,
+                    exc,
+                )
+            _log_stage("workflow inbox reconcile")
         if self._hub_bootstrap.migrated:
             logger.info(
                 "First run after the hub/vault split: identity now lives in %s",
@@ -864,11 +967,32 @@ class Server(
         violation on ``hub.db``. That leak was every remaining failure in
         backend-windows shard 2 once the earlier startup defects were fixed.
         """
+        watcher = getattr(self, "_workflow_inbox_watcher", None)
+        if watcher is not None:
+            self._workflow_inbox_watcher = None
+            watcher.stop()
         if getattr(self, "vault", None) is not None:
             logger.info("Closing the vault and cleaning up resources")
             self._close_active_vault()
         self._close_hub()
         gc.collect()
+
+    def _store_inbox_workflow(self, name: str, workflow: dict) -> dict:
+        """Store one inbox file as a manual workflow, once per content.
+
+        The workflow it becomes is announced, so a file dropped in the folder
+        appears on an open Workflows view rather than at the next reload. No
+        origin client id: nobody's tab did this, so every tab reloads. The
+        start-up reconcile runs before the vault is open and announces
+        nothing, which is right - the first read of the view draws it anyway.
+        """
+        result = store_inbox_workflow(self.hub, name, workflow)
+        announce_changed_workflows(
+            self,
+            [key for key in (result.get("workflow_id"),) if key],
+            "imported",
+        )
+        return result
 
     def request_fatal_shutdown(self) -> None:
         """Ask every programmatic listener to exit after fatal vault loss."""
@@ -987,13 +1111,20 @@ class Server(
             registered_vault_path(self.hub, library, self._hub_bootstrap)
         )
 
-    def build_vault(self, image_root: str) -> Vault:
+    def build_vault(self, image_root: str, *, workers: bool = True) -> Vault:
         """Construct (but do not start) a Vault over *image_root*.
 
         Shared by startup and by switching library, so a vault opened by a
         switch is configured exactly like one opened at boot. Anything that
         diverges here is a bug that only shows up after the first switch, which
         is the hardest kind to find.
+
+        Args:
+            workers: ``False`` builds a vault that can never run background
+                work, whatever the server config says. It is how a library
+                other than the active one is opened to receive pictures:
+                closing a worker-capable vault releases the shared detection
+                and embedding models out from under the active library's tasks.
         """
         startup_forced_cpu = self._startup_check_report.get("forced_cpu", False)
         force_cpu = (
@@ -1006,9 +1137,8 @@ class Server(
             description=User().description,
             server_config_path=self._server_config_path,
             path_mapper=self.path_mapper,
-            disable_background_workers=self._server_config.get(
-                "disable_background_workers", False
-            ),
+            disable_background_workers=not workers
+            or self._server_config.get("disable_background_workers", False),
             force_cpu=bool(force_cpu),
             fast_captions=Server.DEFAULT_FAST_CAPTIONS,
             daily_snapshots_enabled=self._server_config.get("daily_snapshots", True),
@@ -1019,6 +1149,9 @@ class Server(
                 self._server_config
             ),
             scrapheap_retention_reduced_at=scrapheap_service.read_retention_reduced_at(
+                self._server_config
+            ),
+            ghost_retention=workflow_ghost_service.read_ghost_retention(
                 self._server_config
             ),
         )
@@ -1140,6 +1273,15 @@ class Server(
         # get_worker_progress, which the in-app upgrade bar consumes.
         self.vault.start()
         self._maybe_send_telemetry_ping()
+        # A link from before the ComfyUI scope (#1811) is held to it.
+        comfyui_link_service.narrow_recorded_key(self)
+        # A linked ComfyUI on this computer is told if the loopback port moved.
+        threading.Thread(
+            target=comfyui_link_service.reannounce,
+            args=(self,),
+            name="comfyui-link-reannounce",
+            daemon=True,
+        ).start()
         if os.environ.get("PIXLSTASH_INSTALL_TYPE", "").strip().lower() == "electron":
             # The desktop window uses the ephemeral loopback HTTP port (env), not
             # the configured host/port - those describe the optional external
@@ -1300,7 +1442,10 @@ class Server(
             # warning and ignored, leaving the config's own default_device in
             # place, rather than being written straight through and silently
             # falling back to CPU with no explanation.
-            _valid_devices = {"cpu", "cuda", "gpu", "auto"}
+            # One frozenset, shared with the config validator in
+            # startup_checks. These were two hand-maintained copies of the same
+            # list and had already drifted once.
+            _valid_devices = VALID_DEVICE_SETTINGS
             if _device_override in _valid_devices:
                 # Remember what the owner configured: persist_server_config
                 # writes that back, never the runtime's answer.
@@ -1420,7 +1565,16 @@ class Server(
 
             return JSONResponse(
                 status_code=422,
-                content={"detail": detail},
+                # NOTE for validator authors: whatever a validator puts in its
+                # ValueError text reaches the caller in this body, so it must
+                # not carry a host path, a credential or the input value.
+                #
+                # Encoded, not handed to JSONResponse raw: a validator that
+                # raises ValueError puts the exception OBJECT in the error's
+                # ``ctx`` (pydantic v2), which json.dumps cannot write, and the
+                # handler for a 422 would then itself fail with a 500. FastAPI's
+                # own default handler encodes for this reason.
+                content={"detail": jsonable_encoder(detail)},
                 headers=headers,
             )
 
@@ -1477,16 +1631,18 @@ class Server(
         ``None`` when there is no built frontend, so callers fall back the same
         way they did when this served the file straight off disk.
 
-        Cached on ``(path, install_type)`` rather than re-read per request: the
-        SPA entry point is hit on every cold navigation, and the substitution is
-        the same string every time until one of those two changes.
+        Cached on ``(path, install_type, mtime)`` rather than re-read per
+        request: the SPA entry point is hit on every cold navigation, and the
+        substitution is the same string every time until one of those changes.
+        The mtime is there for a frontend rebuilt under a running server, whose
+        old document names entry chunks the build has deleted.
         """
         index_path = self._get_frontend_index_path()
         if not index_path:
             return None
 
         install_type = Server.detect_install_type()
-        key = (index_path, install_type)
+        key = (index_path, install_type, os.stat(index_path).st_mtime_ns)
         if (
             getattr(self, "_index_html_cache", None) is None
             or self._index_html_cache[0] != key
@@ -1828,6 +1984,23 @@ class Server(
             create_snapshots_router(self),
             prefix=API_V1_PREFIX,
             tags=["snapshots"],
+            dependencies=gate,
+        )
+        # The workflow library's read side (implementation plan §F1/§F2). No
+        # router-level ``tags=``: the module declares ``tags=["workflows"]``
+        # itself, and FastAPI concatenates the two into a duplicated tag that
+        # reaches OpenAPI and the generated route table.
+        self.api.include_router(
+            create_workflows_router(self),
+            prefix=API_V1_PREFIX,
+            dependencies=gate,
+        )
+        # Saved recipes (implementation plan §5.5, step B6). Vault rows, read
+        # against the hub's stacks; the module declares its own tag for the
+        # reason above.
+        self.api.include_router(
+            create_recipes_router(self),
+            prefix=API_V1_PREFIX,
             dependencies=gate,
         )
         # Public share endpoint - no API prefix; auth is embedded in the URL token.

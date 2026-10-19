@@ -57,6 +57,9 @@ import { useModelFoldersStore } from "./useModelFoldersStore";
 import { useFolderMappingStore } from "./useFolderMappingStore";
 import { useModelMovesStore } from "./useModelMovesStore";
 import { useMovesStore } from "./useMovesStore";
+import { useWorkflowsStore } from "./useWorkflowsStore";
+import { useRunDialogStore } from "./useRunDialogStore";
+import { useFilterStore } from "./useFilterStore";
 
 /**
  * The matrix. One row per store that holds server-sourced data: how to fill it
@@ -120,9 +123,55 @@ const STORES = [
     name: "useFolderMappingStore",
     use: useFolderMappingStore,
     seed: (s) => {
-      s.save({ taskId: "abc123", path: "/home/me/Pictures", label: "Pictures" });
+      s.save({
+        taskId: "abc123",
+        path: "/home/me/Pictures",
+        label: "Pictures",
+      });
     },
     isEmpty: (s) => s.pending === null,
+  },
+  {
+    // v1.12 F1a, the Workflows grid. The cards are hub-side facts about this
+    // machine, but every count on them is read across the ACTIVE library's
+    // pictures, and a card's covers are thumbnail URLs of those pictures.
+    // None of it may survive a credential change. The sort key is kept - it is
+    // the user's own preference and names nothing.
+    name: "useWorkflowsStore",
+    use: useWorkflowsStore,
+    seed: (s) => {
+      s.cards = [{ id: "auto:" + "a".repeat(64), picture_count: 12 }];
+      s.hidden = 3;
+      s.selectedKeys = ["auto:" + "a".repeat(64)];
+      s.loaded = true;
+    },
+    isEmpty: (s) =>
+      s.cards.length === 0 &&
+      !s.loaded &&
+      s.hidden === 0 &&
+      s.selectedKeys.length === 0,
+  },
+  {
+    // Filter form state otherwise, but it also carries the owner's ComfyUI
+    // address, which a share token's session cannot re-read to overwrite.
+    name: "useFilterStore",
+    use: useFilterStore,
+    seed: (s) => {
+      s.comfyuiUrl = "http://127.0.0.1:8188/";
+      s.comfyuiConfigured = true;
+    },
+    isEmpty: (s) => s.comfyuiUrl === "" && s.comfyuiConfigured === false,
+  },
+  {
+    // An open Run popup names pictures and a card of the library the old
+    // session could see, and is closed with it.
+    name: "useRunDialogStore",
+    use: useRunDialogStore,
+    seed: (s) => {
+      s.openRun({ kind: "picture", pictureIds: [11, 12] });
+      s.context = { character_id: 3 };
+    },
+    isEmpty: (s) => !s.source && !s.makeMore && !s.context.character_id,
   },
   {
     name: "useLockedSetsStore",
@@ -249,12 +298,14 @@ const STORES = [
       s.libraries = [{ uuid: "a", name: "Main", is_active: true }];
       s.canManage = true;
       s.cliHint = "pixlstash --library /srv/main";
+      s.importingPath = "/srv/importing";
       s.hasLoadedSuccessfully = true;
     },
     isEmpty: (s) =>
       s.libraries.length === 0 &&
       s.canManage === false &&
       s.cliHint === "" &&
+      s.importingPath === "" &&
       s.hasLoadedSuccessfully === false,
   },
   {
@@ -402,7 +453,6 @@ describe("the store matrix is complete", () => {
   // and carry no authorization decision in their content.
   const NO_SERVER_DATA = {
     "useExportStore.js": "export dialog form state",
-    "useFilterStore.js": "filter form state; ids come from the route",
     "useGenStackPrefsStore.js": "localStorage view preference",
     "useGridStore.js": "grid layout and display toggles",
     "useNoticeStore.js": "transient toast queue",
