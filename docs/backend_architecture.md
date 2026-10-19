@@ -35,7 +35,7 @@
 22. [Tiered Duplicate Detection](#22-tiered-duplicate-detection)
 23. [Opt-in telemetry](#23-opt-in-telemetry-the-install-id-and-the-consent-flags)
 24. [Folder structure: read, commit, layout and moves](#24-folder-structure-read-commit-layout-and-moves) — incl. [24.1 The folder-structure read](#241-the-folder-structure-read), [24.2 The folder-structure commit](#242-the-folder-structure-commit), [24.3 The library layout](#243-the-library-layout), [24.4 The layout and the move engine](#244-the-layout-and-the-move-engine), [24.5 Reconciling moves made outside PixlStash](#245-reconciling-moves-made-outside-pixlstash)
-25. [Model Shelf](#25-model-shelf) — incl. [25.1 The shelf's five verbs (shelf plan F3)](#251-the-shelfs-five-verbs-shelf-plan-f3), [25.2 The built-in model folder: declared, never scanned](#252-the-built-in-model-folder-declared-never-scanned), [25.3 The other two roots: InsightFace packs and the HuggingFace cache](#253-the-other-two-roots-insightface-packs-and-the-huggingface-cache), [25.4 What a cached model is FOR: the feature classifier and `model_capability`](#254-what-a-cached-model-is-for-the-feature-classifier-and-model_capability), [25.5 The managed model store (shelf plan B7)](#255-the-managed-model-store-shelf-plan-b7), [25.6 `Add file`: one loose model onto the shelf (shelf plan F6)](#256-add-file-one-loose-model-onto-the-shelf-shelf-plan-f6), [25.7 A trained model's previews: `<stem>_samples/`](#257-a-trained-models-previews-stem_samples), [25.8 `Delete`: models off the shelf and off the disk (#933)](#258-delete-models-off-the-shelf-and-off-the-disk-933), [25.9 `Keep one copy`: merging duplicate models (#1439)](#259-keep-one-copy-merging-duplicate-models-1439), [25.10 The Downloads folder and the default folder](#2510-the-downloads-folder-and-the-default-folder), [25.11 The kind a workflow loads a model as (#1962)](#2511-the-kind-a-workflow-loads-a-model-as-1962)
+25. [Model Shelf](#25-model-shelf) — incl. [25.1 The shelf's five verbs (shelf plan F3)](#251-the-shelfs-five-verbs-shelf-plan-f3), [25.2 The built-in model folder: declared, never scanned](#252-the-built-in-model-folder-declared-never-scanned), [25.3 The other two roots: InsightFace packs and the HuggingFace cache](#253-the-other-two-roots-insightface-packs-and-the-huggingface-cache), [25.4 What a cached model is FOR: the feature classifier and `model_capability`](#254-what-a-cached-model-is-for-the-feature-classifier-and-model_capability), [25.5 The managed model store (shelf plan B7)](#255-the-managed-model-store-shelf-plan-b7), [25.6 `Add file`: one loose model onto the shelf (shelf plan F6)](#256-add-file-one-loose-model-onto-the-shelf-shelf-plan-f6), [25.7 A trained model's previews: `<stem>_samples/`](#257-a-trained-models-previews-stem_samples), [25.8 `Delete`: models off the shelf and off the disk (#933)](#258-delete-models-off-the-shelf-and-off-the-disk-933), [25.9 `Keep one copy`: merging duplicate models (#1439)](#259-keep-one-copy-merging-duplicate-models-1439), [25.10 The Downloads folder and the default folder](#2510-the-downloads-folder-and-the-default-folder), [25.11 The kind a workflow loads a model as (#1962)](#2511-the-kind-a-workflow-loads-a-model-as-1962), [25.12 Picking up a model that landed after the scan (#1985)](#2512-picking-up-a-model-that-landed-after-the-scan-1985)
 26. [Prompt match](#26-prompt-match)
 
 ---
@@ -603,6 +603,7 @@ Public guest scoring and shared-link endpoints.
 | DELETE | /api/v1/model-folders/{folder_id}                                             | model_shelf     | Forget a registered model folder                            |
 | POST   | /api/v1/model-folders/{folder_id}/relocate                                    | model_shelf     | Move a folder PixlStash owns to another location            |
 | POST   | /api/v1/model-folders/{folder_id}/rescan                                      | model_shelf     | Rescan a registered model folder                            |
+| POST   | /api/v1/model-folders/pick-up                                                 | model_shelf     | Find and register model files that landed after the last scan |
 | GET    | /api/v1/model-folders/{folder_id}/runs                                        | model_shelf     | List the training runs in an ai-toolkit output folder       |
 | GET    | /api/v1/model-folders/{folder_id}/runs/{run_name}/samples/{filename}          | model_shelf     | One preview image from a training run                       |
 | GET    | /api/v1/model-icons/{sha256}                                                  | model_shelf     | Serve one stored icon                                       |
@@ -10891,6 +10892,48 @@ Unclassified. A recorded workflow that loads the file says what it is, and
 - **The Workflow tab gets the same offer**, on `GET /workflows/{id}` as
   `kind_offers`: `loader_offers` hands a default-recipe loader its model's
   suggestion only where the loader takes that kind and nobody has decided.
+
+### 25.12 Picking up a model that landed after the scan (#1985)
+
+A folder is scanned when it is registered and when the owner presses Rescan,
+and at no other time. A model downloaded into it afterwards (ComfyUI Manager, a
+browser saving straight into `models/loras`) has no `model_file` row, so the
+PixlStash loaders cannot load it off the shelf and a workflow naming it reads as
+missing while the file sits on disk.
+
+`POST /model-folders/pick-up` closes that without a rescan. It takes the
+filenames the run pre-flight reports in `missing_models` and walks every folder
+a rescan would (not a taken-from kind, not built-in) for files of those
+basenames, case-insensitively, that have no `present` row
+(`ModelFolderScanner.find_unregistered`; a `missing` or `unreachable` row is
+picked up again, as a rescan would). A file is only taken once it has finished
+arriving, the Downloads intake's rule: no in-flight sibling (`.part`, …),
+unchanged for `PICK_UP_SETTLE_S`, and a whole safetensors file
+(`safetensors_complete`), because a workflow names a missing file exactly while
+it downloads and `curl -O` writes to the final name. With `add: false` that is
+all it does: a walk, nothing opened or hashed. With `add: true` each file goes
+through `register_file`, the same single-file path `Add file` uses, which sweeps
+nothing else in the folder, under `SHELF_IO_LOCK` taken without waiting: a move
+publishes its destination before it repoints the row, and registering that file
+in between would fail the move. A busy lock registers nothing and the next look
+tries again.
+
+The Workflow tab and the Run popup (`useModelPickUp`) ask after each pre-flight
+that names a missing model: look first, and only when something is found show
+"Found in your model folders" with a spinner while it is added, then pre-flight
+again. A name looked for is not looked for again for 15 s, because the Run
+popup pre-flights on every edit. A remote owner is refused (§16.3, the
+rescan's tier) and the file stays missing, as before.
+
+**What it does not fix.** The walk is a full `os.walk` of every scanned folder,
+twice when something is found; on a large or network tree that is the cost of
+each look, and it is paid only while something is missing. A text encoder or
+VAE of 2 GB or more is registered with its hash deferred
+(`MissingCheckpointHashFinder`), and those load off the shelf only by digest, so
+it stays missing until the hash lands and the owner looks again. A checkpoint
+loads off the shelf only when ComfyUI is on this computer and the shelf holds
+one copy. The other pre-flight callers (Make more like these, the lightbox and
+grid run paths) do not look yet.
 
 ---
 
