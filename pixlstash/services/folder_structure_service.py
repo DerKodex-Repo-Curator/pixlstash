@@ -137,15 +137,22 @@ _CAPTURE_MIN_DATED_PCT = 50
 #: `4`, so a float rule written as seventy percent passes at **66.7%** on a
 #: six-picture sample. Rounding decides in the wrong direction for a threshold
 #: - the whole job of one is to be a floor.
-FACE_MAJORITY_PCT = 70
+#:
+#: Eighty, not seventy, because the sample is twenty pictures and a share
+#: estimated from twenty is noisy: a folder where only 60% of the pictures are
+#: one person clears a 70% rule a quarter of the time (binomial, n=20), and
+#: clears an 80% one about one time in twenty (#1988).
+FACE_MAJORITY_PCT = 80
 
 # ponytail: one cosine threshold and a medoid vote, not a clustering library.
 # InsightFace ArcFace embeddings are L2-normalised, so this is a plain dot
-# product; 0.35 is the conventional same-identity floor for ArcFace and is
-# deliberately on the strict side - a missed Person row costs the owner one
-# dropdown, a wrong one costs them trust in every other row on the screen.
+# product. 0.35 was the first value and it merged different people: generated
+# faces resemble each other more than photographed ones, so a loose floor lets
+# a group of look-alikes read as one person (#1988). 0.45 errs strict on purpose
+# - a missed Person row costs the owner one dropdown, a wrong one costs them
+# trust in every other row on the screen.
 # Upgrade path if it proves noisy: agglomerative clustering over the folder.
-SAME_IDENTITY_COSINE = 0.35
+SAME_IDENTITY_COSINE = 0.45
 
 #: Wall-clock budget for one whole read. The face signal has a per-batch
 #: timeout, but a per-batch timeout multiplied by 20,000 folders is weeks, so
@@ -1466,12 +1473,17 @@ def _largest_face(faces) -> Optional[np.ndarray]:
 def _dominant_identity_count(embeddings: list[np.ndarray]) -> int:
     """How many of these faces are the same person as the most common one.
 
-    A medoid vote: for each face, count the faces within ``SAME_IDENTITY_COSINE``
-    of it (itself included) and take the largest count. O(n²) over at most
+    A medoid vote: the face with the most others within ``SAME_IDENTITY_COSINE``
+    of it (itself included) names the group. A face then counts only if it
+    also matches more than half of that group, not just the medoid: one
+    average-looking face near sixteen different people is a hub, not a person,
+    and on its own vote reads "one face, 17 of 20" (#1988). O(n²) over at most
     ``SAMPLED_PER_FOLDER`` vectors, so 400 dot products per folder.
     """
     if not embeddings:
         return 0
     matrix = np.stack(embeddings)
-    similarity = matrix @ matrix.T
-    return int((similarity >= SAME_IDENTITY_COSINE).sum(axis=1).max())
+    same = (matrix @ matrix.T) >= SAME_IDENTITY_COSINE
+    group = same[same.sum(axis=1).argmax()]
+    support = same[np.ix_(group, group)].sum(axis=1)
+    return int((support * 2 > group.sum()).sum())
