@@ -1765,8 +1765,15 @@ def _comfyui_version(url: Optional[str]) -> Optional[str]:
 
 
 def _version(text: str) -> tuple[int, ...]:
-    """``"0.11.0"`` as ``(0, 11, 0)``; a part that is not a number reads 0."""
-    return tuple(int(part) if part.isdigit() else 0 for part in text.split("."))
+    """``"0.11.0"`` as ``(0, 11)``; a part that is not a number reads 0.
+
+    Trailing zeros go, so ``"0.11"`` and ``"0.11.0"`` compare equal rather
+    than the shorter tuple reading as older.
+    """
+    parts = [int(part) if part.isdigit() else 0 for part in text.split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
 
 
 def _hand_made_set(entry: dict) -> HandMadeSet:

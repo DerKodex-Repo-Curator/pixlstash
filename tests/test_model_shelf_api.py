@@ -1453,7 +1453,12 @@ def test_workflow_templates_answer_the_owner_and_a_made_set_covers_its_template(
 
         # One that answers older than the template wants flags it; numerically,
         # so 0.9 is older than 0.11. A newer one does not.
-        for answered, flagged in (("0.9.2", "0.11.0"), ("0.12.0", None)):
+        # "0.11" is the same release as "0.11.0", not an older one.
+        for answered, flagged in (
+            ("0.9.2", "0.11.0"),
+            ("0.12.0", None),
+            ("0.11", None),
+        ):
             monkeypatch.setattr(
                 model_shelf_routes, "_comfyui_version", lambda _url, v=answered: v
             )

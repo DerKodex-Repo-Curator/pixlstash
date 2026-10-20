@@ -4295,7 +4295,15 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
     const now = workflowTemplates.value.rows
       .flatMap((row) => row.variants)
       .find((candidate) => candidate.name === variant.name);
-    const covered = now?.covered_by;
+    // Gone from the list since the notice: what it saved is no basis for a set.
+    if (!now) {
+      useNoticeStore().push({
+        level: "error",
+        text: `${templateName(variant)} is no longer in the template list. Try again from New workflow set.`,
+      });
+      return null;
+    }
+    const covered = now.covered_by;
     if (covered) {
       if (openSetKey.value !== `hand:${covered.id}`) {
         toggleSet(`hand:${covered.id}`);
@@ -4306,7 +4314,7 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
       });
       return null;
     }
-    return createSetFromTemplate(now ?? variant);
+    return createSetFromTemplate(now);
   }
 
   /**
