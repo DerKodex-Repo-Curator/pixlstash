@@ -10625,8 +10625,9 @@ nothing for it.
   shelf's own quant parser), which is served as `other_quant` so the row can say
   *fp8 for bf16*. Each file carries the slot it would take from its ComfyUI
   folder, `other` where the shelf's kind would make the create refuse it.
-- **One row per head.** The head is the first `checkpoints`/`diffusion_models`
-  file; templates whose heads share a quantless name are variants of one row,
+- **One row per head.** The head is the first `checkpoints`,
+  `diffusion_models` or `unet` file (every such file takes the checkpoint slot,
+  so a Wan 2.2 high/low or a base-plus-refiner template brings both); templates whose heads share a quantless name are variants of one row,
   the default first (covered, then complete, then most files on the shelf, then
   fewest matched only as another quant, then ComfyUI's own usage count). A template with no head is its own row.
 - **Covered is the merge offer's rule.** A hand-made set covers a template when

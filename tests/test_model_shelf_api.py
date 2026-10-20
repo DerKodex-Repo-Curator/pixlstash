@@ -1427,6 +1427,7 @@ def test_workflow_templates_answer_the_owner_and_a_made_set_covers_its_template(
                 {
                     "name": "image_example",
                     "title": "Example",
+                    "min_comfyui_version": "0.11.0",
                     "kind": "image",
                     "tags": [],
                     "models": [],
@@ -1447,6 +1448,17 @@ def test_workflow_templates_answer_the_owner_and_a_made_set_covers_its_template(
         assert r.status_code == 200, r.text
         (variant,) = r.json()["rows"][0]["variants"]
         assert variant["covered_by"] is None and not variant["complete"]
+        # No ComfyUI answered: nothing to compare with, so no flag.
+        assert variant["needs_comfyui"] is None
+
+        # One that answers older than the template wants flags it; numerically,
+        # so 0.9 is older than 0.11. A newer one does not.
+        for answered, flagged in (("0.9.2", "0.11.0"), ("0.12.0", None)):
+            monkeypatch.setattr(
+                model_shelf_routes, "_comfyui_version", lambda _url, v=answered: v
+            )
+            (variant,) = shelf_env.owner.get(path).json()["rows"][0]["variants"]
+            assert variant["needs_comfyui"] == flagged, answered
         assert (
             shelf_env.owner.get(f"{API}/models/workflow-sets").json()[
                 "templates_new_ready"

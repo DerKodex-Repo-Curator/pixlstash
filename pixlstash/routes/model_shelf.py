@@ -2727,12 +2727,14 @@ def create_router(server) -> APIRouter:
         status_code=201,
         summary="Make a workflow set by hand",
         description=(
-            "A set of shelf models the owner says work together: at most one "
-            "checkpoint, any number of text encoders, VAEs, LoRAs and others, "
-            "no order. May be empty or unnamed. A member named by `sha256` "
-            "need not be on the shelf, which is how an undo of a delete puts "
-            "a set back whole. An engine, a file still being hashed and a "
-            "second checkpoint are refused (409). Touches no file."
+            "A set of shelf models the owner says work together: any number "
+            "of checkpoints (a Wan 2.2 high/low pair loads two), text "
+            "encoders, VAEs, LoRAs and others, no order. May be empty or "
+            "unnamed. A member named by `sha256` need not be on the shelf, "
+            "which is how an undo of a delete puts a set back whole. An "
+            "engine, a file still being hashed, and a checkpoint slot for a "
+            "file of another kind are refused (409). `template` records the "
+            "ComfyUI template it was made from. Touches no file."
         ),
         tags=["model_shelf"],
         response_model=HandMadeSet,

@@ -4266,11 +4266,35 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
         action: {
           label: "Make workflow set",
           handler: () => {
-            createSetFromTemplate(variant);
+            makeAnnouncedTemplate(variant);
           },
         },
       });
     }
+  }
+
+  /**
+   * The notice's button, which can be pressed long after the notice was
+   * raised: read the template again first, and open the set a press in the
+   * meantime made rather than make a second one.
+   */
+  async function makeAnnouncedTemplate(variant) {
+    await loadWorkflowTemplates();
+    const now = workflowTemplates.value.rows
+      .flatMap((row) => row.variants)
+      .find((candidate) => candidate.name === variant.name);
+    const covered = now?.covered_by;
+    if (covered) {
+      if (openSetKey.value !== `hand:${covered.id}`) {
+        toggleSet(`hand:${covered.id}`);
+      }
+      useNoticeStore().push({
+        level: "info",
+        text: `${templateName(variant)} is already in ${covered.name || "a set"}.`,
+      });
+      return null;
+    }
+    return createSetFromTemplate(now ?? variant);
   }
 
   /**

@@ -191,7 +191,7 @@
                         :href="file.url"
                         target="_blank"
                         rel="noopener noreferrer"
-                        tabindex="-1"
+                        :aria-label="`Download ${file.name}`"
                         >Download</a
                       >
                       <template v-else>Not on your shelf</template>

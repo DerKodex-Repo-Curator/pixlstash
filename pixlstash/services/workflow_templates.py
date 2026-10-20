@@ -7,12 +7,12 @@ per request, which of them are on the shelf, so the picker can lead with the
 templates whose files have all arrived (#2001).
 
 **Matching is by filename**, the template carries no hashes: a file is on the
-shelf when a model row with a ``present`` copy answers to its basename, case
-folded. A different quant of the same file counts too (``fp8`` where the
+shelf when a model row with a ``present`` copy answers to it by its stored
+filename or that copy's own basename, case folded. A different quant of the same file counts too (``fp8`` where the
 template lists ``bf16``), and the row says so.
 
 **One row per head.** The head is the file a set is built around, the first
-``checkpoints`` or ``diffusion_models`` file. Templates that share a head (text
+``checkpoints``, ``diffusion_models`` or ``unet`` file. Templates that share a head (text
 to image, edit, an int8 cut) are variants of one row, so one download is offered
 once. A template with no head is a row of its own.
 

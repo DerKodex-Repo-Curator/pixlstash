@@ -3545,6 +3545,49 @@ describe("hand-made sets (#1520)", () => {
       );
     });
 
+    it("opens the set a later press finds already made, rather than make a second", async () => {
+      const fresh = { ...READY, new: true };
+      const { store } = await mountGrid({
+        rows: [row(1, "a", "checkpoint")],
+        handMade: [handSet(10, [SET_CKPT])],
+        templates: [{ key: "head:zit", variants: [fresh] }],
+      });
+      const notices = useNoticeStore();
+      store.onModelsArrived([2]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      // Between the notice and the press, a set took the template.
+      fetchWorkflowTemplates.mockResolvedValue({
+        version: "0.1.117",
+        comfyuiVersion: null,
+        rows: [
+          {
+            key: "head:zit",
+            variants: [{ ...fresh, new: false, covered_by: { id: 10, name: "Kit" } }],
+          },
+        ],
+      });
+      await notices.notices[0].action.handler();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(createWorkflowSet).not.toHaveBeenCalled();
+      expect(store.openSetKey).toBe("hand:10");
+    });
+
+    it("puts a deleted set's template back with it on Undo", async () => {
+      deleteWorkflowSet.mockResolvedValue({
+        deleted: { ...handSet(10, [SET_CKPT]), template: "zit" },
+      });
+      createWorkflowSet.mockResolvedValue(handSet(11, [SET_CKPT]));
+      const { store } = await mountGrid({
+        rows: [row(1, "a", "checkpoint")],
+        handMade: [handSet(10, [SET_CKPT])],
+      });
+      await store.deleteHandMadeSets(store.handMadeSets);
+      await useOperationStore().takeLocalReceiptAction();
+      expect(createWorkflowSet).toHaveBeenCalledWith(
+        expect.objectContaining({ template: "zit" }),
+      );
+    });
+
     it("announces an arrival that completed a template, and its button makes the set", async () => {
       createWorkflowSet.mockResolvedValue(handSet(12, []));
       const fresh = { ...READY, new: true };
