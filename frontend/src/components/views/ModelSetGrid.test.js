@@ -3588,6 +3588,42 @@ describe("hand-made sets (#1520)", () => {
       );
     });
 
+    it("puts focus back on the tile when the name filter hides the new set", async () => {
+      createWorkflowSet.mockResolvedValue({ ...handSet(12, []), name: "zit model" });
+      const { wrapper, store } = await openPicker({ attach: true });
+      store.filters.name = "nothing like it";
+      await wrapper.vm.$nextTick();
+
+      await pressFor(wrapper, "head:zit").trigger("click");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await wrapper.vm.$nextTick();
+      expect(document.activeElement?.classList.contains("msg__newrow")).toBe(
+        true,
+      );
+      wrapper.unmount();
+    });
+
+    it("an arrival while the picker is reading never leaves it loading", async () => {
+      const { store } = await mountGrid({ rows: [row(1, "a", "checkpoint")] });
+      let answerPicker;
+      fetchWorkflowTemplates
+        .mockImplementationOnce(
+          () => new Promise((resolve) => (answerPicker = resolve)),
+        )
+        .mockRejectedValueOnce(new Error("offline"));
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const picker = store.loadWorkflowTemplates();
+      store.onModelsArrived([2]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      answerPicker({ version: "v", comfyuiVersion: null, rows: TEMPLATES });
+      await picker;
+
+      expect(store.templatesLoading).toBe(false);
+      expect(store.workflowTemplates.rows).toHaveLength(TEMPLATES.length);
+      warn.mockRestore();
+    });
+
     it("announces an arrival that completed a template, and its button makes the set", async () => {
       createWorkflowSet.mockResolvedValue(handSet(12, []));
       const fresh = { ...READY, new: true };

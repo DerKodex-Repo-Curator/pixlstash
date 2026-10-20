@@ -38,9 +38,13 @@ from pixlstash.pixl_logging import get_logger
 from pixlstash.services.model_workflow_sets import SLOT_CHECKPOINT, _lacks
 from pixlstash.services.workflow_hash import normalized_filename
 from pixlstash.utils.adapter_header import FILE_CHECKPOINT, FILE_UNKNOWN
-from pixlstash.utils.model_utils import quantless_name
+from pixlstash.utils.model_utils import quantless_name as _quantless_name
 
 logger = get_logger(__name__)
+
+# The same few thousand shelf and template names on every read; the parse is
+# most of what reading the shelf costs. Bounded, since a shelf only grows.
+quantless_name = lru_cache(maxsize=16384)(_quantless_name)
 
 NEW_WINDOW = timedelta(hours=24)
 
@@ -161,13 +165,16 @@ def _covered_by(template: dict, files: list[dict], sets: list[dict]):
         "models": [{"id": f["_ids"][0]} for f in shelf_files],
         "namesakes": [f["_ids"] for f in shelf_files if len(f["_ids"]) > 1],
     }
-    for entry in sets:
+    for entry, _held in sets:
         if entry.get("template") == template["name"]:
             return {"id": entry["id"], "name": entry["name"]}
     if not shelf_files or not head or not head["on_shelf"]:
         return None
-    for entry in sets:
-        held = {m["id"] for m in entry["members"] if m["on_shelf"]}
+    for entry, held in sets:
+        # A set without the head (or a namesake of it) lacks it: the same
+        # answer `_lacks` gives, without asking it for every set.
+        if held.isdisjoint(head["_ids"]):
+            continue
         if not _lacks(combination, held):
             return {"id": entry["id"], "name": entry["name"]}
     return None
@@ -245,6 +252,10 @@ def template_rows(hub, sets: list[dict], now: Optional[datetime] = None) -> dict
     now = now or datetime.now(timezone.utc)
     listing = load_templates()
     by_name, by_quantless = _shelf(hub)
+    # Each set's on-shelf ids, once, rather than per template.
+    sets = [
+        (entry, {m["id"] for m in entry["members"] if m["on_shelf"]}) for entry in sets
+    ]
     rows: dict[str, list[dict]] = {}
     for template in listing["templates"]:
         variant = _variant(template, by_name, by_quantless, sets, now)

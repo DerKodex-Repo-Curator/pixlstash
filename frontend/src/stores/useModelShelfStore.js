@@ -4238,7 +4238,9 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
    */
   async function announceReadyTemplates(modelIds) {
     const arrived = new Set(modelIds);
-    const startedAt = (templatesEpoch += 1);
+    // Its own read, outside the picker's epoch: taking a number from it would
+    // drop a picker read already on the wire and leave the picker loading.
+    const epochAtStart = templatesEpoch;
     let body;
     try {
       body = await fetchWorkflowTemplates();
@@ -4249,9 +4251,10 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
       });
       return;
     }
-    if (startedAt === templatesEpoch) {
+    // Fresher than what the picker holds, unless a picker read is out (it
+    // brings its own) or a session reset came in between.
+    if (epochAtStart === templatesEpoch && !templatesLoading.value) {
       workflowTemplates.value = body;
-      templatesLoading.value = false;
     }
     const notices = useNoticeStore();
     for (const row of body.rows) {

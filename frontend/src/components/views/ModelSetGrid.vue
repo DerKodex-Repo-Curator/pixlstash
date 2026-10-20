@@ -1108,13 +1108,18 @@ function closeTemplatePicker({ refocus = true } = {}) {
   if (at >= 0) moveCursor(at);
 }
 
-/** Focus the card of a hand-made set, once the grid draws it. */
+/**
+ * Focus the card of a hand-made set, once the grid draws it. A card the name
+ * filter leaves out is not drawn at all; focus then goes back to the tile,
+ * never to <body>.
+ */
 async function focusSetCard(setId) {
   await nextTick();
   const at = flatRows.value.findIndex(
     (entry) => entry.kind === "card" && entry.key === `hand:${setId}`,
   );
   if (at >= 0) moveCursor(at);
+  else closeTemplatePicker();
 }
 
 async function makeFromTemplate(variant) {
