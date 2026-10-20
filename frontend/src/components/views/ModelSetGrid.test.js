@@ -3572,6 +3572,39 @@ describe("hand-made sets (#1520)", () => {
       expect(store.openSetKey).toBe("hand:10");
     });
 
+    it("makes nothing from the notice when it cannot re-check the sets", async () => {
+      const fresh = { ...READY, new: true };
+      const { store } = await mountGrid({
+        rows: [row(1, "a", "checkpoint")],
+        templates: [{ key: "head:zit", variants: [fresh] }],
+      });
+      const notices = useNoticeStore();
+      store.onModelsArrived([2]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      fetchWorkflowTemplates.mockRejectedValue(new Error("offline"));
+
+      await notices.notices[0].action.handler();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(createWorkflowSet).not.toHaveBeenCalled();
+      expect(notices.notices.at(-1).text).toContain(
+        "Could not check whether zit model is already in a set",
+      );
+    });
+
+    it("a failed make shows why and puts focus back on the tile", async () => {
+      createWorkflowSet.mockRejectedValue(new Error("is still being hashed"));
+      const { wrapper } = await openPicker({ attach: true });
+
+      await pressFor(wrapper, "head:zit").trigger("click");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await wrapper.vm.$nextTick();
+      expect(useNoticeStore().notices.at(-1)).toMatchObject({ level: "error" });
+      expect(document.activeElement?.classList.contains("msg__newrow")).toBe(
+        true,
+      );
+      wrapper.unmount();
+    });
+
     it("puts a deleted set's template back with it on Undo", async () => {
       deleteWorkflowSet.mockResolvedValue({
         deleted: { ...handSet(10, [SET_CKPT]), template: "zit" },

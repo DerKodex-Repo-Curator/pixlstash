@@ -4283,6 +4283,15 @@ export const useModelShelfStore = defineStore("modelShelf", () => {
    */
   async function makeAnnouncedTemplate(variant) {
     await loadWorkflowTemplates();
+    // Unchecked is not "not covered": making it anyway is the second set the
+    // re-read is here to prevent.
+    if (templatesError.value) {
+      useNoticeStore().push({
+        level: "error",
+        text: `Could not check whether ${templateName(variant)} is already in a set. Try again from New workflow set.`,
+      });
+      return null;
+    }
     const now = workflowTemplates.value.rows
       .flatMap((row) => row.variants)
       .find((candidate) => candidate.name === variant.name);
